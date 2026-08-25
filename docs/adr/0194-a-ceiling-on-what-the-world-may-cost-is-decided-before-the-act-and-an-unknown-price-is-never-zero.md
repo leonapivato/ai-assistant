@@ -642,13 +642,25 @@ the two properties it has rather than letting a reader assume the stronger one.
 > on the **validated** `SpendAdmissionHandle` rather than on whatever a factory
 > returned. `Identifier` strips, so `"h"` and `" h "` are two raw strings and one
 > handle; an implementation checking uniqueness before construction would hold two
-> reservations under one key. No two reservations this holder is holding at one
-> instant carry equal handles, whatever an injected id factory does — a repeated
+> reservations under one key. No value this holder has **ever delivered** as a
+> handle is delivered again, whatever an injected id factory does — a repeated
 > value is disambiguated rather than trusted, which is the rule
 > `Engine._mint_handle` already states for the continuation table and for the same
 > reason: two reservations sharing a handle are one reservation, so the other's
 > amount silently leaves the projection and a later call is admitted against a
 > total that omits an admitted one.
+
+> **Normative.** Distinctness is over the holder's **lifetime** and not over the
+> outstanding set, and the difference is load-bearing rather than tidy. A value
+> re-minted after its first reservation was released is the worse case of the two,
+> because the release rule below makes the damage silent: a second release of the
+> retired handle is required to be a **no-op**, an implementation keying on the
+> raw value alone cannot tell it from a release of the live reservation now
+> carrying that value, and it drops the live one — after which a later admission
+> projects a total omitting a call already in flight and admits spend the ceiling
+> should have refused. Uniqueness among the outstanding set does not close that,
+> so it is not what this clause says, and no lane may narrow it to the set on the
+> ground that a retired handle "is not held any more". §11 drives it.
 
 > **Normative.** The holder **mints** the handle; an injected id factory supplies
 > candidate values and nothing more. A candidate `SpendAdmissionHandle` would
@@ -1576,9 +1588,10 @@ what was actually spent — is satisfied rather than overruled. Its reason survi
 whole; only its currency lapses. This is the treatment ADR-0016's header already
 gives its own discharged deferrals ("§7's invocation deferral is discharged by
 ADR-0029"). The record is a `Status` qualifier naming this ADR and an appended
-dated note on ADR-0021, per ADR-0082 §2 — and where ADR-0021's `Status` line is by
-then led by `Partially superseded by`, §2 puts the record in the note alone and no
-qualifier is added.
+dated note on ADR-0021, per ADR-0082 §2 — and ADR-0021's `Status` line **is** led
+by `Partially superseded by` (ADR-0193, merged 2026-08-25), so §2 puts the record
+in the note alone and no qualifier is added to that line. This ADR's own record on
+ADR-0021 is written in that shape.
 
 **ADR-0029 §7 — a record is owed, on the same reading.** The bullet's second half
 defers spend accumulation and gives a precondition ADR-0192 satisfies. Same test,
@@ -1731,16 +1744,32 @@ the ADRs it depends on rather than replacing them.
 > discharge this clause.
 
 > **Normative.** The suite pins each refusal to its class under §4: a crossed
-> ceiling to `SpendCeilingError`, and all **six** undetermined grounds — a
+> ceiling to `SpendCeilingError`, and **five** of the six undetermined grounds — a
 > non-countable declared amount, a declared cost with no number at all (an
 > `UNKNOWN` basis and, separately, a foreign-currency one, each with no allowance
-> configured), a raising clock, a failed store read, an indeterminate period and a
-> trapped computation — each to `SpendUndeterminedError`, with the message
+> configured), a raising clock, a failed store read and an indeterminate period —
+> each to `SpendUndeterminedError`, with the message
 > asserted to name **which** ground. The two unpriced cases are the ones a suite
 > written before §4's second ground existed would leave classed as a crossing, and
 > the assertion that they are *not* `SpendCeilingError` is the point: nothing measured
 > a ceiling. It also asserts that no backend exception type escapes either member,
 > while a `CancelledError` delivered during either member propagates unchanged.
+
+> **Normative.** The sixth ground, a **trapped computation**, is the *lane's* to
+> drive and not this suite's, and that follows from §2 rather than leaving a gap.
+> §2 requires a context sized from its own operands, under which the traps are "a
+> backstop against a context that was not sized from its operands rather than a
+> reachable state on well-formed input" — so no input this suite can supply through
+> the Protocol makes a **conforming** implementation trap, and an obligation stated
+> here would either pass vacuously or force the suite to reach past the Protocol
+> into an implementation's arithmetic, which is the coupling a shared conformance
+> suite exists to avoid. The lane therefore drives it at a fault-injection point it
+> owns — the seam its own summation goes through — and asserts exactly what this
+> suite asserts of the other five: `SpendUndeterminedError`, and a message naming
+> the trapped computation as the ground. §4's enumeration stays at **six**: the
+> class is what an implementation raises when its own sizing is wrong, and dropping
+> the ground because no well-formed input reaches it would leave that case
+> unclassified — which is the failure §4 keeps two classes to prevent.
 
 > **Normative.** The suite drives §4's **order** with fixtures where two grounds
 > hold at once, because each ground's isolated test passes under either order and
@@ -1791,6 +1820,16 @@ the ADRs it depends on rather than replacing them.
 > equal, releasing one leaves the other counted, and a third estimate of 20 is
 > refused while both stand. A suite driving only the single-admission race passes
 > against an implementation whose second reservation overwrote its first.
+
+> **Normative.** It drives the **retired-value** case the outstanding-set reading
+> would let through, which the clause above cannot reach because it never releases
+> before the second admission: the same repeating id factory, a first admission
+> granted **and released**, a second admission granted — whose handle is asserted
+> not equal to the first's — and the **first** handle then released a second time.
+> That stale release is a no-op: the second reservation still stands, and an
+> estimate that fits only without it is refused. An implementation minting unique
+> values only among outstanding handles, and keying reservations on the raw value,
+> passes every distinctness clause above and drops a live reservation here.
 
 > **Normative.** It drives the same with a factory whose values collide **only
 > after validation** — `"h"` then `" h "`, and a value differing only by a Unicode
