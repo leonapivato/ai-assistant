@@ -158,6 +158,45 @@ surface can state an execution at all, because ADR-0186's two operations return
 > claim in that append order to this one is strictly less than that definition's
 > `idempotency_window`.
 
+> **Normative.** **An open claim refuses a further act under that authorisation —
+> including a retry ADR-0029 §5 would otherwise admit — so completion durability is
+> a third prerequisite for that retry.** It is stated positively here rather than
+> left to be composed out of the conjunction above. A completion append that did not
+> commit leaves the claim open (§3), and the conjunction then refuses the next claim
+> twice over: a claim under that decision is open, and the last claim in the append
+> order is that same open one and so is not completed `FAILED` at all. So where a
+> spendable `KEYED` call returns a retryable `FAILED` inside its window and the
+> completion append fails before committing, ADR-0029 §5's own two conditions both
+> hold and the retry is nonetheless refused `AuthorisationSpentError`. Where the
+> completion **did** commit, §5's retry is admitted exactly as it reads. The two
+> branches differ in that one fact and in nothing else, and §7 records the
+> prerequisite against §5 rather than leaving a reader holding only ADR-0029 to
+> discover it.
+
+> **Normative.** That refusal is the direction this section fails in everywhere, not
+> a gap in the conjunction. An open claim is an act that may have run at an outcome
+> nobody observed — the store answered neither yes nor no — and admitting a second
+> act under the same authorisation is the one thing this section exists to prevent.
+> It is the fail-closed reading ADR-0029 §5 itself takes on an elapsed time it cannot
+> read, and the one §5 already accepts on an `INDETERMINATE` outcome: "Declining to
+> retry costs a recoverable error surfaced to the user; retrying outside a lapsed
+> window costs a duplicated side effect." **No durable path permitting that retry is
+> offered, and none is deferred**: permitting it would take either a compensating
+> write that removed the open claim or a second claim admitted under an open one, and
+> §6 offers no selective delete while this section refuses the second in terms. The
+> cost is stated where a reader meets it — such an authorisation is spent for good,
+> whether the claim stays open under a terminal step or a recovery scan completes it
+> `INDETERMINATE` (§3), since either state fails the conjunction — and it is the same
+> residue the commit-state clause below records for the **claim** append.
+
+> **Normative.** One consequence is worth stating here because §3 and §9 both turn on
+> it: on a **spendable** authorisation **at most one claim is ever open**, since a
+> further claim is refused while one is and the refusal is decided inside the atomic
+> append. A decision carrying **two** open claims is therefore a **non-spendable**
+> one — not side-effecting, or `NATURAL` — where this section refuses no repetition
+> at all and ADR-0029 §5's first two arms admit the retry outright. §3's rule over
+> "every open claim" and §9's case are read that way.
+
 > **Normative.** "First" and "last" above are the ledger's own **durable append
 > order** for that decision, never an ordering over `recorded_at`. A stored instant
 > is what a reader is shown; the order is what the rule is decided on, and the two
@@ -1430,9 +1469,14 @@ the count.
 
 > **Normative.** **"Every open claim" reaches an earlier attempt's claim too, and
 > that is not an outcome invented over a known one.** A decision can carry more than
-> one open claim: a completion write can fail on a first attempt — leaving that claim
-> open with the call's own result standing — and ADR-0029 §5 then admit a retry,
-> whose claim is open when the process dies. The scan completes **both**
+> one open claim, and on a **non-spendable** decision — not side-effecting, or
+> `NATURAL` — the ordinary route reaches it: a completion write can fail on a first
+> attempt, leaving that claim open with the call's own result standing, and ADR-0029
+> §5's first two arms then admit a retry whose claim is open when the process dies.
+> On a **spendable** decision it does not arise at all, because §1 refuses a further
+> claim while one is open — the clause §1 states positively, and the reason this rule
+> is written over **every** open claim rather than over two. The scan completes
+> **both**
 > `INDETERMINATE`. Neither row is overwritten, because neither has a completion; and
 > `INDETERMINATE` is not a value minted to fill a field but ADR-0014 §4's durable
 > ignorance, which is exactly what the record holds about both. That a caller once
@@ -2170,7 +2214,8 @@ place both records are in hand" stops being true.
 
 Under ADR-0082 §1 a record is owed on an earlier ADR exactly where a named clause
 of it fails ADR-0070 §1's test. **Three ADRs do, across five clauses** — ADR-0029
-§3, §4 and §5, ADR-0021 §4, ADR-0148 §9. The rest are stacked additions and are listed
+§3, §4 and §5, ADR-0021 §4, ADR-0148 §9; ADR-0029 §5 fails the test on **two** scopes
+of its own, recorded together below. The rest are stacked additions and are listed
 so a reviewer can check the showing rather than infer it.
 
 **ADR-0029 §3 — partially superseded, as it reaches cost only.** Its sentence
@@ -2185,14 +2230,21 @@ number is what answers it. Everything else of §3 stands and this ADR relies on 
 failure returned as data, the three-member `ToolOutcome`, `retryable` on
 `ToolFailureKind`, the message rule, and `output` as `FrozenJsonValue`.
 
-**ADR-0029 §5 — partially superseded.** Its closing paragraph rules "An approval is
-not consumed by executing it" and that "The answer is **no**, and it is not a
-deferral." §1 above makes the answer partly yes on a spendable authorisation. A
-reader holding only ADR-0029 would act differently, so it is a supersession and not
-an amendment. Everything else of §5 stands verbatim and is relied on by §1: the
-derived key and its three properties, the two-part retry conjunction, the two-sided
-window obligation, the fail-closed elapsed-time reading, and the refusal to
-auto-retry an `INDETERMINATE` outcome or an `Idempotency.NONE` side-effecting tool.
+**ADR-0029 §5 — partially superseded, on two scopes.** Its closing paragraph rules
+"An approval is not consumed by executing it" and that "The answer is **no**, and it
+is not a deferral." §1 above makes the answer partly yes on a spendable
+authorisation. And its **two-part retry conjunction** gains a third prerequisite on
+such an authorisation: the preceding attempt's completion must have **committed**.
+Where the completion append fails before committing its claim stays open, so §5's own
+two conditions can both hold while §1 refuses the retry's claim
+`AuthorisationSpentError`. On both scopes a reader holding only ADR-0029 would act
+differently — on the second, would attempt a retry this system refuses — so each is a
+supersession and not an amendment (ADR-0070 §1). Everything else of §5 stands
+verbatim and is relied on by §1: the derived key and its three properties, both
+conditions of the retry conjunction on their own terms and the whole of it wherever
+the completion committed, the two-sided window obligation, the fail-closed
+elapsed-time reading, and the refusal to auto-retry an `INDETERMINATE` outcome or an
+`Idempotency.NONE` side-effecting tool.
 
 **ADR-0021 §4 — partially superseded.** Its paragraph beginning "It bounds
 resolutions, not executions" states what the trail does not hold and defers the
@@ -2469,6 +2521,25 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > implementation can preserve one and drop the other, and dropping this one produces
 > a valid kindless completion that silently refuses a legitimate retry as spent.
 
+> **Normative.** It pins the **failed completion → attempted retry** composition as
+> its own pair, which the groups above reach only separately and which §1 rules on in
+> terms. On a **spendable** `KEYED` authorisation inside its window: the call returns
+> a retryable `FAILED`, the completion append fails before committing, `invoke`
+> returns that `ToolResult` unchanged and the claim is left open, and a further claim
+> under the same decision is then refused **`AuthorisationSpentError`** — the test
+> asserting that no second callable was entered and that the ledger holds one claim,
+> still open, and no completion. The **twin** rides beside it and differs in one fact
+> only: the same sequence where the completion append **commits** admits the retry.
+> A suite holding completion failure and retry admission separately passes an
+> implementation that admits the refused retry, because neither half composes the two.
+
+> **Normative.** The pair is asserted at the **seam**, on the
+> `AuthorisationSpentError` that leaves `invoke`, and not on a ledger method driven
+> directly: the refusal is §1's and is decided inside the append, so a ledger-only
+> test would pin the store's rule while leaving the seam free to swallow it. No test
+> asserts a durable path that permits the refused retry, because §1 offers none and
+> this suite invents none.
+
 > **Normative.** It pins the erasure's effect on the consume, because §6 states it
 > as a scope rather than leaving it to be inferred: a decision claimed, completed,
 > erased by `clear()` and then recorded again admits a new claim, and the test
@@ -2519,9 +2590,13 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > branch of the same classification is pinned beside it, kindless too (§§1–2).
 
 > **Normative.** **Two open claims under one decision** are pinned as their own
-> case, because every recovery case above carries one: a first attempt whose
-> completion write fails leaves its claim open with the call's own result standing,
-> ADR-0029 §5 admits the retry, and the process dies with the retry's claim open too.
+> case, on the **non-spendable** authorisation where §1 admits the second claim at
+> all — not side-effecting, or `NATURAL` — because every recovery case above carries
+> one: a first attempt whose completion write fails leaves its claim open with the
+> call's own result standing, ADR-0029 §5's first two arms admit the retry, and the
+> process dies with the retry's claim open too. The **spendable** twin is the refusal
+> pinned above, so no case constructs two open claims under a spendable decision and
+> none may (§1).
 > One scan then appends an `INDETERMINATE` completion for **both**, in the ledger's
 > append order, before committing the step's transition — and the test asserts two
 > completions and not one, because an implementation completing "the" open claim
@@ -3335,7 +3410,13 @@ row kinds, and the annotation belongs to the kind that was already there.
   known-successful side effect as failed is the one outcome worse than an
   incomplete record. The residue is paid at the budget instead: an open claim fails
   a spend evaluation closed (§5), so the next call under that scope is refused
-  rather than admitted against a total that quietly lost a price.
+  rather than admitted against a total that quietly lost a price. **On a spendable
+  authorisation it is paid at the retry as well**: the open claim refuses the next
+  claim, so a retryable `FAILED` that ADR-0029 §5 would repeat is refused
+  `AuthorisationSpentError` until that completion is durable — the third
+  prerequisite §1 states and §7 records against §5. A caller sees a recoverable
+  error it may not auto-retry, in exchange for never performing a second act under
+  an authorisation whose first act has no recorded outcome.
 - **An honest history has a state that is neither success nor failure, and surfaces
   must render it.** A claim with no completion will be visible to users, and a
   surface that finds it awkward is not permitted to resolve it. The same holds one
@@ -3417,6 +3498,16 @@ one.** Refused because it breaks gated reads, which are invoked repeatedly under
 second act under an approval that may already have sent, which is the double-effect
 this ADR exists to prevent, arriving through the one state where nobody can tell.
 ADR-0014 §4 already places `INDETERMINATE` outside automatic retry.
+
+**Offer a durable path that permits the retry after a completion append fails.**
+Raised in review, on the correct observation that the refusal adds a prerequisite
+ADR-0029 §5 does not carry. Refused because every shape of it needs something this
+corpus does not have: a compensating write that removed or superseded the open claim,
+which §6 declines to offer and ADR-0021 §4's no-`delete(id)` rule forbids; or a second
+claim admitted under an open one, which is the double-effect §1 exists to prevent,
+arriving through the one state where nobody can tell whether the first act ran. What
+is actually owed is the record, and §1, §7 and this ADR's note on ADR-0029 pay it:
+the prerequisite is named, its reason is given, and §9 pins both arms.
 
 **Classify a landed pre-callable cancellation as `FAILED` rather than by
 `interrupted_outcome`.** Raised in review, and declined on scope rather than on
