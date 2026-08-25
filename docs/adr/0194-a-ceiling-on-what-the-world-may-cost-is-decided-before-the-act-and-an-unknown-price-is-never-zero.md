@@ -115,16 +115,23 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > `world_spend_day_ceiling: Decimal | None` and
 > `world_spend_unknown_allowance: Decimal | None`, each defaulting to `None`. They
 > are the whole of what this mechanism **adds** to configuration: no lane adds a
-> fifth field, and no setting other than these four turns the mechanism on, changes
-> what it refuses, or changes a total.
+> fifth field, and these four are the only settings that turn the mechanism on or
+> change what it refuses **given a period**. They are not the only settings its
+> answers depend on, and the clause below names the one that is not among them.
 
 > **Normative.** It reads exactly one **existing** setting besides them,
-> `Settings.timezone`, which is what the calendar periods below are computed in.
-> That is a dependency and not a second knob — the zone is the user's one answer to
-> "what day is it", already ratified and already read by every other dated surface,
-> and this mechanism neither validates it again nor carries a zone of its own. The
-> composition root reads five settings in total (§5), and a reader counting only
-> four cannot implement the period rule.
+> `Settings.timezone`, and that setting's influence is **period selection and
+> nothing else**: it fixes the `[start, end)` bounds below, so which period a row
+> falls in, and therefore which rows a total sums and which total an admission is
+> compared against. Changing it from `UTC` to `Pacific/Kiritimati` over identical
+> rows and identical spend settings can move a row across the current day's
+> boundary and change both a stated total and an admission — that is the zone doing
+> its job and not a second spend knob, and the clause above is written to leave
+> room for it rather than to deny it. The zone is the user's one answer to "what day
+> is it", already ratified and already read by every other dated surface; this
+> mechanism neither validates it again nor carries a zone of its own. The
+> composition root therefore reads **five** settings (§5), and a reader counting
+> only four cannot implement the period rule.
 
 > **Normative.** `world_spend_currency` is validated on **shape only** — exactly
 > three uppercase ASCII letters, ISO-4217's alphabetic form, neither normalised
@@ -626,7 +633,8 @@ the two properties it has rather than letting a reader assume the stronger one.
 > anything here.
 
 > **Normative.** No implementation makes the admission conditional on the calling
-> subsystem, the tool's identity, a setting other than §1's four, or a value
+> subsystem, the tool's identity, a setting other than §1's four **and the
+> `Settings.timezone` §1 exempts as the period selector**, or a value
 > carried in the request. There is no parameter, argument or configuration by
 > which a caller obtains an invocation the ceiling would refuse.
 
@@ -794,7 +802,19 @@ turn, which this section now handles.
 > first one that held, under the order above — and
 > names the period only where one was determined — a clock that raised leaves no
 > period to name, and the message says the clock failed rather than inventing one.
-> It states no amount. Neither carries an argument value, a recipient, an account,
+> It states no amount.
+
+> **Normative.** Where the ground is an **indeterminate period** and **both**
+> configured periods are indeterminate at once — a current-day open claim is in the
+> month as well as the day — the message names **both**, in §5's fixed order,
+> `CALENDAR_DAY` then `CALENDAR_MONTH`. This is the both-ceilings rule below applied
+> to the other class and for the same reason: neither period takes precedence over
+> the other, naming only the day would tell a user to wait until tomorrow when the
+> month cannot be measured either, and an unfixed choice leaves two conforming
+> implementations stating different facts about one refusal. It names only the
+> periods that are **both** indeterminate and carrying a ceiling of their own,
+> since §2 refuses on no other, and one `SpendUndeterminedError` is raised whatever
+> the count. Neither carries an argument value, a recipient, an account,
 > a tool output or a digest of any of them.
 
 **A refusal rather than a confirmation, and the user has already been asked.**
@@ -1132,8 +1152,12 @@ is where that lands.
 > where configured, and its accounted total. Where `accounted` is absent it
 > renders which of §5's two states applies, reading `currency` to tell them apart:
 > that no currency is configured and no total is stated, or that the period is
-> indeterminate — and, where a ceiling is also configured, that no further call in
-> that period will be admitted.
+> indeterminate — and, where **that period's own** `SpendTotal.ceiling` is
+> present, that no further call in that period will be admitted. Where the
+> indeterminate period carries no ceiling the command says so and states no such
+> consequence, because §2 refuses nothing on it; a renderer printing the line from
+> the absence of `accounted` alone tells a user their calls are blocked when they
+> are not.
 
 > **Normative.** This operation is **not** one of ADR-0177 §1's thirty. No browser
 > request resolves to it, no browser argument reaches it, the gateway makes no
@@ -1221,45 +1245,66 @@ Scoping something out is a decision, so each carries the condition that reopens 
 > resemblance to a mechanism this ADR did land, and not by a lane finding the
 > deferral inconvenient.
 
-- **A default ceiling.** Reopened when **any priced invocation can execute with no
-  per-call user act**. A standing grant is the route the corpus already names — the
-  one ADR-0021 §6 defers and ADR-0148 §3's third clause reserves — but it is not
-  the only one, so the trigger is written over the property rather than over that
-  route: a `PER_CALL` tool declaring `discloses=()` sits outside ADR-0021 §5's
-  floor, which binds only a **non-empty** `discloses`, so a policy may auto-`ALLOW`
-  it with no standing grant in existence. Nothing in the tree declares a `PER_CALL`
-  cost today (§5), so that route is open and unwalked; the first tool to walk it is
-  the trigger as surely as a standing grant is. The ground under §1's "unset means
-  unbounded" is the per-call act, and it goes when *either* happens.
-- **Per-tool, per-capability and per-protocol ceilings.** Reopened by a decision
-  that lands keyed per-user tool configuration — ADR-0016 §7's deferred "tool
-  enablement and per-user configuration", which is the store such a ceiling needs.
-- **Currency conversion, and a ceiling over more than one currency.** Reopened by
-  a decision that names a rate source, which is itself a world-reaching read and
-  therefore has an egress question of its own before it has an arithmetic one.
-  ADR-0016 §4 already rules conversion "out of scope entirely" and this ADR does
-  not narrow that.
-- **Model-provider spend.** Reopened by either of two facts: an ADR bringing
-  `models/` under the injected transport capability (#85, ADR-0017 §8's carve-out),
-  or a ledger over model calls landing. Whether one ceiling then covers both axes
-  is that ADR's question; this ADR bounds one axis and says which.
-- **Reconciliation against a provider's bill**, and any surface by which a user
-  corrects a reported figure. ADR-0014 §7's deferral, restated by ADR-0029, and it
-  stays there. Its consequence is stated rather than hidden: an unknown-priced
-  completion with no configured allowance leaves its period indeterminate until
-  the period rolls over — which, **while a ceiling is configured**, refuses every
-  further call in it; the remedies are the allowance, a changed ceiling, and time.
-- **Spend reservations across *processes*** (#1553). §3's reservation closes the
-  admission race inside one process, which is where it is reachable (#1561); a
-  second hub process over one data directory would keep its own reservation set
-  and see none of the first's. ADR-0083 puts one resident process per data
-  directory, so this is out of scope while that rule stands, and it is reopened by
-  the ADR that lands a second one — which owes either a durable reservation or an
-  admission folded into ADR-0192's own atomic append. Parallel execution *inside*
-  a turn does not reopen it: §3 already handles that.
-- **Money a tool moves.** ADR-0016 §7's transacted-cost deferral, untouched. The
-  price of a flight lives in a call's parameters, and pricing it needs the
-  parameter-level policy ADR-0016 §4 declined to invent.
+> **Normative.** Each clause below states one thing this ADR does **not** decide
+> and the condition that reopens it. Every one of them is marked, because ADR-0089
+> §3 makes the marked set the whole of what a marked ADR obligates and a trigger
+> stated in unmarked prose would bind nothing — the same reason §1, §2, §3 and §5
+> each cite this section by number when they forbid a lane from adding the thing.
+
+> **Normative.** **A default ceiling** is not decided. §1's "unset means unbounded"
+> stands until **any priced invocation can execute with no per-call user act**, and
+> that is the whole trigger: not a standing grant specifically, but the property. A
+> standing grant is the route the corpus already names — the one ADR-0021 §6 defers
+> and ADR-0148 §3's third clause reserves — and it is not the only one, because a
+> `PER_CALL` tool declaring `discloses=()` sits outside ADR-0021 §5's floor, which
+> binds only a **non-empty** `discloses`, so a policy may auto-`ALLOW` it with no
+> standing grant in existence. Nothing in the tree declares a `PER_CALL` cost today
+> (§5), so that route is open and unwalked; the first tool to walk it reopens this
+> as surely as a standing grant does. No lane mints a default before either
+> happens.
+
+> **Normative.** **Per-tool, per-capability and per-protocol ceilings** are not
+> decided, and no lane adds one under this ADR. Reopened by a decision that lands
+> keyed per-user tool configuration — ADR-0016 §7's deferred "tool enablement and
+> per-user configuration", which is the store such a ceiling needs — and by nothing
+> else.
+
+> **Normative.** **Currency conversion, and a ceiling over more than one
+> currency**, are not decided, and no implementation reads an exchange rate (§2).
+> Reopened by a decision that names a rate source, which is itself a world-reaching
+> read and therefore has an egress question of its own before it has an arithmetic
+> one. ADR-0016 §4 already rules conversion "out of scope entirely" and this ADR
+> does not narrow that.
+
+> **Normative.** **Model-provider spend** is not decided and enters neither total
+> (§2). Reopened by either of two facts: an ADR bringing `models/` under the
+> injected transport capability (#85, ADR-0017 §8's carve-out), or a ledger over
+> model calls landing. Whether one ceiling then covers both axes is that ADR's
+> question; this ADR bounds one axis and says which.
+
+> **Normative.** **Reconciliation against a provider's bill**, and any surface by
+> which a user corrects a reported figure, are not decided and no lane adds either
+> here. ADR-0014 §7's deferral, restated by ADR-0029, and it stays there. Its
+> consequence is stated rather than hidden: an unknown-priced completion with no
+> configured allowance leaves its period indeterminate until the period rolls over,
+> which refuses every further call in that period **while that period's own ceiling
+> is configured** and refuses nothing where it is not (§2); the remedies are the
+> allowance, a changed ceiling, and time.
+
+> **Normative.** **Spend reservations across *processes*** are not decided
+> (**#1553**). §3's reservation closes the admission race inside one process, which
+> is where it is reachable (#1561); a second hub process over one data directory
+> would keep its own reservation set and see none of the first's. ADR-0083 puts one
+> resident process per data directory, so this stays out of scope while that rule
+> stands, and it is reopened by the ADR that lands a second one — which owes either
+> a durable reservation or an admission folded into ADR-0192's own atomic append.
+> Parallel execution *inside* a turn does **not** reopen it: §3 already handles
+> that.
+
+> **Normative.** **Money a tool moves** is not decided and no ceiling here bounds
+> it. ADR-0016 §7's transacted-cost deferral, untouched: the price of a flight
+> lives in a call's parameters, and pricing it needs the parameter-level policy
+> ADR-0016 §4 declined to invent.
 
 ### 9. What this changes in other ADRs, clause by clause
 
@@ -1401,7 +1446,8 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** The **paired lane** lands `SpendGate` and `SpendLedger` as a
 > triad — both Protocols, a shared conformance suite for each, and canonical fakes
 > in `ai_assistant.testing` — together with the `SpendTotal`, `SpendPeriod` and
-> `SpendAdmissionHandle` types, §4's three error classes, §1's four settings, and the **primary
+> `SpendAdmissionHandle` types, §4's three error classes, §1's four **new**
+> settings — it adds no fifth and changes none that exists — and the **primary
 > production implementation**, which is the `permissions` store that also satisfies
 > ADR-0192's ledger. That is the whole of it: it lands under ADR-0137 §2's pairing
 > and under §3's rule that a triad is never split.
@@ -1517,6 +1563,17 @@ the ADRs it depends on rather than replacing them.
 > period **and** a projection that would also cross a ceiling, which must raise
 > `SpendUndeterminedError` and not `SpendCeilingError`. The last is what stops an
 > implementation from reporting an unmeasurable period as an overspend.
+
+> **Normative.** It drives the two **adjacent** pairs as well, which the fixtures
+> above skip and which are the easiest order to get wrong because both grounds are
+> facts about the same estimate: grounds **1 and 2** together — a cost in a currency
+> other than `world_spend_currency` whose amount is *also* not countable,
+> `Decimal("1E15")`, with no allowance configured, which must name the amount and
+> not the currency; and grounds **2 and 3** together — an `UNKNOWN` estimate with no
+> allowance beside a clock that raises, which must name the unpriced cost and not
+> the clock. An implementation checking the currency before the magnitude passes
+> every fixture above and fails the first; one reading the clock before it looks at
+> the estimate at all fails the second.
 
 > **Normative.** The suite drives §3's short-circuit: with **neither** ceiling
 > configured, a raising clock, a failed store read and an indeterminate period each
@@ -1814,7 +1871,14 @@ the ADRs it depends on rather than replacing them.
 > without being asked: each ceiling alone and the allowance alone with
 > `world_spend_currency` unset raises `ConfigurationError` naming the field, and
 > `world_spend_currency` set **alone** loads and configures a reporting currency
-> that refuses nothing (§1). Without these a `world_spend_day_ceiling` of
+> that refuses nothing (§1). It drives §1's **numeric** rules at load in the same
+> place, on `Settings` and not on `SpendTotal`: a **negative** ceiling and a
+> negative allowance, and `NaN`, `sNaN`, `Infinity` and `-Infinity` for each
+> ceiling and for the allowance, are each refused with `ConfigurationError` naming
+> the field. A validator checking only the zero spellings and countability accepts
+> an allowance of `Decimal("-1")`, which would let an `UNKNOWN` estimate *lower* a
+> projection and admit a call already at its ceiling — the one direction this
+> mechanism must never move in. Without these a `world_spend_day_ceiling` of
 > `Decimal("10")` loads beside no currency and silently caps nothing, which is a
 > configured ceiling that does not bind. It drives `world_spend_currency`'s own
 > shape rule at load in the same place — `""`, `"usd"`, `"US"`, `"USDD"` and a
@@ -1877,11 +1941,13 @@ the ADRs it depends on rather than replacing them.
   counting an unknown price as nothing — would have made the ceiling a decoration
   for exactly the tool the milestone is about.
 - **An unknown-priced completion, where no allowance is configured, leaves its
-  period indeterminate**, and while a ceiling is configured that stops every
-  further invocation in it until the calendar rolls or the user acts. (With an
-  allowance configured it contributes that amount and the total stays a number;
-  with no ceiling configured nothing is refused, whatever the total says — §2's
-  last clause.) That is a real denial of service on
+  period indeterminate**, and while **that period's own** ceiling is configured
+  that stops every further invocation in it until the calendar rolls or the user
+  acts. (With an allowance configured it contributes that amount and the total
+  stays a number; where the indeterminate period carries no ceiling of its own —
+  an unpriced row in an earlier day of a month nobody capped — nothing is refused,
+  which is §2's per-period rule and, where neither ceiling is set, its
+  unconditional case.) That is a real denial of service on
   the user's own assistant, taken knowingly: the alternative is a total that
   under-reports by an unbounded amount while presenting itself as a bound. §8 names
   the deferral that would soften it.
