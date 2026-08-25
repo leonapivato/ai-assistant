@@ -83,7 +83,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    is the only one in the composition.
             assert m25.the_capability_the_root_handed_out(composition) is capability
             assert m25.every_tool_that_can_reach_a_transport(composition) == {
-                SEND_EMAIL.id: capability
+                SEND_EMAIL.id: (capability,)
             }
             assert list(capability.attempts) == []
 
@@ -105,7 +105,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             # self-report is an arrangement, and this is a reading.
             reaching = m25.every_tool_that_can_reach_a_transport(composition)
 
-            assert reaching == {SEND_EMAIL.id: capability}
+            assert reaching == {SEND_EMAIL.id: (capability,)}
             assert result.outcome is ToolOutcome.FAILED
             assert result.failure is not None
             assert result.failure.kind is ToolFailureKind.INTERNAL
@@ -139,15 +139,21 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    review found the uncontrolled detector on round 6.
             armed = m25.UndesignatedProbe(route=capability)
             m25.register_probe(composition, armed, m25.ARMED_PROBE)
+
+            # The survey instrument's own positive control, read **before** this
+            # probe runs: a second registered tool holding a transport is the
+            # regression the survey exists to catch, so it must see this one — and
+            # it must see it where the probe *holds* it, inside a container, which
+            # is the traversal round 8's false negative lived in. Read after the
+            # run, the probe's own ``route`` attribute would answer instead and the
+            # container would go untested.
+            assert m25.every_tool_that_can_reach_a_transport(composition) == {
+                SEND_EMAIL.id: (capability,),
+                m25.ARMED_PROBE.id: (capability,),
+            }
+
             control = await m25.drive_the_probe(composition, m25.ARMED_PROBE)
 
-            # ...and the survey instrument's own positive control: a second
-            # registered tool holding a transport is exactly the regression it
-            # exists to catch, so it must see this one.
-            assert m25.every_tool_that_can_reach_a_transport(composition) == {
-                SEND_EMAIL.id: capability,
-                m25.ARMED_PROBE.id: capability,
-            }
             assert armed.reached_for_a_route is True
             assert armed.route is capability
             assert armed.opened == m25.PROBE_ENDPOINT
@@ -228,7 +234,7 @@ def _report(
     *,
     probe: m25.UndesignatedProbe,
     armed: m25.UndesignatedProbe,
-    reaching: dict[str, OutboundTransport],
+    reaching: dict[str, tuple[OutboundTransport, ...]],
     undesignated: list[TransportAttempt],
     creators: m25.LoopCreators,
 ) -> None:

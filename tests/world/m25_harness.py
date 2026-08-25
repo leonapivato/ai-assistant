@@ -57,7 +57,10 @@ against ADR-0191 §9 rather than edited into the ADR.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Final, cast, final
 
 from keyring.errors import PasswordDeleteError
@@ -94,7 +97,7 @@ from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
     from pathlib import Path
 
     from ai_assistant.app import Composition
@@ -309,8 +312,8 @@ def the_capability_the_root_handed_out(composition: Composition) -> OutboundTran
 
 def every_tool_that_can_reach_a_transport(
     composition: Composition,
-) -> dict[str, OutboundTransport]:
-    """Which registered tools can reach a transport, and which one each reaches.
+) -> dict[str, tuple[OutboundTransport, ...]]:
+    """Which registered tools can reach a transport, and every route each reaches.
 
     **This is the handout measured over the population that exists**, rather than
     over one tool's self-report. ``the_capability_the_root_handed_out`` establishes
@@ -324,64 +327,98 @@ def every_tool_that_can_reach_a_transport(
     integration that receives a transport; it has no general tool-construction path
     a test-authored probe could be built through, and adding one would be the
     "back door added only for tests" ADR-0191 §3 refuses. So the probe is still
-    registered by this arm — and this survey is what reads whether the probe, sitting
-    in the composition, can reach a route at all.
+    registered by this arm — and this survey is what reads whether the probe,
+    sitting in the composition, can reach a route at all.
 
-    It walks the registry's own bindings rather than any source text (ADR-0191 §9's
-    last clause): an object that can open a channel is one with an ``open_channel``
-    to call, and the walk is bounded to three attributes deep and to objects this
-    world defines, which is every tool this composition registers.
+    **The walk is exhaustive rather than first-match**, which round 8 of review is
+    why: a tool holding its route in a list — ``self.routes = [transport]`` — can
+    open a channel with ``self.routes[0]`` while a survey that read only
+    attributes, stopped at the first hit and refused to enter containers reported
+    it route-free. So this follows containers as well as attributes, keeps going
+    after it finds one, and carries an identity set so a cycle terminates. The
+    armed probe holds its route *inside a tuple* for the same reason: the control
+    exercises the traversal that the false negative lived in.
+
+    It reads objects rather than any source text (ADR-0191 §9's last clause): a
+    thing that can open a channel is a thing with an ``open_channel`` to call.
 
     Args:
         composition: The built deployment.
 
     Returns:
-        Tool id to the transport that tool can reach, for every registered tool
-        that can reach one. Empty where none can.
+        Tool id to the routes that tool can reach, in the order found, for every
+        registered tool that can reach one. Empty where none can.
     """
-    reachable: dict[str, OutboundTransport] = {}
+    reachable: dict[str, tuple[OutboundTransport, ...]] = {}
     for tool_id, binding in registry(composition)._live.items():
-        route = _transport_reachable_from(binding.implementation, depth=3)
-        if route is not None:
-            reachable[tool_id] = route
+        routes: list[OutboundTransport] = []
+        for route in _routes_reachable_from(
+            binding.implementation, depth=_SURVEY_DEPTH, seen=set()
+        ):
+            if not any(found is route for found in routes):
+                routes.append(route)
+        if routes:
+            reachable[tool_id] = tuple(routes)
     return reachable
 
 
-def _transport_reachable_from(holder: object, *, depth: int) -> OutboundTransport | None:
-    """The first object reachable from ``holder`` that can open a channel.
+#: How many objects deep the survey walks from a registered tool. The longest
+#: legitimate path in this composition is three — ``SendEmail`` to its
+#: ``SmtpEgressTransport`` to the capability — and a container adds a level per
+#: nesting, so the bound is set well above the shapes that exist rather than
+#: tightly around them: a bound that just fits is a bound a regression steps over.
+_SURVEY_DEPTH: Final = 8
+
+#: What the walk will not enter, because a route is never inside one and entering
+#: them turns a reading into a graph search over the standard library.
+_OPAQUE: Final = (str, bytes, bytearray, memoryview, type, ModuleType)
+
+
+def _routes_reachable_from(
+    holder: object, *, depth: int, seen: set[int]
+) -> Iterator[OutboundTransport]:
+    """Every object reachable from ``holder`` that can open a channel.
 
     Args:
         holder: Where to start, which is a registered tool's callable.
-        depth: How many attributes deep to walk before giving up.
+        depth: How many objects deep to walk before giving up.
+        seen: Identities already visited, so a cycle terminates.
 
-    Returns:
-        The transport, or ``None`` where nothing reachable can open a channel.
+    Yields:
+        Each distinct route, which the caller folds by identity.
     """
-    if depth == 0:
-        return None
-    for value in _attributes_of(holder):
-        if callable(getattr(value, "open_channel", None)):
-            return cast("OutboundTransport", value)
-        reached = _transport_reachable_from(value, depth=depth - 1)
-        if reached is not None:
-            return reached
-    return None
+    if depth == 0 or id(holder) in seen or isinstance(holder, _OPAQUE):
+        return
+    seen.add(id(holder))
+    if callable(getattr(holder, "open_channel", None)):
+        yield cast("OutboundTransport", holder)
+        return
+    for value in _values_within(holder):
+        yield from _routes_reachable_from(value, depth=depth - 1, seen=seen)
 
 
-def _attributes_of(holder: object) -> Iterator[object]:
-    """The attribute values held by an object this world defines.
+def _values_within(holder: object) -> Iterator[object]:
+    """What an object holds: a container's items, or an object's attributes.
 
-    Bounded to this world's own types — ``ai_assistant``'s and this harness's —
-    because those are what a registered tool is, and walking into a pydantic model
-    or a standard-library container would be a graph search rather than a reading.
+    Containers are followed because a route held in one is still a route
+    (round 8). Attributes are read only off this world's own types —
+    ``ai_assistant``'s and this harness's — because those are what a registered
+    tool and its collaborators are, and walking a pydantic model's or a logger's
+    internals would be a graph search rather than a reading.
 
     Args:
         holder: The object to read.
 
     Yields:
-        Each attribute value it holds, whether it keeps them in ``__dict__`` or in
-        ``__slots__``.
+        Each value it holds.
     """
+    if isinstance(holder, Mapping):
+        yield from holder.keys()
+        yield from holder.values()
+        return
+    if isinstance(holder, (list, tuple, set, frozenset, deque)):
+        yield from holder
+        return
     if type(holder).__module__.split(".")[0] not in {"ai_assistant", "m25_harness"}:
         return
     names: list[str] = list(vars(holder)) if hasattr(holder, "__dict__") else []
@@ -739,11 +776,17 @@ class UndesignatedProbe:
         """Start having reached for nothing, holding whatever the arm handed over.
 
         Args:
-            route: The capability this tool was handed. ``None`` is the arm's
-                statement that it was handed none, and is required rather than
-                defaulted for the reason in the class docstring.
+            route: The capability this tool was handed, kept in a container for
+                the reason in the body. ``None`` is the arm's statement that it
+                was handed none, and is required rather than defaulted for the
+                reason in the class docstring.
         """
-        self._handed = route
+        # **Held inside a tuple, deliberately.** A route in a container is still
+        # a route — a tool could call ``self._handed[0].open_channel(...)`` — and
+        # round 8 of review found the survey reading attributes only and so
+        # reporting such a tool route-free. The control has to live in the shape
+        # the false negative lived in, or it controls the easy half.
+        self._handed = () if route is None else (route,)
         self.reached_for_a_route = False
         self.route: OutboundTransport | None = None
         self.opened: TransportEndpoint | None = None
@@ -766,7 +809,7 @@ class UndesignatedProbe:
         """
         del parameters, idempotency_key
         self.reached_for_a_route = True
-        self.route = self._handed
+        self.route = self._handed[0] if self._handed else None
         if self.route is None:
             msg = "this tool was handed no outbound transport, so it has no route"
             raise TransportError(msg)
