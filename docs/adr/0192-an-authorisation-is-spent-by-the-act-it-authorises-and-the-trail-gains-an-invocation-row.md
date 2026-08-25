@@ -977,22 +977,39 @@ the count.
 
 > **Normative.** **One thing is left uncontracted, and it is exactly one**: the
 > **outward class** at `invoke`'s boundary of a `BaseException` that is not a
-> `CancelledError` raised **inside a retained append task**. ADR-0031 §4 *measured*
-> the mechanism — `Task.__step` sets a `KeyboardInterrupt` on the future **and**
-> re-raises it into the event loop, which is the loop coming down — and what class a
-> frame that may never resume observes is not something a seam contract can bind. So
-> this ADR states no outward class for that one case and §9 asserts none.
+> `CancelledError` raised **inside a retained append task**, **while no external
+> cancellation is propagating**. ADR-0031 §4 *measured* the mechanism —
+> `Task.__step` sets a `KeyboardInterrupt` on the future **and** re-raises it into
+> the event loop, which is the loop coming down — and what class a frame that may
+> never resume observes is not something a seam contract can bind. So this ADR states
+> no outward class for that one case and §9 asserts none.
+
+> **Normative.** The qualifier is load-bearing and is the same one the clause above
+> carries. Where an external cancellation **is** already propagating, ADR-0060 §1's
+> precedence governs and is unchanged: `invoke` leaves as the `CancelledError`,
+> carrying the retained task's exception as its cause and in the diagnostic, whatever
+> that exception's class. The uncontracted case is the **complement** of that one,
+> not an exception to it, and the two never both apply.
 
 > **Normative.** **Everything else about that case still holds, and the silence
 > reaches no further.** The call does **not** return: no `ToolResult` reaches the
-> caller and none is manufactured. No completion is written and no outcome is
-> invented. The claim is left open where one landed, as on every other
-> `BaseException` exit. And the **diagnostic matrix below is unaffected**: a
-> `BaseException` that is not an `Exception` yields a diagnostic carrying the
-> operation, the outcome where the path has one, and **no class field at all** —
-> wherever it arose, the retained appends included. That last is the clause an
-> earlier draft of this section contradicted by demanding the real class be logged,
-> and it is restated here so the two cannot drift apart again.
+> caller and none is manufactured. No outcome is invented and no *second* append is
+> attempted. And the **diagnostic matrix below is unaffected**: a `BaseException`
+> that is not an `Exception` yields a diagnostic carrying the operation, the outcome
+> where the path has one, and **no class field at all** — wherever it arose, the
+> retained appends included. That last is the clause an earlier draft of this section
+> contradicted by demanding the real class be logged, and it is restated here so the
+> two cannot drift apart again.
+
+> **Normative.** **What the store already committed, stands.** The append the task
+> was running may have landed before the exception reached it, and this ADR states
+> the durable truth rather than a postcondition it cannot deliver: where a completion
+> had already committed, that row is in the trail and the claim it names is closed;
+> where it had not, the claim is left open, as on every other `BaseException` exit.
+> Nothing is deleted, rewritten or compensated to make the two cases look alike —
+> §6 offers no selective delete and ADR-0060 §1 already rules that an abandoned
+> append may have committed. A draft promising "no completion is written" for every
+> timing promised a rollback this store does not have.
 
 > **Normative.** **Nothing of ADR-0029 §3 is superseded by that silence**, and §7
 > adds no scope for it. §3's rule is that a `BaseException` propagates unchanged, and
@@ -2195,7 +2212,21 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** It pins the **kindless** completion on both outcomes: a completion
 > derived from a cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
 > `failure_kind` and admits no further claim under §1, and the `INDETERMINATE`
-> branch of the same classification is pinned beside it, kindless too (§§1–2). It
+> branch of the same classification is pinned beside it, kindless too (§§1–2).
+
+> **Normative.** **Every completion the recovery scan appends is pinned field by
+> field**, and not only counted, because the scan derives its rows from no
+> `ToolResult` at all and the fields are exactly where that shows. Each carries
+> `outcome` `INDETERMINATE`, `failure_kind` **`None`** — §2's transcription rule
+> forbids synthesising one, and there was no result to transcribe from — and an
+> `incurred_cost` whose basis is **`UNKNOWN`**, never a figure and never
+> `ToolDefinition.cost`, which §5's third clause forbids on every path. The
+> assertions ride on **every** recovery case: the ordering case, the interrupted
+> scan, the rerun that appends nothing, and the `clear()` interleaving. Without them
+> a scan may close every claim with `failure_kind=TIMED_OUT` and the declaration's
+> cost, pass every ordering, rerun, collision and erasure case above, and corrupt
+> the spend total §5 is built on — a kind the tool never reported, priced at a
+> number nobody measured. It
 > pins the **kinded** `INDETERMINATE` in the same place: a `ToolResult` whose
 > outcome is `INDETERMINATE` and whose `ToolFailure.kind` is `TIMED_OUT` — the shape
 > ADR-0029 §3's validator requires and §4's deadline produces — constructs a
@@ -2497,14 +2528,27 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > neither the fault nor the open claim.
 
 > **Normative.** **No test asserts the outward class of a non-cancellation
-> `BaseException` raised inside a retained append**, and none may be: §3 leaves that
-> one thing uncontracted, so a suite asserting it would pin behaviour this ADR
-> declines to state. Two earlier drafts of this clause did — one demanding the
-> unchanged class ADR-0031 §4 measured to be unavailable, the next demanding a
-> converted one that collided with the absorption arm and the diagnostic matrix — and
-> both are withdrawn. The rest of that case **is** tested, here and in the matrix
-> above: no `ToolResult` returned, no completion written, the claim left open, and a
-> diagnostic carrying no class (§3).
+> `BaseException` raised inside a retained append while no external cancellation is
+> propagating**, and none may be: §3 leaves that one thing uncontracted, so a suite
+> asserting it would pin behaviour this ADR declines to state. Two earlier drafts of
+> this clause did — one demanding the unchanged class ADR-0031 §4 measured to be
+> unavailable, the next demanding a converted one that collided with the absorption
+> arm and the diagnostic matrix — and both are withdrawn. The **qualifier** is part
+> of the prohibition: where an external cancellation is already propagating, the
+> outward class **is** asserted and it is `CancelledError`, with the retained task's
+> exception as its cause and in the diagnostic (§3, ADR-0060 §1), and that case is
+> pinned above. The rest **is** tested too: no `ToolResult` returned, no outcome
+> invented, and a diagnostic carrying no class (§3).
+
+> **Normative.** Both **timings** are pinned, because the durable state differs and
+> only one of them is the case a pre-append failure can reach. With the exception
+> delivered **before** the append commits, the claim is left open and the trail holds
+> no completion. With it delivered **after** the append has committed and before the
+> task publishes its result — a barrier the test owns, released once the row is
+> durable — the completion **stands in the trail** and the claim it names is closed,
+> and the test asserts exactly that: nothing deleted, nothing rewritten, no
+> compensating append (§3, §6, ADR-0060 §1). A suite carrying only the first timing
+> certifies an implementation that tries to repair the second.
 
 > **Normative.** What **is** pinned is the `BaseException` the **tool callable**
 > raises, because that path is contracted and answers differently: the callable is
