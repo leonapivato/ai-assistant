@@ -7,18 +7,17 @@ one ADR-0097 §10 gives for `SourceGrant`'s.** Every case in
 shipped this type with none of its validators would pass both suites end to end
 while admitting an endpoint no implementation can honour.
 
-**And the endpoint is where ADR-0191 §4's pin is decided.** §4 obliges an
-implementation to open "a connection to the host and port of the
-``TransportEndpoint`` it was handed" and to verify a certificate "against the
-endpoint's host". A host carrying a ``NUL`` makes both unsatisfiable rather than
-merely awkward: ``getaddrinfo`` hands the string to a C library that stops at the
-first ``NUL``, so ``"127.0.0.1\x00mail.example.invalid"`` resolves to
-``127.0.0.1`` — a connection to a host the value does not name. Adversarial
-review found that on round 4 of this lane's review, reaching the opener.
-
-The refusal is on the type rather than in each implementation on §1's own
-reasoning about ``read``'s domain: making the spelling unrepresentable closes it,
-where asking every implementation to remember does not.
+**What is *not* here, and deliberately.** ADR-0191 §4's destination pin — a host
+carrying a ``NUL``, which ``getaddrinfo`` truncates at the first one, so
+``"127.0.0.1\x00mail.example.invalid"`` resolves to ``127.0.0.1`` — is refused at
+ADR-0154 §1's designated seam rather than on this type, and its cases live with
+it in ``tests/tools/``. §1 settles this type's construction rules and marks
+exhaustiveness where it means it, so a refusal it did not write is contract
+surface no ADR decided (golden rule 5); architecture review found the rule
+sitting here on round 12. Adversarial review found the ``NUL`` reaching the opener
+on round 4, and that property is unchanged — ``parse_smtp_endpoint`` and
+``StreamOutboundTransport.open_channel`` are the only constructor and the only
+route to a resolver under ``src/``, and both refuse it.
 """
 
 from __future__ import annotations
@@ -122,60 +121,18 @@ def test_both_ends_of_the_port_domain_are_accepted(port: int) -> None:
     assert endpoint(port=port).port == port
 
 
-# --- §4: the host a resolver would truncate ----------------------------------
-
-
-def test_a_host_carrying_an_embedded_nul_is_refused() -> None:
-    """§4: the destination pin, closed where a C library would truncate it.
-
-    ``"127.0.0.1\\x00mail.example.invalid"`` is one string to Python and two to
-    ``getaddrinfo``, which stops at the ``NUL`` and resolves ``127.0.0.1``. Under
-    the upgrade TLS mode that is a cleartext channel to a host the endpoint does
-    not name; under implicit TLS the name a certificate is verified against is
-    truncated the same way. Neither is reachable if the value cannot be built.
-
-    The message names the offending code point rather than the host — pydantic
-    renders the input it refused, which is its own behaviour and is why
-    ``parse_smtp_endpoint`` converts this into a ``TransportPinError`` whose text
-    is written fresh.
-    """
-    with pytest.raises(ValidationError, match=r"U\+0000"):
-        endpoint(host="127.0.0.1\x00mail.example.invalid")
-
-
-@pytest.mark.parametrize(
-    "host",
-    ["mail.example.invalid\r", "mail\nexample.invalid", "mail.example.invalid\x1b"],
-    ids=["carriage-return", "newline", "escape"],
-)
-def test_a_host_carrying_any_other_control_character_is_refused(host: str) -> None:
-    """The rule is over control characters, not over the one that was found.
-
-    ``NUL`` is the one adversarial review reached the opener with, and a rule
-    written for it alone would be a pin against one code point: a bare ``\\r`` or
-    ``\\n`` in a host is a header-injection shape wherever such a value is later
-    written into a protocol line, and none of these is a host anything legitimate
-    configures.
-
-    Args:
-        host: A host carrying one control character.
-    """
-    with pytest.raises(ValidationError, match="control character"):
-        endpoint(host=host)
-
-
 @pytest.mark.parametrize(
     "host",
     ["mail.example.invalid", "MAIL.example.invalid", "127.0.0.1", "::1", "xn--bcher-kva.invalid"],
     ids=["name", "mixed-case", "ipv4", "ipv6", "punycode"],
 )
 def test_every_host_a_deployment_could_legitimately_name_is_accepted(host: str) -> None:
-    """The control, so the refusals above are not passing by refusing everything.
+    """The accepted domain is wide, because §1 fixes only two refusals over it.
 
-    A rule this narrow is worth stating only if it costs nothing an operator would
-    write down, and none of these carries a control character. The host is also
-    kept verbatim — two spellings of one host stay two endpoints (ADR-0148 §2's
-    exactness default), which the seam's grammar pins from its own side.
+    The blank refusal above is worth stating only if it costs nothing an operator
+    would write down, and none of these is blank. The host is also kept verbatim —
+    two spellings of one host stay two endpoints (ADR-0148 §2's exactness
+    default), which the seam's grammar pins from its own side.
 
     Args:
         host: A host a deployment could name.

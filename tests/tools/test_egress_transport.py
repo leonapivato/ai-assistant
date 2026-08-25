@@ -123,27 +123,35 @@ def test_the_endpoint_grammar_refuses_every_form_it_will_not_pin(endpoint: str) 
         pytest.param(
             "smtp+starttls://127.0.0.1\x00mail.example.invalid:587", id="nul-under-starttls"
         ),
+        pytest.param("smtps://mail.example\x1binvalid:465", id="escape-under-implicit-tls"),
         pytest.param("smtps://\ud800.invalid:465", id="no-utf-8-encoding"),
     ],
 )
-def test_a_host_the_endpoint_type_refuses_is_refused_in_this_seams_taxonomy(endpoint: str) -> None:
-    """A refusal about a binding is ``TransportPinError``, whoever noticed it.
+def test_a_host_this_seam_will_not_pin_is_refused_in_its_own_taxonomy(endpoint: str) -> None:
+    """A refusal about a binding is ``TransportPinError``, whichever clause noticed it.
 
-    ``TransportEndpoint`` refuses a host carrying a control character — a ``NUL``
-    is what ``getaddrinfo`` truncates at, so ``127.0.0.1\x00mail.example.invalid``
-    resolved to ``127.0.0.1`` until round 4 of review found it — and one with no
-    UTF-8 encoding. This grammar reads the authority's punctuation and neither of
-    those is punctuation, so the refusal arrives from the type. What it must not
-    arrive as is pydantic's ``ValidationError``: this function's callers are
-    handling a refusal about a *binding* (ADR-0191 §4), and pydantic renders the
-    input it refused, so the endpoint an operator configured would travel with it.
+    Two kinds of host arrive here, and this grammar's punctuation check sees
+    neither. A host carrying a **control character** is refused by this seam's own
+    clause — a ``NUL`` is what ``getaddrinfo`` truncates at, so
+    ``127.0.0.1\x00mail.example.invalid`` resolved to ``127.0.0.1`` until round 4
+    of review found it, and an embedded escape is the same rule over the rest of
+    the class. (A *trailing* ``\r`` is refused a clause earlier, by the check that
+    rejects any host ``strip`` would change, which is why no row is one.)
 
-    **Under both TLS modes, and no opener is reached in either**: the endpoint
-    cannot be constructed, so there is nothing for
-    ``StreamOutboundTransport.open_channel`` to be handed.
+    A host with **no UTF-8 encoding** is refused by ``TransportEndpoint`` itself,
+    whose ``host`` is ``NonBlankEncodableText``.
+
+    What neither may arrive as is pydantic's ``ValidationError``: this function's
+    callers are handling a refusal about a *binding* (ADR-0191 §4), and pydantic
+    renders the input it refused, so the endpoint an operator configured would
+    travel with it.
+
+    **Under both TLS modes, and no opener is reached in either**: nothing is
+    constructed, so there is nothing for ``StreamOutboundTransport.open_channel``
+    to be handed — and were one built some other way, that method refuses it too.
 
     Args:
-        endpoint: A configured endpoint whose host the type refuses.
+        endpoint: A configured endpoint whose host this seam will not pin.
     """
     with pytest.raises(TransportPinError) as refusal:
         parse_smtp_endpoint(endpoint)
