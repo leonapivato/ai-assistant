@@ -2691,6 +2691,19 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > No case constructs a **second writer process** over one store: ADR-0083 admits none
 > and §2 scopes it out rather than testing it.
 
+> **Normative.** The reservation is pinned **across a second factory instance in the
+> same process**, because the restart case above and the two-instance case §2 already
+> owes each cover half of it and neither covers the pair. A factory whose **issued**
+> ids are process-global but whose **reservations** are instance-local passes both
+> halves and still reissues: instance A reserves the persisted claim `x`, `clear()`
+> erases it, instance B is constructed with its next candidate forced to `x`, and B
+> mints it. The case asserts the new claim receives a **different** id and that the
+> stale completion for `x` is refused `InvalidCompletionError`. It is §2's rule read
+> as it is written — over the **process** and never over the instance, for reserved
+> ids exactly as for issued ones — and §2 already records why instance scope is the
+> wrong one: nothing makes a factory unreplaceable and §3 adds no lifecycle
+> obligation.
+
 > **Normative.** It pins the erasure's effect on the consume, because §6 states it
 > as a scope rather than leaving it to be inferred: a decision claimed, completed,
 > erased by `clear()` and then recorded again admits a new claim, and the test
