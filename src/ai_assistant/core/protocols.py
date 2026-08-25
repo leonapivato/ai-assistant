@@ -138,6 +138,7 @@ if TYPE_CHECKING:
         DeferralClaim,
         DeferralState,
         DeferredProposal,
+        DurableIdentifier,
         EgressBinding,
         Embedding,
         EncodableText,
@@ -175,6 +176,7 @@ if TYPE_CHECKING:
         PlanExport,
         Question,
         RecordChunk,
+        RecordedInvocation,
         ReplyChunk,
         SecretName,
         SecretValue,
@@ -183,7 +185,11 @@ if TYPE_CHECKING:
         SourceReadRecord,
         StepTransition,
         ToolCall,
+        ToolCost,
         ToolDefinition,
+        ToolFailureKind,
+        ToolInvocation,
+        ToolOutcome,
         ToolResult,
         TraceChunk,
         TracePosition,
@@ -3283,8 +3289,205 @@ class ActionPolicy(Protocol):
 
 
 @runtime_checkable
+class InvocationCompleter(Protocol):
+    """The narrow face over the trail's invocation rows: completions only (ADR-0192 §2).
+
+    **A capability distinction, and the narrow face is what makes it a type rather
+    than a promise.** ``orchestration``'s recovery scan completes open claims and
+    **must not** claim (ADR-0192 §3), so it is handed this and nothing more — a
+    dependency that cannot express the call. That is ADR-0029 §1's rule read where
+    it points, and the corpus has paid for the narrow face three times on the
+    identical argument: ADR-0125 §1 for ``Secrets`` beside :class:`SecretStore`,
+    ADR-0149 §1 refusing a tool the power to provision itself, and ADR-0153 §2 for
+    ``ConnectionPurger`` beside ``ConnectionProvisioner``.
+
+    **One object satisfies this, :class:`InvocationLedger` and
+    :class:`AuditTrail`**, over one store, and the composition root hands each
+    consumer the face its job needs. Two tables keyed by the same decision could
+    diverge, and the consume would then bound one of them (ADR-0029 §8).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060), and how a call observes its inputs by the input-observation clause
+    (ADR-0065).
+    """
+
+    async def complete_invocation(
+        self,
+        *,
+        claim_id: DurableIdentifier,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None = None,
+    ) -> ToolInvocation:
+        """Append the completion of ``claim_id`` and return the stored row.
+
+        **One atomic store operation**, deciding every refusal below inside the
+        same act as the append — never a check followed by an ``await`` and then a
+        write. The row's ``id`` is minted here from the ledger's injected
+        identifier factory and never accepted from a caller, and ``recorded_at``
+        is stamped here from a guarded ``Clock`` (ADR-0026), one reading per
+        append. ``decision_id`` is set from the claim being completed, so the two
+        cannot disagree.
+
+        **Stores a detached, validated snapshot** of what it was given, recursively
+        over reachable mutable state, and **returns a row detached** from the one
+        the store holds. ADR-0021 §4 made both rules for ``record`` and the
+        premise is the same here: ``frozen=True`` bounds the ordinary write path
+        and not ``__dict__``, so a retained or aliased object would rewrite
+        history through a pointer this contract itself hands out. ``incurred_cost``
+        is the live object at the end of the chain that clause names, so a shallow
+        copy would share it.
+
+        Args:
+            claim_id: The claim this completes, learned from the row
+                :meth:`InvocationLedger.claim_invocation` returned.
+            outcome: What ADR-0029 §§3-4 computed for the exit.
+            incurred_cost: What the invocation cost — the figure the tool
+                reported, or a ``ToolCost`` whose basis is ``UNKNOWN`` where it
+                reported none (ADR-0192 §5). Never ``ToolDefinition.cost``.
+            failure_kind: Transcribed from the ``ToolResult`` that carried one,
+                and **never synthesised**. A completion derived from an exception
+                carries none, because no result was produced to transcribe from:
+                ADR-0031 §3 rules that the seam never synthesises ``CANCELLED``,
+                and no other member describes an externally delivered
+                cancellation. The absence is the honest value.
+
+        Returns:
+            The stored completion row, detached.
+
+        Raises:
+            AuditError: If an argument is not valid — which includes a
+                ``failure_kind`` supplied with a ``SUCCEEDED`` outcome, the one
+                combination ``ToolInvocation``'s shape forbids — or if the guard
+                rejects the clock's reading, or the store cannot be read or
+                written. An exception the injected clock or identifier factory
+                **callable itself** raises propagates unwrapped instead, its type
+                and cause intact (ADR-0026 §2).
+            InvalidCompletionError: If ``claim_id`` names no recorded claim, or
+                names one a completion already names. **In this order and no
+                other**: an argument fault first, then this. It never raises
+                ``UnrecordedAuthorisationError`` — a completion names a claim, and
+                the claim already names the decision.
+        """
+        ...
+
+
+@runtime_checkable
+class InvocationLedger(InvocationCompleter, Protocol):
+    """The wide face: the narrow one plus the claim (ADR-0192 §2).
+
+    ``tools/`` holds this, because ``ToolInvoker.invoke`` claims and completes. It
+    inherits rather than stands beside for ADR-0125 §1's reason exactly — the wide
+    face genuinely *is* the narrow face plus one member, so one object satisfies
+    both and there are not two implementations to drift apart.
+
+    **A ``ToolInvoker`` holds this and never an :class:`AuditTrail`.** The ledger
+    can neither record a ``PermissionDecision``, nor read one, nor export, nor
+    ``clear``, so no decision write, no history read and no erasure reaches
+    ``tools/`` through this seam. Handing the invoker the whole trail would put all
+    four into a subsystem the architecture map gives integrations, which is the
+    shape ADR-0017 §8 wants to move away from.
+    """
+
+    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
+        """Append a claim under ``decision`` and return the stored row.
+
+        **The append is the consume** (ADR-0192 §1). It is one atomic store
+        operation, every refusal below is decided inside it, and a call whose claim
+        is refused does not reach the callable. Two concurrent ``invoke``s on one
+        decision reach one atomic append: one claims, the other is refused —
+        ADR-0021 §4's own answer to the identical race, one seam later.
+
+        **The whole decision is passed, not its id alone, and the store requires
+        the two to be equal.** An id lookup admits a caller who takes the id of a
+        recorded, harmless ``ALLOW`` and builds a second ``ALLOW`` carrying that id
+        and a dangerous ``ToolDefinition``: the dangerous callable runs and the row
+        then reports the harmless tool, which is worse than an unrecorded execution
+        because it is a *misrecorded* one. The row stores the ``id`` and no other
+        part of the value; the equality is what makes the id mean the decision.
+
+        **What is spent is the authority to begin a further act, and nothing
+        else.** No recorded row is removed, rewritten, hidden, expired or
+        invalidated; ``PermissionDecision.authorises`` stays the pure comparison
+        ADR-0021 §1 made it, answering identically before and after a claim.
+
+        **An authorisation is spendable** when the decision's ``ToolDefinition`` is
+        ``side_effecting`` and its ``idempotency`` is not ``NATURAL`` — ADR-0029
+        §5's own discriminator. Otherwise no claim under it is ever refused on the
+        ground that it is spent: a read gated by ADR-0016 §3 is invoked under one
+        ``ALLOW`` as often as the pipeline needs it.
+
+        On a spendable authorisation a first claim is admitted, and a **further**
+        claim only where every one of these holds: no claim under that decision is
+        open; **no** claim under it carries the outcome ``SUCCEEDED`` or
+        ``INDETERMINATE``; the last claim in the ledger's own append order for that
+        decision is completed ``FAILED`` with a recorded ``failure_kind`` whose
+        ``retryable`` is true; the definition's ``idempotency`` is ``KEYED``; and
+        the elapsed time from the **first** claim in that order to this one is
+        strictly less than ``idempotency_window``. That is ADR-0029 §5's two-part
+        retry conjunction transcribed onto the store rather than a looser one
+        beside it — an ``Idempotency.NONE`` side-effecting tool gets exactly one
+        claim, ever, whatever the failure kind.
+
+        **An open claim refuses a further act, so completion durability is a third
+        prerequisite for ADR-0029 §5's retry** (ADR-0192 §1, §7). Where a
+        completion append fails before committing, the claim stays open and the
+        next claim is refused twice over. That is the direction this member fails
+        in everywhere: an open claim is an act that may have run at an outcome
+        nobody observed.
+
+        "First" and "last" are the ledger's own **durable append order** for that
+        decision, never an ordering over ``recorded_at``. A stored instant is what
+        a reader is shown; the order is what the rule is decided on, and a wall
+        clock that steps backwards must not be able to make a completed act stop
+        being the most recent one. The instant is taken from a guarded ``Clock``
+        (ADR-0026) in **exactly one reading per append**, and that one reading is
+        both what the admission is decided on and what the row stores — two
+        readings would let a retry be admitted inside a window and stamped outside
+        it. Any reading of the elapsed time that is not a positive duration is
+        treated as the window having lapsed and the claim is refused, and a clock
+        that raises refuses the claim too: ADR-0029 §5's fail-closed rule for the
+        same measurement, enforced where the rule is.
+
+        Args:
+            decision: The authority for the act, by value.
+
+        Returns:
+            The stored claim row, detached. Its ``id`` is what the caller passes as
+            :meth:`InvocationCompleter.complete_invocation`'s ``claim_id``, and it
+            holds it nowhere else.
+
+        Raises:
+            AuditError: If an argument is not valid, or the guard rejects the
+                clock's reading, or the store cannot be read or written, or the
+                identifier factory returns a colliding id until the redraw bound is
+                spent. An exception the injected clock or factory **callable
+                itself** raises propagates unwrapped (ADR-0026 §2).
+            UnrecordedAuthorisationError: If the store holds no decision under that
+                id, holds one that is not equal to the decision passed, or holds
+                one whose ruling outcome is not ``ALLOW``.
+            AuthorisationSpentError: If the consume above refuses. **In this order
+                and no other**: an argument fault, then the unrecorded
+                authorisation, then the spend.
+        """
+        ...
+
+
+@runtime_checkable
 class AuditTrail(Protocol):
-    """The append-only record of what the permission layer decided (ADR-0021 §4).
+    """The append-only record of what the permission layer decided, and of what ran.
+
+    ADR-0021 §4 minted it for the rulings. ADR-0192 §2 gives it a **second row
+    kind** — a ``ToolInvocation``, appended twice per attempt through
+    :class:`InvocationLedger`, which one object satisfies alongside this — so the
+    trail now says both what was permitted and what was done under it. §4 of that
+    ADR partially supersedes ADR-0021 §4's "It bounds resolutions, not executions":
+    the trail holds executions, and the consume that section deferred to "the
+    invocation contract" is the ledger's claim.
+
+    The three reads below join a row to its decision or answer the recovery
+    question; the writes are on the ledger faces, which is what keeps every history
+    read and ``clear`` off the seam ``tools/`` holds.
 
     A Tier 1 store by ADR-0004 §7's own words, so ADR-0004 §2's residency clause
     governs it: implementations persist **locally only**, and none of this may
@@ -3337,6 +3540,19 @@ class AuditTrail(Protocol):
         upserts because there ``id`` is the caller's idempotency key; an audit
         trail that upserts is one where history can be rewritten by replaying a
         write.
+
+        **"Already present" is read over every row the store holds, of either
+        kind** (ADR-0192 §2). A decision whose ``id`` names a claim or a completion
+        is refused ``AuditError``, inside this member's own atomic act and by the
+        same comparison the ledger's collision check makes. Without it the
+        invariant would hold only against ids the ledger mints, and a caller
+        choosing a decision id equal to a claim's would put two records under one
+        identifier from the other side — which ``recent_invocations``' join then
+        resolves to two different rows. Nothing a caller could rely on is narrowed:
+        a ``DurableIdentifier`` is the caller's to mint, and the store already
+        refused a duplicate decision id. Before ADR-0192 the store held one row
+        kind, so "already present" had one reading; the rule is extended onto the
+        kind that ADR adds rather than changed.
 
         **Atomic**: the duplicate-id check, the resolution validation and the
         append are one operation, not a read followed by a write. Without that
@@ -3538,12 +3754,108 @@ class AuditTrail(Protocol):
         """Return a portable snapshot of every recorded decision (ADR-0004 §6)."""
         ...
 
+    async def recent_invocations(self, *, limit: int = 50) -> list[RecordedInvocation]:
+        """Return up to ``limit`` invocation rows, newest first, ties broken by id.
+
+        ADR-0192 §2's first joined listing. It carries :meth:`recent`'s total
+        order, its bounded default and its ``ValueError`` on a ``limit`` that is
+        not strictly positive.
+
+        **The row is joined to its decision inside one atomic store operation**, so
+        every value returned is complete. No consumer assembles one from two reads
+        and no implementation returns a row it could not pair: the tool's identity
+        lives on the decision, and an engine reading rows and then reading
+        decisions has an ``await`` between the two that a :meth:`clear` can land
+        in.
+
+        Returns a detached snapshot, as every other read here does (ADR-0018 §3).
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive.
+            AuditError: If the trail cannot be read.
+        """
+        ...
+
+    async def export_invocations(self) -> list[RecordedInvocation]:
+        """Return a portable snapshot of every invocation row (ADR-0004 §6).
+
+        The unbounded twin of :meth:`recent_invocations`, in the same order and
+        joined the same way. It discharges ADR-0004 §6's portability obligation for
+        this row kind, which :meth:`export` does for the decision rows and — after
+        ADR-0192 §2 — for those alone: the obligation is met by the pair, and there
+        is no single whole-trail export.
+
+        Raises:
+            AuditError: If the trail cannot be read.
+        """
+        ...
+
+    async def open_invocations(self, *, decision_id: DurableIdentifier) -> list[ToolInvocation]:
+        """Every claim under ``decision_id`` that no completion names (ADR-0192 §2).
+
+        In the ledger's append order, as detached snapshots, from one atomic store
+        operation. **It takes no ``limit``**: it is not a history read but the
+        exact set ADR-0192 §3's recovery rule is written against, and a bounded
+        answer would let a scan transition over claims it never saw.
+
+        **A recovery query belongs with the store that owns the record**, which is
+        ADR-0044 §3's move for ``pending_confirmation`` and not a new one — a
+        restarted process asking the trail for the record it can no longer name by
+        id. It goes here and never on :class:`InvocationLedger`, because the ledger
+        is what ``tools/`` holds and a by-decision query over past claims is a
+        history read. ``orchestration``'s recovery scan is its only consumer, and
+        it reaches this through the trail it already holds.
+
+        **It reserves every claim id it returns.** The store hands each to the same
+        identifier factory the ledger mints from, and that factory returns none of
+        them for the life of the process, exactly as it returns none it issued
+        (ADR-0192 §2) — otherwise a claim ``clear()`` erased could be reissued to a
+        later claim and receive the completion the scan is still holding, recording
+        one call's outcome and cost against another's. The reservation is taken
+        **inside the same atomic operation that reads the claims**, never after it,
+        so an erasure and a fresh claim cannot land in the gap. It is
+        store-internal: no id crosses a subsystem boundary to be reserved, and no
+        consumer is given a reservation call. The two history reads above reserve
+        nothing and need not — a surface completes no claim, so an id it holds can
+        misdirect nothing.
+
+        Args:
+            decision_id: The authorisation whose open claims are wanted — a step's
+                ``approval_ref`` at the recovery seam.
+
+        Returns:
+            The open claims, in append order, detached. Empty where none is open,
+            which states that no call was in flight.
+
+        Raises:
+            AuditError: If the trail cannot be read.
+        """
+        ...
+
     async def clear(self) -> int:
-        """Delete every decision in the trail, returning the number removed.
+        """Delete every row in the trail, returning the number removed.
 
         Wholesale erasure is a different act from selective deletion: it
         destroys the trail visibly and completely, which is what a data-rights
         operation should look like (ADR-0004 §6).
+
+        **It erases both row kinds and counts both** (ADR-0192 §6). No operation
+        erases one kind and leaves the other, and no surface offers one:
+        "the user may burn the book; nobody may tear out a page" is a rule about
+        one book, and two erasure acts over one store would let a user destroy the
+        executions and keep the rulings.
+
+        **It erases the consume with everything else.** A decision re-recorded
+        after an erasure has no claim under it, so a claim under it is admitted —
+        including where the value is byte-for-byte the one that was spent before.
+        That is not a hole to be closed: the consume *is* a row, and a rule
+        surviving the erasure of the rows it is made of would be a second,
+        undeletable record of an act the user asked to have erased. No generation,
+        epoch, tombstone or high-water mark is minted to narrow it.
+
+        It wins any race with an in-flight invocation: a completion whose claim it
+        erased is refused ``InvalidCompletionError`` like any other completion
+        naming no claim, and nothing is recreated.
         """
         ...
 

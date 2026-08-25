@@ -20,28 +20,45 @@ only opt out of (#396).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import functools
+import itertools
+import os
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final
+from uuid import uuid4
 
 from pydantic import ValidationError
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuditError,
+    AuthorisationSpentError,
     DuplicateDecisionError,
+    InvalidCompletionError,
     InvalidResolutionError,
+    UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
     CostBasis,
+    Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    RecordedInvocation,
     Reversibility,
     RiskLevel,
+    ToolCost,
+    ToolFailureKind,
+    ToolInvocation,
+    ToolOutcome,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ActionRequest
+    from collections.abc import Callable, Iterable, Iterator
+
+    from ai_assistant.core.types import ActionRequest, DurableIdentifier
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
@@ -198,6 +215,84 @@ class FakeActionPolicy:
         )
 
 
+class FakeIdentifierSpace:
+    """The per-process state :class:`FakeIdentifiers` draws from (ADR-0192 §2).
+
+    A copy of ``permissions.identifiers.IdentifierSpace`` rather than an import of
+    it. Nothing in ``ai_assistant.testing`` imports a subsystem, and the boundary
+    is the reason: the factory is ``permissions/``-internal, which is what makes
+    ADR-0192 §2's reservation store-internal. ``permissions/_transactions.py``
+    already states the trade for this exact boundary — "four copies of one function
+    is what that boundary costs" — and the copy is what keeps this fake usable by a
+    subsystem that must not import the real store (golden rule 1).
+
+    Held apart from the factory so two factories constructed in one process draw
+    from **one** sequence and share **one** reservation set: a factory whose issued
+    ids are process-global but whose reservations are instance-local still reissues
+    an id ``clear()`` erased.
+    """
+
+    def __init__(self, *, nonce: str | None = None) -> None:
+        """Open a fresh space, optionally with a pinned nonce.
+
+        Args:
+            nonce: The per-space component, drawn once. Injectable so a suite can
+                pin the sequence rather than race it. It is not what makes the
+                space fork-safe — the pid folded in at allocation is.
+        """
+        self._nonce: Final = nonce if nonce is not None else uuid4().hex
+        self._counter: Iterator[int] = itertools.count()
+        self._reserved: set[str] = set()
+
+    def mint(self) -> str:
+        """Return the next identifier this space has neither issued nor reserved."""
+        while True:
+            # Read here and not in ``__init__``: a child of a ``fork`` inherits the
+            # nonce and the counter, and the pid is the only component that can
+            # differ (ADR-0049 §3).
+            candidate = f"inv-{os.getpid()}-{self._nonce}-{next(self._counter)}"
+            if candidate not in self._reserved:
+                return candidate
+
+    def reserve(self, ids: Iterable[str]) -> None:
+        """Take ``ids`` out of this space for the life of the process."""
+        self._reserved.update(ids)
+
+
+#: The space every :class:`FakeIdentifiers` shares unless a caller says otherwise.
+FAKE_PROCESS_SPACE: Final = FakeIdentifierSpace()
+
+
+class FakeIdentifiers:
+    """The canonical fake's identifier factory: a per-process nonce and a counter.
+
+    With the allocation-time pid folded in, which is what ADR-0192 §2 requires of
+    every satisfying construction and what a nonce and counter alone are not: those
+    are exactly what a ``fork`` copies.
+    """
+
+    def __init__(self, *, space: FakeIdentifierSpace | None = None) -> None:
+        """Draw from ``space``, or from the process's own.
+
+        Args:
+            space: The state to draw from; a suite pins a sequence by passing one.
+        """
+        self._space = space if space is not None else FAKE_PROCESS_SPACE
+
+    def __call__(self) -> str:
+        """Return a fresh identifier."""
+        return self._space.mint()
+
+    def reserve(self, ids: Iterable[str]) -> None:
+        """Take ``ids`` out of the space for the life of the process."""
+        self._space.reserve(ids)
+
+
+def _fake_now() -> datetime:
+    """The fake trail's default clock: the real one, read in UTC."""
+    return datetime.now(UTC)
+
+
 class FakeAuditTrail:
     """A non-persistent, append-only ``AuditTrail`` test double backed by a dict.
 
@@ -219,9 +314,31 @@ class FakeAuditTrail:
     serialises the pair outright.
     """
 
-    def __init__(self) -> None:
-        """Create an empty trail."""
+    def __init__(
+        self,
+        *,
+        now: Callable[[], datetime] = _fake_now,
+        identifiers: FakeIdentifiers | None = None,
+    ) -> None:
+        """Create an empty trail.
+
+        Args:
+            now: The clock the ledger stamps ``recorded_at`` from, wrapped by
+                ``checked_clock`` (ADR-0026). Injected so a suite pins the
+                idempotency window's boundary rather than racing it; no caller ever
+                supplies an instant (ADR-0192 §1).
+            identifiers: The factory each invocation row's ``id`` is minted from.
+                Defaults to the process's own, so two fakes in one process never
+                mint from independent sequences.
+        """
         self._decisions: dict[str, PermissionDecision] = {}
+        # Insertion order **is** the durable append order every admission rule in
+        # ADR-0192 §1 is decided on — deliberately not an ordering over
+        # ``recorded_at``, so a clock that steps backwards cannot make a completed
+        # act stop being the most recent one.
+        self._invocations: dict[str, ToolInvocation] = {}
+        self._clock = checked_clock(now, owner="FakeAuditTrail")
+        self._identifiers = identifiers if identifiers is not None else FakeIdentifiers()
         self._resource = SuspendableResource()
 
     def suspend_next_operation(self) -> LoopSuspension:
@@ -327,6 +444,16 @@ class FakeAuditTrail:
                     f"append-only, so history cannot be rewritten by replaying a write"
                 )
                 raise DuplicateDecisionError(msg)
+            if snapshot.id in self._invocations:
+                # ADR-0192 §2: one id space, every row in it. Refused inside the
+                # same atomic act, and as an ``AuditError`` rather than a
+                # ``DuplicateDecisionError`` — what is already present is not a
+                # decision, so re-recording one is not what happened.
+                msg = (
+                    f"decision {snapshot.id!r} names a row the trail already holds as an "
+                    f"invocation; one identifier names one record, of either kind"
+                )
+                raise AuditError(msg)
             if snapshot.resolves is not None:
                 self._check_resolution(snapshot)
             self._decisions[snapshot.id] = snapshot
@@ -531,7 +658,14 @@ class FakeAuditTrail:
             return [decision.model_copy(deep=True) for decision in self._ordered()]
 
     async def clear(self) -> int:
-        """Delete every decision, returning the number removed.
+        """Delete every row of either kind, returning the number removed.
+
+        **Both kinds, and the count is over both** (ADR-0192 §6). No operation
+        erases one and leaves the other: "the user may burn the book; nobody may
+        tear out a page" is a rule about one book. It erases the consume with
+        everything else, so a decision re-recorded afterwards admits a claim —
+        including a byte-for-byte identical one — and no generation, epoch or
+        tombstone is minted to narrow that.
 
         The body runs inside the modelled resource for the reason :meth:`record`'s
         does — it is the second locked write, and ADR-0060's clause is stated per
@@ -544,9 +678,271 @@ class FakeAuditTrail:
         already model it this way (#396).
         """
         async with self._resource.held():
-            removed = len(self._decisions)
+            removed = len(self._decisions) + len(self._invocations)
             self._decisions.clear()
+            self._invocations.clear()
         return removed
+
+    # --- the ledger: the consume, and the two appends (ADR-0192 §§1-2) ----
+
+    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
+        """Append a claim under ``decision`` and return the stored row.
+
+        The revalidation runs **before** the resource is entered, so the decision
+        is observed once, before this call's first suspension point (ADR-0065);
+        every refusal is then decided **inside** it, with no interleaving point
+        before the append, which is how the atomicity ADR-0192 §1 requires is
+        obtained on a single event loop. Two concurrent claims under one spendable
+        decision therefore cannot both observe no prior claim.
+
+        Raises:
+            AuditError: If the decision is not a valid record, the guard rejects
+                the clock's reading, or the redraw bound is spent.
+            UnrecordedAuthorisationError: If the trail holds no decision under that
+                id, holds one that is not equal to it, or holds one whose ruling is
+                not ``ALLOW``.
+            AuthorisationSpentError: If ADR-0192 §1's consume refuses.
+        """
+        snapshot = _revalidated_decision(decision)
+        async with self._resource.held():
+            recorded = self._decisions.get(snapshot.id)
+            if (
+                recorded is None
+                or recorded != snapshot
+                or snapshot.ruling.outcome is not PermissionOutcome.ALLOW
+            ):
+                # One class for all three grounds: they are all "the authority this
+                # call claims is not one this store recorded", and separating them
+                # would tell a caller which half of a forgery was detected.
+                msg = (
+                    f"the trail records no decision equal to {snapshot.id!r}; an "
+                    f"authorisation it did not record authorises nothing"
+                )
+                raise UnrecordedAuthorisationError(msg)
+            recorded_at = self._reading()
+            self._refuse_if_spent(snapshot, recorded_at)
+            claim = ToolInvocation(
+                id=self._mint(), decision_id=snapshot.id, recorded_at=recorded_at
+            )
+            self._invocations[claim.id] = claim
+            return claim.model_copy(deep=True)
+
+    async def complete_invocation(
+        self,
+        *,
+        claim_id: DurableIdentifier,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None = None,
+    ) -> ToolInvocation:
+        """Append the completion of ``claim_id`` and return the stored row.
+
+        Every argument is validated and detached **before** the resource is
+        entered, for ADR-0065's reason and for ADR-0021 §4's: ``incurred_cost`` is
+        the live object at the end of the chain that clause names, so a shallow
+        copy would share it and ``cost.__dict__["amount"] = ...`` would rewrite an
+        appended row.
+
+        Raises:
+            AuditError: If an argument is not valid — a ``failure_kind`` with a
+                ``SUCCEEDED`` outcome among them — the guard rejects the clock's
+                reading, or the redraw bound is spent.
+            InvalidCompletionError: If ``claim_id`` names no recorded claim or
+                names one a completion already names.
+        """
+        named = _checked_argument("claim_id", lambda: str(claim_id))
+        settled = _checked_argument("outcome", lambda: ToolOutcome(outcome))
+        cost = _checked_argument(
+            "incurred_cost", lambda: ToolCost.model_validate(incurred_cost.model_dump())
+        )
+        kind = (
+            None
+            if failure_kind is None
+            else _checked_argument("failure_kind", lambda: ToolFailureKind(failure_kind))
+        )
+        if kind is not None and settled is ToolOutcome.SUCCEEDED:
+            msg = "a SUCCEEDED completion carries no failure_kind"
+            raise AuditError(msg)
+        async with self._resource.held():
+            claim = self._invocations.get(named)
+            if claim is None or claim.completes is not None:
+                msg = f"the trail holds no open claim {named!r} to complete"
+                raise InvalidCompletionError(msg)
+            if any(row.completes == named for row in self._invocations.values()):
+                msg = (
+                    f"claim {named!r} is already completed; the trail is append-only, "
+                    f"so an outcome cannot be written twice"
+                )
+                raise InvalidCompletionError(msg)
+            completion = ToolInvocation(
+                id=self._mint(),
+                # Set from the claim and never accepted from a caller (ADR-0192 §2).
+                decision_id=claim.decision_id,
+                recorded_at=self._reading(),
+                completes=claim.id,
+                outcome=settled,
+                incurred_cost=cost,
+                failure_kind=kind,
+            )
+            self._invocations[completion.id] = completion
+            return completion.model_copy(deep=True)
+
+    def _reading(self) -> datetime:
+        """Take the append's one guarded clock reading (ADR-0026 §2).
+
+        The guard's **own** rejection is translated, so a caller never meets a
+        non-``AssistantError`` this trail produced; an exception the clock
+        **callable itself** raises propagates unwrapped, type and cause intact.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = f"the audit trail's clock returned a reading it cannot record: {exc}"
+            raise AuditError(msg) from exc
+
+    def _mint(self) -> str:
+        """Draw an identifier no row currently holds, or refuse (ADR-0192 §2).
+
+        A collision is **drawn away from** rather than refused: after a restart the
+        store holds claims a new, conforming, process-scoped factory may legally
+        mint over, and an implementation refusing the first collision deadlocks
+        there and on every subsequent restart. Only an exhausted bound refuses, and
+        it is an ``AuditError`` and never one of §1's three named classes.
+
+        The bound is the count of every row held, of either kind, plus one — over
+        **one id space**, since a minted invocation id naming a *decision's* id is
+        a collision like any other.
+        """
+        held = len(self._decisions) + len(self._invocations)
+        for _ in range(held + 1):
+            # Called outside the guard: an exception the factory callable raises on
+            # its own account propagates unwrapped (ADR-0026 §2).
+            drawn = self._identifiers()
+            candidate = _checked_argument("identifier", functools.partial(_identifier, drawn))
+            if candidate not in self._decisions and candidate not in self._invocations:
+                return candidate
+        msg = (
+            f"the audit trail's identifier factory returned an identifier the store "
+            f"already holds on every one of {held + 1} draws; no row was appended"
+        )
+        raise AuditError(msg)
+
+    def _refuse_if_spent(self, decision: PermissionDecision, now: datetime) -> None:
+        """Apply ADR-0192 §1's conjunction to the claims already under ``decision``.
+
+        Raises:
+            AuthorisationSpentError: If a further claim is not admitted.
+        """
+        spendable = decision.tool.side_effecting and decision.tool.idempotency is not (
+            Idempotency.NATURAL
+        )
+        if not spendable:
+            # A read gated by ADR-0016 §3 is invoked under one ALLOW as often as
+            # the pipeline needs it, and refusing the second would break working
+            # behaviour to protect nothing.
+            return
+        rows = list(self._invocations.values())
+        claims = [row for row in rows if row.completes is None and row.decision_id == decision.id]
+        if not claims:
+            return
+        completions = {
+            row.completes: row
+            for row in rows
+            if row.completes is not None and row.decision_id == decision.id
+        }
+        refuse = _spend_refusal(decision.id)
+        if any(claim.id not in completions for claim in claims):
+            raise refuse("a claim under it is open")
+        settled = {completions[claim.id].outcome for claim in claims}
+        if settled & {ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE}:
+            raise refuse("an act under it has already succeeded or may have")
+        last = completions[claims[-1].id]
+        if last.outcome is not ToolOutcome.FAILED:
+            raise refuse("its last act did not fail")
+        if last.failure_kind is None or not last.failure_kind.retryable:
+            raise refuse("its last failure reported no retryable kind")
+        if decision.tool.idempotency is not Idempotency.KEYED:
+            raise refuse("the tool offers no keyed idempotency")
+        window = decision.tool.idempotency_window
+        elapsed = now - claims[0].recorded_at
+        if window is None or elapsed <= timedelta(0) or elapsed >= window:
+            # From the **first** claim in append order and never from the last:
+            # measuring from the most recent one would renew the window
+            # indefinitely, one retryable failure at a time.
+            raise refuse("its idempotency window has lapsed")
+
+    # --- reading what ran (ADR-0192 §2) -----------------------------------
+
+    async def recent_invocations(self, *, limit: int = 50) -> list[RecordedInvocation]:
+        """Return up to ``limit`` invocation rows, newest first, ties broken by id.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive.
+            AuditError: If the trail holds a row it could not pair with a decision.
+        """
+        if limit <= 0:
+            msg = f"limit must be strictly positive, got {limit}"
+            raise ValueError(msg)
+        async with self._resource.held():
+            return [self._join(row) for row in self._ordered_invocations()[:limit]]
+
+    async def export_invocations(self) -> list[RecordedInvocation]:
+        """Return every invocation row, in the same order as :meth:`recent_invocations`.
+
+        Raises:
+            AuditError: If the trail holds a row it could not pair with a decision.
+        """
+        async with self._resource.held():
+            return [self._join(row) for row in self._ordered_invocations()]
+
+    async def open_invocations(self, *, decision_id: DurableIdentifier) -> list[ToolInvocation]:
+        """Every claim under ``decision_id`` that no completion names, in append order.
+
+        The reservation is taken **inside** the resource, on the same boundary
+        ``clear`` and every append take, and never after the read: an
+        implementation reserving afterwards satisfies the sentence and loses the
+        race — an erasure and a fresh claim can land in the gap, and the id it then
+        reserves names the **new** claim (ADR-0192 §2).
+        """
+        async with self._resource.held():
+            completed = {
+                row.completes for row in self._invocations.values() if row.completes is not None
+            }
+            claims = [
+                row
+                for row in self._invocations.values()
+                if row.completes is None
+                and row.decision_id == str(decision_id)
+                and row.id not in completed
+            ]
+            self._identifiers.reserve([claim.id for claim in claims])
+            return [claim.model_copy(deep=True) for claim in claims]
+
+    def _join(self, row: ToolInvocation) -> RecordedInvocation:
+        """Pair ``row`` with the decision it names (ADR-0192 §2).
+
+        Raises:
+            AuditError: If the decision is absent — a row the store could not pair,
+                reported rather than silently dropped.
+        """
+        named = self._decisions.get(row.decision_id)
+        if named is None:
+            msg = (
+                f"the audit trail holds invocation {row.id!r} naming decision "
+                f"{row.decision_id!r}, which it does not hold; the store is corrupt"
+            )
+            raise AuditError(msg)
+        return RecordedInvocation(
+            invocation=row.model_copy(deep=True),
+            tool=named.tool.id,
+            capability=named.tool.capability,
+            egress_call=named.egress_binding is not None,
+        )
+
+    def _ordered_invocations(self) -> list[ToolInvocation]:
+        """Return the stored rows by ``recorded_at`` descending, ``id`` ascending."""
+        by_id = sorted(self._invocations.values(), key=lambda row: row.id)
+        return sorted(by_id, key=lambda row: row.recorded_at, reverse=True)
 
     def _ordered(self) -> list[PermissionDecision]:
         """Return the stored decisions by ``decided_at`` descending, ``id`` ascending.
@@ -558,4 +954,78 @@ class FakeAuditTrail:
         return sorted(by_id, key=lambda decision: decision.decided_at, reverse=True)
 
 
-__all__ = ["FakeActionPolicy", "FakeAuditTrail"]
+def _revalidated_decision(decision: PermissionDecision) -> PermissionDecision:
+    """Rebuild ``decision`` as a validated, detached ``PermissionDecision``.
+
+    Raises:
+        AuditError: If it does not satisfy its own model.
+    """
+    try:
+        return PermissionDecision.model_validate(decision.model_dump())
+    except ValidationError as exc:
+        msg = f"decision {decision.id!r} is not a valid record: {exc}"
+        raise AuditError(msg) from exc
+
+
+def _identifier(value: object) -> str:
+    """Return ``value`` if it is a usable ``DurableIdentifier``, else reject it.
+
+    Raises:
+        ValueError: If it is not text, or is blank.
+    """
+    if not isinstance(value, str) or not value.strip():
+        msg = f"an identifier must be non-blank text, got {type(value).__name__}"
+        raise ValueError(msg)
+    return value
+
+
+def _checked_argument[T](name: str, build: Callable[[], T]) -> T:
+    """Run ``build``, reporting a rejected value as this layer's own error.
+
+    The guard-rejection arm of ADR-0026 §2: a non-conforming *output* is
+    translated, while an exception a collaborator's callable raises on its own
+    account is never routed through here.
+
+    Raises:
+        AuditError: If ``build`` rejects the value.
+    """
+    try:
+        return build()
+    except (ValidationError, ValueError) as exc:
+        msg = f"the audit trail was given a {name} it cannot record: {exc}"
+        raise AuditError(msg) from exc
+
+
+def _spend_refusal(decision_id: str) -> Callable[[str], AuthorisationSpentError]:
+    """Build this decision's refusal, so every arm reads the same but for its cause."""
+
+    def _refuse(because: str) -> AuthorisationSpentError:
+        return AuthorisationSpentError(
+            f"the authorisation recorded as {decision_id!r} is spent: {because}"
+        )
+
+    return _refuse
+
+
+#: :class:`FakeAuditTrail` under the ledger faces' names (ADR-0192 §2). **One
+#: object satisfies all three**, over one store, so the canonical fake is one class
+#: and the composition a test writes is the composition production writes:
+#: ``FakeInvocationLedger`` for the seam, ``FakeInvocationCompleter`` for recovery,
+#: and the trail itself for the reads. It is the arrangement
+#: :data:`~ai_assistant.testing.secrets.FakeSecrets` already has for
+#: ``Secrets``/``SecretStore``, which ADR-0192 §2 names as its precedent.
+FakeInvocationLedger = FakeAuditTrail
+
+#: :class:`FakeAuditTrail` under the narrow face's name — the one ``orchestration``'s
+#: recovery scan is handed, which cannot express a claim at all.
+FakeInvocationCompleter = FakeAuditTrail
+
+
+__all__ = [
+    "FakeActionPolicy",
+    "FakeAuditTrail",
+    "FakeIdentifierSpace",
+    "FakeIdentifiers",
+    "FakeInvocationCompleter",
+    "FakeInvocationLedger",
+]

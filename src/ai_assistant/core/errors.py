@@ -781,6 +781,63 @@ class InvalidResolutionError(AuditError):
     """
 
 
+class AuthorisationSpentError(AuditError):
+    """A claim was refused because the authorisation it names is spent (ADR-0192 §1).
+
+    An authorisation is *spendable* when the ``ToolDefinition`` its decision
+    carries is ``side_effecting`` and its ``idempotency`` is not ``NATURAL``. On
+    such a decision the ledger admits a first claim, and a further one only where
+    ADR-0029 §5's retry conjunction has been transcribed onto the store: no claim
+    open, none completed ``SUCCEEDED`` or ``INDETERMINATE``, the last completed
+    ``FAILED`` with a retryable kind, ``KEYED``, and inside the window measured
+    from the *first* claim.
+
+    **This is the direction the consume fails in.** An open claim is an act that
+    may have run at an outcome nobody observed, so it refuses the next claim
+    rather than admitting one — including a retry ADR-0029 §5 would otherwise
+    admit, whose third prerequisite is therefore that the preceding completion
+    committed (ADR-0192 §1, §7).
+
+    A seam fault: returned as no ``ToolResult``, never as data, and never
+    auto-retried. Derives from :class:`AuditError` and not from ``ToolError``
+    because the refusal is the store's.
+    """
+
+
+class UnrecordedAuthorisationError(AuditError):
+    """A claim named an authority this trail did not record (ADR-0192 §1, §2).
+
+    Raised where the store holds no decision under the id passed, where the
+    decision it holds is **not equal** to the one passed — the whole value, by the
+    frozen model's own equality — or where the stored decision's ruling outcome is
+    not ``ALLOW``.
+
+    **The three grounds are one class deliberately.** They are all "the authority
+    this call claims is not one this store recorded", and separating them would
+    tell a caller which half of a forgery was detected. The equality conjunct is
+    what closes the attack ADR-0192 §1 names: an id lookup alone admits a caller
+    who takes the id of a recorded, harmless ``ALLOW`` and builds a second
+    ``ALLOW`` carrying that id and a dangerous ``ToolDefinition``, which would run
+    and then be *misrecorded* as the harmless one.
+    """
+
+
+class InvalidCompletionError(AuditError):
+    """A completion named no open claim (ADR-0192 §2).
+
+    Raised where ``claim_id`` names no recorded claim, or names one a completion
+    already names. A completion never raises
+    :class:`UnrecordedAuthorisationError`: it names a claim, and the claim already
+    names the decision.
+
+    **``clear()`` is the one interleaving that makes this reachable in ordinary
+    running** (ADR-0192 §6): an erasure landing between a claim and its completion
+    leaves the completion naming nothing, and it is refused here exactly as any
+    other completion naming no claim is. Nothing is recreated — the store putting
+    back a row the user destroyed on purpose is the one answer it may not give.
+    """
+
+
 class GrantError(AssistantError):
     """A source-grant store could not be read or written (ADR-0097 §10).
 
