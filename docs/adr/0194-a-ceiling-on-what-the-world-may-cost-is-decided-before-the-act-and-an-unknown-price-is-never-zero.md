@@ -505,9 +505,28 @@ ceiling. It does not promise that the accounted total never exceeds one: a
 declared estimate can understate what a call turns out to have cost, and
 ADR-0016's own Consequences say "a wrong number will mislead a spend policy, and
 no mechanism detects the drift". So the guaranteed bound is the ceiling plus the
-last admitted call's overrun of its own declaration, and the overrun is
-**recorded** — it lands in the accounted total, refuses the next call, and is
-readable (§6). This is the survey's accounting corner taken in the honest
+**aggregate** overrun of every call that was admitted before any of their
+completions became visible, and each overrun is **recorded** — it lands in the
+accounted total, refuses the next call, and is readable (§6). Under a single call
+in flight that aggregate is the last admitted call's overrun of its own
+declaration, which is the shape the bound is easiest to picture in; it is stated
+over the set rather than over that one call because §3 records that more than one
+invocation is in flight today (**#1561**), and ten concurrent calls declaring 10
+each against a ceiling of 100 are all admissible at equality — if each then
+reports 100 the accounted total is 1000, not the 190 the one-call reading would
+predict. The reservation bounds what may be *admitted*; nothing bounds what a
+declaration understated, and this is the second place that asymmetry shows.
+
+**It also does not promise a bound across a clock that steps backward over a
+period boundary, and §7 is where that comes from rather than this section.** A
+completion is recorded at its own instant and rows do not move between periods, so
+a clock that steps back across midnight selects a period whose rows exclude a
+completion recorded after the step: a call completed and released just after
+midnight is not in the total the step-back selects, a second call is admitted
+against that total, and a later forward step puts both in one period. Carrying a
+*reservation* across a boundary closes this for as long as the first call is
+outstanding (§3), which is the whole of what the mechanism can do without
+rewriting history. This is the survey's accounting corner taken in the honest
 direction: the crossing call is counted, not excused, and this ADR says which of
 the two properties it has rather than letting a reader assume the stronger one.
 
@@ -611,7 +630,8 @@ the two properties it has rather than letting a reader assume the stronger one.
 > **Normative.** An admission that is granted **reserves its own declared
 > contribution**, in the same atomic step as the decision. The store read, the
 > comparison and the reservation are one critical section over the holder's state,
-> with no other admission interleaved **and no release interleaved either**;
+> with no other admission interleaved **and no release taking effect inside it
+> either**;
 > `admit_invocation` returns an opaque **admission handle**; and the projected total of every later admission counts
 > the declared amounts of the admissions this holder has granted whose handles are
 > still outstanding. The Nth concurrent invocation therefore sees the N−1
@@ -671,15 +691,41 @@ the two properties it has rather than letting a reader assume the stronger one.
 > for as long as it is in flight, which is the fail-closed direction and is bounded
 > by the call.
 
-> **Normative.** `release_admission` participates in that **same** exclusion, and
-> saying so is not pedantry: an implementation that serialised admissions against
-> each other while letting a release run between an admission's row snapshot and
-> its comparison admits a call it must refuse. Concretely — accounted 90, one
-> reservation of 10, a ceiling of 100 — an admission snapshots 90, the first call's
-> completion of 10 lands and its handle is released, and the admission then reads
-> no reservation and projects 100 for a further estimate of 10, where the truth at
-> that instant is 110. The snapshot, the comparison, the reservation **and every
-> release** are one critical section over the holder's state.
+> **Normative.** No release **takes effect** between an admission's row snapshot
+> and its reservation, and saying so is not pedantry: an implementation that
+> serialised admissions against each other while letting a release land between an
+> admission's row snapshot and its comparison admits a call it must refuse.
+> Concretely — accounted 90, one reservation of 10, a ceiling of 100 — an admission
+> snapshots 90, the first call's completion of 10 lands and its handle is released,
+> and the admission then reads no reservation and projects 100 for a further
+> estimate of 10, where the truth at that instant is 110. The reservation is the
+> conservative stand-in for a completion the snapshot may not yet show — that is
+> why dropping one inside a running admission is the single interleaving that can
+> under-count, while the completion's own append, which this holder does not
+> serialise against at all, cannot.
+
+> **Normative.** `release_admission` therefore **never waits**, and it is
+> deliberately *not* placed inside the admission's critical section to achieve the
+> clause above. It records the release in the holder's own memory — an operation
+> that touches no store, performs no I/O and cannot block — and a recorded release
+> takes effect at the **start of the next admission's critical section**, before
+> that admission's row snapshot. The property is preserved exactly as stated: no
+> release is ever applied inside a critical section already running. What is
+> removed is the wait.
+
+> **Normative.** That is a liveness rule rather than a refinement, because the
+> alternative contradicts the deadline clause above. The admission's store read is
+> inside the critical section, so a gate blocked on a store that never answers
+> holds it for as long as **its own** deadline allows. Were a release made to wait
+> on that exclusion, a *second* invocation whose callable had already returned
+> would block in its `finally` behind the first invocation's store I/O; the
+> no-stranded-reservation rule below, which requires a cancelled release to
+> complete its state change before re-raising, would hold it there through its own
+> expiry, and its `invoke` would outlast the `timeout` its caller set — the one
+> thing the deadline clause above promises this ADR does not do, and it would do it
+> to an invocation that had already succeeded. A release that cannot block cannot
+> do that, and it makes the no-stranded-reservation rule bounded by construction
+> instead of conditional on another invocation's store. §11 drives both halves.
 
 > **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
 > ADR-0192's completion has been appended or after the failure that prevented it.
@@ -970,7 +1016,10 @@ whole explanation.
 > evaluates §3's admission, raises under §4 where it refuses, and where it admits
 > takes §3's reservation and returns its handle; and
 > `release_admission(handle: SpendAdmissionHandle) -> None`, which drops that
-> reservation and is the idempotent no-raising member §3 requires. Neither appends a row and neither
+> reservation and is the idempotent, no-raising, **never-blocking** member §3
+> requires — it awaits no store and no lock a store read is held under, which is
+> §3's liveness rule and the reason it is `async` only for symmetry with the member
+> beside it. Neither appends a row and neither
 > writes durable state. `SpendLedger` has one member, **`async`** like the two
 > above it and with exactly this signature:
 > `async def spend_totals(self) -> tuple[SpendTotal, ...]`. It returns one
@@ -1811,14 +1860,28 @@ the ADRs it depends on rather than replacing them.
 > **successfully** at nearly twice the deadline the caller set, which is
 > `invoke(timeout=...)` no longer meaning what §3 says it still means.
 
-> **Normative.** The suite drives the release **race** the exclusion clause exists
-> for, since the concurrency clauses above all hold the releases still: an
-> admission paused after its row snapshot, the outstanding call's completion
-> appended and its handle released while that admission is paused, and the
-> admission then resumed. Accounted 90, reservation 10, ceiling 100, second
-> estimate 10 — the second is **refused**, because 90 plus the completed 10 plus 10
-> is 110. An implementation that serialises admissions against each other but not
-> against releases passes every race and double-count fixture above and admits it.
+> **Normative.** The suite drives the release **race** §3's take-effect rule exists
+> for: an admission paused after its row snapshot, the outstanding call's
+> completion appended and its handle released while that admission is paused, and
+> the admission then resumed. It asserts **both** halves of that rule — the release
+> returns *without waiting* for the paused admission, and its effect is *not*
+> applied to it. Accounted 90, reservation 10, ceiling 100, second estimate 10: the
+> second is **refused**, because the snapshot of 90 still carries the reservation
+> of 10 standing in for the completion just appended, and 90 plus 10 plus 10 is
+> 110. An implementation that applies a release inside a running admission passes
+> every race and double-count fixture above and admits it.
+
+> **Normative.** The suite drives §3's liveness rule with **two** invocations,
+> which the single blocked gate above cannot reach: one whose `admit_invocation` is
+> blocked inside the critical section on a store that never answers, and a second,
+> already admitted, whose callable has returned and which releases its handle while
+> the first is still blocked. The release returns promptly and the second `invoke`
+> returns within its **own** `timeout`, unaffected by the first invocation's store
+> and by the first invocation's deadline. It drives the same with the second
+> invocation's release **cancelled** while the first is still blocked, and asserts
+> that it still drops the reservation and re-raises without waiting. An
+> implementation that serialises releases behind admissions passes every fixture
+> above this one and returns late on both.
 
 > **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
 > asserts on the projection rather than on the exception alone: a `CancelledError`
@@ -1833,8 +1896,21 @@ the ADRs it depends on rather than replacing them.
 > advanced past midnight, and the reservation still counted in the next admission's
 > projection whichever period it falls in; then released, and no longer counted.
 > It drives the same with a clock that steps **backward** across the boundary,
-> since §7 permits one, and asserts that no combination of rollover and step
-> admits a pair of calls whose declarations together cross a ceiling.
+> since §7 permits one, and asserts that **while the first call is still
+> outstanding** no combination of rollover and step admits a pair of calls whose
+> declarations together cross a ceiling — the reservation is counted whichever
+> period is current, so neither direction of step can lose it.
+
+> **Normative.** The suite asserts that of an outstanding pair and **not** of a
+> pair whose first call has already completed and been released, and the difference
+> is §7's rule rather than a gap the suite is leaving: rows do not move between
+> periods, so a clock stepped back across a boundary selects a period whose rows
+> exclude a completion recorded after the step, a second call is admitted against
+> that total, and a later forward step puts both completions in one period. §2
+> states that limit as one the ceiling does not promise. A suite asserting
+> otherwise would be requiring an implementation that rewrote history, which §7
+> forbids in as many words, so this clause exists to stop a lane reading the one
+> above it as the wider claim.
 
 > **Normative.** The suite drives `spend_totals`' coherence: with a clock that
 > steps between reads, both returned entries carry bounds selected from **one**
