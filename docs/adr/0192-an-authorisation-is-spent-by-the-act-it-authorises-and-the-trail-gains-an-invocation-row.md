@@ -1883,7 +1883,15 @@ prefixes whatever nonce or counter they copied.
 
 > **Normative.** Which adapters render these operations is the surface group's
 > (§9), and the rendering floor above binds each that does. This ADR promotes no CLI
-> command and reserves no command name.
+> command and reserves no command name. **It does bound the set below by one**: at
+> least one adapter renders both operations, because ADR-0004 §6's *view* right is
+> not served by an engine method nobody can reach and a floor over "each adapter
+> that does" is satisfied vacuously by none. Which one, and what it is called, stays
+> the surface group's — the natural candidate is the CLI that already renders the
+> decision trail — and this ADR reserves neither. That is one clause narrower than
+> ADR-0186 §10's deferral, and deliberately: that ADR declined to mint a surface for
+> a store "whose consumer nobody has driven", where this row kind lands beside
+> decisions a person can already list and export.
 
 **Separate operations rather than one interleaved listing, and ADR-0186 §1 is why
 the question does not even reach taste.** Its first clause fixes
@@ -2254,7 +2262,15 @@ carries `clear`'s widening with it, because that is the same fact — the store 
 a second kind — reaching a second sentence. Everything else of §4 stands and is
 relied on throughout: write-once, atomicity, the detached validated snapshot, the
 resolution invariant, the no-`delete(id)` rule, the total order, the strictly
-positive `limit`, local-only residency and the timezone-aware instant.
+positive `limit`, local-only residency and the timezone-aware instant. **One further
+sentence of §4 is over-wide and is inside this scope**: `export` "discharges ADR-0004
+§6's portability obligation for this store", which after §2 above is true of the
+decision rows and not of the store. §6 above discharges ADR-0004 §6 for the new kind
+through `export_invocations` and the engine operation beside it, so the obligation is
+met by the pair and nothing lapses — but a reader holding only ADR-0021 would take
+one call for the whole trail. No single whole-trail export is minted, for the reason
+the alternatives already give against one interleaved listing and because ADR-0186 §1
+fixes what the promoted decision read returns.
 
 **ADR-0016 §7 and ADR-0014 §7 — nothing is owed, and the reason is a fact already
 on those documents.** ADR-0016 §7's exactly-once bullet was discharged by ADR-0029
@@ -2477,7 +2493,10 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** **The surface group** lands §4's two `AssistantEngine` operations,
 > that Protocol's new conformance obligations and its fake, the `PROTOCOL_VERSION`
-> bump with its wire tests, and whichever adapters render the rows. These are
+> bump with its wire tests, and the adapters that render the rows — **at least one**
+> (§4), with an end-to-end test through it that lists and exports rows a seeded
+> trail holds, so the adapter obligations below are not discharged by an empty set.
+> These are
 > relays and adaptation rather than new machinery, which is why ADR-0137 §4's
 > grouping test admits them as one group; that test, and not this list, governs any
 > resplit the dispatcher judges necessary.

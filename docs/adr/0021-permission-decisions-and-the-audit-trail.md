@@ -1,6 +1,6 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail and of `clear`) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source)
+- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail, of `clear` and of `export`'s whole-store portability discharge) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source)
 - Date: 2026-07-20
 - Partially superseded: 2026-08-25 by
   [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
@@ -88,8 +88,22 @@
   ADR-0192 §§1–2 and §6 rest on it**: `record` write-once and atomic, the detached
   validated snapshot, the resolution invariant and its authorisation-pointer
   check, the no-`delete(id)` rule and wholesale erasure, `recent`'s total order
-  and its strictly positive `limit`, `export`'s portability discharge,
-  local-only residency, and the timezone-aware `decided_at`. No sentence of §1,
+  and its strictly positive `limit`, local-only residency, and the timezone-aware
+  `decided_at`. **`export`'s discharge follows `clear`'s reach into this scope, and
+  narrows rather than lapses**: §4 says `export` "discharges ADR-0004 §6's
+  portability obligation **for this store**", and after ADR-0192 the store holds a
+  second row kind `export` does not return. So that sentence is over-wide, and its
+  scope is now the decision rows; ADR-0192 §6 discharges §6 for the invocation rows
+  through `AuditTrail.export_invocations` and the engine operation beside it, and
+  ADR-0004 §6 is met by the pair. A reader holding only this ADR would take one call
+  for the whole trail, which is ADR-0070 §1's test. **No single whole-trail export is
+  minted**: ADR-0186 §1 fixes what the promoted decision read returns, one
+  interleaved listing of both kinds is refused in ADR-0192's own alternatives, and
+  ADR-0004 §6 requires that the user can export their data rather than that one call
+  return every kind — as `memory/`, `planning/` and this store already discharge it
+  separately. An erasure between the two calls yields the pre- and post-`clear`
+  states, which is `clear` winning as §6 rules everywhere and not a torn snapshot; no
+  lane presents either export as an answer to the other's half. No sentence of §1,
   §2, §3, §5 or §6 is touched, and this ADR's Decision text below is not
   rewritten (ADR-0070 §1). **The ADR-0148 qualifier is no longer on this `Status`
   line, and this change is not what moved it**: ADR-0193's took it off under
