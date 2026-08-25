@@ -991,9 +991,15 @@ coordinator has not yet decided.
 > ordering pair, and this ADR assigns it there because no earlier lane has a
 > caller to test it with: the grant is recorded **only after** `AuditTrail.record`
 > has accepted the answer, and an answer the trail **refuses** leaves no grant —
-> asserted over the store's contents and not over what the surface returned. That
-> is not the deferral §13 makes: the obligation is fixed here, in a marked clause,
-> and the surface lane discharges it rather than deciding it. The content floor is
+> asserted over the store's contents and not over what the surface returned. It
+> ships the **opt-in** pair in the same place and for the same reason: a user who
+> approves the call and asks for nothing standing leaves the answer recorded and
+> the grant store **empty**, and a user who asks for it standing leaves **exactly
+> one** grant. Without that pair a surface could mint a grant after every approved
+> confirmation and satisfy every clause above, which is §2's first clause
+> inverted — the act would ride the answer rather than being one. That is not the
+> deferral §13 makes: both obligations are fixed here, in a marked clause, and the
+> surface lane discharges them rather than deciding them. The content floor is
 > not assigned this way and could not be, which is why `established_from` exists.
 
 > **Normative.** `established_from` lives on `RecipientGrant` in
