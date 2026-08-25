@@ -116,18 +116,28 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 
 > **Normative.** An amount is **countable** exactly where all three hold: it is
 > finite; its absolute value is **strictly less than** `Decimal("1E15")`; and its
-> **value** can be expressed with at most **nine** fractional digits — the test is
-> `value == value.quantize(Decimal("1E-9"))` computed exactly, so it is a test on
-> the number and not on its representation, and `Decimal("1.0000000000")` is
+> **value** can be expressed with at most **nine** fractional digits. It is a test
+> on the number and not on its representation, so `Decimal("1.0000000000")` is
 > countable because its value is `1`. This predicate governs every amount this
 > mechanism reads: a configured ceiling, the allowance, a declared
 > `ToolCost.amount` and a reported one.
 
+> **Normative.** The predicate is **context-independent**, and an implementation
+> evaluates it without consulting `decimal.getcontext()`. Read `digits` and
+> `exponent` from the amount's own `Decimal.as_tuple()`: the scale test is
+> `exponent >= -9`, or every digit the amount carries at a position below
+> `10**-9` is zero. No ambient precision, rounding mode or trap setting changes a
+> classification or makes one raise, and an implementation that reaches for
+> `quantize` uses an isolated context sized for the operand rather than the
+> caller's.
+
 > **Normative.** A **configured** amount that is not countable is refused at load
 > with `ConfigurationError`, naming the field. A **declared** amount that is not
-> countable refuses the call at admission with `SpendCeilingError` where a ceiling
-> is configured (§4). A **reported** amount that is not countable makes its
-> period's accounted total **indeterminate** (§2).
+> countable refuses the call at admission with `SpendUndeterminedError` where a
+> ceiling is configured — it is §4's **fifth** ground, and it is not a crossing: no
+> ceiling was reached, and the projection could not be formed at all. A
+> **reported** amount that is not countable makes its period's accounted total
+> **indeterminate** (§2).
 
 > **Normative.** An amount that is not countable is **never** replaced by
 > `world_spend_unknown_allowance`. The allowance stands for a price nobody knows;
@@ -481,8 +491,9 @@ clause as it stands.
 > **Normative.** A call is refused with `SpendCeilingError` where a **configured
 > ceiling would be crossed** — and only then. It is refused with
 > `SpendUndeterminedError` where the period's spend **could not be reduced to a
-> number**, on exactly four grounds: the period is indeterminate under §2, the
-> store read failed, the injected clock raised, or the arithmetic trapped. No other
+> number**, on exactly five grounds: the period is indeterminate under §2, an
+> amount the admission reads is not countable under §1, the store read failed, the
+> injected clock raised, or the arithmetic trapped. No other
 > `Exception` escapes `admit_invocation`; a backend exception is translated rather
 > than propagated, so `tools/` never sees a store's own error type.
 
@@ -494,9 +505,10 @@ clause as it stands.
 
 > **Normative.** The two are separate classes because their messages state
 > different facts and one of them would otherwise be false. A ceiling refusal
-> names the ceiling that was crossed; a refusal on a clock failure, a trapped sum
-> or an open claim crossed no ceiling at all, and reporting it as one would tell
-> the user a number about their budget that nothing measured.
+> names the ceiling that was crossed; a refusal on a clock failure, a trapped sum,
+> an open claim or an amount that is not countable crossed no ceiling at all, and
+> reporting it as one would tell the user a number about their budget that nothing
+> measured.
 
 > **Normative.** The refusal is an exit **before the callable is entered**, so it
 > falls in the window ADR-0034 §1 governs and qualifies on that section's second
@@ -516,7 +528,7 @@ clause as it stands.
 
 > **Normative.** Both messages are **payload-free**. A `SpendCeilingError` states
 > the ceiling that was crossed, its period, its currency and the accounted total.
-> A `SpendUndeterminedError` names **which of the four grounds above** applied, and
+> A `SpendUndeterminedError` names **which of the five grounds above** applied, and
 > names the period only where one was determined — a clock that raised leaves no
 > period to name, and the message says the clock failed rather than inventing one.
 > It states no amount. Neither carries an argument value, a recipient, an account,
@@ -923,7 +935,9 @@ replacing them.
 > `FREE` call admitted with the accounted total already at the ceiling; an
 > `UNKNOWN` estimate refused with no allowance configured and admitted at the
 > allowance with one; an `UNKNOWN` completion making the period indeterminate and
-> the next call refused; an **open claim** doing the same whatever the allowance is
+> the next call refused **where no allowance is configured**, and the same
+> completion leaving the period **determinate** at the allowance where one is; an
+> **open claim** making the period indeterminate whatever the allowance is
 > set to and whatever its decision declared, including the case where the
 > completion append itself failed; a foreign-currency cost taking the `UNKNOWN`
 > path; a period rollover clearing an indeterminate total; both ceilings configured
@@ -945,8 +959,9 @@ replacing them.
 > discharge this clause.
 
 > **Normative.** The suite pins each refusal to its class under §4: a crossed
-> ceiling to `SpendCeilingError`, and an indeterminate period, a failed store read,
-> a raising clock and a trapped computation each to `SpendUndeterminedError` — and
+> ceiling to `SpendCeilingError`, and an indeterminate period, a non-countable
+> declared amount, a failed store read, a raising clock and a trapped computation
+> each to `SpendUndeterminedError` — and
 > asserts that no backend exception type escapes either member, while a
 > `CancelledError` delivered during either member propagates unchanged.
 
@@ -968,7 +983,9 @@ replacing them.
 > indeterminate; and — the case the predicate's wording exists for — a value
 > written with ten fractional digits that is numerically equal to one with none,
 > accepted as countable. It asserts that in **none** of those cases is the
-> allowance substituted.
+> allowance substituted, and it drives every one of them again under a hostile
+> ambient `decimal` context — a precision of ten, with traps armed — asserting the
+> same classifications and no leaked `decimal` exception.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
@@ -1018,10 +1035,12 @@ replacing them.
   turn that into a zero. The user's remedy is one setting, and the alternative —
   counting an unknown price as nothing — would have made the ceiling a decoration
   for exactly the tool the milestone is about.
-- **An unknown-priced completion leaves its period indeterminate**, and while a
-  ceiling is configured that stops every further invocation in it until the
-  calendar rolls or the user acts. (With no ceiling configured nothing is refused,
-  whatever the total says — §2's last clause.) That is a real denial of service on
+- **An unknown-priced completion, where no allowance is configured, leaves its
+  period indeterminate**, and while a ceiling is configured that stops every
+  further invocation in it until the calendar rolls or the user acts. (With an
+  allowance configured it contributes that amount and the total stays a number;
+  with no ceiling configured nothing is refused, whatever the total says — §2's
+  last clause.) That is a real denial of service on
   the user's own assistant, taken knowingly: the alternative is a total that
   under-reports by an unbounded amount while presenting itself as a bound. §8 names
   the deferral that would soften it.
