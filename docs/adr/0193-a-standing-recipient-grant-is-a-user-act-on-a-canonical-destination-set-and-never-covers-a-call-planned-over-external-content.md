@@ -232,6 +232,16 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 > transcribed by the caller that records, exactly as `decided_at` is, and it is
 > covered by the digest rather than by a lookup.
 
+> **Normative.** Nothing re-resolves `established_by`, at any later read, in any
+> component. `AuditTrail.record`'s seven checks do not read it; no surface renders
+> the act it names, resolves it, or states that the decision it names still
+> exists; and no lane adds a read that does. After the user clears the **audit
+> trail** it names nothing, which is the same posture §9 takes when the user
+> clears the **grant** store and the same one ADR-0021 §3 states about
+> `authorised_by` in terms: *"It is a pointer this contract does not verify."*
+> What `established_by` is for is the **digest**, and the digest is a comparison
+> between two records rather than a resolution of either.
+
 > **Normative.** `destinations` is held in **one canonical order, validated at
 > construction**, and a tuple in any other order is refused. The order is not this
 > ADR's invention: it is the total order `EgressBinding.canonical_destination_set`
@@ -309,6 +319,28 @@ the caller that records **into the audit trail**, a store with no `delete(id)`
 whose erasure is a separate act of the user's (ADR-0021 §4), so it is an identity
 the grant store cannot recycle by clearing itself — which is exactly what the
 coordinator's ruling said no scheme *inside* this store could achieve.
+
+**It is not unforgeable and is not claimed to be, and round 12 raised the case
+that shows where the line is.** A user who clears their **audit trail** leaves
+every `established_by` naming nothing, and an id reused there afterwards names a
+different act. That is real, and it is not a defect this ADR can close: the trail
+is the user's to burn (ADR-0021 §4 — "the user may burn the book; nobody may tear
+out a page"), and a grant store that refused to authorise until it could resolve a
+decision in the trail would be an authorisation store acquiring a **veto over a
+data right**, which is the inversion §9 already refuses in the other direction and
+for the same reason. The reviewer's direction — "act evidence whose identity
+cannot be rebound by an independent clear" — describes a thing this system does
+not have and cannot mint: every identifier here is caller-supplied and every store
+is wholesale-erasable, which is the same ground on which round 3's tombstone died.
+
+**What the field does buy is bounded and is what it was added for.** Two *honest*
+confirmations now produce different digests, which was round 11's blocker and is
+the case that arises without anybody doing anything unusual. The remaining cases
+all require a deliberate act by a component that could already falsify the record
+in easier ways — a recording caller hand-authoring a grant (§1's residual), or a
+user erasing their own trail and a caller then reusing an id from it. Neither is
+an attacker the fields on this record were ever going to stop, and §6's own
+statement of what is left unclosed says so about the identical boundary.
 
 **What remains is one residual, and it is stated rather than engineered away.** A
 **recording caller** that hand-authors a whole grant — the same declaration, the
@@ -500,9 +532,23 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > **Normative.** The establishing act is refused on that ground too, with a
 > visible reason, and **no narrower grant is minted in its place** — not over a
 > prefix of the set, not over the account, not over a subset (§2's sixth clause,
-> which already refuses to loosen rather than mint). A revoking record transcribes
-> the grant it revokes and is never refused on this ground: a grant admitted under
-> a higher ceiling must stay revocable.
+> which already refuses to loosen rather than mint). A revoking record is refused
+> only where its serialisation exceeds **the greater of** the current ceiling and
+> the serialised length of the granting record it names — so a grant admitted
+> under a higher ceiling stays revocable however far the ceiling has since fallen,
+> and a revoking record cannot be a vehicle for bytes the grant it transcribes did
+> not carry. The exemption is for the **inherited** size and for nothing else; a
+> revocation carrying a caller-supplied field far larger than the grant it names
+> is refused like any other over-sized record.
+
+**The exemption had to be narrowed, because "never refused" was a hole with a
+name.** Adversarial review found at round 12 that `DurableIdentifier` is
+`Identifier` with no length bound (verified in the tree), so a revoking record
+naming a small grant could carry a gigabyte in its own `id` and the blanket
+exemption obliged `record` to accept it — one write defeating the bound with no
+higher historical ceiling anywhere in the story. Stating the exemption over the
+transcribed grant's own length keeps what it was for (a lowered ceiling must
+never trap a grant unrevokable) and drops what it was not.
 
 > **Normative.** A **revoking** record is never refused on this ground, whatever
 > the count. A ceiling that could block a revocation would trap a user above it
@@ -538,15 +584,26 @@ them their grants. A ceiling evaluated against a caller-supplied `decided_at`
 instead is the round-4 draft, breakable by clock skew in both directions at once.
 
 > **Normative.** Both ceilings govern **admission and never eviction**. Lowering
-> either one refuses new records; it deletes nothing, expires nothing, hides
-> nothing, and omits nothing from `standing`, `recent` or `export`. A store that
-> holds more than a newly lowered ceiling would admit is a **legal** state: every
-> record in it was admitted under the ceiling in force at the time, `record`
-> refuses every new granting record until revocations bring the store under, and
-> every query still returns the whole truth about what the user has authorised. A
-> query that hid records to make the current setting look satisfied would be
-> lying to the user about their own standing policy, which is the failure the
-> totality clause exists to prevent.
+> either one deletes nothing, expires nothing, hides nothing, and omits nothing
+> from `standing`, `recent` or `export`. A store holding records a newly lowered
+> ceiling would not admit is a **legal** state: every record in it was admitted
+> under the ceiling in force at the time. A query that hid records to make the
+> current setting look satisfied would be lying to the user about their own
+> standing policy, which is the failure the totality clause exists to prevent.
+
+> **Normative.** The two ceilings behave **differently** when lowered, because
+> one is an aggregate and the other is per record, and no lane reads either
+> through the other. Lowering `recipient_grant_max_outstanding` refuses **every**
+> new granting record while the outstanding count is at or above it, and the
+> count falls only as the user revokes; that is the aggregate, and revocation is
+> the recourse. Lowering `recipient_grant_max_bytes` refuses only a **newly
+> submitted** record whose own serialisation exceeds the new bound, and refuses
+> nothing else: a conforming small grant is admitted while an over-sized older
+> one is still stored, because a per-record bound says nothing about the store's
+> total and revoking the older record could not bring an append-only store "under"
+> a per-record limit anyway. An earlier draft of these clauses stated one rule
+> over both, which architecture review found unsatisfiable at round 12 and was
+> right about.
 
 **Two ceilings and not one, because a bound on the record count is not a bound on
 the read.** Adversarial review raised `standing`'s unbounded materialisation of a
@@ -1201,11 +1258,32 @@ class PermissionRuling(BaseModel):                     # core/types.py — added
 > and to nothing else: a non-resolving `ALLOW` whose `egress_binding` is not
 > `None`. A decision with no binding is not an egress call, and this ADR states no
 > rule about one. ADR-0021 §6's standing grants **for other actions stay deferred
-> and unnarrowed**: the ADR that opens one adds its own arm to this same check,
-> which is an addition here rather than a breaking change to a shared type, and it
-> does not find `PermissionDecision` already shaped against it. A later standing
-> source *for egress* does the same. This scoping is stated so that no lane reads
-> the invariant as a general rule about `authorised_by`.
+> and unnarrowed**: such a decision carries no `egress_binding`, so it falls
+> outside this invariant's scope entirely rather than needing an exception inside
+> it, and the ADR that opens one states its own scope beside this one without
+> finding `PermissionDecision` already shaped against it. This scoping is stated
+> so that no lane reads the invariant as a general rule about `authorised_by`.
+
+> **Normative.** Route-(b) **egress** authorisation is reserved to **this** store.
+> On a decision in scope, `authorised_by` names a `RecipientGrant` and
+> `RecipientGrantResolution` is the seam it resolves against, and there is no
+> second reading. A later ADR that wants a *different* standing source for egress
+> is making a **contract change** to how a row in this scope is read — it decides
+> how the reference is told apart, whether by tagging it, by a second field, or by
+> narrowing this scope — and it does not inherit an "add your own arm" permission
+> from this ADR.
+
+**That reservation is a claim withdrawn rather than a limit added, and the reason
+is worth keeping.** An earlier draft said a later egress standing source "does the
+same" — adds an arm to this check — and architecture review found at round 12 that
+it cannot: with two egress grant stores, a bare `DurableIdentifier` and a bare
+`Sha256Hex` do not say which seam `record` should ask, so the second ADR would
+have to reject a valid pointer, probe both stores, or change the shared record
+after all. The reviewer offered a tagged reference as the alternative, and this
+ADR declines it for the reason it declined a one-member discriminated union at
+round 10: a tag with one value today is a surface with no consumer (ADR-0045 §1),
+and the second value would arrive with its own ADR anyway. What was wrong was the
+*promise*, not the shape — so the promise goes.
 
 > **Normative.** `AuditTrail.record` refuses a non-resolving `ALLOW` whose
 > `egress_binding` is not `None` and whose `authorised_by` is set unless **all
@@ -2056,6 +2134,17 @@ narrowings of one store, not three implementations.
 > last clause). An implementation that reuses the last successful lookup passes
 > every other policy test in this section.
 
+> **Normative.** The lane ships the **call-count** tests for §7's lookup clause,
+> against a seam that records its calls and fails the test if called: on every
+> path the request alone settles — a binding carrying
+> `planned_with_external_content`, an `OriginUnrecordedBinding`, a request with no
+> `egress_binding` — `covering` is called **zero** times; and on a path where a
+> grant could apply it is called **at most once**, asserted over the recorded
+> count rather than over the outcome. Without the zero-call half, an
+> implementation that consults the seam first and then refuses on the request's
+> own facts passes every other policy test here while letting a store failure
+> disturb an outcome the request had already settled.
+
 > **Normative.** The lane ships construction tests for `RecipientGrant`'s
 > `destinations`: an empty tuple and one carrying a duplicate are refused at
 > construction; a tuple whose members are **not in canonical order** is refused,
@@ -2149,21 +2238,30 @@ narrowings of one store, not three implementations.
 > ceiling passes the first and fails the other two, which is the round-11 finding
 > stated as a test. It ships one asserting that the establishing act is refused
 > for such a grant with **no** narrower grant recorded in its place, asserted over
-> the store's contents rather than over the surface's return; one asserting that a
-> revoking record transcribing an over-sized grant admitted under an earlier,
-> higher ceiling is **not** refused; and a `Settings` construction test that
+> the store's contents rather than over the surface's return; the **pair** that
+> pins the narrowed revocation exemption — a revoking record transcribing an
+> over-sized grant admitted under an earlier, higher ceiling is **not** refused,
+> and a revoking record naming a *small* grant while carrying a caller-supplied
+> `id` far longer than the current ceiling **is** refused; and a `Settings`
+> construction test that
 > `recipient_grant_max_bytes` of zero is refused while
 > `recipient_grant_max_outstanding` of zero is accepted and turns route (b) off —
 > `covering` answering `None` for every request with an empty store.
 
-> **Normative.** The lane ships the **lowered-ceiling** test, which is the one no
-> other test in this section reaches: a store admitted under a high ceiling,
-> reopened against `Settings` carrying a lower one, still returns **every** record
-> from `standing`, `recent` and `export`, refuses every new granting record until
-> revocations bring it under, and accepts a revocation throughout. It fails against
-> an implementation that evicts, hides or truncates to make the current setting
-> look satisfied — which would be the store telling the user they had authorised
-> less than they had (§1's admission-not-eviction clause).
+> **Normative.** The lane ships the **lowered-ceiling** tests, which are the ones
+> no other test in this section reaches, and it ships them **separately for the
+> two ceilings** because their lowered semantics differ (§1). Common to both: a
+> store admitted under a high ceiling and reopened against `Settings` carrying a
+> lower one still returns **every** record from `standing`, `recent` and `export`,
+> and accepts a revocation throughout. For the **count** ceiling: every new
+> granting record is refused while the outstanding count is at or above the new
+> value, and one is accepted once revocations have brought the count below it. For
+> the **byte** ceiling: a *conforming* small grant is **accepted** while an
+> over-sized older record is still stored, which fails against an implementation
+> that read the per-record bound as an aggregate one and blocked the store. All of
+> them fail against an implementation that evicts, hides or truncates to make the
+> current setting look satisfied — which would be the store telling the user they
+> had authorised less than they had (§1's admission-not-eviction clause).
 
 > **Normative.** The lane ships `clear`'s **returned count** in the shared
 > conformance suite: `0` on an empty store, and on a mixed store holding live,
@@ -2241,6 +2339,16 @@ narrowings of one store, not three implementations.
 > which is the one failure the bounded read exists to prevent, and no other test
 > in this section reaches it.
 
+> **Normative.** The lane ships the **wide positive limit** in the same suite:
+> `recent(limit=2**63)` returns every record available and raises nothing. The
+> contract admits every strictly positive integer, and a store passing the value
+> straight to SQLite raises `OverflowError` on it while passing the zero and
+> negative cases above. This is not a new rule: `SourceGrantStore`'s own shared
+> suite pins exactly this boundary
+> (`tests/permissions/source_grant_contract.py`, `recent(limit=2**63)`), as
+> `AuditTrail`'s does, and a third grant-shaped store that omitted it would be the
+> one implementation free to have the bug.
+
 > **Normative.** The lane ships a test asserting that `record` refuses an
 > identical granting record while the first is **outstanding but expired**, and
 > accepts one once the first has been revoked — the two sides of §1's
@@ -2255,10 +2363,15 @@ narrowings of one store, not three implementations.
 > answer to a recorded `CONFIRM` (§2's second clause).
 
 > **Normative.** The lane ships a test asserting that an established grant's
-> `tool` equals the confirmed **decision**'s `tool` by value, and that its
+> `tool` equals the confirmed **decision**'s `tool` by value, that its
 > `account` and `destinations` equal that decision's binding's `account` and
 > derived `canonical_destination_set` by value — not merely equivalent, and not
-> re-derived at the establishing surface (§2's first clause).
+> re-derived at the establishing surface — and that its `established_by` **equals
+> that decision's own `id`** (§2's first clause). The last is asserted by equality
+> and not by presence, with a failing case in which the surface writes some other
+> id: a surface that copies the three subject values correctly and stamps a fixed
+> or invented `established_by` passes every other assertion here, and the field's
+> whole purpose is that it names *this* act.
 
 ### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
