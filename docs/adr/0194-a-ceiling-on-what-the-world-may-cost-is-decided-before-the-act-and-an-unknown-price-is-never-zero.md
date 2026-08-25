@@ -1943,13 +1943,19 @@ the ADRs it depends on rather than replacing them.
 > the gate fake refuses a call whose arguments carry **sentinel** values — a
 > recipient and a subject appearing nowhere else in the fixture — and the suite
 > asserts the `SpendCeilingError` the caller catches **is** the instance the gate
-> raised, and that no sentinel appears in its `str()`, in its `args`, or in any
-> field the class itself declares. That set is the **user-facing** state and is
-> stated as a closed one on purpose: `__traceback__`, `__cause__` and `__context__`
-> are the interpreter's, a propagating exception's traceback necessarily holds
-> frames whose locals include the `ToolCall`, and a suite reading them would be
-> asserting something no conforming implementation — and no correct one — can
-> satisfy. It drives the same for `SpendUndeterminedError`. Without it an invoker
+> raised, and that no sentinel appears in any of its **user-facing** channels:
+> `str()`, `repr()`, `args`, `__notes__`, `__cause__`, `__context__`, or any field
+> the class itself declares. Those six channels are the enumeration ADR-0029 §3's
+> own message rule uses, which ADR-0032 §5 and ADR-0145 §7 restate and ADR-0145
+> §13 drives with a sentinel of its own; the set is stated as a **closed** one
+> because a suite asserting "no attribute" would be
+> unsatisfiable: `__traceback__` is the interpreter's, a propagating exception
+> necessarily carries frames whose locals include the `ToolCall`, and requiring the
+> sentinel's absence from them would forbid the propagation the clause above
+> requires. `__notes__` is on the list and not off it — an invoker preserving the
+> exact instance can still `add_note(f"call={call}")`, leave every other channel
+> untouched, and have the traceback formatter print the recipient and the subject.
+> It drives the same for `SpendUndeterminedError`. Without it an invoker
 > that catches the gate's refusal and re-raises the **same class** with the call
 > appended to the message passes every clause above — they assert the class, the
 > untouched callable, the unappended rows, the released handle and the forwarded
