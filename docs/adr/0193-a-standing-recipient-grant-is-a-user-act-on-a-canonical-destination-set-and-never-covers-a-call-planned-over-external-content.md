@@ -234,28 +234,68 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 > **Normative.** `RecipientGrant` carries a **derived** `subject_digest`, typed
 > `Sha256Hex`, computed as `sha256(_canonical_bytes(projection)).hexdigest()` over
 > the encoding `_canonical_bytes` already pins for `parameters_digest`, where the
-> projection is taken from this record's own `model_dump(mode="json")` and carries
-> exactly three members: `tool`, `destinations` and `decided_at`. It is a
-> **property and never a stored field**, for the reason
+> projection is this record's own `model_dump(mode="json")` with **exactly one
+> key removed**, `id`. Every other field is in it — `tool`, `account`,
+> `destinations`, `decided_at`, `expires_at` and `revokes` — and a field added to
+> `RecipientGrant` by a later ADR is in it too unless that ADR removes it by name.
+> It is a **property and never a stored field**, for the reason
 > `EgressBinding.canonical_destination_set` is one: a stored digest can be read
 > back disagreeing with the fields it was computed from, and nothing downstream
 > would catch it. It reads no clock, no store and no seam; it is total and never
 > raises.
 
-> **Normative.** The digest carries those three values and **no others** — not
-> `id`, not `account`, not `expires_at`, not `revokes`. `id` is excluded because
-> the digest exists to be checked *against* an id and a digest over its own
-> pointer proves nothing. `expires_at` and `revokes` are excluded because they are
-> the grant's **liveness**, which §6 and §9 decide from the records as they stand;
-> a durable fingerprint that froze them would make a revocation change the digest
-> of a decision already written. `account` is excluded because §6 compares it whole
-> and by value at the same moment it checks the digest, so digesting it would be a
-> second spelling of a comparison already exact — ADR-0150 §1's argument against a
-> second carriage. `decided_at` is **included**, and it is the member that makes
-> the digest do something §6's subject match cannot: two grants over the same tool,
-> account and destination set — one recorded, `clear`ed, and established again —
-> are one subject and two different user acts, and only the instant tells them
-> apart.
+> **Normative.** The rule is stated as **removal from the whole dump** rather than
+> as a list of members, and a lane that implements it as a hand-written list has
+> not implemented this clause. A list goes stale silently the first time a field is
+> added; a removal cannot. §14 pins the roster mechanically, so a seventh field
+> cannot go undigested without a red test.
+
+> **Normative.** `id` is the one removal, and it is removed because the digest
+> exists to be checked **against** an id: a fingerprint that included its own
+> pointer would match only where the pointer already matched, which is the
+> comparison the digest is meant to be independent of.
+
+**Three earlier exclusions were wrong, and adversarial and architecture review
+converged on them at round 10.** An earlier draft digested `tool`, `destinations`
+and `decided_at` alone, on the ground that `expires_at` and `revokes` are
+"liveness a fingerprint must not freeze" and that `account` is "already compared
+exactly". Both grounds are false and the consequences are real.
+
+*Liveness is not in these fields.* A granting record is **immutable once
+appended**: revocation is a *separate* record naming it (§9), so this record's
+`expires_at` never changes and its own `revokes` is `None` for as long as it
+exists. Nothing a revocation does can change a granting record's digest, so
+including `expires_at` freezes nothing. Excluding it, on the other hand, aliased
+two genuinely different authorisations — the same recipients granted until March
+and the same recipients granted until 2040 — into one fingerprint.
+
+*And "already compared exactly" answers the wrong question.* §6 does compare the
+account whole and by value, but it does so **at the write**, which is exactly the
+moment the digest is not needed. The digest's whole job is the later read, where
+§6's comparison is not being run by anybody; a fingerprint that omits a coverage
+key is one an after-the-fact check cannot use to distinguish a grant over the
+user's work account from an otherwise identical grant over their personal one —
+which §3's first clause says are different authorisations and which
+`BoundAccount`'s own declaration says "a standing grant would cover a record the
+user never granted" about. Digesting the whole record but its pointer costs
+nothing and closes both.
+
+**What remains is one residual, and it is stated rather than engineered away.**
+Two granting records identical in every field but `id` — same declaration, same
+account, same destinations, same `expires_at`, and the same caller-supplied
+`decided_at` — share a digest. After a `clear` a caller can construct such a
+record deliberately. That case is a **recording caller falsifying its own store**,
+which is the boundary ADR-0018 §3 drew for detachment and which route (a) sits
+behind identically: a caller that hand-authors a `decided_at` to fall inside an
+expired grant's window is already doing the same thing one field over (§6). The
+two directions review offered instead are both unavailable and not on this ADR's
+own authority: a non-rebindable act identity cannot be carried by the store,
+because `clear` erases the history that would have to enforce it; and preserving
+the grant's snapshot with the decision is round 6's embedded value, refused for
+storage amplification and for having no honest channel. What a digest buys over
+those is every distinction the record actually carries, at sixty-four characters,
+with no cross-store lock — and the one it does not buy is named here rather than
+claimed.
 
 > **Normative.** No standing recipient authorisation exists anywhere else. It is
 > not a field on a `ToolDefinition`, on a `PermissionDecision`, on a `Settings`
@@ -398,6 +438,16 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > a fault of the call being confirmed. The confirmation itself is unaffected — the
 > user may still approve *that* call; what they cannot do is make it standing.
 
+> **Normative.** A second ceiling bounds **one grant's own size**:
+> `Settings.recipient_grant_max_destinations`, a strictly positive integer, is the
+> greatest number of members a granting record's `destinations` may carry, and
+> `record` refuses one that exceeds it by the same error. The establishing act is
+> refused on the same ground, with a visible reason, and **no narrower grant is
+> minted in its place** — not over a prefix of the set, not over the account, not
+> over a subset (§2's sixth clause, which already refuses to loosen rather than
+> mint). A revoking record transcribes the grant it revokes and is never refused
+> on this ground either.
+
 > **Normative.** A **revoking** record is never refused on this ground, whatever
 > the count. A ceiling that could block a revocation would trap a user above it
 > with no way down, which inverts the clause's purpose.
@@ -413,6 +463,11 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > the clause fixes is that a ceiling exists, that it is read from `Settings`, and
 > that reaching it refuses rather than widens.
 
+> **Normative.** `recipient_grant_max_destinations` is by contrast **strictly
+> positive**: zero there would forbid every grant, which is the first ceiling's
+> job and would make two settings able to say one thing. A deployment turns route
+> (b) off in exactly one place.
+
 **The ceiling is stated over *outstanding* rather than over *live*, and the
 substitution is deliberate and in the tighter direction.** Live is outstanding
 plus the clock, and `record` reads no clock — the same constraint that decides the
@@ -426,19 +481,27 @@ recourse is the revocation §9 already gives the user, on any surface that shows
 them their grants. A ceiling evaluated against a caller-supplied `decided_at`
 instead is the round-4 draft, breakable by clock skew in both directions at once.
 
-**The ceiling is what answers the unbounded read, and it is the thing citing an
-issue could not.** Adversarial review raised `standing`'s unbounded
-materialisation of a Tier 1 store on rounds 8 and 9, and round 9's rejoinder was
-right: pointing at an issue does not change the Protocol being ratified in this
-tree. With the clause above, `standing` is bounded **by construction** — every
-record it can return is an outstanding granting record, and the store refuses to
-hold more of those than the configured number — so the member keeps the totality
-that is the whole point of "what have I authorised" and stops being an unbounded
-read. `recent` is bounded by its `limit`, which is why it exists and why a
-non-positive value raises. `export` is bounded by nothing, and that is stated
-rather than repaired: it discharges ADR-0004 §6's portability obligation, which
-admits no truncation, and revoking records accumulate under the ceiling rather
-than beneath it.
+**Two ceilings and not one, because a bound on the record count is not a bound on
+the read.** Adversarial review raised `standing`'s unbounded materialisation of a
+Tier 1 store on rounds 8 and 9, and round 9's rejoinder was right — pointing at an
+issue does not change the Protocol being ratified in this tree. Round 10 then
+found that a count ceiling alone does not answer it either: at a ceiling of one, a
+single grant naming millions of destinations is still a value `standing` must
+materialise and detach whole. Both findings are right and they are about different
+axes, so the answer is both clauses. With them, `standing`'s result is bounded by
+the **product**: at most `recipient_grant_max_outstanding` records, each carrying
+at most `recipient_grant_max_destinations` members, and a `ToolDefinition` and a
+`BoundAccount` whose own sizes ADR-0018 and ADR-0148 bound where they are declared.
+That keeps the totality which is the whole point of "what have I authorised" while
+removing the exhaustion path.
+
+**What the ceilings do not bound is `export`, and that is stated rather than
+repaired.** `recent` is bounded by its `limit`, which is why it exists and why a
+non-positive value raises. `export` is bounded by nothing: revoked grants and
+revoking records accumulate *outside* the outstanding count, and truncating them
+is not available, because `export` is what discharges ADR-0004 §6's portability
+obligation and a portable snapshot that omits records is not one. A store the user
+never clears grows there, and the recourse is `clear` (§9), which is the user's.
 
 **#1551 stays open, and it is the half this ADR cannot close.**
 `SourceGrantStore` declares the identical unbounded `standing`, with no ceiling
@@ -478,11 +541,12 @@ them and leave the other looking decided; the issue answers it for the pair.
 > resolution read and its append, or at any time after it. What that **cannot** do
 > is make the row say something false, because the row does not rest on the id
 > alone: it carries the `subject_digest` of the grant it was actually validated
-> against (§6). A re-recorded grant satisfies that digest only where its `tool`,
-> `destinations` and `decided_at` are the same three values — the same subject
-> established at the same instant, which is the same user act. Anything else fails
-> the digest at every later read, by anyone holding the row and the record, with no
-> privileged access and no live store. The timing window is still the one §9
+> against (§6). A re-recorded grant satisfies that digest only where **every field
+> the record carries but its `id`** is the same value — the same declaration, the
+> same account, the same destinations, the same establishment instant and the same
+> expiry, which is the same user act in everything the record says about it.
+> Anything else fails the digest at every later read, by anyone holding the row and
+> the record, with no privileged access and no live store. The timing window is still the one §9
 > states, and it is still not one a tombstone would close: round 3's tombstone made
 > ids unrecyclable, which is a different property from making the read and the
 > append one act.
@@ -512,9 +576,14 @@ them and leave the other looking decided; the issue answers it for the pair.
 > **Normative.** `record` is **write-once and atomic**, on `AuditTrail.record`'s
 > and `SourceGrantStore.record`'s shape and for their reason. Re-recording an id
 > already present raises rather than overwriting; the duplicate-id check, the
-> revocation invariants and the append are **one** operation, not a read followed
-> by a write, so two concurrent writes cannot both observe the store as they found
-> it. It stores a detached, validated snapshot, recursively over reachable state,
+> duplicate-**subject** refusal, **both ceiling counts**, the revocation
+> invariants and the append are **one** operation, not a read followed by a
+> write, so two concurrent writes cannot both observe the store as they found
+> it. The ceilings are named explicitly because a count read outside the
+> operation is the one that fails the way a duplicate-id check does not: two
+> writers of **different** subjects at one below the ceiling both see room, both
+> append, and the store ends one over — a race the duplicate-subject refusal
+> cannot catch, because the two subjects differ. It stores a detached, validated snapshot, recursively over reachable state,
 > and never retains the caller's object.
 
 > **Normative.** A **revoking** record transcribes verbatim every field of the
@@ -713,9 +782,10 @@ coordinator has not yet decided.
 
 > **Normative.** The establishing act is refused, with a reason visible to the
 > user, where the store already holds the configured maximum of outstanding
-> granting records (§1). The refusal is the act's alone: the user may still
-> approve the call they were asked about, and no grant is evicted, expired or
-> narrowed to admit theirs. This is the second thing that refuses an act a user
+> granting records, **or** where the confirmed call's canonical destination set
+> carries more members than one grant may (§1's two ceilings). The refusal is the
+> act's alone: the user may still approve the call they were asked about, and no
+> grant is evicted, expired, truncated or narrowed to admit theirs. This is the second thing that refuses an act a user
 > asked for, and it takes the first's shape — say so, name the recourse, and mint
 > nothing looser in its place.
 
@@ -1186,11 +1256,13 @@ reconstruct it from. Each repair moved the *evidence* without moving the
 record the trail consults that the policy did not write.
 
 **Embedding the grant by value is refused, and its two costs are why.** A covering
-grant may name a large superset of one call's recipients and nothing bounds the
-count, so copying it into every decision multiplies a Tier 1 store against
-ADR-0004 §7's minimisation rule — a grant over ten thousand recipients spent on
-ten thousand single-recipient calls writes a hundred million destination entries
-into the trail, nearly all of them unrelated to the call each row is about. And a
+grant may name a large superset of one call's recipients — up to
+`recipient_grant_max_destinations` of them (§1) — so copying it into every
+decision multiplies a Tier 1 store against ADR-0004 §7's minimisation rule: a
+grant over ten thousand recipients spent on ten thousand single-recipient calls
+writes a hundred million destination entries into the trail, nearly all of them
+unrelated to the call each row is about. The ceiling bounds that product; it does
+not make it proportionate, and a fingerprint of fixed size does. And a
 value the recording caller must supply is a value it has no honest way to obtain:
 a second lookup by the recorder answers a different question than the one the
 policy ruled on, and an overlapping newer grant appearing between the two would
@@ -1225,10 +1297,10 @@ forbidding later reads makes it unread rather than true.
 
 **The digest is what makes the pointer truthful after the fact rather than merely
 unconsulted.** The row carries the fingerprint of the grant it was validated
-against, and that fingerprint includes the grant's `decided_at` — so a rebound id
-resolves to a record whose `subject_digest` differs, and the mismatch is the
-statement "this is not the grant this row rested on", available to anyone holding
-the row and the record. Three grants are then distinguishable where two used to
+against, and that fingerprint covers every field the record carries but its `id`
+— so a rebound id resolves to a record whose `subject_digest` differs, and the
+mismatch is the statement "this is not the grant this row rested on", available to
+anyone holding the row and the record. Three grants are then distinguishable where two used to
 be: the grant that authorised the row (digest equal), a *different* grant behind
 the same id (digest differs), and no grant at all (nothing resolves). Only the
 first is ever read as the authoriser.
@@ -1802,10 +1874,12 @@ token and the record living in its appended dated note (ADR-0082 §2).
 > `ActionPolicy` may consult either source-grant seam.
 
 > **Normative.** This ADR does not fix the **value** of
-> `Settings.recipient_grant_max_outstanding`, nor a default for it. §1 decides
-> that the ceiling exists, is configured, is counted over outstanding granting
-> records, refuses rather than evicts, and never refuses a revocation; the number
-> a deployment chooses is a deployment's, and no lane reads §1 as naming one.
+> `Settings.recipient_grant_max_outstanding` or of
+> `Settings.recipient_grant_max_destinations`, nor a default for either. §1 decides
+> that the ceilings exist, are configured, are counted inside `record`'s atomic
+> operation, refuse rather than evict or truncate, and never refuse a revocation;
+> the numbers a deployment chooses are a deployment's, and no lane reads §1 as
+> naming one.
 
 > **Normative.** This ADR decides nothing about detection (#75), nothing about a
 > span's origin within the assistant's own store (#1154), nothing about residency
@@ -1822,7 +1896,8 @@ lane, because both write the audit surface. It is a Protocol triad under ADR-013
 `RecipientGrant`, `RecipientGrants`, `RecipientGrantResolution`,
 `RecipientGrantStore`, those suites and the canonical fake in
 `ai_assistant.testing`, together with `PermissionRuling.authorised_subject` (§6),
-`Settings.recipient_grant_max_outstanding` (§1), and the `ActionPolicy` and
+`Settings.recipient_grant_max_outstanding` and
+`Settings.recipient_grant_max_destinations` (§1), and the `ActionPolicy` and
 `AuditTrail` obligations §6 and §7 state, in one change. **One** fake serves all three faces,
 as one fake serves `SourceGrants` and `SourceGrantStore` today: the faces are
 narrowings of one store, not three implementations.
@@ -1915,12 +1990,22 @@ narrowings of one store, not three implementations.
 > dropping three of the four (§1's portability clause).
 
 > **Normative.** The lane ships the `subject_digest` tests: two `RecipientGrant`s
-> equal in `tool`, `destinations` and `decided_at` but differing in `id`,
-> `account`, `expires_at` or `revokes` share a digest; two differing in any of the
-> three digested members do not; a grant round-tripped through
-> `model_dump(mode="json")` and reconstructed recomputes an **identical** digest,
-> which is the property a stored field would not have had; and the digest is
-> absent from `model_dump()` output, because it is a property and not a field.
+> differing **only** in `id` share a digest; two differing in **any other single
+> field** — `tool`, `account`, `destinations`, `decided_at` or `expires_at` — do
+> not, asserted one field at a time so no exclusion can survive unnoticed; a grant
+> round-tripped through `model_dump(mode="json")` and reconstructed recomputes an
+> **identical** digest, which is the property a stored field would not have had;
+> and the digest is absent from `model_dump()` output, because it is a property
+> and not a field.
+
+> **Normative.** The lane ships a **roster** test over `RecipientGrant`, in the
+> shape `tests/readers/test_calendar_duration_settings.py`'s
+> `test_the_roster_is_every_calendar_duration_setting` already uses for a field set
+> that must not drift unnoticed: the roster is read off `model_fields` rather than
+> hand-written, and the test asserts that the digest's projection is exactly that
+> set less `id`. An eighth field added later without deciding its place in the
+> digest is then a **red test** rather than a silent exclusion, and an
+> implementation that lists the members by hand fails it.
 
 > **Normative.** The lane ships the digest's enforcement tests against
 > `AuditTrail.record`, each asserting `InvalidAuthorisationError` by type: a
@@ -1942,14 +2027,34 @@ narrowings of one store, not three implementations.
 > case §6's subject match alone accepts and the case `decided_at` is in the digest
 > for.
 
-> **Normative.** The lane ships the ceiling tests: `record` refuses a granting
-> record that would take the count of **outstanding granting records** above
-> `Settings.recipient_grant_max_outstanding`, raising
+> **Normative.** The lane ships the count-ceiling tests: `record` refuses a
+> granting record that would take the count of **outstanding granting records**
+> above `Settings.recipient_grant_max_outstanding`, raising
 > `InvalidRecipientGrantError`; it accepts one after a revocation has brought the
 > count back under; it refuses on the same ground where the records at the ceiling
 > are **expired but unrevoked**, which is the outstanding-not-live substitution
 > stated rather than assumed; and it **never** refuses a revoking record on this
 > ground, asserted at and above the ceiling.
+
+> **Normative.** The lane ships a **concurrent** test for the count ceiling, and
+> it is not the concurrent duplicate test one clause up: with the store one below
+> the ceiling, two granting records of **distinct** subjects are recorded at once
+> and exactly one succeeds, the store holding exactly the ceiling afterwards. It
+> fails against an implementation that counts outside the atomic operation — which
+> the duplicate-subject test cannot catch, because those two subjects differ and
+> that invariant never fires (§1's atomicity clause).
+
+> **Normative.** The lane ships the size-ceiling tests: `record` refuses a
+> granting record whose `destinations` carries more members than
+> `Settings.recipient_grant_max_destinations` and accepts one carrying exactly
+> that many; the establishing act is refused for a confirmed call whose canonical
+> destination set is larger, with **no** narrower grant recorded in its place,
+> asserted over the store's contents rather than over the surface's return; and a
+> revoking record transcribing an over-sized grant recorded under an earlier,
+> higher ceiling is **not** refused. It ships a construction test that
+> `recipient_grant_max_destinations` of zero is refused by `Settings` while
+> `recipient_grant_max_outstanding` of zero is accepted and turns route (b) off —
+> `covering` answering `None` for every request with an empty store.
 
 > **Normative.** The lane ships a test asserting that a request whose canonical
 > destination set is partly covered draws `CONFIRM` and that the confirmation
@@ -2135,7 +2240,33 @@ so it does not have to be re-argued at every later reading.
   exhaustive of every fact a row may carry, and §8's bars all continue to hold
   over the added fact — §11's second clause states one of them explicitly. Under
   ADR-0082 §1 that is a stacked addition and no record is owed on ADR-0186.
-- **ADR-0097, ADR-0016, ADR-0017, ADR-0146, ADR-0098, ADR-0152, ADR-0150,
+- **ADR-0097 — neither amended nor superseded, and the sentence review keeps
+  finding is unmarked supporting text.** §3's *marked* output is that the source
+  seam is **two Protocols beside `ActionPolicy`**, in `core/protocols.py`, each
+  with its own triad — and this ADR takes that shape exactly: `RecipientGrants`
+  is a Protocol **beside** `ActionPolicy`, not a widening of it, and §7's first
+  clauses state that `ActionPolicy` gains no method, no argument and no widened
+  return. §7 of ADR-0097 — its rule about policies and grant stores that *is*
+  marked — says a source grant may never be an action authorisation and no
+  `ActionPolicy` may consult either source-grant seam; §13 restates it verbatim
+  and this ADR consults neither.
+- **The sentence itself, engaged rather than waved at.** ADR-0097 §3's discussion
+  of "why not one generalised permission surface" says "`ActionPolicy` is a pure
+  function by ratified design, and a grant is a store … A surface that must read
+  durable state to answer cannot be that function." Three things about it. It is
+  **unmarked**, and ADR-0097's own header note already rules on what that means
+  for this ADR: §2's "unmarked supporting text … obligate nothing under ADR-0089
+  §3; they read as evidence of the marked clause's meaning and move with it
+  rather than being separately superseded". It is a ground for **rejecting a
+  merged surface**, and the thing it rejects — one contract answering about
+  sources and actions at once — is not what this ADR builds. And its own citation
+  is ADR-0021 §3, whose reading is settled two bullets up: the purity clause
+  carries its own condition, names the standing grant as the relief valve, and
+  states the I/O as a testability cost. ADR-0070 §1's test asks whether a reader
+  acting on ADR-0097 would act differently, and this reader would not: they would
+  put a second Protocol in `core` beside `ActionPolicy`, ship its triad, and keep
+  the source seams out of `decide` — which is what §1, §7, §13 and §14 do.
+- **ADR-0016, ADR-0017, ADR-0146, ADR-0098, ADR-0152, ADR-0150,
   ADR-0155, ADR-0184 — untouched.** Each is cited and none has a clause this ADR
   makes false or wider. ADR-0016 §7 in particular defers invocation, exactly-once
   execution, per-call data reach, parameter validation, selection, tool
@@ -2201,14 +2332,17 @@ green on one tree — and it is ratified only after that, by the one-line
   by forbidding the read instead. Nothing in this system performs that check;
   what this ADR ships is the evidence for it, and a later ADR that wants an
   integrity pass has it without a migration.
-- **A policy that holds a grant seam is no longer a function of its argument
-  alone, and its conformance suite pays for it.** ADR-0021 §3 named that cost when
-  it called a pure policy a testable one, and the bill is a fake `RecipientGrants`
-  standing up in the monotonicity suite (§14). The obligations themselves are
-  unchanged — a grant is "an input the policy was given, not a severity axis", and
-  the comparison holds the store equal — and the seam is one read-only member that
-  resolves no id, so the hazard the purity clause was written against stays closed
-  (§7, §15).
+- **A policy given a grant seam performs one read per ruling, and its conformance
+  suite pays for it.** `decide` stays a function of its argument **and its
+  injected seams**, which is the form ADR-0021 §5's monotonicity comparison is
+  already written in — "with the grants in the store held equal" is that sentence
+  read on this input — so the obligations are checkable exactly as before, against
+  a fake `RecipientGrants` standing up in the suite (§14). ADR-0021 §3 named this
+  cost when it called a pure policy a testable one, and the bill is that fake. The
+  seam is one read-only member taking the whole request and resolving no id, so
+  the hazard the purity framing was written against — a policy consulting a
+  registry, rebinding an id inside the subsystem meant to close that — stays
+  closed (§7, §15).
 - **A deployment can be at its ceiling, and the user is told.** With
   `recipient_grant_max_outstanding` reached, the establishing act is refused with
   a visible reason and the recourse named, the call itself is still approvable,
