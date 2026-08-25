@@ -86,6 +86,54 @@ def _undeclared(value: BaseModel, state: dict[object, object]) -> None:
     holder.update(state)
 
 
+class HostileKey(str):
+    """A ``str`` subclass that collides with a field name and refuses to be compared.
+
+    The construction a set difference walks into: it hashes as the field name it
+    spells, so a lookup against the declared field names lands in that bucket and
+    has to compare — and once :meth:`arm` is called the comparison raises. An
+    implementation that classifies a non-``str`` key *without touching it* never
+    provokes it; one that builds a ``set`` of the keys, or asks ``key in
+    declared``, leaves as that ``RuntimeError`` instead of this layer's refusal.
+
+    A ``str`` **subclass** rather than an unrelated object, because ``type(key) is
+    str`` is the discriminator an implementation must use: an ``isinstance`` check
+    admits this and then compares it.
+
+    **Armed after insertion, and explicitly.** Putting the key into a dict that
+    already holds the real one costs comparisons — how many is CPython's business,
+    not the test's — so a key that counted them would fail by table layout rather
+    than by anything the subject did. Disarmed it simply answers "not equal", which
+    lands it beside the real key rather than over it.
+    """
+
+    _armed: bool
+
+    def __init__(self, *_spelling: object) -> None:
+        """Start disarmed; ``str`` itself is built by ``__new__``."""
+        self._armed = False
+
+    def arm(self) -> None:
+        """Refuse every comparison from here on."""
+        self._armed = True
+
+    def __hash__(self) -> int:
+        """Hash as the plain text it spells, so a lookup of that field must compare."""
+        return hash(str(self))
+
+    def __eq__(self, other: object) -> bool:
+        """Never equal while disarmed, so it lands *beside* the real key; then refuse.
+
+        Equal-while-disarmed would make the insertion replace the field's value
+        instead of adding an undeclared key, and the case would then be about a
+        decision naming something the store does not hold.
+        """
+        if self._armed:
+            msg = "this key will not be compared"
+            raise RuntimeError(msg)
+        return False
+
+
 class Undescribable:
     """A value that refuses to describe itself, and can still be a mapping key.
 
@@ -681,6 +729,7 @@ class InvocationCompleterContract:
         [
             pytest.param("undescribable", id="a-field-that-cannot-be-described"),
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
+            pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
         ],
     )
     async def test_malformed_model_state_is_still_an_argument_fault(
@@ -688,17 +737,25 @@ class InvocationCompleterContract:
     ) -> None:
         """The refusal must survive the value it is refusing (ADR-0192 §2).
 
-        Both parameters are ways the *diagnostic* can destroy the diagnosis. A
+        Every parameter is a way the *diagnostic* can destroy the diagnosis. A
         field whose ``__repr__`` raises turns a message that reaches for ``repr``
         into whatever it threw, from inside the ``except`` block. Undeclared
         ``__dict__`` keys of two different types turn a ``sorted`` over them into a
-        ``TypeError``. Either leaves this boundary as a class §2's order does not
-        admit, and a consumer catching ``AuditError`` catches neither.
+        ``TypeError``. A key that hashes like a field name and raises when compared
+        turns the *lookup* itself into that exception, before any message is built
+        — which is why an implementation must classify a non-``str`` key without
+        touching it rather than ask a set. Each leaves this boundary as a class §2's
+        order does not admit, and a consumer catching ``AuditError`` catches none of
+        them.
         """
         claim = await _claim(ledger, allowed())
         cost = ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("1.00"), currency="USD")
         if tamper == "undescribable":
             cost.__dict__["amount"] = Undescribable()
+        elif tamper == "hostile-key":
+            hostile = HostileKey("basis")
+            _undeclared(cost, {hostile: "shadow"})
+            hostile.arm()
         else:
             _undeclared(cost, {1: "one", "extra": "text"})
 
@@ -1628,6 +1685,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
         [
             pytest.param("undescribable", id="a-field-that-cannot-be-described"),
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
+            pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
         ],
     )
     async def test_a_malformed_decision_is_still_an_argument_fault(
@@ -1644,6 +1702,10 @@ class InvocationLedgerContract(InvocationCompleterContract):
         handed = authorisation.model_copy()
         if tamper == "undescribable":
             handed.__dict__["id"] = Undescribable()
+        elif tamper == "hostile-key":
+            hostile = HostileKey("id")
+            _undeclared(handed, {hostile: "shadow"})
+            hostile.arm()
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
 
