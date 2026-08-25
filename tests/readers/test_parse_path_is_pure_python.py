@@ -31,23 +31,33 @@ path nobody is choosing.
 
 **Two instruments, because the installed environment is one platform and the property
 is not.** Installed metadata answers for *this* interpreter on *this* operating system:
-a dependency guarded by ``sys_platform == "darwin"`` is not installed here and a
+a dependency guarded by ``sys_platform == "darwin"`` is not installed here, and a
 distribution publishing a pure Linux wheel beside a compiled macOS one installs the
 pure one here. Both would be green on the gate's Ubuntu runner while a macOS install
 handed hostile bytes to compiled code. So the same property is asserted twice:
 
-- :func:`test_the_installed_calendar_parse_path_ships_no_compiled_code` reads
-  ``WHEEL``'s ``Root-Is-Purelib`` and ``RECORD`` for what is installed here. It is the
-  fact ADR-0183 §5 states, checked where the ADR states it.
+- :func:`test_the_installed_calendar_parse_path_ships_no_compiled_code` reads what is
+  installed here — ``WHEEL``'s ``Root-Is-Purelib``, and every file ``RECORD`` lists,
+  **by its first bytes** rather than by its name. It is the fact ADR-0183 §5 states,
+  checked where the ADR states it.
 - :func:`test_the_locked_calendar_parse_path_publishes_only_pure_python_wheels` reads
   ``uv.lock``, whose resolution is universal — every wheel of every resolved version
   for every platform, and every dependency edge including the ones a marker excludes
-  here. A compiled macOS wheel is a filename in that file, and a platform-guarded
+  here. A compiled macOS wheel is a file name in that file, and a platform-guarded
   dependency is an entry in it. This is the platform-independent half.
 
-Neither subsumes the other: the lock records what would be installed, and the installed
-metadata records what *is*, which is what an environment assembled some other way
-actually runs.
+Neither subsumes the other: the lock records what an install *would* fetch, and the
+installed metadata records what *is*, which is what an environment assembled some other
+way actually runs.
+
+**A file's first bytes, not its extension.** ``Root-Is-Purelib: true`` does not forbid a
+loadable artifact inside the tree, and a name-based check is a list of the formats
+somebody remembered: a Mach-O ``parser.bundle``, an extensionless helper, or a
+``.DLL`` a case-sensitive match slid past would each be compiled code the property
+denies. So every recorded file is opened and its magic number read
+(:data:`NATIVE_MAGIC`), and the file-name pattern (:data:`COMPILED_ARTIFACT`) stays as a
+second net for entries that are absent from the tree. The name-based net is not the
+proof; the bytes are.
 
 **Why the whole requirement closure and not only the two names.** The clause is stated
 over what the *bytes* can reach, and they do not stop at the two distributions the ADR
@@ -57,23 +67,35 @@ so the closure is walked from the declared requirements and every distribution i
 checked — the shape
 ``tests/tools/test_egress_seam.py::test_every_runtime_dependency_is_classified`` already
 uses, and for its reason: a new transitive dependency should be a decision rather than
-an omission. The walk tracks *activated extras per distribution* rather than visiting a
-name once, because a diamond — a root wanting ``helper[native]`` and a sibling wanting
-bare ``helper`` — otherwise marks the name seen without its extra and never walks the
-requirements that extra turns on. :func:`test_the_closure_walks_an_extra_discovered_late`
-is that case, in both orders.
+an omission. Two properties of that walk are load-bearing and each has its own test:
+
+- **Extras are tracked per distribution and canonicalised** (PEP 685, via
+  :func:`packaging.utils.canonicalize_name`). A diamond — a root wanting
+  ``helper[native]`` and a sibling wanting bare ``helper`` — otherwise marks the name
+  seen without its extra and never walks what that extra turns on; and a root spelling
+  it ``helper[Native_Code]`` against a lock whose key is ``native-code`` otherwise
+  looks the extra up under a name nothing has.
+- **A lock edge that selects a version is followed to that version.** A universal
+  resolution may fork a name into two entries, and only the entry an edge from the
+  parse path selects is the parse path's. Checking both would fail the gate over a
+  fork some unrelated dependency reaches; checking neither would miss the fork this one
+  does. An edge with no selector still puts every entry of that name in play, because
+  then any of them can be the one installed.
 
 **Unverifiable is a breach, not a pass.** A ``WHEEL`` or ``RECORD`` that cannot be read,
-a distribution absent from the lock, and a locked distribution with no wheel at all
-(so an install builds it from its sdist, which is where compilation happens) are each
-reported as a failure rather than skipped. The claim is that the property *holds*, and
-an install this module cannot read grounds nothing.
+a recorded file that exists and will not open, a distribution absent from the lock, and
+a locked distribution with no wheel at all (so an install builds it from its sdist,
+which is where compilation happens) are each reported as a failure rather than skipped.
+The claim is that the property *holds*, and an install this module cannot read grounds
+nothing. A recorded file that is simply *absent* is the one exception, and it is not the
+same case: bytes that are not on disk are bytes no parser loads.
 
-**What this does not see, stated rather than implied.** Distribution metadata and a
-lock are both manifests, so a compiled artifact a package downloads, builds or extracts
-at run time is outside both; ``ctypes`` reaching a system library is a file in no
-``RECORD``; the granularity is the distribution, so neither test says which module
-inside a pure-Python distribution the bytes reach; and the lock is checked as it is
+**What this does not see, stated rather than implied.** A compiled artifact a package
+downloads, builds or extracts at run time exists at neither of the moments this looks;
+``ctypes`` reaching a system library is a file in no ``RECORD``; the granularity is the
+distribution, so neither test says which module inside a pure-Python distribution the
+bytes actually reach; a wheel's tags are a claim its author makes, so the lock half
+trusts them where the installed half does not have to; and the lock is checked as
 written, so a resolution nobody has committed is outside it too. It is the instrument
 ADR-0183 §5's own reasoning asks for — the fact about the libraries, asserted rather
 than assumed — and not a proof of memory safety.
@@ -82,6 +104,7 @@ than assumed — and not a proof of memory safety.
 from __future__ import annotations
 
 import importlib.metadata
+import os
 import re
 import sys
 import tomllib
@@ -91,9 +114,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 #: This module itself, so a test can redirect one of its readers. `monkeypatch` on the
 #: dotted path would import a *second* copy under pytest's rootdir layout and patch
@@ -105,22 +129,39 @@ _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _LOCK = _REPO_ROOT / "uv.lock"
 
 #: The two distributions ADR-0183 §5 names as the calendar parse path: `icalendar`
-#: does the format, and `python-dateutil` expands the `RRULE`. Normalised, so the
-#: spelling in `pyproject.toml`, in `uv.lock` and in the installed metadata compare
-#: equal. Deliberately names no version — see this module's docstring.
-PARSE_PATH_ROOTS = frozenset({"icalendar", "python_dateutil"})
+#: does the format, and `python-dateutil` expands the `RRULE`. In PEP 503 canonical
+#: form, so the spelling in `pyproject.toml`, in `uv.lock` and in the installed
+#: metadata compare equal. Deliberately names no version — see this module's docstring.
+PARSE_PATH_ROOTS = frozenset({"icalendar", "python-dateutil"})
 
-#: A file name that ends in *loadable compiled code*: a CPython extension module on the
-#: three platforms that spell it differently, plus a Windows or ELF shared library,
-#: with the version suffixes a `libfoo.so.1.2` carries. Anchored at the end and matched
+#: The magic numbers of the loadable native formats, read from a file's first bytes.
+#: This is the check that does not depend on anyone having remembered a file
+#: extension. `\xca\xfe\xba\xbe` is a Mach-O universal binary and also a Java class
+#: file — neither belongs in a pure-Python parse path, so the conflation costs nothing.
+NATIVE_MAGIC: tuple[bytes, ...] = (
+    b"\x7fELF",  # ELF: a Linux or BSD shared object
+    b"MZ",  # PE/COFF: a Windows .pyd or .dll
+    b"\xfe\xed\xfa\xce",  # Mach-O, 32-bit, big and little endian
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",  # Mach-O, 64-bit, big and little endian
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",  # Mach-O universal ("fat"), both byte orders
+    b"\xbe\xba\xfe\xca",
+)
+
+#: The bytes to read per file: the longest magic number above, and no more.
+_MAGIC_BYTES = max(len(magic) for magic in NATIVE_MAGIC)
+
+#: A file name that ends in *loadable compiled code* — the second net, for entries
+#: `RECORD` lists that are not on disk to be read. Anchored at the end and matched
 #: case-insensitively, which is what separates `parser.DLL` — loadable, and missed by a
-#: case-sensitive check — from `libfoo.dll.a`, a static archive that is a build input
+#: case-sensitive check — from `libparse.dll.a`, a static archive that is a build input
 #: rather than something an interpreter loads.
-COMPILED_ARTIFACT = re.compile(r"\.(so|pyd|dylib|dll)(\.\d+)*$", re.IGNORECASE)
+COMPILED_ARTIFACT = re.compile(r"\.(so|pyd|dylib|dll|bundle|sl)(\.\d+)*$", re.IGNORECASE)
 
 
 class _Distribution(Protocol):
-    """The two pieces of installed metadata this module reads.
+    """The three pieces of installed metadata this module reads.
 
     Narrower than :class:`importlib.metadata.Distribution` so the mutation tests can
     supply one without constructing a real distribution.
@@ -135,6 +176,10 @@ class _Distribution(Protocol):
         """The named metadata file's text, or `None` when it is absent."""
         ...
 
+    def locate_file(self, path: Any) -> Any:
+        """Where a `RECORD` entry actually lives on disk."""
+        ...
+
 
 def _normalise(name: str) -> str:
     """A distribution name in the one spelling this module compares by.
@@ -143,9 +188,24 @@ def _normalise(name: str) -> str:
         name: A distribution name as declared, as locked, or as installed.
 
     Returns:
-        Lower case, with separators folded to underscores.
+        Its PEP 503 canonical form, so `python_dateutil`, `Python-DateUtil` and
+        `python.dateutil` are one name.
     """
-    return name.lower().replace("-", "_").replace(".", "_")
+    return canonicalize_name(name)
+
+
+def _canonical_extras(extras: Iterable[str]) -> frozenset[str]:
+    """Extra names in the one spelling this module compares by.
+
+    Args:
+        extras: Extra names as a requirement or a lock spells them.
+
+    Returns:
+        Their PEP 685 canonical forms — the same normalisation as a distribution name,
+        which is what makes `helper[Native_Code]` and a lock key of `native-code` the
+        same extra.
+    """
+    return frozenset(canonicalize_name(extra) for extra in extras)
 
 
 def _declared_dependencies() -> dict[str, Requirement]:
@@ -162,8 +222,8 @@ def _declared_dependencies() -> dict[str, Requirement]:
 def closure(
     roots: Iterable[Requirement],
     requires: Callable[[str, frozenset[str]], Sequence[str]],
-) -> frozenset[str]:
-    """Every distribution reachable from `roots`, extras included.
+) -> dict[str, list[Requirement]]:
+    """Every distribution reachable from `roots`, with the edges that reached it.
 
     A name is revisited when an extra is discovered for it that an earlier edge did not
     activate, so the requirements that extra turns on are walked even though the name
@@ -174,49 +234,28 @@ def closure(
     Args:
         roots: The requirements to start from.
         requires: The requirements of a distribution, given its normalised name and the
-            extras activated on it so far.
+            canonical extras activated on it so far.
 
     Returns:
-        Normalised distribution names, the roots included.
+        Normalised distribution name to the requirements naming it, the roots included.
+        The edges are kept because a version selector on one of them is what says which
+        locked entry of a forked name this path actually reaches.
     """
-    visited: set[str] = set()
+    reached: dict[str, list[Requirement]] = {}
     activated: dict[str, set[str]] = {}
     pending = list(roots)
     while pending:
         requirement = pending.pop()
         name = _normalise(requirement.name)
-        extras = {extra.lower() for extra in requirement.extras}
-        unseen = name not in visited
+        extras = _canonical_extras(requirement.extras)
+        unseen = name not in reached
         new_extras = extras - activated.get(name, set())
+        reached.setdefault(name, []).append(requirement)
         if not unseen and not new_extras:
             continue
-        visited.add(name)
         activated.setdefault(name, set()).update(extras)
         pending.extend(Requirement(text) for text in requires(name, frozenset(activated[name])))
-    return frozenset(visited)
-
-
-def _installed_requires(name: str, extras: frozenset[str]) -> list[str]:
-    """The installed distribution's requirements, for the extras activated on it.
-
-    Args:
-        name: A normalised distribution name.
-        extras: The extras activated on it so far.
-
-    Returns:
-        Requirement strings whose environment marker holds here, under no extra or
-        under one of `extras`. Empty when the distribution is not installed — the
-        absence is reported by the checks, not by a walk that raises.
-    """
-    installed = _installed_distributions().get(name)
-    if installed is None:
-        return []
-    return [
-        text
-        for text in installed.requires or []
-        if (marker := Requirement(text).marker) is None
-        or any(marker.evaluate({"extra": extra}) for extra in {"", *extras})
-    ]
+    return reached
 
 
 @cache
@@ -231,6 +270,29 @@ def _installed_distributions() -> dict[str, importlib.metadata.Distribution]:
         for distribution in importlib.metadata.distributions()
         if distribution.metadata["Name"]
     }
+
+
+def _installed_requires(name: str, extras: frozenset[str]) -> list[str]:
+    """The installed distribution's requirements, for the extras activated on it.
+
+    Args:
+        name: A normalised distribution name.
+        extras: The canonical extras activated on it so far.
+
+    Returns:
+        Requirement strings whose environment marker holds here, under no extra or
+        under one of `extras`. Empty when the distribution is not installed — the
+        absence is reported by :func:`installed_breach`, not by a walk that raises.
+    """
+    installed = _installed_distributions().get(name)
+    if installed is None:
+        return []
+    return [
+        text
+        for text in installed.requires or []
+        if (marker := Requirement(text).marker) is None
+        or any(marker.evaluate({"extra": extra}) for extra in {"", *extras})
+    ]
 
 
 def _roots() -> list[Requirement]:
@@ -249,15 +311,30 @@ def _roots() -> list[Requirement]:
     return [declared.get(root) or Requirement(root) for root in sorted(PARSE_PATH_ROOTS)]
 
 
+def is_native(head: bytes) -> bool:
+    """Whether a file's first bytes are one of the loadable native formats.
+
+    Args:
+        head: The file's leading bytes, at least :data:`_MAGIC_BYTES` of them.
+
+    Returns:
+        `True` for an ELF, PE/COFF or Mach-O image — the formats an operating system
+        can load and execute, whatever the file happens to be called.
+    """
+    return head.startswith(NATIVE_MAGIC)
+
+
 def compiled_artifacts(files: Iterable[PurePosixPath]) -> list[str]:
-    """The entries of a `RECORD` that are loadable compiled code.
+    """The entries of a `RECORD` whose *name* says they are loadable compiled code.
+
+    The second net. :func:`is_native` is the first, and it is the one that decides for
+    every file actually on disk.
 
     Args:
         files: The distribution's recorded files.
 
     Returns:
-        Their paths, as strings, in the order given — empty when the distribution
-        ships none, which is the property ADR-0183 §5 rests on.
+        Their paths, as strings, in the order given.
     """
     return [str(path) for path in files if COMPILED_ARTIFACT.search(path.name)]
 
@@ -299,6 +376,30 @@ def _purelib_breach(distribution: _Distribution) -> str | None:
     return None
 
 
+def _content_breach(distribution: _Distribution, files: Sequence[PurePosixPath]) -> str | None:
+    """Why one of the distribution's installed files is a native image.
+
+    Args:
+        distribution: The installed distribution's metadata.
+        files: Its recorded files.
+
+    Returns:
+        A sentence naming the first offending file, or `None` when every file that is
+        on disk begins with something other than a native magic number.
+    """
+    for entry in files:
+        located = Path(os.fspath(distribution.locate_file(entry)))
+        try:
+            head = located.read_bytes()[:_MAGIC_BYTES]
+        except FileNotFoundError:
+            continue  # Bytes that are not on disk are bytes no parser loads.
+        except OSError as error:
+            return f"{entry} is recorded but cannot be read ({type(error).__name__})"
+        if is_native(head):
+            return f"{entry} is a native image, whatever its extension says"
+    return None
+
+
 def _record_breach(distribution: _Distribution) -> str | None:
     """Why the distribution's `RECORD` fails to show a source-only install.
 
@@ -306,7 +407,8 @@ def _record_breach(distribution: _Distribution) -> str | None:
         distribution: The installed distribution's metadata.
 
     Returns:
-        A sentence naming the failure, or `None` when no recorded file is compiled.
+        A sentence naming the failure, or `None` when no recorded file is compiled —
+        by its first bytes, and failing that by its name.
     """
     files = distribution.files
     if files is None:
@@ -314,15 +416,15 @@ def _record_breach(distribution: _Distribution) -> str | None:
     compiled = compiled_artifacts(files)
     if compiled:
         return f"RECORD lists compiled artifacts: {', '.join(sorted(compiled))}"
-    return None
+    return _content_breach(distribution, files)
 
 
 def installed_breach(name: str) -> str | None:
     """Why `name`'s installed metadata fails ADR-0183 §5's memory-safety clause.
 
-    Both halves of the check are required, and either one being unreadable is itself
-    the breach: the assertion is that the property holds, and metadata this cannot read
-    is metadata that grounds nothing.
+    Every half of the check is required, and any of them being unreadable is itself the
+    breach: the assertion is that the property holds, and metadata this cannot read is
+    metadata that grounds nothing.
 
     Args:
         name: A normalised distribution name.
@@ -343,8 +445,8 @@ def _locked_packages() -> dict[str, list[dict[str, Any]]]:
     """Every `[[package]]` entry of `uv.lock`, grouped by normalised name.
 
     A list rather than one entry per name: a universal resolution may lock two
-    versions of the same distribution under different resolution markers, and both are
-    installable, so both are checked.
+    versions of the same distribution under different resolution markers, and an edge
+    is what says which of them a given path reaches.
 
     Returns:
         The lock's package entries, keyed by normalised name.
@@ -355,32 +457,46 @@ def _locked_packages() -> dict[str, list[dict[str, Any]]]:
     return packages
 
 
+def _edge_requirement(edge: Mapping[str, Any]) -> str:
+    """One `uv.lock` dependency edge, rendered as a requirement string.
+
+    Args:
+        edge: A `dependencies` or `optional-dependencies` entry.
+
+    Returns:
+        `name[extra,…]==version` when the edge selects a forked version, and the bare
+        name otherwise. The marker is deliberately dropped — an edge guarded by
+        `sys_platform == "darwin"` is exactly the one the installed closure cannot see,
+        and keeping it is the conservative direction.
+    """
+    name = str(edge["name"])
+    extras = f"[{','.join(str(extra) for extra in edge['extra'])}]" if edge.get("extra") else ""
+    version = f"=={edge['version']}" if edge.get("version") else ""
+    return f"{name}{extras}{version}"
+
+
 def _locked_requires(name: str, extras: frozenset[str]) -> list[str]:
     """A locked distribution's dependency edges, markers deliberately ignored.
 
-    Ignoring markers is the point of this walk: an edge guarded by
-    `sys_platform == "darwin"` is exactly the one the installed closure cannot see, and
-    including it here is the conservative direction.
-
     Args:
         name: A normalised distribution name.
-        extras: The extras activated on it so far.
+        extras: The canonical extras activated on it so far.
 
     Returns:
-        Requirement strings for its `dependencies`, plus the `optional-dependencies` of
-        each activated extra. Empty when the name is not in the lock — the absence is
-        reported by :func:`locked_breach`.
+        Requirement strings for the `dependencies` of every locked entry of that name,
+        plus the `optional-dependencies` of each activated extra. Empty when the name
+        is not in the lock — the absence is reported by :func:`locked_breach`.
     """
-    edges: list[dict[str, Any]] = []
+    edges: list[Mapping[str, Any]] = []
     for package in _locked_packages().get(name, []):
         edges.extend(package.get("dependencies", []))
-        optional = package.get("optional-dependencies", {})
+        optional = {
+            str(canonicalize_name(str(key))): value
+            for key, value in package.get("optional-dependencies", {}).items()
+        }
         for extra in extras:
             edges.extend(optional.get(extra, []))
-    return [
-        f"{edge['name']}[{','.join(edge['extra'])}]" if edge.get("extra") else str(edge["name"])
-        for edge in edges
-    ]
+    return [_edge_requirement(edge) for edge in edges]
 
 
 def wheel_is_pure(filename: str) -> bool:
@@ -405,20 +521,52 @@ def wheel_is_pure(filename: str) -> bool:
     return abi == "none" and set(platform.split(".")) == {"any"}
 
 
-def locked_breach(name: str) -> str | None:
+def _selected_entries(name: str, edges: Sequence[Requirement]) -> list[dict[str, Any]]:
+    """The locked entries of `name` that the parse path's own edges reach.
+
+    An edge with no version selector puts every entry in play, because then any of them
+    can be the one installed. An edge that selects a version narrows to it, so a fork
+    of the same name that only an unrelated dependency reaches is not this path's to
+    fail over.
+
+    Args:
+        name: A normalised distribution name.
+        edges: The requirements that reached it.
+
+    Returns:
+        The `[[package]]` entries to check.
+    """
+    packages = _locked_packages().get(name, [])
+    if any(not edge.specifier for edge in edges):
+        return packages
+    return [
+        package
+        for package in packages
+        if any(
+            edge.specifier.contains(str(package.get("version", "")), prereleases=True)
+            for edge in edges
+        )
+    ]
+
+
+def locked_breach(name: str, edges: Sequence[Requirement]) -> str | None:
     """Why `name`'s entry in `uv.lock` fails ADR-0183 §5's memory-safety clause.
 
     Args:
         name: A normalised distribution name.
+        edges: The requirements that reached it, whose version selectors decide which
+            locked entries are this path's.
 
     Returns:
-        A sentence naming the failure, or `None` when every locked version of the
-        distribution publishes only pure-Python wheels.
+        A sentence naming the failure, or `None` when every locked version this path
+        reaches publishes only pure-Python wheels.
     """
-    packages = _locked_packages().get(name, [])
-    if not packages:
+    if not _locked_packages().get(name):
         return "not in uv.lock, so what an install would fetch cannot be read"
-    for package in packages:
+    selected = _selected_entries(name, edges)
+    if not selected:
+        return "no locked version satisfies the edges that reach it"
+    for package in selected:
         version = package.get("version", "?")
         wheels = [str(wheel["url"]) for wheel in package.get("wheels", [])]
         if not wheels:
@@ -458,7 +606,7 @@ def test_the_installed_calendar_parse_path_ships_no_compiled_code() -> None:
     see is any platform but the running one, which is the other test's half.
     """
     reached = closure(_roots(), _installed_requires)
-    assert reached >= PARSE_PATH_ROOTS, (
+    assert reached.keys() >= PARSE_PATH_ROOTS, (
         f"the installed parse-path closure {sorted(reached)} does not contain "
         f"{sorted(PARSE_PATH_ROOTS)}; the walk is broken, and a check over an empty "
         "set would pass while asserting nothing"
@@ -484,14 +632,16 @@ def test_the_locked_calendar_parse_path_publishes_only_pure_python_wheels() -> N
     check on the gate's Ubuntu runner and visible in this file.
     """
     reached = closure(_roots(), _locked_requires)
-    assert reached >= PARSE_PATH_ROOTS, (
+    assert reached.keys() >= PARSE_PATH_ROOTS, (
         f"the locked parse-path closure {sorted(reached)} does not contain "
         f"{sorted(PARSE_PATH_ROOTS)}; the walk is broken, and a check over an empty "
         "set would pass while asserting nothing"
     )
 
     breaches = {
-        name: reason for name in sorted(reached) if (reason := locked_breach(name)) is not None
+        name: reason
+        for name, edges in sorted(reached.items())
+        if (reason := locked_breach(name, edges)) is not None
     }
     assert not breaches, (
         "ADR-0183 §5's memory-safety clause is a property of the parse path on every "
@@ -508,8 +658,8 @@ def test_the_two_closures_agree_on_the_parse_path() -> None:
     walks is reading something the other cannot see, and the assertions above would
     then be over different sets while appearing to be over one.
     """
-    installed = closure(_roots(), _installed_requires)
-    locked = closure(_roots(), _locked_requires)
+    installed = closure(_roots(), _installed_requires).keys()
+    locked = closure(_roots(), _locked_requires).keys()
     assert installed <= locked, (
         f"installed closure {sorted(installed)} is not contained in the locked closure "
         f"{sorted(locked)}, so something is installed that the lock does not record"
@@ -519,38 +669,94 @@ def test_the_two_closures_agree_on_the_parse_path() -> None:
 _DIAMOND: dict[tuple[str, frozenset[str]], list[str]] = {
     ("wrapper", frozenset()): ["helper"],
     ("helper", frozenset()): [],
-    ("helper", frozenset({"native"})): ["compiled_thing"],
-    ("compiled_thing", frozenset()): [],
+    ("helper", frozenset({"native-code"})): ["compiled-thing"],
+    ("compiled-thing", frozenset()): [],
 }
+
+
+def _diamond_requires(name: str, extras: frozenset[str]) -> list[str]:
+    """The diamond's requirements, keyed by canonical name and canonical extras.
+
+    Args:
+        name: A normalised distribution name.
+        extras: The canonical extras activated on it so far.
+
+    Returns:
+        The requirement strings for that node.
+    """
+    return _DIAMOND.get((name, extras), [])
 
 
 @pytest.mark.parametrize(
     "order",
     [
-        pytest.param(["helper[native]", "wrapper"], id="bare-edge-walked-first"),
-        pytest.param(["wrapper", "helper[native]"], id="extra-edge-walked-first"),
+        pytest.param(["helper[native-code]", "wrapper"], id="bare-edge-walked-first"),
+        pytest.param(["wrapper", "helper[native-code]"], id="extra-edge-walked-first"),
     ],
 )
 def test_the_closure_walks_an_extra_discovered_late(order: list[str]) -> None:
     """A name already seen without an extra is revisited when the extra shows up.
 
-    The diamond: the root wants `helper[native]` and `wrapper`, and `wrapper` wants
-    bare `helper`. A walk that marked `helper` seen on the bare edge would never reach
-    `compiled_thing`, which `native` turns on — so a compiled distribution would be
-    installed and unchecked. Both orders are exercised because a stack makes the
+    The diamond: the root wants `helper[native-code]` and `wrapper`, and `wrapper`
+    wants bare `helper`. A walk that marked `helper` seen on the bare edge would never
+    reach `compiled-thing`, which the extra turns on — so a compiled distribution would
+    be installed and unchecked. Both orders are exercised because a stack makes the
     outcome depend on which edge is popped first — the *last* string given is walked
     first — and only `bare-edge-walked-first` fails against the name-only walk this
-    replaced, which is why both are here.
+    replaced.
 
     Args:
         order: The root's requirement strings, in the order they are handed over.
     """
+    reached = closure([Requirement(text) for text in order], _diamond_requires)
+    assert reached.keys() == {"wrapper", "helper", "compiled-thing"}
 
-    def requires(name: str, extras: frozenset[str]) -> list[str]:
-        return _DIAMOND.get((name, extras), [])
 
-    reached = closure([Requirement(text) for text in order], requires)
-    assert reached == {"wrapper", "helper", "compiled_thing"}
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        pytest.param("native-code", id="canonical"),
+        pytest.param("Native_Code", id="underscored-and-capitalised"),
+        pytest.param("native.code", id="dotted"),
+        pytest.param("NATIVE-CODE", id="upper-case"),
+    ],
+)
+def test_an_extra_is_looked_up_in_its_canonical_spelling(spelling: str) -> None:
+    """PEP 685: every spelling of an extra names the same extra.
+
+    A requirement spelling it `helper[Native_Code]` against a lock whose key is
+    `native-code` would otherwise activate an extra nothing has, and the compiled
+    dependency that extra turns on would never be walked — while the installed check,
+    on a platform where it is not installed, stayed green too.
+
+    Args:
+        spelling: How the requirement spells the extra.
+    """
+    reached = closure([Requirement(f"helper[{spelling}]")], _diamond_requires)
+    assert "compiled-thing" in reached
+
+
+def test_a_locked_extra_key_is_matched_in_its_canonical_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock's `optional-dependencies` key is canonicalised before it is looked up.
+
+    Args:
+        monkeypatch: Redirects the lock reader at the crafted entry.
+    """
+    monkeypatch.setattr(
+        _MODULE,
+        "_locked_packages",
+        lambda: {
+            "helper": [
+                {
+                    "version": "1.0",
+                    "optional-dependencies": {"Native.Code": [{"name": "compiled-thing"}]},
+                }
+            ]
+        },
+    )
+    assert _locked_requires("helper", frozenset({"native-code"})) == ["compiled-thing"]
 
 
 class _StubDistribution:
@@ -558,17 +764,32 @@ class _StubDistribution:
 
     Args:
         wheel: The text `read_text("WHEEL")` returns, or `None` for absent.
-        files: The paths `files` returns, or `None` for an unreadable `RECORD`.
+        root: The directory `locate_file` resolves entries against.
+        entries: Recorded file name to its bytes on disk, or `None` for an unreadable
+            `RECORD`. A `None` value records a file that `RECORD` lists and the tree
+            does not have.
     """
 
-    def __init__(self, *, wheel: str | None, files: Sequence[str] | None) -> None:
+    def __init__(
+        self,
+        *,
+        wheel: str | None,
+        root: Path,
+        entries: Mapping[str, bytes | None] | None,
+    ) -> None:
         self._wheel = wheel
-        self._files = files
+        self._root = root
+        self._entries = entries
+        for name, content in (entries or {}).items():
+            if content is not None:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
 
     @property
     def files(self) -> Sequence[PurePosixPath] | None:
         """The stubbed `RECORD` listing."""
-        return None if self._files is None else [PurePosixPath(path) for path in self._files]
+        return None if self._entries is None else [PurePosixPath(name) for name in self._entries]
 
     def read_text(self, filename: str) -> str | None:
         """The stubbed `WHEEL` text, and nothing else.
@@ -581,34 +802,67 @@ class _StubDistribution:
         """
         return self._wheel if filename == "WHEEL" else None
 
+    def locate_file(self, path: Any) -> Any:
+        """Where a stubbed entry lives.
+
+        Args:
+            path: A `RECORD` entry.
+
+        Returns:
+            Its path under this stub's root.
+        """
+        return self._root / str(path)
+
 
 _PURELIB_WHEEL = "Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\nRoot-Is-Purelib: true\n"
 
+_SOURCE = b"from __future__ import annotations\n"
+
+_ELF = b"\x7fELF\x02\x01\x01\x00 the rest of a shared object"
+
 
 @pytest.mark.parametrize(
-    ("wheel", "files", "expected"),
+    ("wheel", "entries", "expected"),
     [
         pytest.param(
             _PURELIB_WHEEL,
-            ["dateutil/_speedups.cpython-314-x86_64-linux-gnu.so", "dateutil/rrule.py"],
+            {"dateutil/_speedups.cpython-314-x86_64-linux-gnu.so": _ELF},
             "RECORD lists compiled artifacts",
             id="extension-module-in-record",
         ),
         pytest.param(
             _PURELIB_WHEEL,
-            ["icalendar/libparse.so.1", "icalendar/parser.py"],
+            {"icalendar/libparse.so.1": _ELF, "icalendar/parser.py": _SOURCE},
             "RECORD lists compiled artifacts",
             id="versioned-shared-library-in-record",
         ),
         pytest.param(
             _PURELIB_WHEEL,
-            ["icalendar/parser.DLL", "icalendar/parser.py"],
+            {"icalendar/parser.DLL": b"MZ\x90\x00", "icalendar/parser.py": _SOURCE},
             "RECORD lists compiled artifacts",
             id="upper-case-windows-library",
         ),
         pytest.param(
+            _PURELIB_WHEEL,
+            {"icalendar/parser.bundle": b"\xcf\xfa\xed\xfe", "icalendar/parser.py": _SOURCE},
+            "RECORD lists compiled artifacts",
+            id="mach-o-bundle-by-name",
+        ),
+        pytest.param(
+            _PURELIB_WHEEL,
+            {"icalendar/helper": b"\xcf\xfa\xed\xfe", "icalendar/parser.py": _SOURCE},
+            "is a native image",
+            id="extensionless-native-helper",
+        ),
+        pytest.param(
+            _PURELIB_WHEEL,
+            {"icalendar/parser.data": _ELF, "icalendar/parser.py": _SOURCE},
+            "is a native image",
+            id="native-image-under-a-data-extension",
+        ),
+        pytest.param(
             "Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: cp314-cp314-manylinux_2_28_x86_64\n",
-            ["icalendar/parser.py"],
+            {"icalendar/parser.py": _SOURCE},
             "Root-Is-Purelib: false",
             id="platform-wheel",
         ),
@@ -620,13 +874,13 @@ _PURELIB_WHEEL = "Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\nRoot-Is-Purel
         ),
         pytest.param(
             None,
-            ["icalendar/parser.py"],
+            {"icalendar/parser.py": _SOURCE},
             "no WHEEL metadata",
             id="absent-wheel-metadata",
         ),
         pytest.param(
             "Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\n",
-            ["icalendar/parser.py"],
+            {"icalendar/parser.py": _SOURCE},
             "declares no Root-Is-Purelib",
             id="wheel-metadata-without-the-field",
         ),
@@ -634,49 +888,86 @@ _PURELIB_WHEEL = "Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\nRoot-Is-Purel
 )
 def test_the_installed_check_reports_a_breach_it_is_shown(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     wheel: str | None,
-    files: Sequence[str] | None,
+    entries: Mapping[str, bytes | None] | None,
     expected: str,
 ) -> None:
     """Each way the property can stop holding is a failure rather than a pass.
 
     Without this, a check that read the wrong metadata field — or read it out of a
     distribution whose `RECORD` it could not open — would be green for the same reason
-    a correct one is, and the gate would pin nothing. Three of the cases are the
-    unreadable ones, because "cannot verify" is the answer most likely to be mistaken
-    for "verified".
+    a correct one is, and the gate would pin nothing. Two of the cases are artifacts
+    whose *name* says nothing, which is what the magic-number pass is for, and three
+    are the unreadable ones, because "cannot verify" is the answer most likely to be
+    mistaken for "verified".
 
     Args:
         monkeypatch: Redirects the metadata reader at the stub.
+        tmp_path: Where the stubbed distribution's files are written.
         wheel: The `WHEEL` text the stubbed distribution reports.
-        files: The `RECORD` listing the stubbed distribution reports.
+        entries: The `RECORD` listing, and each entry's bytes.
         expected: A fragment the reported breach must contain.
     """
     monkeypatch.setattr(
         importlib.metadata,
         "distribution",
-        lambda _name: _StubDistribution(wheel=wheel, files=files),
+        lambda _name: _StubDistribution(wheel=wheel, root=tmp_path, entries=entries),
     )
     reported = installed_breach("icalendar")
     assert reported is not None
     assert expected in reported
 
 
-def test_a_pure_python_install_is_no_breach(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_pure_python_install_is_no_breach(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The installed check is not merely always failing, which the cases above cannot show.
+
+    The listing includes a recorded file that is not on disk, because `RECORD` outlives
+    what an uninstall or a `__pycache__` sweep removes, and bytes that are not there are
+    bytes no parser loads.
 
     Args:
         monkeypatch: Redirects the metadata reader at the stub.
+        tmp_path: Where the stubbed distribution's files are written.
     """
     monkeypatch.setattr(
         importlib.metadata,
         "distribution",
         lambda _name: _StubDistribution(
             wheel=_PURELIB_WHEEL,
-            files=["icalendar/parser.py", "icalendar/tests/calendars/issue_156.ics"],
+            root=tmp_path,
+            entries={
+                "icalendar/parser.py": _SOURCE,
+                "icalendar/tests/calendars/issue_156.ics": b"BEGIN:VCALENDAR\n",
+                "icalendar/__pycache__/parser.cpython-314.pyc": None,
+            },
         ),
     )
     assert installed_breach("icalendar") is None
+
+
+@pytest.mark.parametrize(
+    ("head", "native"),
+    [
+        pytest.param(b"\x7fELF\x02\x01", True, id="elf"),
+        pytest.param(b"MZ\x90\x00", True, id="pe-coff"),
+        pytest.param(b"\xcf\xfa\xed\xfe", True, id="mach-o-64"),
+        pytest.param(b"\xca\xfe\xba\xbe", True, id="mach-o-universal"),
+        pytest.param(b"from ", False, id="python-source"),
+        pytest.param(b"BEGI", False, id="calendar-data"),
+        pytest.param(b"", False, id="empty-file"),
+    ],
+)
+def test_the_native_image_classifier_at_its_boundaries(head: bytes, native: bool) -> None:
+    """A file's first bytes decide it, and nothing else does.
+
+    Args:
+        head: A file's leading bytes.
+        native: Whether they are a loadable native image.
+    """
+    assert is_native(head) is native
 
 
 @pytest.mark.parametrize(
@@ -685,6 +976,7 @@ def test_a_pure_python_install_is_no_breach(monkeypatch: pytest.MonkeyPatch) -> 
         pytest.param("dateutil/_speedups.cpython-314-x86_64-linux-gnu.so", True, id="ext-linux"),
         pytest.param("icalendar/_parse.cp314-win_amd64.pyd", True, id="ext-windows"),
         pytest.param("icalendar/_parse.dylib", True, id="shared-macos"),
+        pytest.param("icalendar/_parse.bundle", True, id="mach-o-bundle"),
         pytest.param("icalendar/libparse.so.1.2", True, id="versioned-so"),
         pytest.param("icalendar/parser.DLL", True, id="upper-case-dll"),
         pytest.param("icalendar/libparse.dll.a", False, id="static-archive"),
@@ -694,12 +986,14 @@ def test_a_pure_python_install_is_no_breach(monkeypatch: pytest.MonkeyPatch) -> 
     ],
 )
 def test_the_compiled_artifact_classifier_at_its_boundaries(path: str, compiled: bool) -> None:
-    """What counts as loadable compiled code, at the names that decide it.
+    """What the *name*-based second net counts as loadable compiled code.
 
     `parser.DLL` is loadable on Windows and a case-sensitive check misses it;
     `libparse.dll.a` is a static archive, which the comment on
     :data:`COMPILED_ARTIFACT` excludes deliberately and a suffix-chain check reports
-    anyway. Both were review findings against the version this replaced.
+    anyway. `icalendar/so` is why the pattern is anchored to an extension rather than
+    matched anywhere in the name. What this net misses on a file that is on disk,
+    :func:`is_native` catches.
 
     Args:
         path: A `RECORD` entry.
@@ -734,24 +1028,21 @@ def test_the_wheel_purity_classifier_at_its_boundaries(filename: str, pure: bool
     assert wheel_is_pure(filename) is pure
 
 
-def test_the_lock_check_reports_a_distribution_it_cannot_read() -> None:
-    """A parse-path name absent from the lock is a breach, not a silent pass."""
-    reported = locked_breach("no_such_distribution_at_all")
-    assert reported is not None
-    assert "not in uv.lock" in reported
-
-
 _PURE_WHEEL_URL = "https://files.pythonhosted.org/packages/f1/icalendar-7.2.2-py3-none-any.whl"
 _PLATFORM_WHEEL_URL = (
     "https://files.pythonhosted.org/packages/f1/icalendar-8.0-cp314-cp314-macosx_11_0_arm64.whl"
 )
 
+_PURE_ENTRY = {"version": "7.2.2", "wheels": [{"url": _PURE_WHEEL_URL}]}
+_PLATFORM_ENTRY = {"version": "8.0", "wheels": [{"url": _PLATFORM_WHEEL_URL}]}
+
 
 @pytest.mark.parametrize(
-    ("entries", "expected"),
+    ("entries", "edges", "expected"),
     [
         pytest.param(
-            [{"version": "8.0", "wheels": [{"url": _PLATFORM_WHEEL_URL}]}],
+            [_PLATFORM_ENTRY],
+            ["icalendar"],
             "publishes non-pure wheels",
             id="platform-wheel",
         ),
@@ -760,57 +1051,91 @@ _PLATFORM_WHEEL_URL = (
                 {
                     "version": "8.0",
                     "wheels": [{"url": _PURE_WHEEL_URL}, {"url": _PLATFORM_WHEEL_URL}],
-                },
+                }
             ],
+            ["icalendar"],
             "publishes non-pure wheels",
             id="platform-wheel-beside-a-pure-one",
         ),
         pytest.param(
             [{"version": "8.0", "sdist": {"url": "…/icalendar-8.0.tar.gz"}}],
+            ["icalendar"],
             "locks no wheel",
             id="sdist-only",
         ),
         pytest.param(
-            [
-                {"version": "7.2.2", "wheels": [{"url": _PURE_WHEEL_URL}]},
-                {"version": "8.0", "wheels": [{"url": _PLATFORM_WHEEL_URL}]},
-            ],
+            [_PURE_ENTRY, _PLATFORM_ENTRY],
+            ["icalendar"],
             "publishes non-pure wheels",
-            id="second-resolution-marker-version",
+            id="unselected-fork-with-an-unqualified-edge",
+        ),
+        pytest.param(
+            [_PURE_ENTRY, _PLATFORM_ENTRY],
+            ["icalendar==8.0"],
+            "publishes non-pure wheels",
+            id="the-parse-path-reaches-the-impure-fork",
+        ),
+        pytest.param(
+            [_PURE_ENTRY],
+            ["icalendar==8.0"],
+            "no locked version satisfies",
+            id="edge-selects-a-version-the-lock-does-not-have",
         ),
     ],
 )
 def test_the_lock_check_reports_a_breach_it_is_shown(
     monkeypatch: pytest.MonkeyPatch,
     entries: list[dict[str, Any]],
+    edges: list[str],
     expected: str,
 ) -> None:
     """Every way a locked parse path can carry compiled code is a failure.
 
-    The last case is why `uv.lock` is read as a list per name rather than one entry:
-    a universal resolution can lock two versions under different resolution markers,
-    and a platform wheel in either of them is installable.
+    The forked cases are why `uv.lock` is read as a list per name: a universal
+    resolution can lock two versions under different resolution markers, and an edge
+    with no selector leaves either installable.
 
     Args:
         monkeypatch: Redirects the lock reader at the crafted entries.
         entries: The `[[package]]` entries the lock is made to report.
+        edges: The requirements said to reach the name.
         expected: A fragment the reported breach must contain.
     """
     monkeypatch.setattr(_MODULE, "_locked_packages", lambda: {"icalendar": entries})
-    reported = locked_breach("icalendar")
+    reported = locked_breach("icalendar", [Requirement(text) for text in edges])
     assert reported is not None
     assert expected in reported
 
 
-def test_a_pure_python_lock_entry_is_no_breach(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lock check is not merely always failing, which the cases above cannot show.
+@pytest.mark.parametrize(
+    ("entries", "edges"),
+    [
+        pytest.param([_PURE_ENTRY], ["icalendar"], id="one-pure-version"),
+        pytest.param([_PURE_ENTRY, _PLATFORM_ENTRY], ["icalendar==7.2.2"], id="unrelated-fork"),
+    ],
+)
+def test_a_locked_parse_path_that_reaches_no_platform_wheel_is_no_breach(
+    monkeypatch: pytest.MonkeyPatch,
+    entries: list[dict[str, Any]],
+    edges: list[str],
+) -> None:
+    """The lock check is not merely always failing, and a fork it does not reach is not its own.
+
+    `unrelated-fork` is the case that would otherwise fail the gate over a dependency
+    nothing on the parse path installs: some other requirement forks `icalendar` to a
+    platform-wheel 8.0 while the parse path's own edge selects 7.2.2.
 
     Args:
-        monkeypatch: Redirects the lock reader at the crafted entry.
+        monkeypatch: Redirects the lock reader at the crafted entries.
+        entries: The `[[package]]` entries the lock is made to report.
+        edges: The requirements said to reach the name.
     """
-    monkeypatch.setattr(
-        _MODULE,
-        "_locked_packages",
-        lambda: {"icalendar": [{"version": "7.2.2", "wheels": [{"url": _PURE_WHEEL_URL}]}]},
-    )
-    assert locked_breach("icalendar") is None
+    monkeypatch.setattr(_MODULE, "_locked_packages", lambda: {"icalendar": entries})
+    assert locked_breach("icalendar", [Requirement(text) for text in edges]) is None
+
+
+def test_the_lock_check_reports_a_distribution_it_cannot_read() -> None:
+    """A parse-path name absent from the lock is a breach, not a silent pass."""
+    reported = locked_breach("no-such-distribution-at-all", [Requirement("no-such-distribution")])
+    assert reported is not None
+    assert "not in uv.lock" in reported
