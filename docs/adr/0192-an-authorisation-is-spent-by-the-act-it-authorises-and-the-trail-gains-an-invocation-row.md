@@ -901,8 +901,9 @@ egress call moves after the ruling, so the set the call transmitted to **is** th
 set the decision fixed, and a pointer to the decision is a pointer to it.
 
 **`egress_call` is a boolean and not the binding, and that is the line between what
-a surface may say and what it may show.** §4 grants one word — *sent* — on a
-completed egress call, and a boolean is exactly what deciding that word needs. Who
+a surface may say and what it may show.** §4 grants one phrase — *attempted and
+reported success* — on a completed egress call, and a boolean is exactly what
+deciding it needs. Who
 received the bytes is `recent_decisions`' to render, under ADR-0186 §7's floor,
 from the binding itself; putting a second copy of it here would be the drift the
 paragraph above refuses, in service of a rendering another operation already owes.
@@ -1001,15 +1002,18 @@ the count.
 > contradicted by demanding the real class be logged, and it is restated here so the
 > two cannot drift apart again.
 
-> **Normative.** **What the store already committed, stands.** The append the task
-> was running may have landed before the exception reached it, and this ADR states
-> the durable truth rather than a postcondition it cannot deliver: where a completion
-> had already committed, that row is in the trail and the claim it names is closed;
-> where it had not, the claim is left open, as on every other `BaseException` exit.
-> Nothing is deleted, rewritten or compensated to make the two cases look alike —
-> §6 offers no selective delete and ADR-0060 §1 already rules that an abandoned
-> append may have committed. A draft promising "no completion is written" for every
-> timing promised a rollback this store does not have.
+> **Normative.** **What the store already committed, stands — on every failure
+> branch of this section and not only this one.** A retained append may land before
+> the failure reaches the task, whatever that failure is: a `BaseException`, a
+> collaborator's `CancelledError` with the count unmoved, an external cancellation
+> already propagating, or an ordinary `Exception` the seam absorbs. Where the
+> completion had already committed, that row is in the trail and the claim it names
+> is **closed**; where it had not, the claim is **left open**. Nothing is deleted,
+> rewritten or compensated to make the two cases look alike — §6 offers no selective
+> delete and ADR-0060 §1 already rules that an abandoned append may have committed.
+> Every clause below that says "the claim is left open" is read subject to this one,
+> and says so where it appears; a draft promising it unconditionally promised a
+> rollback this store does not have.
 
 > **Normative.** **Nothing of ADR-0029 §3 is superseded by that silence**, and §7
 > adds no scope for it. §3's rule is that a `BaseException` propagates unchanged, and
@@ -1026,7 +1030,9 @@ the count.
 > **unmoved across the call**, so no cancellation request reached this task at all,
 > is not a cancellation of this call, is never read as one, and is **absorbed exactly
 > as any other completion failure is**. `invoke`
-> returns the call's own `ToolResult` unchanged, the claim is left open, the
+> returns the call's own `ToolResult` unchanged, the claim is left open **unless the
+> append had already committed** (the commit-state clause above governs that, here as
+> everywhere), the
 > diagnostic is emitted carrying no class (the clause above governs that field), and
 > `invoke` attempts no second completion: the obligation is to call
 > `complete_invocation` once per claim, and a completion path that failed has
@@ -1067,7 +1073,9 @@ the count.
 > exception, and it reaches the operator through the diagnostic below — by fault
 > class where it is an `Exception`, and by the operation and outcome alone where it
 > is a `BaseException` that is not one. It does not stand in the cancellation's
-> place, and the claim is left open as in every other completion failure.
+> place, and the claim is left open as in every other completion failure — **unless
+> the append had already committed**, which the commit-state clause above governs on
+> this branch as on the others.
 
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
@@ -1524,9 +1532,23 @@ nothing in this section inherits that nonce or its hazard.
 > say most about: a **completion whose outcome is `SUCCEEDED`** is the tool
 > reporting an outcome back through the seam, which is unreachable without the
 > callable. Where such a completion's `RecordedInvocation` also carries
-> `egress_call` true, a surface may say that the call was **sent**. It says this on
-> no other row and in no other state, and on every other row it says what that row
-> says and no more.
+> `egress_call` true, a surface may say that the egress call was **attempted and
+> reported success**. It says this on no other row and in no other state, and on
+> every other row it says what that row says and no more.
+
+> **Normative.** It may **not** say the call was **sent**, and an earlier draft that
+> granted that word is corrected here for the third time this section has had to say
+> less. `SUCCEEDED` is bounded by ADR-0031 §4 to exactly three facts — a validated
+> callable return, an unexpired deadline, and no increase in the cancellation count —
+> and none of them is a transmission. An egress callable that returns normally
+> without putting a byte on the wire produces `SUCCEEDED` like any other, so "sent"
+> would assert a fact no row carries, which is precisely what the clause above
+> refuses for "this ran". **Nothing available today could carry it**: a transmission
+> fact would have to come from the integration, and `ToolImplementation` returns
+> `FrozenJson` with no channel for one (§5) — the same gap #1558 owns for the cost.
+> The word is therefore withheld rather than approximated, and the row still says the
+> most useful true thing: the system attempted an egress call on an authorisation the
+> user granted, and the tool reported it succeeded.
 
 > **Normative.** No surface says or implies that anything was **read**, **received**,
 > **delivered**, **seen** or **acted on** by any recipient, on any row, in any
@@ -1592,15 +1614,18 @@ boolean, where a `PermissionDecision` measured 858 bytes in this tree carrying a
 whole `ToolDefinition` and an egress binding (ADR-0186 §3). The export of
 invocations is subject to the same limit and fails the same honest way.
 
-**"Sent" is the whole point of the exercise and it is granted narrowly.** ADR-0186
-§8 barred it because the trail held only rulings: "a resolved `ALLOW` says a call
-was permitted and says nothing about whether, or how many times, it ran". That
-sentence stays true of a decision row and is now false of nothing, because the word
-is granted on a different row — a **`SUCCEEDED` completion**, which is the tool
-reporting an outcome back through the seam and so is unreachable without the
-callable, over a decision the store has already confirmed carried a binding. It is
-granted on the one state that establishes the call happened, and on no state that
-merely records it was begun (above). The three words that stay barred
+**The egress statement was the point of the exercise, and what survives is
+narrower than "sent".** ADR-0186 §8 barred that word because the trail held only
+rulings: "a resolved `ALLOW` says a call was permitted and says nothing about
+whether, or how many times, it ran". That sentence stays true of a decision row, and
+this ADR does not falsify it — it adds a different row, a **`SUCCEEDED`
+completion**, which is the tool reporting an outcome back through the seam and so is
+unreachable without the callable, over a decision the store has already confirmed
+carried a binding. What that licenses is that the egress call was **attempted and
+reported success**, on the one state establishing the call happened and on no state
+that merely records it was begun (above). "Sent" itself stays barred, on ADR-0031
+§4's bound on what `SUCCEEDED` means and for want of any transmission fact an
+integration could report (§4, §5). The three words that stay barred
 everywhere are barred for a reason no record can lift: nothing in this system
 observes a recipient. A tool reporting `SUCCEEDED` reports that its own upstream
 accepted the call, and a surface that turned that into "delivered" would be
@@ -2246,10 +2271,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > because §2 admits it and an earlier enumeration here left it out — **`SUCCEEDED`,
 > which carries no kind at all**, on a row whose `egress_call` is true and again on
 > one where it is false. On the `SUCCEEDED` pair the adapter renders the cost the row
-> carries, says **sent** on the egress one and says it on the other **nowhere**, and
-> raises on neither; an adapter that branches on the failure outcomes alone passes
-> every other case here and then crashes, drops the cost, or says "sent" for a
-> successful local call. On
+> carries, says **attempted and reported success** on the egress one and says it on
+> the other **nowhere**, and raises on neither; an adapter that branches on the
+> failure outcomes alone passes every other case here and then crashes, drops the
+> cost, or makes the egress statement for a successful local call. The suite also
+> asserts the word **"sent" appears on no row in any state** (§4), because an adapter
+> that reaches for it is the drift this clause exists to catch. On
 > the kindless two it renders that no kind was reported, renders no kind of its own,
 > drops neither the row nor the field, and raises nothing; on the kinded two it
 > renders the reported kind exactly and substitutes nothing. The floor is proved on
@@ -2550,6 +2577,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > compensating append (§3, §6, ADR-0060 §1). A suite carrying only the first timing
 > certifies an implementation that tries to repair the second.
 
+> **Normative.** The same **commit-state split** is asserted on the other failure
+> branches, because an implementation may honour it on the `BaseException` path and
+> repair the others: a collaborator's `CancelledError` with the count unmoved, an
+> external cancellation already propagating, and an ordinary absorbed `Exception`
+> are each driven with the barrier released **after** the row is durable, and each
+> must leave the completion standing and the claim closed — no compensating append,
+> no rewrite, no second `complete_invocation` (§3). Each is also driven with the
+> failure **before** the commit, where the claim is left open. What `invoke` returns
+> or raises on each branch is unchanged by which side of the commit it landed on, and
+> the tests assert that too: the durable state and the outward answer are decided
+> independently, which is exactly what a repairing implementation gets wrong.
+
 > **Normative.** What **is** pinned is the `BaseException` the **tool callable**
 > raises, because that path is contracted and answers differently: the callable is
 > awaited **directly** and is not isolated in a task, so a `KeyboardInterrupt` and a
@@ -2604,6 +2643,19 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > stores or returns the caller's object passes every mapping and shape case above and
 > fails these, which is why ADR-0021 §4 pins it for `record` rather than resting on
 > `frozen=True`.
+
+> **Normative.** The **mid-flight** mutation is pinned as well, and it is a
+> different obligation from the one above rather than a repeat of it. ADR-0065
+> requires every Protocol call to observe its inputs **once, before its first
+> await**, and says in terms that a post-call mutation test does not detect tearing.
+> So the suite mutates the submitted `PermissionDecision` and the submitted
+> `ToolCost` through `__dict__` **at the first suspension point** — a store operation
+> held on a barrier the test owns — and asserts that every answer derives from the
+> pre-await snapshot: the admission decision, the refusal or its absence, the row
+> persisted, and the row returned. An implementation that validates, suspends, and
+> then re-reads the caller's object can admit a claim under a decision that was
+> spent when it looked and persist a cost nobody submitted, while passing every
+> post-return case above.
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
@@ -2771,8 +2823,9 @@ row kinds, and the annotation belongs to the kind that was already there.
 
 - **A user can be told what happened, for the first time.** The listing states that
   a call was begun on an authorisation the user granted, what it cost, how it
-  finished, and — on an egress call that succeeded — that it was sent. It does not
-  say the callable was entered, because no row carries that (§4). That is #1503's user-visible half, and it is what
+  finished, and — on an egress call that succeeded — that it was attempted and
+  reported success. It does not say the callable was entered, and it does not say
+  anything was **sent**, because no row carries either fact (§4). That is #1503's user-visible half, and it is what
   milestone 24's exit could not be ruled on.
 - **One approval no longer backs an unbounded number of acts on a *spendable*
   authorisation** — side-effecting and not `NATURAL` (§1). The property ADR-0021 §4
