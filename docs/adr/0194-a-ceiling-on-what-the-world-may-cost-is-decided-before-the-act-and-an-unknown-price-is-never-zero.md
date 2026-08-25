@@ -518,6 +518,23 @@ the two properties it has rather than letting a reader assume the stronger one.
 > entered. A refused call reaches no callable, appends no claim, and appends no
 > completion.
 
+> **Normative.** It runs **after all three** of ADR-0029 §2's checks, in that
+> section's own order and reordering none of them: the call is revalidated and
+> detached; the definition on the detached copy matches the registry's original;
+> `decision.authorises(request)` is re-evaluated on that same copy. Only then is
+> `admit_invocation` called, and the estimate it is given is read off **that
+> detached, checked copy** — never off the argument the caller passed. This ADR
+> adds a fourth check to the end of that sequence and nothing to its middle.
+
+> **Normative.** The order is fail-closed in one direction and that is why it is
+> marked rather than assumed. A `ToolCall` mutated after construction — the
+> `__dict__` write ADR-0029 §2 puts inside the threat model — could carry an
+> `UNKNOWN` cost the user never authorised; reaching the gate first, it would be
+> refused as this ADR's `SpendUndeterminedError` when it is in fact ADR-0029's
+> `ToolBindingError`, and the operator would be sent to a budget setting to repair
+> a binding failure. A `ToolBindingError` therefore pre-empts every refusal in §4,
+> and no lane may move the admission earlier to save a store read.
+
 > **Normative.** Where **neither ceiling is configured**, `admit_invocation`
 > returns before it reads the clock, reads the store or performs any arithmetic.
 > It cannot refuse in that configuration — not on a crossed ceiling, not on a
@@ -632,14 +649,23 @@ the two properties it has rather than letting a reader assume the stronger one.
 > sends such a tool to `CONFIRM`, are neither relaxed, satisfied nor duplicated by
 > anything here.
 
-> **Normative.** The admission reads exactly three things: the `ToolCost` handed
-> to `admit_invocation`, §1's four settings with the `Settings.timezone` §1 exempts
-> as the period selector, and the rows and reservations the holder holds. Nothing
-> else conditions it — not the calling subsystem, not the tool's identity, not a
+> **Normative.** The **decision** reads exactly four things: the `ToolCost` handed
+> to `admit_invocation`; §1's four settings with the `Settings.timezone` §1 exempts
+> as the period selector; the **instant** read from the injected clock, which is
+> what selects the period and whose failure is §4's third ground; and the rows and
+> reservations the holder holds. Nothing else conditions it — not the calling subsystem, not the tool's identity, not a
 > capability, not a protocol, and no **caller-controlled** value: there is no
 > parameter, argument, header or configuration by which a caller obtains an
 > invocation the ceiling would refuse, and no override, bypass or force flag exists
 > to be reached for.
+
+> **Normative.** The injected **id factory** is a dependency of the *handle* and
+> not of the decision, and the two are counted separately for that reason. It is
+> consulted only after an admission has been granted, no value it returns and no
+> failure it has changes whether the call is admitted (§3's minting rule), and an
+> implementation that let it reach the comparison would have made the outcome
+> depend on a source of opacity. The inventory above is over the decision; this is
+> the whole of what else the member touches.
 
 > **Normative.** The `ToolCost` is not an exception to that and is the reason it is
 > stated as three things rather than as "nothing from the request". It is the
@@ -1509,6 +1535,17 @@ the ADRs it depends on rather than replacing them.
 > `release_admission` that is never called twice for one admission by the invoker
 > even though the gate must tolerate it.
 
+> **Normative.** That gate fake **records its arguments**, and the suite asserts
+> the invoker forwarded the **pinned definition's own** `ToolCost` — the object on
+> the revalidated, detached copy ADR-0029 §2's checks produced — unchanged, for a
+> `FREE` definition, a `PER_CALL` one and an `UNKNOWN` one. Without it an invoker
+> passing `FREE` for a registered `PER_CALL` cost of 20 lets the callable begin at
+> an accounted total of 90 against a ceiling of 100 and still passes every clause
+> above, because those assert refusal and release and never look at what was
+> handed over. The suite also asserts the estimate is not read from the caller's
+> argument: with the argument mutated after construction, the call fails ADR-0029's
+> way and the gate is never reached (§3).
+
 > **Normative.** That group carries the **whole** of the promoted surface's
 > topology, because widening `AssistantEngine` breaks every implementation of it at
 > once: the loopback `HubEngineClient`'s forwarding member, `HubClient`'s, the
@@ -1806,6 +1843,16 @@ the ADRs it depends on rather than replacing them.
 > it again under a hostile ambient `decimal` context — a precision of ten, with
 > traps armed — asserting the same classifications and no leaked `decimal`
 > exception.
+
+> **Normative.** The suite drives the case where **both** configured periods are
+> indeterminate at once — both ceilings configured and an open claim in the current
+> day, which is in the month as well — and asserts the single
+> `SpendUndeterminedError` names **both**, in §5's fixed order, `CALENDAR_DAY` then
+> `CALENDAR_MONTH`. An implementation naming only the day passes the ground and
+> class clauses above and the both-ceilings clause below, and still tells a user to
+> wait until tomorrow when the month cannot be measured either. It drives the
+> mirror as the assertion that the rule is over *configured* periods: with only the
+> month ceiling set and the same claim, the message names the month alone.
 
 > **Normative.** The suite drives the case where **both** ceilings are crossed by
 > one projection — day 9 of 10 and month 99 of 100 against an estimate of 2 — and
