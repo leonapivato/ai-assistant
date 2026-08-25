@@ -1,10 +1,10 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Partially superseded by ADR-0193 (§3's per-ruling purity sentence, for a policy constructed with an authorisation source)
+- Status: Partially superseded by ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source)
 - Date: 2026-07-20
 - Partially superseded: 2026-08-25 by
   [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
-  — **one sentence of §3, in one condition: a policy constructed with an
+  — **two sentences of §3, in one condition: a policy constructed with an
   authorisation source performs one durable read per ruling.** §3's rejected
   alternatives say *"A pure policy is a testable policy. `decide` as a function of
   its argument is what lets §5's monotonicity obligations be checked at all; a
@@ -16,14 +16,25 @@
   describes the contract, and a reader building one acts differently, which is
   ADR-0070 §1's test.
 
-  **What is *not* superseded, and it is nearly all of §3.** The sentence still
-  governs **every policy constructed with no authorisation source** — the
+  **The same purity claim is carried by a second sentence of §3, and it goes with
+  the first.** §3 also says *"`decided_at` and `id` are supplied by the caller
+  that records, which leaves `decide` a genuine function of its argument — which
+  is in turn what makes §5's monotonicity obligations checkable at all."* For a
+  sourced policy that conclusion is false in the same respect and for the same
+  reason: the same request draws `CONFIRM` against an empty store and `ALLOW` once
+  a covering grant is recorded, so `decide` answers from its argument **and its
+  injected seams**. That half of the sentence is superseded. The half it is
+  *drawn from* is not, and is the next paragraph.
+
+  **What is *not* superseded, and it is nearly all of §3.** Both sentences still
+  govern **every policy constructed with no authorisation source** — the
   condition §3's own first bullet states ("Today that is *every* policy") and the
   one ADR-0193 leaves untouched: such a policy takes no seam, reads nothing, and
-  returns `authorised_by is None`. `decide` still mints no `id` and reads no
-  clock, so the removal that sentence was drawn from stands, and §5's monotonicity
-  obligations stay checkable — ADR-0193 §3 restates the comparison with the grants
-  in the store held equal, against the canonical fake its §14 lands. The
+  returns `authorised_by is None`. Even for a sourced policy `decide` still mints
+  no `id` and reads no clock, so the removal the second sentence was drawn from
+  stands, and §5's monotonicity obligations stay checkable — ADR-0193 §3 restates
+  the comparison with the grants in the store held equal, against the canonical
+  fake its §14 lands. The
   **id-resolution hazard** is untouched and stays closed: *"a policy that resolved
   an id would be reintroducing the rebinding hazard inside the very subsystem
   meant to close it"* — `RecipientGrants.covering` takes the whole request and
@@ -34,7 +45,7 @@
   `authorised_by`'s two rules, §1's transcription rules, §4's append-only trail
   and §5's floors all stand.
 
-  **§5 anticipated this**, which is why the scope is one sentence rather than the
+  **§5 anticipated this**, which is why the scope is two sentences rather than the
   section: the disclosure floor *"is written against the distinction that matters
   rather than against a proxy for it, which is what keeps §6's relief valve
   reachable **without amending this clause**"*, and *"the relief valve is
