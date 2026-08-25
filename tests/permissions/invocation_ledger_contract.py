@@ -136,6 +136,21 @@ class HostileKey(str):
         return False
 
 
+class Unhashable(str):
+    """A str that refuses to be hashed, which an enum lookup has to do.
+
+    Not a value a validator rejects: a value that stops the validator from reaching a
+    verdict at all. ToolOutcome(value) looks the member up in a mapping, so the
+    fault leaves as whatever __hash__ raised rather than as the refusal the
+    lookup was about to make.
+    """
+
+    def __hash__(self) -> int:
+        """Refuse to be hashed."""
+        msg = "this value refuses to be hashed"
+        raise RuntimeError(msg)
+
+
 class HostileClass:
     """An object that refuses to say what it is, which ``isinstance`` has to ask.
 
@@ -700,6 +715,38 @@ class InvocationCompleterContract:
 
         assert not isinstance(raised.value, InvalidCompletionError)
         assert await _rows(ledger) == []
+
+    @pytest.mark.parametrize(
+        "field_name", ["outcome", "failure_kind"], ids=["the-outcome", "the-failure-kind"]
+    )
+    async def test_an_enum_argument_that_cannot_be_looked_up_is_an_argument_fault(
+        self, ledger: LedgerSubject, field_name: str
+    ) -> None:
+        """The case above, where the value defeats the *check* rather than failing it.
+
+        ``ToolOutcome(value)`` looks the member up in a mapping, so it hashes what it
+        was given: a ``str`` subclass whose ``__hash__`` raises leaves through a
+        validator that never got as far as saying no. An implementation catching only
+        what its validators mean to raise lets that out of ``complete_invocation`` as
+        itself, and ADR-0192 §2's order is exhaustive over the classes a refusal
+        arrives in.
+
+        The claim is left open, because nothing was appended: this is an argument
+        fault, decided before the store is touched at all.
+        """
+        claim = await _claim(ledger, allowed())
+        arguments: dict[str, Any] = {
+            "claim_id": claim.id,
+            "outcome": ToolOutcome.FAILED,
+            "incurred_cost": UNKNOWN_COST,
+        }
+        arguments[field_name] = Unhashable("SUCCEEDED" if field_name == "outcome" else "TIMED_OUT")
+
+        with pytest.raises(AuditError) as raised:
+            await ledger.complete_invocation(**arguments)
+
+        assert not isinstance(raised.value, InvalidCompletionError)
+        assert [row.id for row in await ledger.open_invocations(decision_id="d-1")] == [claim.id]
 
     @pytest.mark.parametrize(
         ("field_name", "value"),

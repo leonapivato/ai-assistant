@@ -1454,12 +1454,22 @@ def _checked_argument[T](name: str, build: Callable[[], T]) -> T:
     translated, while an exception a collaborator's callable raises on its own
     account is never routed through here.
 
+    **Every ordinary exception, and not only the ones a validator means to raise.**
+    ``build`` never does anything but check a value, and the value is the caller's,
+    so whatever it raises is a fault of that value — including where the value is
+    what makes the check itself fail: ``ToolOutcome(value)`` looks the member up in a
+    mapping, so a ``str`` subclass whose ``__hash__`` raises leaves through a
+    validator that never got to say no. ADR-0192 §2's order is exhaustive over the
+    classes a refusal arrives in. ``BaseException`` is deliberately not caught: a
+    cancellation is not a fault of the value and is never absorbed (ADR-0060 §1).
+    The durable store carries the identical guard.
+
     Raises:
         AuditError: If ``build`` rejects the value.
     """
     try:
         return build()
-    except (ValidationError, ValueError) as exc:
+    except Exception as exc:
         # `describe_untrusted` on the cause, for :func:`_revalidated`'s reason: the
         # value is the caller's, and so is any exception reading it raised.
         msg = f"the audit trail was given a {name} it cannot record: {describe_untrusted(exc)}"
