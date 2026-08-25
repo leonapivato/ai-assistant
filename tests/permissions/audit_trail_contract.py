@@ -1297,7 +1297,7 @@ class AuditTrailContract:
         assert await trail.get("d-2") is None
         assert [held.id for held in await trail.export()] == ["d-1"]
 
-    @pytest.mark.parametrize("supplied", ["model", "mapping"])
+    @pytest.mark.parametrize("supplied", ["model", "mapping", "whole-decision"])
     async def test_a_decision_whose_binding_records_no_origin_is_refused(
         self, trail: AuditTrail, supplied: str
     ) -> None:
@@ -1335,6 +1335,13 @@ class AuditTrailContract:
         closes both at once, and is the same reason ADR-0021 §4 asks for a validated
         snapshot rather than a copied one.
 
+        **The third arm hands the whole decision over as a mapping**, which the same
+        ordering admits: a value that is not a model reaches ``model_validate``
+        untouched and comes back a decision. A store naming the refusal from what it
+        was *handed* rather than from the snapshot then asks a ``dict`` for its
+        ``.id`` — an ``AttributeError`` raised from inside the refusal that was about
+        to be made, and outside the classes ADR-0192 §2's order admits.
+
         ``_refuses`` asserts the write left no trace, which matters more here than
         usual: a store that appended and *then* raised would be holding precisely the
         fabricated history this clause exists to make impossible.
@@ -1351,8 +1358,11 @@ class AuditTrailContract:
         )
         await trail.record(decision("d-1"))
         unrecorded = decision("d-2").model_copy(update={"egress_binding": binding})
+        handed: Any = unrecorded
+        if supplied == "whole-decision":
+            handed = {**dict(unrecorded), "egress_binding": members}
 
-        await _refuses(trail, unrecorded, AuditError)
+        await _refuses(trail, handed, AuditError)
 
         assert await trail.get("d-2") is None
         assert [held.id for held in await trail.export()] == ["d-1"]

@@ -1641,6 +1641,11 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     rather than a value. ``record`` is where the trail already enforces what a model
     cannot see for itself (ADR-0021 §4), and this is one more clause of that kind.
 
+    **The refusal is named from the snapshot too**, because a caller can hand over a
+    raw mapping: it validates into a decision — that is the ordering above — and
+    ``given.id`` on a ``dict`` is an ``AttributeError`` raised from inside the refusal
+    that was about to be made.
+
     **The refusal is judged on the rebuilt snapshot, not on what the caller handed
     over, and the order is load-bearing.** ``model_copy(update=...)`` does **not**
     validate, so a caller can put a bare mapping into ``egress_binding``; an
@@ -1692,7 +1697,7 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
         raise AuditError(msg) from exc
     if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
         msg = (
-            f"decision {decision.id!r} is not a valid record: its egress binding "
+            f"decision {snapshot.id!r} is not a valid record: its egress binding "
             f"records no origin, which is a shape only a row written before "
             f"ADR-0181 can have; the trail reads such rows and never writes one"
         )
