@@ -1218,11 +1218,21 @@ whole explanation.
 > configured differently from the process that computed them; a renderer uses these
 > fields and never its own configuration and never its own `tzdata`.
 
-> **Normative.** Both offsets are whole minutes and within `±24` hours — the range
-> a real UTC offset occupies — and a value outside it raises at validation. This is
-> an **intrinsic** invariant in ADR-0016 §2's sense: it is decided from the field's
-> own value, needs no zone database, and gives the same answer for every consumer,
-> which is the property the zone name could not have.
+> **Normative.** Both offsets are **strictly within `±24` hours** and carry
+> whatever resolution the zone database gives them — **seconds included, and not
+> rounded to a minute**. `core/clock.py` already accounts for the historical
+> offsets the tz database carries, naming `Asia/Manila`'s `-15:56:08` and
+> `America/Metlakatla`'s `+15:13:42` as the widest; a whole-minute rule would make
+> a `SpendTotal` unable to state the offset actually in force for a reading
+> `checked_clock` accepts, leaving the producer to leak a validation failure,
+> round the offset, or fail to return the value §6 promises. The `±24`-hour bound
+> is strict and is the whole of the range rule.
+
+> **Normative.** That is an **intrinsic** invariant in ADR-0016 §2's sense — decided
+> from the field's own value, needing no zone database, the same answer for every
+> consumer — which is the property the zone name could not have. Rounding, by
+> contrast, would have been this model quietly disagreeing with the clock contract
+> about what an offset is.
 
 > **Normative.** `ceiling` is non-`None` only where `currency` is. `accounted` is
 > `None` in exactly two states, which `currency` discriminates: where `currency`
@@ -1340,24 +1350,36 @@ been a fourth row, and it bought nothing the specification's own form does not.
 > and encodes one after, so no ratified vector's spelling moves. The record it owes
 > ADR-0087 is in §9 and §10.
 
-> **Normative.** `PROTOCOL_VERSION` **is bumped, once, by the lane that widens the
-> codec** — the implementation lane §11 names — **in that same change**, and this
-> ADR names the bearer rather than leaving it to be inferred. ADR-0124 §9 decides
-> it: a bump is owed by "any change after which a frame a conforming peer at the
-> new version may send would be refused by a conforming peer at the old version",
-> and "the obligation is on whoever makes the change, in the same change". A peer
-> at the new version may emit a `PER_CALL` `Decimal` inside a `PermissionDecision`
-> and a peer at the old version refuses it, so the first limb is met the moment the
-> codec's domain widens.
+> **Normative.** `PROTOCOL_VERSION` is bumped **once**, by the **consumer group
+> §11 names**, and that one bump carries **two** independent ADR-0124 §9 grounds
+> because that group makes both incompatible changes in one change. §11 already
+> puts the codec entries and the promoted member in that group; this clause names
+> the grounds so neither is read as unversioned.
+>
+> - **The codec's domain widens.** A peer at the new version may emit a `PER_CALL`
+>   `Decimal` inside a `PermissionDecision`, and a peer at the old version refuses
+>   it — ADR-0124 §9's first limb, "a frame a conforming peer at the new version
+>   may send would be refused by a conforming peer at the old version".
+> - **The promoted method set gains a member.** An old peer refuses an unknown
+>   `spend_totals`, which is the same limb one surface out and is the ground
+>   ADR-0186 §5 bumped on.
 
-> **Normative.** The bearer is named because the obligation does **not** travel.
-> Reading it as discharged by a *later* change — a consumer group that bumps for
-> the promoted member it adds — leaves the window between the two, in which a peer
-> carrying the widened codec announces a version an old peer believes it
-> understands. ADR-0124 §9's "in the same change" forbids exactly that window. So
-> the bump sits with the codec widening; a consumer group landing afterwards adds
-> no second bump on this ground, and no lane adds one on the strength of the
-> promoted member alone.
+> **Normative.** ADR-0087 §8's first case is **absent and that is not a defence**,
+> which is stated because the two rules are easy to conflate. §8's first case is
+> about bytes *changing* for a value an encoder already emitted; no conforming
+> encoder emitted any bytes for a `Decimal` before, it raised, so no ratified
+> vector's spelling moves and §8's ground is genuinely not met. ADR-0124 §9's is,
+> independently: it asks what a new peer **may send** that an old one refuses, not
+> whether an old spelling moved. A lane reading ADR-0087's note as "no bump owed"
+> and stopping there would ship the widened codec unversioned.
+
+> **Normative.** **No lane splits the codec widening out of that group**, and this
+> is the clause that forbids it rather than a matter of convenience. Landing the
+> codec in an earlier change and the member in a later one creates a window in
+> which a peer carrying the widened codec announces a version an old peer believes
+> it understands — and ADR-0124 §9's "in the same change" would then oblige that
+> earlier lane to bump on its own, making two bumps where the topology needs one.
+> One change, one bump, both grounds.
 
 > **Normative.** A `ToolInvoker` implementation holds a `SpendGate`. It acquires
 > no `AuditTrail`, no `SpendLedger` and no additional store handle by this ADR,
@@ -2217,14 +2239,39 @@ the ADRs it depends on rather than replacing them.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations, and **every one of them is decidable from the value alone**:
-> `start_offset` and `end_offset` are whole minutes within `±24` hours; `ceiling`
+> `start_offset` and `end_offset` are strictly within `±24` hours; `ceiling`
 > is non-`None` only where `currency` is; and `accounted` is
 > non-`None` only where `currency` is. A construction violating any of them raises
-> at validation, and the shared contract drives each as a hostile construction —
-> an offset of 30 seconds, one of `±24` hours exactly and one beyond it, each
-> raising, beside the currency and absence cases.
+> at validation, and the shared contract drives each as a hostile construction:
+> an offset of `±24` hours exactly and one beyond it each **raise**, beside the
+> currency and absence cases.
 
-> **Normative.** The model's bound invariant is likewise the **intrinsic** one and
+> **Normative.** The suite drives the offsets' **resolution** in the accepting
+> direction, because a whole-minute validator passes every refusing fixture above:
+> `Asia/Manila`'s `-15:56:08` and `America/Metlakatla`'s `+15:13:42` each
+> **construct**, are carried unrounded, and render as themselves. A model that
+> rounded to the minute states an offset the clock contract says was never in
+> force.
+
+> **Normative.** It drives the **bound-plus-offset** invariant at both ends, which
+> the offset and clamp fixtures reach separately and never together:
+> `period_start` at the earliest representable instant with a negative
+> `start_offset` **raises**, `period_end` at the latest with a positive
+> `end_offset` **raises**, and the same bounds with offsets of the opposite sign
+> construct and render. It asserts the CLI renders both accepting cases rather than
+> only that they validate, since the invariant exists for the renderer.
+
+> **Normative.** **Each bound plus its own offset is representable**, and the model
+> checks it: `period_start + start_offset` and `period_end + end_offset` each land
+> inside `datetime`'s range. This is intrinsic on the same test — two fields and an
+> addition, no zone database — and it is the invariant that makes §6's rendering
+> total, since a renderer performs exactly those two additions. Without it the
+> listed range and ordering rules admit a value the required renderer cannot print:
+> `period_start` at `0001-01-01T00:00:00Z` with a negative `start_offset`
+> underflows, and a `period_end` near `datetime.max` with a positive `end_offset`
+> overflows, each while satisfying every other clause here.
+
+> **Normative.** The model's bound invariant is otherwise the **intrinsic** one and
 > nothing more: `period_start` is strictly before `period_end`, except on §1's
 > zero-length period where they are equal. It does **not** re-derive §1's
 > boundaries and compare, and that is a decision rather than an omission — the

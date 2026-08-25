@@ -37,9 +37,13 @@
   §7 and §8 stand as ratified.
 
   **What this did not change.** §8's first case does not apply — no conforming
-  encoder emitted any bytes for a `Decimal` before, it raised — so no protocol
-  version bump is owed on this ground, though ADR-0194's consumer group bumps
-  anyway for the promoted method it adds. This ADR's ratified text below is **not**
+  encoder emitted any bytes for a `Decimal` before, it raised — so no ratified
+  vector's spelling moves and no bump is owed **on §8's ground**. A bump is
+  nonetheless owed on **ADR-0124 §9's**, which asks what a new peer may send that
+  an old one refuses rather than whether an old spelling moved: a peer carrying the
+  widened codec may emit a `PER_CALL` `Decimal` and an old peer refuses it.
+  ADR-0194 §5 puts the codec entries and the promoted member in one change, so one
+  `PROTOCOL_VERSION` bump carries that ground and the promoted method's together. This ADR's ratified text below is **not**
   rewritten; the `Status` line above and this note are the whole of the record
   (ADR-0070 §1 and §4, ADR-0082 §2). Refs #1559, ADR-0194 §5, §9, §10.
 - **This is a fifth change inserted into ADR-0084 §5's four, and its position is
