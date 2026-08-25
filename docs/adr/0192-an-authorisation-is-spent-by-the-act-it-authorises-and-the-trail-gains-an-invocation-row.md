@@ -1017,13 +1017,27 @@ the count.
 > and neither ledger await is bounded. `timeout` is the deadline for the **call**,
 > which is what §4 makes it, and it was never a budget for the seam's whole frame.
 
-> **Normative.** `invoke` **spawns nothing and retains nothing** on either path. It
-> awaits the ledger call it made and nothing else: there is no orphan task to own,
-> nothing to be collected mid-write, and no unretrieved exception left behind. The
-> store owns its own in-flight work and reaches quiescence when the façade closes it
-> (ADR-0042 §2), which is the arrangement that already holds and which this ADR does
-> not disturb. It adds no shutdown member, no drain hook and no lifecycle obligation
-> to `ToolInvoker`.
+> **Normative.** Each ledger append is driven as a **retained, shielded** await, and
+> that is the shape §1's observability clause requires rather than merely permits.
+> A cancellation delivered into the ledger call itself is not enough: this project's
+> audit store absorbs such a cancellation, waits for its worker, and then re-raises it
+> **in place of the value the worker produced** (ADR-0054, `permissions/audit.py`) —
+> so a caller that let the cancellation reach that call would lose the claim's own
+> `id` for a claim that landed, and would then be unable to complete it. `invoke`
+> therefore holds the append in a task it shields, absorbs the cancellation itself,
+> reads the task's actual result or failure, and only then re-raises. It is ADR-0034
+> §1's own remedy for its own claim, which §1 above already cites, applied to this
+> one.
+
+> **Normative.** That retention creates nothing for anyone else to track. Neither
+> append is bounded, so `invoke` does not return until the task it shielded has
+> finished: nothing outlives the frame, no task is dropped, nothing is collected
+> mid-write, and no unretrieved exception is left behind. The store owns its own
+> in-flight work and reaches quiescence when the façade closes it (ADR-0042 §2),
+> which is the arrangement that already holds and which this ADR does not disturb.
+> **It adds no shutdown member, no drain hook and no lifecycle obligation to
+> `ToolInvoker`** — the two properties are compatible precisely because the wait is
+> unbounded, and a draft that bounded it had to choose between them.
 
 > **Normative.** Where ADR-0014 §4's recovery scan records `INDETERMINATE` on a
 > step, the same act appends an `INDETERMINATE` completion for **every** open claim
@@ -1793,16 +1807,22 @@ untouched. *(b) "what it buys is that the seam stops waiting, not that the tool 
 working"* — **this is the sentence that becomes over-wide**, and a reader holding
 only ADR-0029 would expect both bookkeeping waits to be bounded and would be wrong.
 ADR-0070 §1's test comes out on the record side, so §4 gains the record. *(c) "the
-expiry comes back as a classified `ToolResult`"* — still true of the expiry, which is
-computed and returned exactly as §4 says; what is new is that a store which has
-stopped answering can delay that return, which §3 states rather than hides. *(d) The
+expiry comes back as a classified `ToolResult`"* — **this sentence is superseded too,
+and only over the completion window.** The expiry is still *computed* and classified
+exactly as §4 says, and §3 changes nothing about that; what §4 also promises is that
+it comes **back**, and an audit store that never answers the completion append stops
+it coming back at all rather than merely late. Review put it exactly that way and it
+is right: this is a window where the promise is false, not slow, so it goes in the
+record with (b). *(d) The
 `FAILED`/`INDETERMINATE` classification rule* — this ADR computes nothing of its own
 there and consults §4 for it.
 
 **The scope of that record is the two audit writes and nothing else.** It does not
-reach the deadline over the callable, the classification of an expiry, the validation
-of the argument, or the rule that the seam and not the caller enforces it — all four
-stand unchanged and this ADR relies on every one. What a reader is owed, and what the
+reach the deadline over the callable, the **computation and classification** of an
+expiry, the validation of the argument, or the rule that the seam and not the caller
+enforces it — all four stand unchanged and this ADR relies on every one. What it does
+reach, on top of (b), is the *delivery* of that classified result back to the caller,
+and only where the completion append is the thing that hangs. What a reader is owed, and what the
 note on ADR-0029 says, is that the two waits `invoke` adds are bounded by the store
 rather than by `timeout`, and why each is.
 
@@ -2190,11 +2210,20 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > implementation lets that argument reach either append — which is the whole point of
 > the pair.
 
+> **Normative.** The **shield** is pinned against the store's real behaviour and not
+> against a convenient fake. The ledger the test injects re-raises an absorbed
+> cancellation **in place of** the row it produced, which is what `permissions/audit.py`
+> does (ADR-0054): with a cancellation delivered while the claim append is in flight,
+> `invoke` must still hold the claim's `id`, still append the completion §3 requires,
+> leave **no** claim open, and re-raise the `CancelledError` last. An implementation
+> that awaits the ledger call directly passes every unshielded test and fails this
+> one, leaving a landed claim it can never name.
+
 > **Normative.** No test asserts that a ledger append is abandoned, and none may be
-> written, because §3 states that no such abandonment happens: `invoke` spawns
-> nothing, so there is no late-landing row, no orphan task and no unretrieved
-> exception to test for. A suite that grew such a case would be pinning behaviour
-> this ADR forbids.
+> written: neither wait is bounded and the shielded task is awaited to its outcome,
+> so there is no late-landing row, no orphan task and no unretrieved exception to
+> test for. A suite that grew such a case would be pinning behaviour this ADR
+> forbids.
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
@@ -2402,8 +2431,9 @@ row kinds, and the annotation belongs to the kind that was already there.
   write, history read or erasure reaches `tools/`.
 - **A hung audit store now blocks the call, and `invoke` waits with it.** Neither
   ledger append carries a deadline of the seam's (§§1, 3), so a store that has
-  stopped answering blocks the request before the callable and delays the classified
-  `ToolResult` after it — a real liveness cost on a broken store, taken deliberately
+  stopped answering blocks the request before the callable and withholds the
+  classified `ToolResult` after it — not late, but not at all, for as long as the
+  store does not answer. A real liveness cost on a broken store, taken deliberately
   and twice over. Before the callable, the alternative is a row that may or may not
   exist for an act that certainly never happened, with §5 failing closed on it for
   good. After it, a bound would not shorten the wait at all: ADR-0054 has the store
