@@ -169,13 +169,25 @@ surface can state an execution at all, because ADR-0186's two operations return
 > commits `RUNNING → FAILED` and never retries, on the window and not on a list of
 > causes.
 
-> **Normative.** That clause is stated over the `AssistantError` classes §2 names,
-> and it reaches nothing else. It does **not** reach a `BaseException` — a
-> `KeyboardInterrupt`, a `SystemExit` — and it does not reach an exception the clock
-> callable raises on its own account, which §2 propagates unwrapped. This ADR asks
-> the executor to derive **nothing** from either: it states no outcome for them,
-> ADR-0029 §3's "`BaseException` propagates unchanged" stands, and ADR-0034's own
-> treatment of them is untouched.
+> **Normative.** **No ordinary `Exception` leaves `invoke` unwrapped from the claim
+> path.** ADR-0026 §2's split binds the **ledger**, which propagates an exception its
+> clock callable raised without relabelling it (§2) — and `invoke`, one frame out and
+> a consumer rather than a guard, translates it. Every `Exception` that escapes the
+> claim append, whatever raised it, leaves `invoke` as an `AuditError` carrying it as
+> the cause, so the clause above reaches it and ADR-0034 §1's second ground
+> classifies the step `FAILED`. The type is destroyed nowhere: it survives on the
+> cause chain and as the diagnostic's fault class (§3). ADR-0034 §2 is the precedent
+> for a consumer that acts on a callable's failure, and the alternative is a
+> `RuntimeError` from a wired-wrong clock leaving a step `RUNNING` until a recovery
+> scan makes it `INDETERMINATE` — a provably pre-callable exit recorded as an act
+> that may have run, which is the misclassification ADR-0034 §1 exists to refuse.
+
+> **Normative.** That clause is stated over the `AssistantError` classes §2 names
+> and the exceptions the paragraph above translates into one, and it reaches nothing
+> else. It does **not** reach a `BaseException` — a `KeyboardInterrupt`, a
+> `SystemExit`. This ADR asks the executor to derive **nothing** from those: it
+> states no outcome for them, ADR-0029 §3's "`BaseException` propagates unchanged"
+> stands, and ADR-0034's own treatment of them is untouched.
 
 > **Normative.** The exclusion is deliberate and is not a gap left open. Such an
 > exception carries no marker saying which side of the callable it came from, so a
@@ -229,10 +241,33 @@ surface can state an execution at all, because ADR-0186's two operations return
 > out why the boolean reading fails, and one of its two named failures is exactly
 > this one, "a tool's invented `CancelledError` … promoted to an external
 > cancellation on the strength of something that happened before the seam was
-> entered". Where the count did increase, an external cancellation **is** pending and
-> the `CancelledError` propagates untouched: ADR-0060 §1's propagation clause turns
-> on provenance — "*from outside* is load-bearing" — and this ADR supersedes no part
-> of it.
+> entered".
+
+> **Normative.** **The delta carries no provenance, and no clause here may say it
+> does.** ADR-0031 §2 states the limit in terms — `cancelling()` "is a count of
+> requests, not a record of who made them, and CPython exposes nothing else" — and
+> names the manufactured case: a collaborator that cancels its own invoking task,
+> catches the result and raises can move the count with nothing outside having
+> cancelled anything. This ADR inherits that limit whole and closes no part of it.
+> What the two branches actually turn on is therefore stated exactly: an **unmoved**
+> count means no cancellation request reached this task during the call, and an
+> **increased** count means one did, from a party the count cannot name.
+
+> **Normative.** Where the count increased, the `CancelledError` propagates
+> untouched. That is the **fail-safe** branch and it is chosen because it is safe,
+> not because provenance was established: ADR-0031 §2 already accepts the same trade
+> one collaborator over, on the ground that the misreading "fails in the safe
+> direction" — an interrupted-call classification for a call that may have finished,
+> rather than a success reported for one that was cancelled. ADR-0060 §1's
+> propagation clause is satisfied whenever there is any doubt, which is what this
+> branch guarantees.
+
+> **Normative.** The mirror residue is inherited too and is named rather than
+> papered over: a collaborator that calls `uncancel()` can zero the delta and hide a
+> genuine external cancellation, at which point the clause above absorbs one it
+> should have delivered. That is exactly ADR-0031 §4's declared limit (#189), one
+> collaborator over — **not closed here, not made worse here**, and reaching an
+> injected clock or store only where it reaches an integration's callable already.
 
 > **Normative.** This is ADR-0029 §4's own rule applied one collaborator over, not a
 > new one. That section reserves propagation for "a cancellation delivered from
@@ -245,11 +280,20 @@ surface can state an execution at all, because ADR-0186's two operations return
 > cancelled. The reachability fact ADR-0034 §1 declines is still not minted, and
 > #234's residue is unchanged.
 
-> **Normative.** The step's outcome in that case is whatever
+> **Normative.** Where a `CancelledError` **does** leave `invoke` — an external
+> cancellation delivered while the append was in flight, or one the clauses above
+> propagate on an increased count — the step's outcome is whatever
 > `ToolDefinition.interrupted_outcome` already computes for a cancellation
 > (ADR-0029 §4), which may be `INDETERMINATE` for a call that provably did not run.
 > This ADR does **not** change that, exactly as it declines to change it for the
 > cancellation cases #234 already owns.
+
+> **Normative.** That clause governs **only** the cases where a `CancelledError`
+> leaves `invoke`, and is stated that way because an earlier draft left it
+> unqualified beside the new one. Where the collaborator's cancellation was absorbed
+> and an `AuditError` left instead, `interrupted_outcome` is never consulted: the
+> step is `FAILED` on ADR-0034 §1's second ground and can be nothing else. The two
+> clauses partition the claim path's exits and no exit falls under both.
 
 > **Normative.** Where the claim landed and the call is then cancelled before the
 > callable is entered, `invoke` appends the completion carrying the outcome ADR-0029
@@ -739,9 +783,10 @@ the count.
 > §3 forbids. The claim is left open by that exit as by any other.
 
 > **Normative.** A `CancelledError` **a collaborator raised** on the completion path
-> — the ledger's clock, its store — where the `Task.cancelling()` delta shows **no
-> external cancellation pending** is not a cancellation of this call, is never read
-> as one, and is **absorbed exactly as any other completion failure is**. `invoke`
+> — the ledger's clock, its store — where the `Task.cancelling()` count is
+> **unmoved across the call**, so no cancellation request reached this task at all,
+> is not a cancellation of this call, is never read as one, and is **absorbed exactly
+> as any other completion failure is**. `invoke`
 > returns the call's own `ToolResult` unchanged, the claim is left open, the
 > diagnostic is emitted carrying no class (the clause above governs that field), and
 > `invoke` attempts no second completion: the obligation is to call
@@ -761,11 +806,14 @@ the count.
 > from it and does not classify it through `ToolDefinition.interrupted_outcome`; the
 > outcome was already decided by the call itself.
 
-> **Normative.** Where the delta shows an external cancellation **is** pending, that
-> cancellation is what leaves `invoke`, by the clause below and by ADR-0060 §1. The
-> two cases are told apart by the count and by nothing else — never by the
-> exception's class, never by its identity, and never by where in the body it
-> surfaced.
+> **Normative.** Where the count **did** move, a cancellation request reached this
+> task during the call and that cancellation is what leaves `invoke`, by the clause
+> below and by ADR-0060 §1. The two cases are told apart by the count and by nothing
+> else — never by the exception's class, never by its identity, and never by where in
+> the body it surfaced. §1's provenance clauses bind here in full: the count names no
+> requester, the moved branch is chosen because it is the safe one rather than
+> because provenance was established, and ADR-0031 §4's `uncancel()` residue is
+> inherited and not closed.
 
 > **Normative.** No exit ever attempts a second completion for one claim. That is
 > stated on its own because three of the arms above are reached *from inside* the
@@ -993,7 +1041,12 @@ the other way — ADR-0029 §4 reserves propagation for the outside case and mak
 anything else "an exception like any other", and ADR-0031 §2 names the invented
 cancellation in terms and gives the `Task.cancelling()` delta as the discriminator
 precisely so it is not "promoted to an external cancellation on the strength of
-something that happened before the seam was entered". Propagating it also produced
+something that happened before the seam was entered". The delta is a weak signal and
+§1 says so — it "carries no provenance", it can be manufactured, and ADR-0031 §4's
+`uncancel()` residue can erase it — but it is the signal the seam already has, the
+branch it selects on doubt is the propagating one, and the case it decides here is
+the one where **no cancellation was requested of this task at all**. Propagating it
+also produced
 the concrete harm §3 exists to prevent: a `ToolResult` already in hand discarded, and
 a successful side effect committed by the executor as an interrupted call. So the arm
 is absorbed on the completion path and translated to an `AuditError` on the claim
@@ -1644,10 +1697,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > and the test distinguishes the two by the `Task.cancelling()` count alone (§3).
 
 > **Normative.** Each adapter the surface group writes against §4 is tested on
-> **that row shape**: given a `FAILED` completion carrying no `failure_kind`, it renders that
-> no kind was reported, renders no kind of its own, drops neither the row nor the
-> field, and raises nothing. The floor is proved on the shape that is hardest to
-> meet it on, which is the only way a floor is proved at all (§4).
+> **every completion shape §2 admits**, not on `FAILED` alone — a renderer that
+> branches on `FAILED` passes a `FAILED`-only test and then crashes or silently drops
+> a kind on the others. The cases are `FAILED` with no kind, `INDETERMINATE` with no
+> kind, `INDETERMINATE` with a reported kind, and `FAILED` with a reported kind. On
+> the kindless two it renders that no kind was reported, renders no kind of its own,
+> drops neither the row nor the field, and raises nothing; on the kinded two it
+> renders the reported kind exactly and substitutes nothing. The floor is proved on
+> the shapes hardest to meet it on, which is the only way a floor is proved at all
+> (§4).
 
 > **Normative.** Two tests are owed on the claim path's mirror case, one at the seam
 > and one at the **executor**. At the seam: the **claim** clock callable raising
@@ -1730,10 +1788,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > `UnrecordedAuthorisationError`, before any append, and indistinguishably from an
 > id the store never held.
 
-> **Normative.** It pins ADR-0026 §2's split at this seam in both directions: a
-> guard rejection surfaces as `AuditError`, and an exception the clock **callable**
-> raises on its own account arrives at the caller **unwrapped**, with its type and
-> cause intact.
+> **Normative.** It pins ADR-0026 §2's split **at the ledger boundary** in both
+> directions: a guard rejection surfaces from a ledger member as `AuditError`, and an
+> exception the clock **callable** raises on its own account leaves that member
+> **unwrapped**, with its type and cause intact and nothing relabelled. It pins
+> `invoke`'s own exit separately, because the two boundaries answer differently and
+> an earlier draft ran them together: on the claim path every `Exception` reaching
+> `invoke` leaves it as an `AuditError` whose `__cause__` is that exception, type
+> intact (§1); on the completion path none leaves at all, because it is absorbed
+> (§3).
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
