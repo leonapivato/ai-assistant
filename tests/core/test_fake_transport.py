@@ -291,6 +291,30 @@ async def test_forgetting_attempts_keeps_every_arming_in_place() -> None:
         await transport.open_channel(ENDPOINT)
 
 
+async def test_forgetting_attempts_while_one_is_in_flight_discards_it_safely() -> None:
+    """A reset discards an in-flight attempt rather than raising out of its completion.
+
+    Adversarial review found the earlier shape on round 2: the completing call
+    wrote back through an *index* into the attempt list, so a reset that emptied
+    the list left the open raising ``IndexError`` — having already handed its
+    modelled socket to a channel nobody received, so ``open_sockets`` stayed at
+    one forever.
+    """
+    transport = FakeOutboundTransport()
+    gate = transport.suspend_next_open()
+    opening = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+
+    transport.forget_attempts()
+    gate.release()
+    channel = await opening
+
+    assert transport.attempts == ()
+    assert transport.open_sockets == 1
+    await channel.close()
+    assert transport.open_sockets == 0
+
+
 def test_no_rendering_of_the_transport_names_an_endpoint_or_an_octet() -> None:
     """§8: the attempt record carries no payload and no credential.
 

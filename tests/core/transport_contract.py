@@ -284,6 +284,24 @@ class ByteChannelContract(ABC):
         with pytest.raises(TransportError):
             await channel.read_line()
 
+    async def test_a_failing_read_is_reported_as_a_transport_error(
+        self, channel: ByteChannel
+    ) -> None:
+        """§1: ``read`` is in the shared taxonomy too, and is not covered by the case above.
+
+        The two methods share a cursor and nothing else — a bounded read and a
+        read-to-a-terminator can fail on different code paths, and an
+        implementation that converted only the one this suite exercised would pass
+        while leaking its backend's own exception from the other. Adversarial and
+        architecture review both found that gap on ADR-0191's implementation round
+        2.
+        """
+        self.far_end_sent(channel, b"")
+        self.arm_connection_failure(channel)
+
+        with pytest.raises(TransportError):
+            await channel.read(1)
+
     async def test_a_failing_write_is_reported_as_a_transport_error(
         self, channel: ByteChannel
     ) -> None:
@@ -515,15 +533,6 @@ class OutboundTransportContract(ABC):
 
         assert self.held_resources(transport) == before
 
-    #: Whether this implementation ever suspends while holding what
-    #: ``open_channel`` acquired. An implementation whose acquisition and whose
-    #: return are separated by no ``await`` has no window for a cancellation to
-    #: land in, so ADR-0060 §1's clause is vacuous over it rather than unmet — the
-    #: same reduction ``PlanStoreContract`` makes for a store that acquires nothing
-    #: whose safety outlives the coroutine.
-    suspends_inside_its_acquisition: bool = True
-
-    @pytest.mark.optional_obligation
     async def test_a_cancellation_inside_the_acquisition_releases_and_is_re_raised(
         self, transport: OutboundTransport
     ) -> None:
@@ -535,9 +544,6 @@ class OutboundTransportContract(ABC):
         after the scenario has finished, and the assertion is about what was left
         behind rather than about what came out.
         """
-        if not self.suspends_inside_its_acquisition:
-            pytest.skip("open_channel holds what it acquired across no await")
-
         before = self.held_resources(transport)
         gate = self.suspend_next_open(transport)
         opening = asyncio.ensure_future(transport.open_channel(ENDPOINT))

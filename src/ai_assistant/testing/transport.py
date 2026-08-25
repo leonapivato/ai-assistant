@@ -81,6 +81,28 @@ class TransportAttempt:
 
 
 @final
+@dataclass(slots=True)
+class _Pending:
+    """One attempt while it is still being decided, and after.
+
+    A *mutable* record, so completing an attempt does not have to find it in a
+    list again — :meth:`FakeOutboundTransport.forget_attempts` may have emptied
+    that list while an open was suspended, and an index into it would then be an
+    ``IndexError`` raised out of a completing call. Adversarial review found that
+    on ADR-0191's implementation round 2. A reset that discards an in-flight
+    attempt is now exactly a reset that discards it: the holder is orphaned and
+    the completion writes to nothing anybody reads.
+
+    Attributes:
+        endpoint: The endpoint this attempt named.
+        served: Whether a channel was produced.
+    """
+
+    endpoint: TransportEndpoint
+    served: bool = False
+
+
+@final
 class FakeByteChannel:
     """A :class:`~ai_assistant.core.protocols.ByteChannel` with no socket under it.
 
@@ -434,7 +456,7 @@ class FakeOutboundTransport:
 
     def __init__(self) -> None:
         """Start with nothing attempted, nothing queued and nothing armed."""
-        self._attempts: list[TransportAttempt] = []
+        self._attempts: list[_Pending] = []
         self._queued: deque[FakeByteChannel] = deque()
         self._served: list[FakeByteChannel] = []
         self._refusal: TransportError | None = None
@@ -514,6 +536,12 @@ class FakeOutboundTransport:
 
         What a calibration needs: an instrument is demonstrated live by making it
         fire, and the reading that follows must not carry the demonstration.
+
+        **An attempt still in flight is discarded like any other** and does not
+        come back when it completes. That is the honest reading of a reset, and it
+        is safe rather than merely tolerated: the record each open completes into
+        is its own (see :class:`_Pending`), so a reset can empty the list without
+        a completing call writing past its end.
         """
         self._attempts.clear()
 
@@ -521,8 +549,17 @@ class FakeOutboundTransport:
 
     @property
     def attempts(self) -> tuple[TransportAttempt, ...]:
-        """Every request for a channel, in order, served and refused alike."""
-        return tuple(self._attempts)
+        """Every request for a channel, in order, served and refused alike.
+
+        Returns:
+            A frozen record per attempt, built on the read: what the transport
+            holds while an open is in flight is mutable, and handing that out
+            would let a reader watch an attempt change under it.
+        """
+        return tuple(
+            TransportAttempt(endpoint=pending.endpoint, served=pending.served)
+            for pending in self._attempts
+        )
 
     @property
     def channels(self) -> tuple[FakeByteChannel, ...]:
@@ -603,8 +640,8 @@ class FakeOutboundTransport:
             CancelledError: Re-raised after that same release, never absorbed
                 (ADR-0060 §1).
         """
-        index = len(self._attempts)
-        self._attempts.append(TransportAttempt(endpoint=endpoint, served=False))
+        pending = _Pending(endpoint=endpoint)
+        self._attempts.append(pending)
         if self._refusal is not None:
             raise self._refusal
         self._in_flight += 1
@@ -621,5 +658,5 @@ class FakeOutboundTransport:
             raise
         self._served.append(channel)
         self._in_flight -= 1
-        self._attempts[index] = TransportAttempt(endpoint=endpoint, served=True)
+        pending.served = True
         return channel
