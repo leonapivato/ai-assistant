@@ -120,7 +120,9 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > on the number and not on its representation, so `Decimal("1.0000000000")` is
 > countable because its value is `1`. This predicate governs every amount this
 > mechanism reads: a configured ceiling, the allowance, a declared
-> `ToolCost.amount` and a reported one.
+> `ToolCost.amount` and a reported one. It governs **inputs** and not results: a
+> computed total is a sum of countable amounts over rows nothing bounds, so it is
+> not itself bounded by this predicate and is never refused on it.
 
 > **Normative.** The predicate is **context-independent**, and an implementation
 > evaluates it without consulting `decimal.getcontext()`. Read `digits` and
