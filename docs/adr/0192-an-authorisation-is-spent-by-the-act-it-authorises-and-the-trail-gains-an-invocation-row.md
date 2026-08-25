@@ -1625,11 +1625,15 @@ carried a binding. What that licenses is that the egress call was **attempted an
 reported success**, on the one state establishing the call happened and on no state
 that merely records it was begun (above). "Sent" itself stays barred, on ADR-0031
 §4's bound on what `SUCCEEDED` means and for want of any transmission fact an
-integration could report (§4, §5). The three words that stay barred
+integration could report (§4, §5). The words that stay barred
 everywhere are barred for a reason no record can lift: nothing in this system
-observes a recipient. A tool reporting `SUCCEEDED` reports that its own upstream
-accepted the call, and a surface that turned that into "delivered" would be
-asserting the measurement ADR-0016 §3 declines to offer, one axis over.
+observes a recipient, and **nothing observes an upstream either**. A tool reporting
+`SUCCEEDED` reports that its own callable returned a valid result inside its
+deadline (ADR-0031 §4) — not that an upstream accepted anything, and an earlier
+draft here said otherwise while §4 above was refusing exactly that inference. A
+surface turning it into "delivered" would be asserting the measurement ADR-0016 §3
+declines to offer, one axis over; turning it into "sent" or "accepted" asserts one
+this ADR has just finished declining.
 
 **Deciding the engine surface here rather than deferring it, which ADR-0188 §7 did
 for its own record.** That deferral rested on the record being "in the data
@@ -2214,6 +2218,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > carrying `None` maps to a `ToolCost` whose basis is `UNKNOWN`, and a
 > `ToolDefinition.cost` present on the definition appears on **no** row (§5).
 
+> **Normative.** The cost of a completion derived from **no `ToolResult` at all** is
+> pinned separately, because the mapping case above cannot reach it and an
+> implementation may map results correctly while inventing a cost where there is
+> none. On **both** cancellation outcomes ADR-0029 §4's classification can compute —
+> including a cancellation delivered after the claim lands and before the callable is
+> entered — the completion carries an `incurred_cost` whose basis is **`UNKNOWN`**,
+> and the definition's `ToolDefinition.cost` appears on no row of the trail. The
+> assertion rides beside the kindless one above, on the same rows, because the two
+> failures have the same shape: a field filled from the declaration because nothing
+> measured one. Without it a spend accumulator counts an invented measurement, which
+> is the one thing §5 exists to prevent.
+
 > **Normative.** It does **not** pin that path end to end, and no group writes a
 > test claiming it does. §5 records that no registered integration can supply a
 > figure at all, so a case asserting one traversing the production path would have to
@@ -2274,9 +2290,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > carries, says **attempted and reported success** on the egress one and says it on
 > the other **nowhere**, and raises on neither; an adapter that branches on the
 > failure outcomes alone passes every other case here and then crashes, drops the
-> cost, or makes the egress statement for a successful local call. The suite also
-> asserts the word **"sent" appears on no row in any state** (§4), because an adapter
-> that reaches for it is the drift this clause exists to catch. On
+> cost, or makes the egress statement for a successful local call.
+
+> **Normative.** The adapter's **negatives** are asserted over **every** barred
+> claim and on **every** row in **every** state, not over one word on one row. §4
+> bars *sent*, *read*, *received*, *delivered*, *seen* and *acted on*, and bars
+> naming a recipient, an account, an endpoint or a destination on an invocation row
+> — so the suite asserts each of those is absent from what the adapter renders,
+> across the claim row, all four completion outcomes, and both values of
+> `egress_call`. A single-word check is what an implementation walks around: a
+> renderer emitting "attempted and reported success; delivered to
+> alice@example.com" satisfies an assertion about *sent* alone while breaking both
+> the truthfulness rule and the Tier 1 disclosure one. On
 > the kindless two it renders that no kind was reported, renders no kind of its own,
 > drops neither the row nor the field, and raises nothing; on the kinded two it
 > renders the reported kind exactly and substitutes nothing. The floor is proved on
@@ -2824,8 +2849,11 @@ row kinds, and the annotation belongs to the kind that was already there.
 - **A user can be told what happened, for the first time.** The listing states that
   a call was begun on an authorisation the user granted, what it cost, how it
   finished, and — on an egress call that succeeded — that it was attempted and
-  reported success. It does not say the callable was entered, and it does not say
-  anything was **sent**, because no row carries either fact (§4). That is #1503's user-visible half, and it is what
+  reported success. A **claim** row does not say the callable was entered, because a
+  claim is written before it; a `SUCCEEDED` completion does, because the tool
+  reported an outcome back through the seam. Neither says anything was **sent**,
+  **delivered**, **received** or accepted by any upstream or recipient, because no
+  row carries any of those facts (§4). That is #1503's user-visible half, and it is what
   milestone 24's exit could not be ruled on.
 - **One approval no longer backs an unbounded number of acts on a *spendable*
   authorisation** — side-effecting and not `NATURAL` (§1). The property ADR-0021 §4
