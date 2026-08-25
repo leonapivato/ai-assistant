@@ -1943,8 +1943,13 @@ the ADRs it depends on rather than replacing them.
 > the gate fake refuses a call whose arguments carry **sentinel** values — a
 > recipient and a subject appearing nowhere else in the fixture — and the suite
 > asserts the `SpendCeilingError` the caller catches **is** the instance the gate
-> raised, and that neither its `str()` nor any attribute it carries contains either
-> sentinel. It drives the same for `SpendUndeterminedError`. Without it an invoker
+> raised, and that no sentinel appears in its `str()`, in its `args`, or in any
+> field the class itself declares. That set is the **user-facing** state and is
+> stated as a closed one on purpose: `__traceback__`, `__cause__` and `__context__`
+> are the interpreter's, a propagating exception's traceback necessarily holds
+> frames whose locals include the `ToolCall`, and a suite reading them would be
+> asserting something no conforming implementation — and no correct one — can
+> satisfy. It drives the same for `SpendUndeterminedError`. Without it an invoker
 > that catches the gate's refusal and re-raises the **same class** with the call
 > appended to the message passes every clause above — they assert the class, the
 > untouched callable, the unappended rows, the released handle and the forwarded
