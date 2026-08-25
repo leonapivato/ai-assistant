@@ -776,6 +776,13 @@ async def _release(writer: asyncio.StreamWriter) -> None:
 
     Args:
         writer: The write half of a pair no holder received.
+
+    Raises:
+        CancelledError: If one was delivered *during* the release. It is deferred
+            until the release has finished and then raised, replacing whatever
+            exception this helper was called under — never dropped, which on the
+            ordinary-failure path would report a broken endpoint for a caller that
+            cancelled (ADR-0060 §1).
     """
     try:
         writer.close()
@@ -802,15 +809,28 @@ async def _release(writer: asyncio.StreamWriter) -> None:
             writer.transport.abort()
     # **Then the release is waited out, and the exception in flight is delivered
     # after it.** The wait is on work this frame started — the writer's own close
-    # waiter — and a cancellation arriving during it is suppressed and the wait
-    # resumed: the exception this release is running under is already in hand and
-    # is what leaves, and abandoning the wait is the orphan window reopened one
-    # turn later. That is the same order, and the same suppression, as
-    # ``open_channel``'s wait on the open above.
+    # waiter — and abandoning it is the orphan window reopened one turn later. So
+    # a cancellation arriving during the wait defers rather than ends it.
+    #
+    # **Deferred is not absorbed, and this frame is the one that has to know the
+    # difference.** ``_StreamChannel.close`` and ``open_channel``'s wait on the
+    # open both run with a ``CancelledError`` already in flight, so a second one
+    # swallowed there still leaves a cancellation to the caller. This helper does
+    # not: it is also called while an ordinary ``TransportError`` is in flight,
+    # where a swallowed cancellation would leave the caller told that the endpoint
+    # broke when what happened is that the caller cancelled — ADR-0060 §1's
+    # "delivered onward, never absorbed" broken by the cleanup path, which is what
+    # adversarial review found on round 13. So the first one is kept and raised
+    # once the release is done, replacing the exception it interrupted. The
+    # *first*, on ``LoopSuspension.hold``'s reasoning: a caller cancelled twice
+    # sees the cancellation it asked for rather than a later duplicate.
     waiting = asyncio.ensure_future(writer.wait_closed())
+    cancellation: asyncio.CancelledError | None = None
     while not waiting.done():
-        with suppress(asyncio.CancelledError):
+        try:
             await asyncio.wait((waiting,))
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
     if not waiting.cancelled():
         failure = waiting.exception()
         if isinstance(failure, OSError):
@@ -818,6 +838,8 @@ async def _release(writer: asyncio.StreamWriter) -> None:
             # transport is already aborted, so there is nothing further to try,
             # and raising would replace the exception in flight.
             _log.debug("egress_orphaned_streams_release_failed", error_type=type(failure).__name__)
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _release_orphaned_streams(

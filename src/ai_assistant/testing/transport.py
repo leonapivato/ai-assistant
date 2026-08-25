@@ -485,9 +485,11 @@ def _again(refusal: TransportError) -> TransportError:
     milestone arm opens against a standing refusal many times over. Adversarial
     review found it on round 12.
 
-    A fresh instance per attempt keeps the arming's message and its type — nothing
-    a case can read changes — while each refusal carries only the frames of the
-    open that raised it.
+    A fresh instance per attempt keeps the arming's message and its concrete type
+    — ``type(refusal)``, so an arming with a narrower
+    :class:`~ai_assistant.core.errors.TransportError` subclass is still caught by
+    a case that names it — while each refusal carries only the frames of the open
+    that raised it. Adversarial review noted the type on round 13.
 
     Args:
         refusal: What :meth:`FakeOutboundTransport.refuse_with` was armed with.
@@ -496,7 +498,7 @@ def _again(refusal: TransportError) -> TransportError:
         A new :class:`~ai_assistant.core.errors.TransportError` with its
         arguments.
     """
-    return TransportError(*refusal.args)
+    return type(refusal)(*refusal.args)
 
 
 @final
