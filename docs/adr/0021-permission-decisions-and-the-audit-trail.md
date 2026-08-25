@@ -1,7 +1,59 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Accepted, §1's payload-storage sentence amended by ADR-0148 (§6's egress binding is carried in the recorded decision)
+- Status: Partially superseded by ADR-0193 (§3's per-ruling purity sentence, for a policy constructed with an authorisation source)
 - Date: 2026-07-20
+- Partially superseded: 2026-08-25 by
+  [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
+  — **one sentence of §3, in one condition: a policy constructed with an
+  authorisation source performs one durable read per ruling.** §3's rejected
+  alternatives say *"A pure policy is a testable policy. `decide` as a function of
+  its argument is what lets §5's monotonicity obligations be checked at all; a
+  policy that performs I/O on every call is one whose conformance suite has to
+  mock a store to ask a question about ranking."* ADR-0193 §7 requires exactly
+  that read — `RecipientGrants.covering`, injected as a constructor dependency,
+  consulted at most once per ruling, after every ground the request alone settles,
+  failing closed on `None` and on error. For such a policy the sentence no longer
+  describes the contract, and a reader building one acts differently, which is
+  ADR-0070 §1's test.
+
+  **What is *not* superseded, and it is nearly all of §3.** The sentence still
+  governs **every policy constructed with no authorisation source** — the
+  condition §3's own first bullet states ("Today that is *every* policy") and the
+  one ADR-0193 leaves untouched: such a policy takes no seam, reads nothing, and
+  returns `authorised_by is None`. `decide` still mints no `id` and reads no
+  clock, so the removal that sentence was drawn from stands, and §5's monotonicity
+  obligations stay checkable — ADR-0193 §3 restates the comparison with the grants
+  in the store held equal, against the canonical fake its §14 lands. The
+  **id-resolution hazard** is untouched and stays closed: *"a policy that resolved
+  an id would be reintroducing the rebinding hazard inside the very subsystem
+  meant to close it"* — `RecipientGrants.covering` takes the whole request and
+  returns a record, carries no read-by-id member, and ADR-0193 §1 forbids adding
+  one. The **rejection of injecting an `AuditTrail`** is untouched: the policy
+  still does not write to the trail, and the caller does. §3's split of
+  `PermissionRuling` from `PermissionDecision`, its three `resolve` obligations,
+  `authorised_by`'s two rules, §1's transcription rules, §4's append-only trail
+  and §5's floors all stand.
+
+  **§5 anticipated this**, which is why the scope is one sentence rather than the
+  section: the disclosure floor *"is written against the distinction that matters
+  rather than against a proxy for it, which is what keeps §6's relief valve
+  reachable **without amending this clause**"*, and *"the relief valve is
+  deliberately **not** a policy quietly deciding on the user's behalf: it is the
+  standing grant (§6)"*. §3's own last bullet made the arrival a named
+  precondition — *"The ADR that introduces standing grants must make the other
+  source resolvable … and must say where those records live"* — and ADR-0193 §6
+  discharges it. Discharging it is what changes a **sourced** policy's shape, and
+  ADR-0070 §1 makes that a supersession however narrow. ADR-0193 §12 states the
+  scope in marked clauses and §15 classifies it.
+- Amended: 2026-08-13 by
+  [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
+  §6 — **§1's sentence "the decision binds the payload and holds none of it" is
+  over-wide for an egress call at the `tools/` seam**, where an egress binding is
+  transcribed verbatim into the recorded decision. The record in full is the
+  block quote in §1 below, "Amended by ADR-0148 §6 (2026-08-13)", which states the
+  scope and what does not change. It is written here because the qualifier that
+  carried it moves off the `Status` line in the same change that line takes the
+  leading `Partially superseded by` token (ADR-0082 §2).
 
 ## Context
 
