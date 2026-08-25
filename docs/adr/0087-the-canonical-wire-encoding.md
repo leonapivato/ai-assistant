@@ -1,26 +1,40 @@
 # 87. The canonical wire encoding, and the vectors that make it testable
 
-- Status: Partially superseded by ADR-0194 (§2c's enumeration of the types this encoding carries, which gains a `Decimal` row)
+- Status: Partially superseded by ADR-0194 (the enumeration of the types this encoding carries, which gains `Decimal`: §2c's table, §6's scalar inventory and §9's count of the values §2 gives no encoding)
 - Date: 2026-08-01
-- **Partially superseded: 2026-08-25 by ADR-0194 — §2c's enumeration, and nothing
-  else.** The scalar table names the types this encoding carries and
+- **Partially superseded: 2026-08-25 by ADR-0194 — the enumeration of the types
+  this encoding carries, and nothing else.** The scalar table names the types this encoding carries and
   `wire/codec.py` refuses one it does not list ("a type nobody has spelled a form
   for has no canonical bytes"), so a reader holding only this ADR refuses to encode
-  a `Decimal`. ADR-0194 §5 promotes a member that returns one and states its form:
-  a **JSON string** built from the value's own `as_tuple()` — sign, digits, `E`,
-  signed exponent — carrying the scale rather than normalising it, with a
-  non-finite `Decimal` refused exactly as a non-finite `float` is here.
+  a `Decimal`. ADR-0194 §5 promotes a member that returns one and states its
+  form: a **JSON string** in the General Decimal Arithmetic specification's
+  *to-scientific-string* shape, written out as a grammar over the value's own
+  `as_tuple()` rather than named after a library's `str`, carrying the scale
+  rather than normalising it, with a non-finite `Decimal` refused exactly as a
+  non-finite `float` is here.
 
-  **Replaced — §2c's enumeration only.** A reader now acts differently, which is
-  ADR-0070 §1's test, so this is a supersession rather than an amendment; it is
-  **partial** in ADR-0070 §3's sense, and the scope is the enumeration alone.
+  **Replaced — the enumeration, wherever this ADR states it.** A reader now acts
+  differently, which is ADR-0070 §1's test, so this is a supersession rather than
+  an amendment; it is **partial** in ADR-0070 §3's sense. The scope is three
+  clauses, each stating the enumeration from a different side: **§2c's table**;
+  **§6's** sentence inventorying "the scalar types the promoted surface reaches",
+  which omits `Decimal` — an omission already inaccurate, since `ToolCost.amount`
+  reaches that surface today (#1559); and **§9's** first bullet, which counts
+  "**two** values" with no encoding where there are now three, the non-finite
+  `Decimal` ADR-0194 §5 refuses. §9's open *problem* is unchanged: every
+  `Decimal`-typed field on the promoted surface refuses a non-finite value at
+  validation, so the gap that bullet describes is no wider than it was.
 
-  **Not replaced — every other clause, and §4 most of all.** No existing row's
-  spelling moves, and §4's normalises-nothing rule is what *dictates* the new
-  row's shape: `Decimal("1.0")` and `Decimal("1")` are distinguishable by
-  `as_tuple()`, so §4 makes them two values and the encoding keeps them apart.
-  §2a, §2b, §2d, §2e, §3, §4, §5's existing vectors, §6, §7, §8 and §9 stand as
-  ratified.
+  **Not replaced — every other clause, and §3 and §4 most of all.** §3's table of
+  library disagreements stays **exhaustive at three**: measured,
+  `model_dump(mode="json")` renders `Decimal("1.50")` as `"1.50"` and
+  `Decimal("1E15")` as `"1E+15"`, which is exactly the form ADR-0194 §5 ratifies,
+  so no fourth row arises and ADR-0084 §3's appended record of what that clause
+  loses needs no reconciliation. §4's normalises-nothing rule is what *dictates*
+  the new form rather than being bent by it: `Decimal("1.0")` and `Decimal("1")`
+  are distinguishable by `as_tuple()`, so §4 makes them two values and the
+  encoding keeps them apart. §2a, §2b, §2d, §2e, §3, §4, §5's existing vectors,
+  §7 and §8 stand as ratified.
 
   **What this did not change.** §8's first case does not apply — no conforming
   encoder emitted any bytes for a `Decimal` before, it raised — so no protocol

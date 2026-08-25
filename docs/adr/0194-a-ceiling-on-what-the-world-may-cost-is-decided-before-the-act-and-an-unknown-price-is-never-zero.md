@@ -331,6 +331,18 @@ trigger rather than pre-deciding it here.
 > implementation that failed to size its context rather than a reachable state on
 > well-formed input.
 
+> **Normative.** A context is sized from the operands' **effective** scale, not
+> from their raw exponents. `Decimal("0E-999999999999999999")` is countable under
+> §1 — it is finite, its absolute value is below `1E15`, and its *value* needs no
+> fractional digit — and an implementation that sized a precision from its
+> exponent would demand one no machine can allocate for a sum whose exact result
+> is the other operand. So an operand is reduced to the scale its value actually
+> needs before it is added or compared: a zero coefficient contributes nothing
+> whatever its exponent, and a value's trailing zeros below its last significant
+> digit do not enlarge the context. This is §1's "a test on the number and not on
+> its representation" carried into the arithmetic, and without it §1's bound
+> guarantees nothing.
+
 > **Normative.** A trapped computation is a **refusal** under admission and an
 > **indeterminate** total under a read — the same fail-closed direction the rest
 > of this section takes.
@@ -431,13 +443,17 @@ the two properties it has rather than letting a reader assume the stronger one.
 > reservations already taken and cannot project a total that omits a call already
 > admitted.
 
-> **Normative.** Outstanding handles are **distinct**. No two reservations this
-> holder is holding at one instant carry the same handle, whatever an injected id
-> factory does — a repeated value is disambiguated rather than trusted, which is
-> the rule `Engine._mint_handle` already states for the continuation table and for
-> the same reason: two reservations sharing a handle are one reservation, so the
-> other's amount silently leaves the projection and a later call is admitted
-> against a total that omits an admitted one.
+> **Normative.** Outstanding handles are **distinct**, and distinctness is tested
+> on the **validated** `SpendAdmissionHandle` rather than on whatever a factory
+> returned. `Identifier` strips, so `"h"` and `" h "` are two raw strings and one
+> handle; an implementation checking uniqueness before construction would hold two
+> reservations under one key. No two reservations this holder is holding at one
+> instant carry equal handles, whatever an injected id factory does — a repeated
+> value is disambiguated rather than trusted, which is the rule
+> `Engine._mint_handle` already states for the continuation table and for the same
+> reason: two reservations sharing a handle are one reservation, so the other's
+> amount silently leaves the projection and a later call is admitted against a
+> total that omits an admitted one.
 
 > **Normative.** A reservation stands **until its handle is released**, and is
 > counted into the projected total of every later admission until then —
@@ -599,9 +615,14 @@ turn, which this section now handles.
 > classes.
 
 > **Normative.** The ceiling never produces a `CONFIRM`, never routes a question
-> to the user, and no per-call answer overrides it. A refusal is lifted only by
-> changing the configuration or by the period rolling over — never from inside a
-> turn. (That a call *admitted* under the projection may still carry the accounted
+> to the user, and no per-call answer overrides it. A refusal is lifted by exactly
+> three things and by nothing a turn can reach: changing the configuration, the
+> period rolling over, and the **release of another call's reservation** (§3) —
+> which is not a relaxation but the projection ceasing to count a call that is no
+> longer in flight. A refused call retried after that release may be admitted in
+> the same period under the same configuration, and that is the mechanism working:
+> what refused it was a total including an in-flight call, and that call's own
+> reported cost is what the retry is now measured against. (That a call *admitted* under the projection may still carry the accounted
 > total past a ceiling, because its declaration understated it, is §2's stated
 > overrun and not an override of a refusal: nothing was refused.)
 
@@ -618,7 +639,10 @@ turn, which this section now handles.
 > the same order.
 
 > **Normative.** Both messages are **payload-free**. A `SpendCeilingError` states
-> the ceiling that was crossed, its period, its currency and the accounted total.
+> the ceiling that was crossed, its period, its currency, the accounted total and
+> the **projected** total that crossed it — the accounted figure alone would leave
+> a user reading "90 against a ceiling of 100" beside a refusal and no way to see
+> the reservations and the declaration that made 101 (§2, §3).
 > A `SpendUndeterminedError` names **which of the five grounds above** applied, and
 > names the period only where one was determined — a clock that raised leaves no
 > period to name, and the message says the clock failed rather than inventing one.
@@ -759,6 +783,14 @@ whole explanation.
 > is not `None`, the period is **indeterminate** under §2. No third meaning is
 > assigned to the absence.
 
+> **Normative.** `currency`, where present, carries `ToolCost.currency`'s rule and
+> not a second one: exactly three uppercase ASCII letters, ISO-4217's alphabetic
+> form, neither normalised nor checked against the live register (§1). A blank
+> string, a lowercase code, a non-ASCII one and a wrong-length one each raise at
+> validation. `EncodableText` is the base the field layers on and is **not** the
+> whole of its rule: it admits `""` and `"usd"`, and a `SpendTotal` carrying either
+> would state a currency §1 refuses as configuration and a renderer would print it.
+
 > **Normative.** The two amounts carry their own numeric invariants, and they are
 > **not the same one**. A `ceiling`, where present, is exactly what §1 admits as a
 > configured ceiling: finite, greater than or equal to zero, and **countable** —
@@ -787,15 +819,48 @@ whole explanation.
 > one thing §2's exact arithmetic forbids, and ADR-0087 §2c's `float` grammar is
 > about a value that *is* a binary64 — this one is not.
 
-> **Normative.** The encoding of a finite `Decimal` is read from its own
-> `as_tuple()` — `(sign, digits, exponent)` — and is: a `-` where `sign` is 1 and
-> nothing where it is 0; then the `digits` in order as decimal characters, with no
-> digit added and none removed; then `E`; then the exponent's sign, `+` or `-`,
-> always written; then the exponent's magnitude in decimal, with no leading zero.
-> Decoding is the inverse, reading the string back to the same triple. The
-> normative vectors are `Decimal("1.50")` → `"150E-2"`, `Decimal("1E15")` →
-> `"1E+15"`, `Decimal("0")` → `"0E+0"`, `Decimal("-0")` → `"-0E+0"`, and
-> `Decimal("1.0000000000")` → `"10000000000E-10"`.
+> **Normative.** The encoding of a finite `Decimal` is determined by its own
+> `as_tuple()` — `(sign, digits, exponent)` — and by nothing else. It is the
+> **to-scientific-string** form of the General Decimal Arithmetic specification,
+> stated here rather than named, because ADR-0087 §1's objection to "whatever
+> `repr` does" applies to a library's `str` too. Let `adjusted` be
+> `exponent + len(digits) - 1`.
+>
+> - Where `exponent <= 0` **and** `adjusted >= -6`, the form is **plain**. Where
+>   `exponent` is 0 it is the digits alone. Otherwise a point is placed
+>   `-exponent` digits from the right of the digits; where `adjusted` is negative
+>   the digits are preceded by `0.` and by `-adjusted - 1` zeros.
+> - Otherwise the form is **exponential**: the first digit, then a point and the
+>   remaining digits *only if there are any*, then `E`, then `+` or `-`, then the
+>   magnitude of `adjusted` in decimal with no leading zero.
+> - A `-` precedes either form where `sign` is 1, **negative zero included**.
+>
+> Decoding is the inverse and reads the string back to the same triple. The
+> normative vectors are `Decimal("1.50")` → `"1.50"`, `Decimal("1E15")` →
+> `"1E+15"`, `Decimal("0")` → `"0"`, `Decimal("-0")` → `"-0"`,
+> `Decimal("1.0000000000")` → `"1.0000000000"`, `Decimal("0.0000000001")` →
+> `"1E-10"`, and `Decimal("0E-999999999999999999")` →
+> `"0E-999999999999999999"`.
+
+**Verified rather than asserted, in the shape ADR-0087 §2c uses for its float
+grammar.** This grammar reproduces CPython 3.14's `str` on every vector above and
+on **200,000 pseudo-random finite decimals** — coefficients of one to thirty
+digits, exponents drawn from ±40, both signs — with no mismatch, and
+`Decimal(s).as_tuple()` returned the encoded triple on every one. So an
+implementation may call `str` today and conform; what is *ratified* is the
+grammar, and the vectors are what would catch an interpreter that stopped agreeing
+with it.
+
+**This is not a fourth row in ADR-0087 §3, and that was checked rather than
+hoped.** §3's table is the exhaustive list of places the library and the ratified
+bytes disagree. Measured on pydantic today, `model_dump(mode="json")` renders
+`Decimal("1.50")` as `"1.50"` and `Decimal("1E15")` as `"1E+15"` — which is this
+grammar — so there is nothing to disagree about, §3's three rows stay exhaustive,
+and ADR-0084 §3's appended record of what that clause loses needs no
+reconciliation. This is §3's own treatment of negative zero applied again: where
+the library is right, the corpus ratifies it unchanged. An earlier draft of this
+ADR spelled the value from `as_tuple()` directly (`"150E-2"`), which *would* have
+been a fourth row, and it bought nothing the specification's own form does not.
 
 > **Normative.** The scale is **carried and not normalised**, and that follows from
 > ADR-0087 §4 rather than from taste: §4's relation is indistinguishability, not
@@ -1059,8 +1124,25 @@ exactly §2c's enumeration of the types this encoding carries; **no existing row
 spelling moves**, and ADR-0087 §8's first case therefore does not apply: no
 conforming encoder emitted any bytes for a `Decimal` — it raised — so no protocol
 version bump is owed **on this ground**, though the consumer group bumps anyway for
-its promoted method. §2a, §2b, §2d, §2e, §3, §4, §5's existing vectors, §7's
-boundary and §8 itself are untouched and stay accepted.
+its promoted method. **Three clauses of ADR-0087 fall inside the replaced scope and not one**, because
+each of them states the enumeration from a different side and a reader acting on
+any of them acts differently now. §2c's table is the enumeration itself. §6's
+sentence inventories "the scalar types the promoted surface reaches" and omits
+`Decimal` — an omission that was **already** inaccurate, since `ToolCost.amount`
+reaches that surface today (#1559), and one this ADR makes decisive. §9's first
+bullet says "§2 gives **two** values no encoding — a lone surrogate `str` and a
+non-finite `float`"; after this ADR there are three, the non-finite `Decimal` §5
+refuses. What §9's *open problem* does not gain is a case: every `Decimal`-typed
+field on the promoted surface refuses a non-finite value at validation —
+`ToolCost`'s model validator does, and §5's does — so the gap that bullet is about
+stays exactly as wide as it was.
+
+**§3 is outside the scope, measured rather than assumed.** Its table is the
+exhaustive list of disagreements between the library and the ratified bytes, and
+§5's grammar is what `model_dump(mode="json")` already produces, so no fourth row
+arises and ADR-0084 §3's appended record of that clause's losses is untouched.
+§2a, §2b, §2d, §2e, §4, §5's existing vectors, §7's boundary and §8 itself are
+untouched and stay accepted.
 
 **ADR-0029 §7's "one executor runs at a time".** Not changed by this ADR and not
 relied on by it. §3 records that the sentence decides the *plan executor* ADR-0014
@@ -1114,9 +1196,12 @@ to encode a `Decimal`; after, they encode it by a rule stated here. That the
 existing rows are untouched does not make the enlarged domain an amendment, and
 the argument that "nothing §2c decided is reversed" was the wrong test — §1's is
 whether a reader acts differently, not whether an old sentence became false. So
-this ADR **partially supersedes** ADR-0087, in ADR-0070 §3's first-class form:
-the named scope is §2c's enumeration of the types the encoding carries, and every
-other clause of ADR-0087 stays accepted. The record is ADR-0070 §4's status form
+this ADR **partially supersedes** ADR-0087, in ADR-0070 §3's first-class form.
+The named scope is the enumeration of the types the encoding carries **wherever
+ADR-0087 states it** — §2c's table, §6's inventory of the scalar types the
+promoted surface reaches, and §9's count of the values §2 gives no encoding — and
+every other clause stays accepted, §3's exhaustive three included (§9 above states
+why that one is outside the scope rather than merely unmentioned). The record is ADR-0070 §4's status form
 on ADR-0087 — a leading `Partially superseded by` naming this ADR and the exact
 scope — plus an appended dated note, and ADR-0087's ratified text is not
 rewritten.
@@ -1257,6 +1342,19 @@ them.
 > refused while both stand. A suite driving only the single-admission race passes
 > against an implementation whose second reservation overwrote its first.
 
+> **Normative.** It drives the same with a factory whose values collide **only
+> after validation** — `"h"` then `" h "`, and a value differing only by a Unicode
+> space `Identifier` strips — asserting the same three outcomes. An implementation
+> comparing raw factory output passes the clause above and fails this one, which is
+> the whole reason it is stated separately.
+
+> **Normative.** The suite drives a refusal **lifted by a release**, which §4 now
+> names as one of the three ways one clears: an accounted total of 90, a ceiling of
+> 100, an outstanding reservation of 10 and an estimate of 1 refused at 101; the
+> outstanding handle released; the same estimate admitted in the same period under
+> the same configuration. It asserts the `SpendCeilingError` from the first attempt
+> states the **projected** figure that crossed and not only the accounted one.
+
 > **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
 > asserts on the projection rather than on the exception alone: a `CancelledError`
 > delivered inside `admit_invocation` after it would have reserved leaves the later
@@ -1326,6 +1424,21 @@ them.
 > `SpendCeilingError`. A conforming implementation sizes its context from the
 > operands (§2) and neither rounds the stated total nor answers the comparison out
 > of a default context.
+
+> **Normative.** The suite drives `Decimal("0E-999999999999999999")` — countable
+> by §1, numerically zero, and carrying an exponent no context can be sized from —
+> as a configured ceiling, as the allowance, as a declared amount and as a reported
+> one. Each is classified as countable and each is carried through the arithmetic
+> to the same answer as `Decimal("0")` would give, with no trap raised and no
+> allocation attempted from the raw exponent. This is §2's effective-scale clause,
+> and an implementation sizing a context from `as_tuple().exponent` fails it by
+> exhausting memory rather than by returning a wrong number.
+
+> **Normative.** The suite drives `SpendTotal.currency`'s shape rule as hostile
+> constructions: `""`, `"usd"`, `"US"`, `"USDD"` and a three-character non-ASCII
+> value each raise at validation, and `"USD"` constructs. The field's
+> `EncodableText` base admits every one of the refused values, so a suite that
+> drove only encodability would leave the rule untested.
 
 > **Normative.** The suite drives §1's countability predicate at **both** of its
 > boundaries, by naming the values rather than asking for one outside the range.
