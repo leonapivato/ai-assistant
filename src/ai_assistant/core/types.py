@@ -12597,3 +12597,66 @@ class ConnectionAct(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+# --- transport: the endpoint an injected capability opens to (ADR-0191) ------
+# ADR-0191 §1 makes reaching the world an injected capability whose one method
+# takes an endpoint and returns an open duplex channel. This is that endpoint,
+# and the ceiling both halves of the contract refuse against.
+
+
+#: The most octets a :class:`~ai_assistant.core.protocols.ByteChannel` will
+#: buffer for one line, and the largest ``limit`` its ``read`` accepts
+#: (ADR-0191 §1).
+#:
+#: **One constant in `core` rather than a number chosen per implementation**, so
+#: the canonical fake and the production implementation refuse the same inputs
+#: and a consumer tested against one behaves against the other. It is the bound
+#: ``ai_assistant.tools.egress`` already opened its connections with, so nothing
+#: about what that seam accepts moves; changing it is a change to `core` surface
+#: and takes an ADR.
+#:
+#: For ``read_line`` it bounds the octets **before** the terminator and not the
+#: returned value: a line of exactly this many octets is accepted and comes back
+#: one octet longer, and a line one octet past it is refused.
+TRANSPORT_OCTET_CEILING: Final = 4096
+
+#: The largest TCP port number, which is what makes a port field's upper bound a
+#: fact about the protocol rather than a choice.
+_MAX_TCP_PORT: Final = 65535
+
+
+class TransportEndpoint(BaseModel):
+    """One host and port an outbound channel may be opened to (ADR-0191 §1).
+
+    **Exactly three fields and no others** — no scheme, no path, no query, no
+    fragment, no userinfo, no credential and no recipient. An implementation is
+    handed one already parsed and parses no string of its own, which is what
+    stops a permissive endpoint grammar from becoming a second place a
+    connection's destination is decided (#83).
+
+    Frozen, because it is the value a pin is compared against: a holder that
+    could reassign ``host`` after the comparison would be holding a different
+    endpoint from the one that was checked.
+
+    Attributes:
+        host: The host the connection is opened to, and the name a certificate is
+            verified against. Never derived from a recipient's domain.
+        port: The TCP port, in ``1..65535`` inclusive.
+        implicit_tls: ``True`` where TLS is established before the far end's
+            greeting; ``False`` where the holder must upgrade the channel itself.
+            There is no third value and in particular no cleartext one — a
+            capability that could be asked for a connection it would never
+            secure is a capability whose shape admits the failure ADR-0017 §3's
+            transport conditions exist to prevent.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    host: NonBlankEncodableText = Field(
+        description="The host connected to and verified against; never blank.",
+    )
+    port: int = Field(ge=1, le=_MAX_TCP_PORT, description="The TCP port, 1..65535 inclusive.")
+    implicit_tls: bool = Field(
+        description="Whether TLS is established before the greeting, or must be upgraded to.",
+    )
