@@ -692,7 +692,7 @@ class StreamOutboundTransport:
             while not opening.done():
                 with suppress(asyncio.CancelledError):
                     await asyncio.wait((opening,))
-            _release_orphaned_streams(opening)
+            await _release_orphaned_streams(opening)
             raise
         except (OSError, UnicodeError) as exc:
             # ``ssl.SSLError`` is an ``OSError``, so a certificate that did not
@@ -715,12 +715,12 @@ class StreamOutboundTransport:
             # (ADR-0191 §1). A cancellation delivered here is re-raised after the
             # release rather than absorbed (ADR-0060 §1); an ordinary failure
             # constructing the channel takes the same path.
-            _release(writer)
+            await _release(writer)
             raise
 
 
-def _release(writer: asyncio.StreamWriter) -> None:
-    """Give back streams no channel reached, swallowing a failed release.
+async def _release(writer: asyncio.StreamWriter) -> None:
+    """Give back streams no channel reached, and wait for the release to finish.
 
     **Both pre-return release paths go through here, and the guard is the point.**
     ``StreamWriter.close`` can raise on a transport that is already broken, and a
@@ -732,9 +732,24 @@ def _release(writer: asyncio.StreamWriter) -> None:
     channel exists to state it on. Adversarial review found both paths unguarded
     on round 5.
 
-    There is no ``wait_closed`` here: this is called from an exceptional path that
-    is about to raise, and awaiting a far end's acknowledgement there would put an
-    unbounded wait between the failure and its delivery.
+    **It waits for the release to complete, and an earlier shape did not.**
+    ``StreamWriter.close`` only *starts* one: ``transport.close`` stops reading,
+    flushes what is buffered and closes the socket from a later turn of the loop.
+    So a caller that got its exception back the moment ``close`` returned held it
+    while the connection was still up, which is ADR-0191 §1's "releases what it
+    acquired first" read as an intention rather than as an order, and ADR-0060 §1
+    read the same way. Architecture review found it on round 12 — and the
+    asymmetry is what makes it right: :meth:`_StreamChannel.close` already defers
+    delivery until its wait is done, and this is the path where *nothing else can
+    ever release*, so it owed at least as much.
+
+    **The abort is what keeps the wait bounded**, and is why the deferral here is
+    not the unbounded one :meth:`_StreamChannel.close` documents. A plain close
+    waits on a buffer draining to a far end that may never read again; ``abort``
+    drops the transport without asking, so ``connection_lost`` — and with it the
+    close waiter — is settled on the next turn of the loop. Nothing was written
+    over these streams by anyone: no channel reached a holder, so there is no
+    graceful close being cut short.
 
     Args:
         writer: The write half of a pair no holder received.
@@ -753,9 +768,36 @@ def _release(writer: asyncio.StreamWriter) -> None:
         # review found the un-aborted path on round 6.
         with suppress(OSError):
             writer.transport.abort()
+    else:
+        # **Aborted on the ordinary path too, and for the wait rather than for the
+        # close.** The close above has begun a graceful release of streams nobody
+        # ever wrote over; what it does not do is finish one promptly, because a
+        # far end that has stopped reading can hold the flush indefinitely. The
+        # abort settles it on the next turn of the loop, which is what makes the
+        # wait below bounded and therefore what makes waiting affordable at all.
+        with suppress(OSError):
+            writer.transport.abort()
+    # **Then the release is waited out, and the exception in flight is delivered
+    # after it.** The wait is on work this frame started — the writer's own close
+    # waiter — and a cancellation arriving during it is suppressed and the wait
+    # resumed: the exception this release is running under is already in hand and
+    # is what leaves, and abandoning the wait is the orphan window reopened one
+    # turn later. That is the same order, and the same suppression, as
+    # ``open_channel``'s wait on the open above.
+    waiting = asyncio.ensure_future(writer.wait_closed())
+    while not waiting.done():
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait((waiting,))
+    if not waiting.cancelled():
+        failure = waiting.exception()
+        if isinstance(failure, OSError):
+            # Retrieved *and* read, on ADR-0191 §1's "suppresses and logs": the
+            # transport is already aborted, so there is nothing further to try,
+            # and raising would replace the exception in flight.
+            _log.debug("egress_orphaned_streams_release_failed", error_type=type(failure).__name__)
 
 
-def _release_orphaned_streams(
+async def _release_orphaned_streams(
     opened: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
 ) -> None:
     """Close streams an open produced that its caller never received.
@@ -772,7 +814,7 @@ def _release_orphaned_streams(
     if opened.cancelled() or opened.exception() is not None:
         return
     _, writer = opened.result()
-    _release(writer)
+    await _release(writer)
 
 
 def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:

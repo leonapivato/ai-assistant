@@ -226,6 +226,51 @@ async def test_a_standing_refusal_holds_until_it_is_lifted() -> None:
     assert [attempt.served for attempt in transport.attempts] == [False, False, True]
 
 
+def _frames(error: BaseException) -> int:
+    """How many frames an exception's traceback carries.
+
+    Args:
+        error: The exception to measure.
+
+    Returns:
+        The length of its traceback chain, which is what grows without bound when
+        one instance is raised more than once.
+    """
+    depth, frame = 0, error.__traceback__
+    while frame is not None:
+        depth, frame = depth + 1, frame.tb_next
+    return depth
+
+
+async def test_a_standing_refusal_raises_a_fresh_error_with_a_traceback_of_its_own() -> None:
+    """A standing arming is raised many times, and one instance would grow each time.
+
+    ``raise exc`` on an object that has already been raised sets its
+    ``__traceback__`` to a new traceback whose tail is the old one, and every one
+    of those frames keeps its locals alive. A milestone arm opens against a
+    standing refusal repeatedly, and the caller at this seam is
+    ``SmtpEgressTransport._send``, whose locals include a credential — so the
+    accumulation is not only unbounded, it retains exactly what this seam is most
+    careful about. Adversarial review found it on round 12.
+
+    What a case can read is unchanged: the type and the words are the arming's.
+    """
+    transport = FakeOutboundTransport()
+    armed = TransportError("this fake opens nothing")
+    transport.refuse_with(armed)
+
+    raised: list[TransportError] = []
+    for _ in range(3):
+        with pytest.raises(TransportError) as refusal:
+            await transport.open_channel(ENDPOINT)
+        raised.append(refusal.value)
+
+    assert [str(error) for error in raised] == [str(armed)] * 3
+    assert armed.__traceback__ is None  # the arming itself is never the one raised
+    assert len({id(error) for error in raised}) == 3
+    assert [_frames(error) for error in raised] == [_frames(raised[0])] * 3
+
+
 async def test_a_failure_after_acquiring_is_recorded_as_an_unserved_attempt() -> None:
     """§8: the record distinguishes refused from served, wherever the failure fell."""
     transport = FakeOutboundTransport()

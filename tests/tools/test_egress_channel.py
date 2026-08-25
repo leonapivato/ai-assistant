@@ -291,6 +291,11 @@ class _Sockets:
             back before it raises. ``False`` is the harder and more honest
             arrangement — a close can fail on its first statement — and it is
             what makes a case about the abort path bite.
+        holds_the_close_waiter: Whether the writer it hands out models a far end
+            that has stopped reading — its synchronous ``close`` succeeds and
+            gives nothing back, and only a dropped transport settles it. That is
+            the arrangement under which a release that merely *starts* is
+            distinguishable from one that finished.
         handed: The last writer it handed out, for the cases that read what
             happened to it.
     """
@@ -303,6 +308,7 @@ class _Sockets:
         self.gate: _Handoff | None = None
         self.breaks_on_close = False
         self.releases_before_it_fails = True
+        self.holds_the_close_waiter = False
         self.handed: _Writer | None = None
 
     async def __call__(
@@ -332,6 +338,7 @@ class _Sockets:
         writer = _Writer(ledger=self)
         writer.fails_to_close = self.breaks_on_close
         writer.releases_before_it_fails = self.releases_before_it_fails
+        writer.holds_the_close_waiter = self.holds_the_close_waiter
         self.handed = writer
         gate, self.gate = self.gate, None
         if gate is not None:
@@ -660,6 +667,16 @@ async def test_a_host_the_resolver_refuses_is_a_transport_error_not_a_unicode_on
     clause obviously wants; a substitute would be asserting the arrangement.
     """
     unresolvable = TransportEndpoint(host="\u200d.invalid", port=465, implicit_tls=True)
+    # **And it reaches no resolver**, which is why this is a unit test rather than
+    # an integration one (`CONTRIBUTING.md`, "No network or filesystem in unit
+    # tests"). ``socket.getaddrinfo`` encodes the host with the ``idna`` codec
+    # before it consults anything, and a label that is empty after nameprep \u2014 a
+    # lone zero-width joiner is \u2014 fails there. Asserted rather than asserted-about:
+    # on a platform where that ever stopped holding, this line fails instead of the
+    # case reaching the network. Adversarial review raised the possibility on
+    # round 12.
+    with pytest.raises(UnicodeError):
+        unresolvable.host.encode("idna")
 
     with pytest.raises(TransportError) as failure:
         await StreamOutboundTransport().open_channel(unresolvable)
@@ -740,6 +757,45 @@ async def test_a_cancellation_survives_a_release_that_fails(
     with pytest.raises(asyncio.CancelledError):
         await opening
     assert sockets.open == 0
+
+
+async def test_an_orphaned_release_has_finished_before_the_cancellation_is_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1: "releases what it acquired first" is an order, not an intention.
+
+    ``StreamWriter.close`` only *starts* a release — the transport stops reading,
+    flushes what is buffered, and closes the socket from a later turn of the loop
+    — so a shape that raised the moment ``close`` returned handed the caller its
+    ``CancelledError`` while the connection was still up. Nothing else can ever
+    release these streams, which is what makes this the one path where the
+    difference between started and finished is the whole obligation. Architecture
+    review found it on round 12.
+
+    **The arrangement is a far end that has stopped reading**, which is the only
+    one that tells the two apart: a close alone gives the socket back only when
+    the flush completes, and this far end never lets it. So the ledger still reads
+    one at the moment the caller's call completes unless the release was both
+    forced — the abort, which is what keeps the wait bounded — and waited out.
+    """
+    sockets = _Sockets()
+    sockets.holds_the_close_waiter = True
+    gate = _Handoff()
+    sockets.gate = gate
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    opening = asyncio.ensure_future(StreamOutboundTransport().open_channel(ENDPOINT))
+    await gate.reached()
+
+    opening.cancel()
+    gate.release()
+    await settle()
+
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert sockets.open == 0
+    assert sockets.handed is not None
+    assert sockets.handed.aborts == 1
+    assert sockets.handed.released is True
 
 
 async def test_the_channels_close_aborts_a_release_that_failed_before_releasing(
