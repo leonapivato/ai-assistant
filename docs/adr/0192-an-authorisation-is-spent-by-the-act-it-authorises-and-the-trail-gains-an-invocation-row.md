@@ -575,6 +575,15 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > nothing about the collision reaches the caller, the trail or the diagnostic: no row
 > was appended under a colliding id, so there is nothing to report.
 
+> **Normative.** The collision and the bound are over **one id space, and it is
+> every row the store holds** — decisions and invocations alike, since one store
+> holds both and `clear()`'s count is over both (§6). A minted invocation id naming
+> a **decision's** id is therefore a collision like any other and is drawn away from
+> like any other, and the bound is the count of every row held, of either kind, plus
+> one. A narrower space would let an implementation check invocation rows alone and
+> append an invocation under a decision's id, which the join below then resolves to
+> two different rows under one identifier.
+
 > **Normative.** That bound reads the rows the store holds **now** and holds nothing
 > across an erasure, which is what makes it available here at all. It consults no
 > generation, no epoch, no high-water mark and no record of an id the store used to
@@ -607,22 +616,69 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > the id space; the second is a property of a durable store meeting a memory that
 > resets.
 
+> **Normative.** Both members store a **detached, validated snapshot** of what they
+> were given, and neither retains the caller's object. ADR-0021 §4 made this a rule
+> for `record` — a store that retained it would let `decision.__dict__["ruling"] =
+> ...` rewrite an appended entry through a store whose whole premise is that entries
+> are not rewritten — and these two members are that same store gaining two more
+> write paths, so the rule reaches them or the premise stops holding for the rows
+> they add. It is **recursive over reachable mutable state**, for ADR-0018 §3's
+> reason and against ADR-0021 §4's own example: `complete_invocation` is handed a
+> live `ToolCost`, which is the object at the end of the chain that clause names, and
+> a shallow copy would share it.
+
+> **Normative.** The row each member **returns** is detached from the one the store
+> holds, for the second half of the same reason. A caller holds what
+> `claim_invocation` returned for the length of the call and reads the `id` it will
+> complete against out of it (above), so a returned row aliasing the stored one would
+> let `row.__dict__` rewrite history through a pointer this contract itself hands
+> out. Frozen models do not close that: `frozen=True` and `extra="forbid"` bound the
+> ordinary write path and not `__dict__`, which is why ADR-0021 §4 states detachment
+> rather than resting on a model's own immutability, and why this ADR does not rest
+> on it either.
+
 > **Normative.** A `ToolInvoker` implementation holds an `InvocationLedger` and
 > **never** an `AuditTrail`. The ledger can neither record a `PermissionDecision`,
 > nor read one, nor export, nor `clear`, so no decision write, no history read and
 > no erasure reaches `tools/` through this seam.
 
-> **Normative.** `AuditTrail` gains exactly two members, both reads:
-> `recent_invocations(*, limit: int = 50) -> list[RecordedInvocation]` and
-> `export_invocations() -> list[RecordedInvocation]`. `recent_invocations` carries
+> **Normative.** `AuditTrail` gains exactly three members, all reads:
+> `recent_invocations(*, limit: int = 50) -> list[RecordedInvocation]`,
+> `export_invocations() -> list[RecordedInvocation]` and
+> `open_invocations(*, decision_id: DurableIdentifier) -> list[ToolInvocation]`. `recent_invocations` carries
 > `recent`'s total order, its bounded default and its `ValueError` on a `limit`
-> that is not strictly positive. Each returns a detached snapshot, as every other
-> `AuditTrail` read does (ADR-0018 §3).
+> that is not strictly positive. Each of the three returns a detached snapshot, as
+> every other `AuditTrail` read does (ADR-0018 §3).
 
 > **Normative.** Each read **joins the row to its decision inside one atomic store
 > operation**, so every `RecordedInvocation` it returns is complete. No consumer
 > assembles one from two reads, and no implementation returns a row it could not
 > pair.
+
+> **Normative.** `open_invocations` returns every claim under that decision that no
+> completion names, in the ledger's append order, as detached snapshots, from one
+> atomic store operation. It takes no `limit`: it is not a history read but the
+> **exact set §3's recovery rule is written against**, and a bounded answer would let
+> a scan transition over claims it never saw.
+
+> **Normative.** It exists because §3 requires the scan to complete *every* open
+> claim under the decision a step's `approval_ref` names, and to **re-read** that set
+> before committing the transition — a question an earlier draft required while
+> naming no operation that asks it, leaving a scan to page `recent_invocations` or
+> export the whole trail and rebuild the claim-to-completion relation `permissions/`
+> owns. **This is ADR-0044 §3's move, not a new one.** That section added
+> `AuditTrail.pending_confirmation` for exactly this shape — a restarted process
+> asking the trail for the record it can no longer name by id — and the rule it
+> settled is that a recovery query belongs with the store that owns the record.
+> `orchestration/` already holds an `AuditTrail` for that member's sake, so this
+> costs it no capability it did not have.
+
+> **Normative.** It goes on `AuditTrail` and **never** on `InvocationLedger`, and
+> that is the boundary this ADR does have to defend. The ledger is what `tools/`
+> holds, and the clause below keeps every history read off that seam; a
+> by-decision query over past claims is precisely such a read. The recovery scan is
+> the only consumer that calls this member, and it reaches it through the trail it
+> already has.
 
 > **Normative.** The composition root injects **one object implementing both
 > Protocols**, over one store. This is ADR-0029 §8's rule for `ToolRegistry` and
@@ -919,6 +975,40 @@ the count.
 > converting a `KeyboardInterrupt` into a returned result is the conversion ADR-0029
 > §3 forbids. The claim is left open by that exit as by any other.
 
+> **Normative.** **One case in that clause cannot be honoured, and this ADR states
+> that rather than requiring it**: a `BaseException` that is not a `CancelledError`
+> raised **inside a retained append task**. ADR-0031 §4 *measured* the behaviour and
+> it is not a matter of care — `Task.__step` sets a `KeyboardInterrupt` on the future
+> **and** re-raises it into the event loop, so the awaiting frame sees a
+> `CancelledError` whatever the implementation does, and recovering the real class
+> off the retained task would re-raise an exception the loop already holds. The
+> clause above therefore governs every non-cancellation `BaseException` raised on the
+> completion path **outside** the two appends — the callable's, the clock callable's,
+> the seam's own — and this one is governed here.
+
+> **Normative.** What `invoke` owes for it is what it can deliver. The exception
+> arrives as a `CancelledError` with the `Task.cancelling()` count **unmoved across
+> the call**, which is the state the next clause already classifies: no cancellation
+> request reached this task, so it is a collaborator raising the wrong thing and is
+> never read as a cancellation of this call. `invoke` reads the retained task's own
+> exception, carries its **class** in the diagnostic under §3's bound on that field,
+> writes no completion, invents no outcome and converts nothing into a `ToolResult`.
+> It does **not** promise the caller that class, and no lane "restores" it: the
+> outward exception is the one asyncio delivers, and re-raising the recovered one
+> delivers the interrupt twice.
+
+> **Normative.** That is a **cost of the shield**, priced against what the shield
+> buys. Without the retained task an absorbed cancellation costs the `id` of a claim
+> that landed (§1, ADR-0054) — the failure this section exists to prevent, on every
+> cancellation. With it, one exit — an interpreter torn down *inside an audit append*
+> — reaches the caller under a class it did not have. The second is both rarer and
+> less harmful, and no third option was available. ADR-0031 §4 refused the child task
+> for the **callable** on this exact ground; what differs here is that the callable is
+> **not** what is isolated. It is awaited directly, its own `BaseException`
+> propagates unchanged as ADR-0029 §3 requires, no Ctrl-C during the act is
+> misclassified as an external cancellation, and no watchdog over the callable is
+> acquired — which were §4's other two objections, and neither reaches this design.
+
 > **Normative.** A `CancelledError` **a collaborator raised** on the completion path
 > — the ledger's clock, its store — where the `Task.cancelling()` count is
 > **unmoved across the call**, so no cancellation request reached this task at all,
@@ -1124,8 +1214,9 @@ the count.
 > §6). That refusal is neither a fault to repair nor a reason to abandon the
 > transition — the claim it named no longer exists, so there is nothing left to
 > complete, and §6's `clear()` wins here as everywhere. The scan re-reads the open
-> claims under that `approval_ref` and proceeds by the rule above: the transition is
-> committed once none is open, which after an erasure is trivially so.
+> claims under that `approval_ref` — `AuditTrail.open_invocations` (§2), the
+> operation this rule is written against — and proceeds by the rule above: the
+> transition is committed once none is open, which after an erasure is trivially so.
 
 > **Normative.** The **re-read** is a property of the rule and not a special case for
 > erasure. "Transition only after no claim under that decision is still open" is read
@@ -1995,9 +2086,11 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > `ToolResult.incurred_cost` — with `InvocationLedger` as a triad (Protocol, shared
 > conformance suite, canonical fake) and its primary production implementation, the
 > `permissions` store that also satisfies `AuditTrail` (ADR-0137 §2's pairing). It
-> also lands `AuditTrail`'s two new read members with the store-side join, their
-> obligations in that Protocol's existing conformance suite, and its fake, because
-> those are the same object and the same store. No lane implements against this ADR
+> also lands `AuditTrail`'s **three** new read members — the two joined listings and
+> `open_invocations` — their obligations in that Protocol's existing conformance
+> suite, and its fake, because those are the same object and the same store. No new
+> Protocol is minted for the recovery read: ADR-0044 §3 already put a recovery query
+> on `AuditTrail`, and this is that member's shape (§2). No lane implements against this ADR
 > before it is ratified and merged (ADR-0015 §5).
 
 > **Normative.** **The seam group** (`tools/`) lands `ToolInvoker.invoke`'s new
@@ -2007,7 +2100,9 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the group that first needs an invoker holding a ledger.
 
 > **Normative.** **The recovery group** (`orchestration/`) lands §3's recovery-scan
-> completions and their ordering, and the executor-level test below.
+> completions and their ordering, the scan's use of `AuditTrail.open_invocations`
+> through the trail it already holds, and the executor-level test below. It is the
+> only consumer that calls that member (§2).
 
 > **Normative.** **The surface group** lands §4's two `AssistantEngine` operations,
 > that Protocol's new conformance obligations and its fake, the `PROTOCOL_VERSION`
@@ -2281,6 +2376,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > fails the same way on every subsequent restart, which is the deadlock this clause
 > exists to remove.
 
+> **Normative.** The redraw is pinned over **more than one occupied id, across both
+> row kinds**, because both arms above are passed by an implementation that redraws
+> exactly once and checks invocation rows alone. The store is seeded with several
+> rows whose ids the test knows — **a decision's among them** — and the factory
+> returns each of those ids once, in turn, before returning a fresh one on a draw the
+> bound still permits. The append **succeeds** under that fresh id, every seeded row
+> is unchanged field by field, and no row is appended under any seeded id; the case
+> runs for **both members**. An implementation that redraws once refuses here; one
+> that treats the id space as the invocation rows alone appends under the decision's
+> id and fails the unchanged-row assertion, which is §2's one-id-space clause under
+> test.
+
 > **Normative.** The factory's own **faults** are pinned at that same boundary, by
 > ADR-0026 §2's split and for the same reason the clock's two arms are named apart
 > below: an earlier draft stated the clock's and left the factory's to be inferred,
@@ -2376,18 +2483,24 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the cancellation ADR-0054 permits the store to re-raise in its place, reporting
 > neither the fault nor the open claim.
 
-> **Normative.** The **claim** path's non-cancellation `BaseException` is pinned for
-> its **outward identity**, which no case here otherwise asserts — the completion
-> path's is pinned above, and the failure-path list below reaches only one raised
-> from the **callable**. The retained, shielded task §3 mandates is itself what puts
-> this at risk: ADR-0031 §4 records that awaiting a coroutine which raises a
-> `BaseException` through a child task can deliver a `CancelledError` in its place, so
-> an implementation that then classified Ctrl-C through an interrupted outcome would
-> pass every `Exception` and every `CancelledError` case above. A `KeyboardInterrupt`
-> and a `SystemExit` raised from the **claim** append each reach the caller **as
-> their own class** — asserted by class and not by `BaseException` alone, with the
-> cause intact — the tool callable **never entered**, no completion written and no
-> outcome invented for either (§3).
+> **Normative.** The non-cancellation `BaseException` raised **inside a retained
+> append** is pinned for what §3 promises, and an earlier draft of this clause pinned
+> what ADR-0031 §4 measured to be impossible. A `KeyboardInterrupt` and a
+> `SystemExit` raised from the **claim** append each reach the caller as a
+> `CancelledError` whose `Task.cancelling()` count is **unmoved**, with the tool
+> callable **never entered**, no completion written, no outcome invented, and the
+> **diagnostic carrying the real class** read off the retained task. The test asserts
+> each of those, and asserts that the interrupt is **not delivered twice** — a lane
+> that re-raises the recovered class hands the loop an exception it already holds
+> (§3, ADR-0031 §4). The same pair is run against the **completion** append.
+
+> **Normative.** The `BaseException` the **tool callable** raises is pinned beside
+> it and answers differently, which is why the two are named apart: the callable is
+> awaited **directly** and is not isolated in a task, so a `KeyboardInterrupt` and a
+> `SystemExit` from it propagate **unchanged**, asserted by class with the cause
+> intact (ADR-0029 §3, §3 above). A suite carrying only the converted case would
+> certify an implementation that had isolated the callable too — the shape ADR-0031
+> §4 refused outright — and only running both finds it.
 
 > **Normative.** No test asserts that a ledger append is abandoned, and none may be
 > written: neither wait is bounded and the shielded task is awaited to its outcome,
@@ -2419,6 +2532,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > evaluation here would mean inventing the contract §10 defers. What §9 owes is the
 > **fact** such an evaluation reads — that a failed completion leaves the claim open —
 > and the clause above stops there; §5 says where the case that reads it is owed.
+
+> **Normative.** The **mutation bypass** is pinned on both write paths and on both
+> returns, because a frozen model makes it look closed and does not close it (§2).
+> The suite mutates, through `__dict__` and **after** the call returned, the
+> `ToolCost` it passed to `complete_invocation`; every later read — the returned row,
+> `recent_invocations`, `export_invocations`, `open_invocations` — still shows the
+> value as it stood at the append. It mutates the **returned** claim and the
+> **returned** completion the same way and asserts the same thing, reaching
+> recursively into the `ToolCost` a completion row carries. An implementation that
+> stores or returns the caller's object passes every mapping and shape case above and
+> fails these, which is why ADR-0021 §4 pins it for `record` rather than resting on
+> `frozen=True`.
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
@@ -2486,6 +2611,19 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > exactly **one** appends, the other refused `AuthorisationSpentError`. A store that
 > passes the first-claim race and fails this one admits the duplicate effect this
 > whole ADR exists to prevent, one state later.
+
+> **Normative.** Every race above is also run through **two independently
+> constructed ledger instances over one persistent store**, and not only through two
+> coroutines on one object. §2 makes overlapping instances reachable — nothing makes
+> the ledger unreplaceable and no quiescence rule is minted — so an implementation
+> whose atomicity is a per-instance `asyncio.Lock` satisfies every single-object race
+> above while two instances each observe no claim, each append one, and admit two
+> spendable invocations: the duplicate effect §1 exists to prevent, reached through
+> the one door the single-object suite leaves open. The claim race, the
+> retry-admission race, the completion race and the `clear()` join race each carry
+> this arm. Where a store under test cannot be opened twice, the suite **skips with
+> its reason stated**, as the conformance suites in this corpus already do, and never
+> by omitting the case.
 
 > **Normative.** `clear()`'s **returned count** is pinned over both kinds, on a
 > store holding a decision, a claim and a completion: the call returns **3** and the
@@ -2559,9 +2697,13 @@ row kinds, and the annotation belongs to the kind that was already there.
 - **#234's classification change.** The reachability fact becomes durable; what the
   executor does with it is that issue's Protocol decision (§3).
 - **Retention** (#108), for either row kind (§6).
-- **A richer query surface** over either kind — by tool, by outcome, by window, by
-  decision. ADR-0021 §4 defers those "until something asks for it" and nothing here
-  asks.
+- **A richer query surface** over either kind — by tool, by outcome, by window.
+  ADR-0021 §4 defers those "until something asks for it" and nothing here asks. The
+  one exception is `open_invocations`, a query **by decision**, and it is the
+  exception on §4's own terms: §3's recovery rule asks for it, in the sense that
+  clause means — it is written against the exact set that member returns and cannot
+  be satisfied without it. Every other by-decision question, open or not, stays
+  deferred.
 - **Closing #259.** §1 narrows it and says by how much.
 - **Any change to `PlanStore`, `StepExecution` or ADR-0014 §4's transition graph.**
 
@@ -2601,6 +2743,14 @@ row kinds, and the annotation belongs to the kind that was already there.
   own result stands, leaving a terminal step over an open claim. Closing either
   would take a transaction across two stores or a scan writing plan state from an
   audit row, neither of which this ADR takes.
+- **`AuditTrail` gains a recovery query, and the scan stops reconstructing a
+  relation it does not own.** `open_invocations` answers the exact set §3's rule is
+  written against, from the store that owns the record, through the trail
+  `orchestration/` already holds — ADR-0044 §3's move, made again for the same
+  reason. Without it the scan would page a bounded listing or export the whole trail
+  and rebuild the claim-to-completion relation `permissions/` owns, materialising
+  unrelated Tier 1 history in the wrong subsystem to do it. It is deliberately not on
+  `InvocationLedger`, so `tools/` still holds two write members and no history read.
 - **An append may now mint more than once, and the ledger reads its own live rows
   to know when to stop.** A minted id naming a row the store currently holds is
   drawn again rather than refused, bounded by the rows held plus one, with an
