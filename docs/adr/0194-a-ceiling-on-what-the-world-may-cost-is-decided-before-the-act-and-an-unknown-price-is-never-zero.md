@@ -632,11 +632,25 @@ the two properties it has rather than letting a reader assume the stronger one.
 > sends such a tool to `CONFIRM`, are neither relaxed, satisfied nor duplicated by
 > anything here.
 
-> **Normative.** No implementation makes the admission conditional on the calling
-> subsystem, the tool's identity, a setting other than §1's four **and the
-> `Settings.timezone` §1 exempts as the period selector**, or a value
-> carried in the request. There is no parameter, argument or configuration by
-> which a caller obtains an invocation the ceiling would refuse.
+> **Normative.** The admission reads exactly three things: the `ToolCost` handed
+> to `admit_invocation`, §1's four settings with the `Settings.timezone` §1 exempts
+> as the period selector, and the rows and reservations the holder holds. Nothing
+> else conditions it — not the calling subsystem, not the tool's identity, not a
+> capability, not a protocol, and no **caller-controlled** value: there is no
+> parameter, argument, header or configuration by which a caller obtains an
+> invocation the ceiling would refuse, and no override, bypass or force flag exists
+> to be reached for.
+
+> **Normative.** The `ToolCost` is not an exception to that and is the reason it is
+> stated as three things rather than as "nothing from the request". It is the
+> **pinned declaration** — the `cost` on the `ToolDefinition` the call's recorded
+> `PermissionDecision` pins (§2), which ADR-0016 §5 binds to the tool id for the
+> life of the process and ADR-0021 §2 freezes onto the decision — so a `FREE` call
+> and a `PER_CALL` call *must* admit differently and do. What it is not is
+> caller-supplied: the invoker reads it off the pinned definition and cannot
+> substitute one, a turn cannot author it, and a tool cannot restate it between the
+> ruling and the call. A prohibition written over "any value carried in the
+> request" would have forbidden the one input the arithmetic is made of.
 
 **The policy was the obvious home and it is the one place this cannot go.** It
 already reads `ToolCost` and already produces the `PermissionRuling`, so
@@ -887,6 +901,24 @@ whole explanation.
 > the invoker and the gate for the duration of one call — so nothing here promotes
 > a new value onto ADR-0085's surface, and no adapter, engine or client ever holds
 > one.
+
+> **Normative.** `admit_invocation` takes a `ToolCost` and **no tool identity**,
+> and that is §3's ratified decision rather than an omission: the admission is not
+> conditional on which tool is calling, so the seam is given nothing it must not
+> read. Two tools declaring the same cost are deliberately indistinguishable here.
+
+> **Normative.** That is **not** the temporary signature ADR-0016 §5 refuses — "a
+> contract whose author expects it to break is not a contract" — and the difference
+> is that §8's per-tool ceiling is **declined on the merits**, not scheduled. §1
+> gives the argument: such a ceiling partitions one budget rather than lowering it,
+> the property people want from it is a rate limit the day ceiling already
+> supplies, and it needs the keyed per-user store ADR-0016 §7 defers. This ADR does
+> not expect it to land. If a later decision reopens it, widening this contract is
+> that decision's to make and it is a breaking change with its own ratified ADR
+> (golden rule 5) — which is the corpus's ordinary route and is what ADR-0016 §5's
+> own registration case took when invocation landed. Pre-shaping the seam for a
+> ceiling this ADR argues against would hand the gate an identity §3 forbids it to
+> use, which is a worse contract than one that is narrow and says why.
 
 > **Normative.** They are two Protocols because they have two consumers and
 > neither needs the other's face: the invoker holds a `SpendGate` and **never** a
@@ -1989,10 +2021,11 @@ the ADRs it depends on rather than replacing them.
   that it was reachable today rather than unreachable (#1561); what remains named
   is the cross-process case (#1553), which ADR-0083's one-process rule makes
   unreachable for a reason that is checkable rather than assumed.
-- **Revisit when** a standing grant makes a call executable with no per-call user
-  act (the default becomes a live question), when a second priced integration
-  lands (the per-tool deferral gets its first real case), or when a user's tools
-  span two currencies.
+- **Revisit when** any priced invocation becomes executable with no per-call user
+  act — a standing grant, or simply a `PER_CALL` tool declaring `discloses=()`,
+  which ADR-0021 §5's floor does not reach (§8) — at which point the default
+  becomes a live question; when a second priced integration lands (the per-tool
+  deferral gets its first real case); or when a user's tools span two currencies.
 
 ## Alternatives considered
 
