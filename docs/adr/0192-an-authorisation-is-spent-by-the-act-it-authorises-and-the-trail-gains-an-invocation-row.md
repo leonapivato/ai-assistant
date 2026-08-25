@@ -138,7 +138,13 @@ surface can state an execution at all, because ADR-0186's two operations return
 > to make a completed act stop being the most recent one.
 
 > **Normative.** The ledger stamps `recorded_at` itself, from an injected `Clock`
-> wrapped by `checked_clock` (ADR-0026), and no caller supplies it. Any reading of
+> wrapped by `checked_clock` (ADR-0026), and no caller supplies it. It takes
+> **exactly one guarded reading per append**, and that one reading is both the
+> instant the admission rules above are decided on and the instant stored on the
+> row. Two readings would let a retry be admitted at `t+9s` inside a ten-second
+> window and stamped at `t+11s` outside it, so the row would then disagree with the
+> rule that admitted it — and a reader auditing the window against the stored
+> instants would find a claim this store admitted and cannot justify. Any reading of
 > the elapsed time that is not a positive duration is treated as the window having
 > lapsed, and the claim is refused; a clock that raises refuses the claim too. Both
 > are ADR-0029 §5's fail-closed rule for the same measurement, unchanged and
@@ -427,8 +433,12 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > **Normative.** `core/errors.py` gains exactly three classes, **all three deriving
 > from `AuditError`** and none from `ToolError`: `AuthorisationSpentError`,
 > `UnrecordedAuthorisationError` and `InvalidCompletionError`. Each preserves its
-> cause where it has one. A consumer catching `AuditError` catches every failure
-> either ledger member raises, the translated ones below included.
+> cause where it has one. A consumer catching `AuditError` catches every failure a
+> ledger member **owns** — every refusal above, and every failure it translates at
+> this boundary. It does **not** catch an exception the clock callable raises on its
+> own account, which §2's split propagates unwrapped and which is by construction
+> not the ledger's to classify; a consumer that must survive one catches it by its
+> own type, as it would from any other injected callable.
 
 > **Normative.** `claim_invocation` refuses in this order and no other: `AuditError`
 > where an argument is not valid; `UnrecordedAuthorisationError` where the store
@@ -618,15 +628,33 @@ the count.
 > not retry the act, and does not re-claim. A `SUCCEEDED` side effect is not
 > reported as failed because a disk was full.
 
+> **Normative.** A **`BaseException` that is not a cancellation**, raised anywhere
+> on the completion path — the clock callable during `complete_invocation` included
+> — is not a "completion failure" the clause above absorbs. It propagates unchanged,
+> the `ToolResult` does not reach the caller, and no diagnostic stands in for it.
+> The rule above is about a store or a clock that **refuses**; a process being torn
+> down is not a refusal, and converting a `KeyboardInterrupt` into a returned result
+> is the conversion ADR-0029 §3 forbids. The claim is left open by that exit as by
+> any other, and §3's open-claim clause governs it.
+
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic carrying the cause, and it is a diagnostic
 > and never a row. `core/logging.py`'s redaction rules and ADR-0004 §5 bind it as
 > they bind every operator-facing message.
 
-> **Normative.** The result of all three clauses is a claim left **open**, which is
-> the state the clause above governs and which no reader resolves. That is the
-> honest record of an act whose outcome this system failed to write down, and it is
+> **Normative.** The result of those clauses is a claim left **open**, which is the
+> state the clause above governs and which no reader resolves. That is the honest
+> record of an act whose outcome this system failed to write down, and it is
 > preferred to every alternative that writes a number down instead.
+
+> **Normative.** One case is exempt, and it is exempt because there is nothing to
+> leave open: where `clear()` erased the claim, the completion is refused
+> `InvalidCompletionError` (§6) and **no claim remains**. Nothing is recreated, and
+> the "claim left open" postcondition is not read as an obligation to put one back —
+> that would be the store recreating a row the user destroyed on purpose, which §6
+> names as the one answer no store may give. Everything else of the clauses above
+> holds unchanged: the call's own result stands, and the failure reaches the
+> operator as a diagnostic.
 
 > **Normative.** Where ADR-0014 §4's recovery scan records `INDETERMINATE` on a
 > step, the same act appends an `INDETERMINATE` completion for **every** open claim
@@ -1029,11 +1057,12 @@ here; they are what the surveyed projects' own code and documentation say, and
 
 > **Normative.** `clear()` wins any race with an in-flight invocation. A
 > completion whose claim was erased under it is refused as
-> `InvalidCompletionError` like any other completion naming no claim, and §3's
-> three clauses govern from there without a special case: the call's own result
-> stands, the failure reaches the operator, and nothing is recreated. No lane
-> mints an erasure marker, a cleared generation, or any other value by which the
-> two causes could be told apart.
+> `InvalidCompletionError` like any other completion naming no claim, and §3
+> governs from there: the call's own result stands and the failure reaches the
+> operator. Its open-claim postcondition is the one thing that cannot follow, and §3
+> states the exemption in terms — the claim was erased, so **no claim remains** and
+> nothing is recreated. No lane mints an erasure marker, a cleared generation, or
+> any other value by which the two causes could be told apart.
 
 > **Normative.** `AuditTrail.export_invocations` and the engine operation above
 > discharge ADR-0004 §6's portability obligation for this row kind.
@@ -1056,9 +1085,12 @@ landing between them would, under an earlier draft that suppressed the error, ha
 required the store to distinguish "the user burned the trail" from "this pointer is
 corrupt". It cannot: after `clear()` the two are the same absence. Review found that
 squarely, and the fix is that nothing is suppressed. §3's rule is uniform over every
-completion failure — the call's result stands, the operator is told, the claim stays
-open — so the erasure case needs no marker, no generation counter and no precedence
-of its own. Erasure still wins, because it is the data-rights act and the other is a
+completion failure in the two things that matter — the call's result stands and the
+operator is told — so the erasure case needs no marker, no generation counter and no
+precedence of its own. What it does need, and what a later round found missing, is
+the one sentence saying that a claim the user erased is not put back: §3's
+"claim left open" describes a claim that is still there, and reading it as an
+obligation would turn a data-rights act into a store that rebuilds what it deleted. Erasure still wins, because it is the data-rights act and the other is a
 record of it; the residue is one call whose record the user destroyed on purpose, and
 recreating the row is the one answer no store may give.
 
@@ -1237,6 +1269,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > obligations in the existing conformance suites for `AuditTrail`, `ToolInvoker`
 > and `AssistantEngine`; and the fakes for each. No lane implements against this
 > ADR before it is ratified and merged (ADR-0015 §5).
+
+> **Normative.** The suite asserts **one guarded reading per append**, with a clock
+> that advances on every call and a test that fails if the append reads it twice,
+> and asserts that the instant the admission was decided on is the instant stored on
+> the row.
+
+> **Normative.** Two further failure paths are pinned. A **`clear()` landing between
+> a claim and its completion** leaves the call's result standing, emits the
+> diagnostic, refuses the completion `InvalidCompletionError`, and leaves **no
+> claim** — nothing recreated (§§3, 6). A **completion-path clock callable raising
+> `KeyboardInterrupt`** propagates unchanged and returns no `ToolResult` (§3).
 
 > **Normative.** The conformance suite for `InvocationLedger` pins the clock at the
 > boundary: an exact-window reading, a reading one unit outside it, a reading that
