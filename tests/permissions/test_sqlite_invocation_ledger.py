@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,10 +25,14 @@ from permission_builders import action, decision, ruling, tool
 
 from ai_assistant.core.errors import AuditError, AuthorisationSpentError
 from ai_assistant.core.types import (
+    CostBasis,
     Idempotency,
     PermissionDecision,
     PermissionOutcome,
+    ToolCost,
+    ToolFailureKind,
     ToolInvocation,
+    ToolOutcome,
 )
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
@@ -178,12 +183,24 @@ class TestSqliteInvocationLedgerContract(InvocationLedgerContract):
 # a column at all needs the store's own SQL.
 
 
-def _allow(decision_id: str, tool_id: str = "smtp") -> PermissionDecision:
-    """An ALLOW a claim can be admitted under, over a named tool."""
+def _allow(decision_id: str, tool_id: str = "smtp", *, keyed: bool = False) -> PermissionDecision:
+    """An ALLOW a claim can be admitted under, over a named tool.
+
+    ``keyed`` opens ADR-0029 §5's retry arm, which is the only arm an instant
+    decides and so the only one a reordered append order could move.
+    """
+    definition = (
+        tool(
+            tool_id,
+            side_effecting=True,
+            idempotency=Idempotency.KEYED,
+            idempotency_window=timedelta(seconds=10),
+        )
+        if keyed
+        else tool(tool_id, side_effecting=True, idempotency=Idempotency.NONE)
+    )
     return decision(
-        decision_id,
-        request=action(tool=tool(tool_id, side_effecting=True, idempotency=Idempotency.NONE)),
-        ruled=ruling(PermissionOutcome.ALLOW),
+        decision_id, request=action(tool=definition), ruled=ruling(PermissionOutcome.ALLOW)
     )
 
 
@@ -201,6 +218,32 @@ async def _claimed(trail: SqliteAuditTrail, authorisation: PermissionDecision) -
     """Record ``authorisation`` and claim one invocation under it."""
     await trail.record(authorisation)
     return await trail.claim_invocation(decision=authorisation)
+
+
+async def _fail(trail: SqliteAuditTrail, claim: ToolInvocation) -> ToolInvocation:
+    """Complete ``claim`` retryably, which is the state §1's retry arm reads."""
+    return await trail.complete_invocation(
+        claim_id=claim.id,
+        outcome=ToolOutcome.FAILED,
+        incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+        failure_kind=ToolFailureKind.UNAVAILABLE,
+    )
+
+
+class _StepClock:
+    """A clock the case moves by hand, so the window's boundary is exact."""
+
+    def __init__(self) -> None:
+        """Start at the epoch-anchored instant every case below measures from."""
+        self.at = 0
+
+    def __call__(self) -> datetime:
+        """Return the instant the case has wound to."""
+        return _ORIGIN + timedelta(seconds=self.at)
+
+
+#: A fixed instant, so the window boundary is about the values and not the runtime.
+_ORIGIN = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 
 @pytest.mark.integration
@@ -243,47 +286,74 @@ async def test_a_column_the_record_derives_cannot_be_altered_at_all(
 
 
 @pytest.mark.integration
-async def test_a_stored_column_that_disagrees_with_its_blob_is_reported(
-    trail: SqliteAuditTrail,
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param("seq", 99, id="the-append-order"),
+        pytest.param("recorded_at_us", 1, id="the-listing-order"),
+        pytest.param("data", '{"id": "x"}', id="the-record-itself"),
+    ],
+)
+async def test_a_column_the_record_cannot_derive_is_refused_by_the_table(
+    trail: SqliteAuditTrail, column: str, value: object
 ) -> None:
-    """``recorded_at_us`` cannot be derived, so it is checked instead.
+    """The two stored columns are closed by the table being append-only, not by a check.
 
-    ``json_extract`` yields the stored ISO-8601 text, which does not sort as an
-    instant — a whole second serialises with no fraction and sorts *after* the same
-    second with one — so the ordering column is `_sort_key`'s integer microseconds
-    and is genuinely a second copy. It decides no admission; it decides the order a
-    listing is served in, and serving a row in the order some other instant would
-    put it in is the trail telling the operator something that is not so.
+    ``seq`` is absent from :class:`ToolInvocation` and ``recorded_at_us`` is
+    `_sort_key`'s integer microseconds, which ``json_extract`` cannot produce from
+    the ISO-8601 text the blob holds — so neither can be derived, and for both the
+    hazard is the one no comparison reaches. Swapping two claims' ``seq`` moves the
+    claim ADR-0192 §1's retry window is measured from. Altering ``recorded_at_us``
+    pushes a row past a bounded listing's ``LIMIT``, where it is never decoded and
+    never compared, and the caller is handed a wrong page with every row on it
+    valid — and validating rows the bound *excludes* would mean reading the whole
+    table to serve a page.
+
+    ADR-0021 §4 already says nothing recorded is rewritten and this store issues no
+    ``UPDATE`` against the table, so saying that to SQLite costs nothing and closes
+    both. ``data`` is here too: it is what a tamperer would move once the derived
+    columns stopped being movable.
     """
     await _claimed(trail, _allow("d-1"))
-    trail._conn.execute("UPDATE invocations SET recorded_at_us = 1")
-    trail._conn.commit()  # the raw write is the case's premise, not a half-open transaction
 
-    with pytest.raises(AuditError, match="disagrees with the projection"):
-        await trail.export_invocations()
-    with pytest.raises(AuditError, match="disagrees with the projection"):
-        await trail.recent_invocations()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        trail._conn.execute(f"UPDATE invocations SET {column} = ?", (value,))  # noqa: S608 — literal
+    trail._conn.rollback()
+
+    assert len(await trail.export_invocations()) == 1
 
 
 @pytest.mark.integration
-async def test_a_row_whose_record_was_replaced_wholesale_is_reported_where_it_can_be(
+async def test_the_retry_window_cannot_be_moved_by_reordering_the_ordinals(
     trail: SqliteAuditTrail,
 ) -> None:
-    """Rewriting ``data`` moves the derived columns with it, which is the honest limit.
+    """The concrete consequence the append-only table exists to deny.
 
-    A generated column cannot disagree with the blob, so an edit that rewrites the
-    blob is not caught by any comparison — the record itself now says something
-    else, and no store can tell that from a record legitimately written unless it
-    keeps a second, independently protected copy. What the store still refuses is a
-    rewrite that does not survive the model, and a `seq` that no longer orders the
-    row it names is the residue named in issue #1574.
+    ADR-0192 §1 measures the idempotency window from the **first** claim in the
+    ledger's append order, so an implementation whose ordinals can be swapped
+    measures a third attempt from the second claim and admits it outside the
+    window. Driven at the ADR's own figures — a claim at ``t=0`` completed
+    retryable, a second at ``t=9`` completed the same way, a third at ``t=18``.
     """
-    await _claimed(trail, _allow("d-1"))
-    trail._conn.execute("UPDATE invocations SET data = ?", ('{"id": "x"}',))
-    trail._conn.commit()  # the raw write is the case's premise, not a half-open transaction
+    clock = _StepClock()
+    trail = SqliteAuditTrail(path=trail._path, now=clock)
+    try:
+        authorisation = _allow("d-1", tool_id="smtp", keyed=True)
+        first = await _claimed(trail, authorisation)
+        await _fail(trail, first)
+        clock.at = 9
+        second = await trail.claim_invocation(decision=authorisation)
+        await _fail(trail, second)
 
-    with pytest.raises(AuditError, match="no longer validates"):
-        await trail.export_invocations()
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            trail._conn.execute("UPDATE invocations SET seq = 99 WHERE seq = 1")
+        trail._conn.rollback()
+
+        clock.at = 18
+        with pytest.raises(AuthorisationSpentError, match="window"):
+            await trail.claim_invocation(decision=authorisation)
+    finally:
+        trail.close()
 
 
 @pytest.mark.integration
