@@ -54,18 +54,30 @@
   discharged without a second pinning axis.** #1462 is closed by asserting the
   property §5 actually rests on rather than by freezing a version:
   `tests/readers/test_parse_path_is_pure_python.py` (PR #1554) fails the gate when
-  the calendar parse path stops being pure Python — checked against the installed
-  metadata *and* against `uv.lock`, so a platform this machine is not also counts —
-  and passes a refresh that only moves a version. A reader of §13 should therefore
-  read the bullet as answered by that test, and follow #1462 rather than #1448.
+  either distribution on the calendar parse path ships compiled code — checked
+  against the installed metadata *and* against `uv.lock`, so a platform this
+  machine is not also counts — and passes a refresh that only moves a version. A
+  reader of §13 should therefore read the bullet as answered by that test, and
+  follow #1462 rather than #1448.
+  **What that answer buys is bounded, and the bound is the test's own rather than
+  one this note infers for it.** Unverifiable is a breach there — an unreadable
+  `WHEEL` or `RECORD`, a distribution absent from the lock, a locked distribution
+  with no wheel at all — but the module states in the same paragraph what it does
+  not see: "A compiled artifact a package downloads, builds or extracts at run time
+  exists at neither of the moments this looks; `ctypes` reaching a system library is
+  a file in no `RECORD`; the granularity is the distribution, so neither test says
+  which module inside a pure-Python distribution the bytes actually reach". It is
+  "the instrument ADR-0183 §5's own reasoning asks for — the fact about the
+  libraries, asserted rather than assumed — and **not a proof of memory safety**".
+  So what §13's deferral loses is its currency and not its subject: the question it
+  deferred has an answer, and §5's property is asserted at the granularity
+  packaging metadata carries instead of being assumed at every granularity.
   **ADR-0024 §3 is untouched by all of it.** No dependency was pinned and its
   exact-pin rule is still scoped closed to the four behaviour-affecting embedding
   packages; nothing here widens that scope, which is the outcome §5 anticipated
   when it said whether either package argues for an exact pin "is ADR-0024 §3's
   question and not this ADR's". `icalendar` is still declared as a range and this
-  note does not change that. What #1462's answer removes is the possibility of the
-  *parse-path property* changing with nobody deciding it should, which is the fact
-  §5's memory-safety clause was resting on.
+  note does not change that.
   **Nothing decided changes and no reader acts differently as to the decision**
   (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). §5's
   marked clause — that adversary-chosen bytes may not reach a compiled parse path
