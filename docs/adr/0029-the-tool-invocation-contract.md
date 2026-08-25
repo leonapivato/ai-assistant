@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it"; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes ADR-0192 adds to `invoke`)
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §5's retry conjunction where the preceding completion did not commit; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes ADR-0192 adds to `invoke`)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -14,10 +14,20 @@
   refused unless the preceding one completed `FAILED`. A reader holding only this
   ADR would act differently, so it is a supersession and not an amendment
   (ADR-0070 §1). **Both of §5's stated reasons survive and ADR-0192 §1 is written
-  to keep them.** Retry is unaffected — the retry path is the `FAILED` arm, so the
-  transient `UNAVAILABLE` §5 was written about still does not reach the user as a
-  fresh prompt — and no entry is consumed: a claim is an append, and the only
-  thing spent is the authority to append a second one. **Everything else of §5
+  to keep them.** Retry is unaffected **where the completion committed** — the
+  retry path is the `FAILED` arm, so the transient `UNAVAILABLE` §5 was written
+  about still does not reach the user as a fresh prompt — and no entry is consumed:
+  a claim is an append, and the only thing spent is the authority to append a second
+  one. **That qualifier is a third prerequisite §5 does not carry, and it is part of
+  what is superseded here.** Where the first attempt's completion append fails
+  before committing, its claim stays open, and ADR-0192 §1 refuses the retry's claim
+  `AuthorisationSpentError` even though §5's own two conditions both hold. The
+  refusal is deliberate and fail-closed — an open claim is an act that may have run
+  at an outcome nobody observed — and it is the reading §5 already takes on an
+  unreadable elapsed time and on an `INDETERMINATE` outcome; ADR-0192 §6 offers no
+  compensating write that would let it be lifted, and that ADR declines to mint one.
+  A reader holding only this ADR would attempt that retry, so this scope too is a
+  supersession and not an amendment (ADR-0070 §1). **Everything else of §5
   stands verbatim and ADR-0192 relies on it**: the derived `idempotency_key` and
   its three properties, the two-part retry conjunction, the two-sided window
   obligation, the fail-closed elapsed-time reading, and the refusal to auto-retry
