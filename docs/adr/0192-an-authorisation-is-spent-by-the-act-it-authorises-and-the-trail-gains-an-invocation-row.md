@@ -719,12 +719,44 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > injects **one** such factory per store, so two ledgers over one store never mint
 > from independent sequences.
 
-> **Normative.** The process is the right scope and not merely the convenient one:
-> the only holder of a claim's `id` is the `invoke` call the ledger returned it to,
-> which holds it in memory and nowhere else (above), so no stale holder outlives the
-> process. After a restart the only claims anything can name are the ones §3's
-> recovery scan reads back **out of the store**, and a claim `clear()` erased is not
-> among them.
+> **Normative.** The process is the right scope for the ids a factory **issues**:
+> the only holder of one is the `invoke` call the ledger returned it to, which holds
+> it in memory and nowhere else (above), so no stale holder of an issued id outlives
+> the process.
+
+> **Normative.** **That leaves one holder the scope does not reach, and this clause
+> closes it rather than arguing it away.** After a restart the claims anything can
+> name are the ones §3's recovery scan reads back **out of the store** — ids **this**
+> process never issued, so its factory is free to mint them. A draft said a claim
+> `clear()` erased "is not among them", which is true of what the scan reads and not
+> of what it is already holding: the scan can read claim `x`, an erasure can then
+> remove it, and a later claim minted under a re-recorded decision could be issued
+> the same `x` and receive the completion the scan is still holding — one call's
+> `INDETERMINATE` and `UNKNOWN` recorded against another call's claim, which is the
+> exact failure this section exists to prevent, arriving through the one door left
+> open. The pid component narrows it — an id another process issued carries **that**
+> process's pid — but narrowing by a pid the OS may recycle is the improbability this
+> section refuses to rest on anywhere else.
+
+> **Normative.** So **`open_invocations` reserves every claim id it returns**: the
+> store hands each to the same factory §2 injects, and the factory returns none of
+> them for the life of the process, exactly as it returns none it issued. The
+> obligation above is therefore over the ids a factory has issued **or been given to
+> reserve**, and the two are one rule. It is **store-internal** — `open_invocations`,
+> `complete_invocation` and the factory are all `permissions/` — so no id crosses a
+> subsystem boundary to be reserved, no consumer is given a reservation call, and
+> `orchestration/`'s recovery holder gains no member (§3). The two **history** reads
+> reserve nothing and need not: `recent_invocations` and `export_invocations` serve
+> surfaces, and a surface completes no claim, so an id it holds can misdirect
+> nothing.
+
+> **Normative.** The reservation is **not** the erasure residue §6 refuses, on §2's
+> own ground and not on a new one: what is remembered is an **identifier**, not an
+> act — no row, no decision, no outcome, no count of executions the user erased — it
+> is consulted at no admission, so a decision re-recorded after `clear()` still
+> admits a claim exactly as §6 states, and it dies with the process. It also does not
+> make a post-erasure claim judgeable against a pre-erasure one: it changes which
+> **id** a new claim gets, never whether one is admitted.
 
 > **Normative.** The **factory instance** is not enough, and a draft that narrowed
 > the scope to one was wrong. The composition root injects one factory per store, but
@@ -2616,6 +2648,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > asserts a durable path that permits the refused retry, because §1 offers none and
 > this suite invents none.
 
+> **Normative.** It pins the **restart, read, erase, re-claim** sequence the
+> reservation above exists for, because no other case reaches it: a claim appended by
+> one factory is read back by `open_invocations` in a **second** process, `clear()`
+> erases it, the decision is recorded again and a new claim is appended — and the
+> test asserts the new claim's id is **not** the erased one, and that the completion
+> still held for the erased one is refused `InvalidCompletionError` rather than
+> landing on the new claim. It drives the second factory so that it **would** have
+> minted that id absent the reservation, since a factory left to its own sequence
+> reproduces the collision only by coincidence and a test resting on one asserts
+> nothing.
+
 > **Normative.** It pins the erasure's effect on the consume, because §6 states it
 > as a scope rather than leaving it to be inferred: a decision claimed, completed,
 > erased by `clear()` and then recorded again admits a new claim, and the test
@@ -2902,7 +2945,7 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** The **factory's** own obligation (§2) is pinned as a *factory*
 > conformance case, separate from the ledger's, because it is the collaborator that
 > owes it: a factory conforms only where no value it returns repeats for the life of
-> the **process**. The cases are the ones that catch a **reset** —
+> the **process**, and where it returns none it was given to **reserve** (§2). The cases are the ones that catch a **reset** —
 > the failure a construction actually has — and not a long draw that could only catch
 > a collision by luck: ids drawn either side of a `clear()` differ (a claim, an
 > erasure, a further claim, three distinct ids), ids drawn under two different
@@ -3470,7 +3513,8 @@ row kinds, and the annotation belongs to the kind that was already there.
   that had none, and a new failure mode: a clock that will not read refuses the
   claim, so nothing side-effecting executes. That is the fail-closed direction and
   it is chosen deliberately. The factory carries a marked obligation of its own —
-  it repeats no value for the life of the process (§2) — which is a requirement on a
+  it repeats no value for the life of the process and returns none it was handed to
+  reserve (§2) — which is a requirement on a
   collaborator rather than state held in the store, and so costs the erasure right
   nothing.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
@@ -3621,6 +3665,24 @@ cancelled from outside; the only question is how far the call got, which is the 
 ADR-0034 §1 declines to expose and #234 owns. The first is decided by a count
 `invoke` already holds; the second would need a fact nothing exposes. That is why one
 is taken and the other is not.
+
+**Give recovery a purpose-built completion that takes only the claim id, and derive
+`INDETERMINATE`, `UNKNOWN` and the absent kind inside `permissions/`.** Raised in
+review against `InvocationCompleter` — the argument being that recovery may write
+only that one shape, so a member taking an arbitrary outcome, cost and kind is wider
+than its concern. Refused, and on §2's own rule rather than on convenience: the store
+**transcribes and never synthesises** an outcome, a kind or a cost, and a member that
+derived all three would be the store deciding what a recovery act means. §3 makes the
+same refusal one level out — "a scan that derived a step's outcome from an audit row
+would be changing" ADR-0014 §4's transition graph — and `INDETERMINATE` here is
+ADR-0014 §4's word for what recovery found, carried by the party that ran the scan.
+What the capability principle asks for is that a holder cannot reach a **capability**
+it has no concern with, which is why the recovery group holds the completer and not
+the ledger: it cannot claim, cannot record a decision, cannot read a history and
+cannot erase. It does not ask that every rule about an argument be unexpressible —
+ADR-0029 §1's own split leaves an invoker able to pass a call its registry will
+refuse — and §2's transcription rule, §3's recovery rule and §9's field-by-field
+assertions on **every** recovery case are where the one admissible shape is bound.
 
 **Hand the `ToolInvoker` the whole `AuditTrail`.** The first draft's shape, and
 refused once review named what it hands over: decision writes, history reads, the
