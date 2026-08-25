@@ -1106,10 +1106,10 @@ whole explanation.
 
 > **Normative.** `core/protocols.py` gains **two** Protocols. `SpendGate` has
 > **two** members, and exactly **one** of them is `async`:
-> `async def admit_invocation(*, estimate: ToolCost) -> SpendAdmissionHandle`,
+> `async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle`,
 > which evaluates §3's admission, raises under §4 where it refuses, and where it
 > admits takes §3's reservation and returns its handle; and
-> `def release_admission(handle: SpendAdmissionHandle) -> None` —
+> `def release_admission(self, handle: SpendAdmissionHandle) -> None` —
 > **synchronous** — which drops that reservation and is the idempotent,
 > no-raising, **never-blocking** member §3 requires. Neither appends a row and
 > neither writes durable state.
