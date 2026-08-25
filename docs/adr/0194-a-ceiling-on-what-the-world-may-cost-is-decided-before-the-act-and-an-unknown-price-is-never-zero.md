@@ -362,8 +362,12 @@ trigger rather than pre-deciding it here.
 > as the value needs and no more — none where it is an integer — and never a
 > positive exponent; and its **sign is never negative**, so a total whose exact
 > value is zero is `Decimal("0")` and never `Decimal("-0")`. Rows of `0.1`, `0.9`
-> and `1` total `Decimal("2")`, never `Decimal("2.0")` and never `Decimal("2E+0")`,
-> whatever order they were added in and however an implementation grouped them.
+> and `1` total `Decimal("2")` and never `Decimal("2.0")`, whatever order they were
+> added in and however an implementation grouped them; rows of `Decimal("1E+1")`
+> total `Decimal("20")` and never `Decimal("2E+1")`, which is where the
+> no-positive-exponent half bites, since `Decimal("2E+0")` and `Decimal("2")` are
+> one representation and not two — `as_tuple()` returns `(0, (2,), 0)` for both,
+> so no rule can separate them and none here tries to.
 > This governs a **result** — the accounted total and the projection — and no
 > input: a declared or configured amount keeps the scale whoever wrote it chose.
 
@@ -693,14 +697,24 @@ turn, which this section now handles.
 > classes.
 
 > **Normative.** The ceiling never produces a `CONFIRM`, never routes a question
-> to the user, and no per-call answer overrides it. A refusal is lifted by exactly
-> three things and by nothing a turn can reach: changing the configuration, the
-> period rolling over, and the **release of another call's reservation** (§3) —
-> which is not a relaxation but the projection ceasing to count a call that is no
-> longer in flight. A refused call retried after that release may be admitted in
-> the same period under the same configuration, and that is the mechanism working:
-> what refused it was a total including an in-flight call, and that call's own
-> reported cost is what the retry is now measured against. (That a call *admitted* under the projection may still carry the accounted
+> to the user, and no per-call answer overrides it. **What is closed is the
+> direction, not a count: nothing a turn can reach lifts a refusal.** A later
+> admission may nonetheless succeed where the same call was refused, and every way
+> that happens is a change to what the arithmetic reads rather than an override of
+> the decision: the configuration changed; the period rolled over; another call's
+> reservation was **released** (§3); the ground under a `SpendUndeterminedError`
+> ceased — an open claim gained its completion, or a store read or an injected
+> clock that failed succeeded on a later attempt; or the rows themselves were
+> erased by the user's `clear()` (§7), which resets the accounted total to
+> `Decimal("0")`. None is reachable from inside a turn: the gate can neither record
+> nor `clear` (§5), a turn cannot edit configuration or move the clock, and a
+> release retires only a call the invoker itself admitted. The release is the one
+> worth naming twice, because it is the only one that needs no act outside the
+> mechanism: it is not a relaxation but the projection ceasing to count a call that
+> is no longer in flight. A refused call retried after that release may be admitted
+> in the same period under the same configuration, and that is the mechanism
+> working: what refused it was a total including an in-flight call, and that call's
+> own reported cost is what the retry is now measured against. (That a call *admitted* under the projection may still carry the accounted
 > total past a ceiling, because its declaration understated it, is §2's stated
 > overrun and not an override of a refusal: nothing was refused.)
 
@@ -882,9 +896,11 @@ whole explanation.
 > value this mechanism cannot produce and would put bytes on the wire that no
 > conforming implementation states. Stated over `as_tuple()`: the sign is 0, the
 > exponent is between `-9` and `0` inclusive, and where the exponent is negative
-> the last digit is non-zero. So `Decimal("2")` constructs while `Decimal("2.0")`,
-> `Decimal("2E+0")` and `Decimal("-0")` each raise, and `Decimal("0")` is the only
-> spelling of a zero total. That subsumes the two invariants a reader would
+> the last digit is non-zero. So `Decimal("2")` and `Decimal("20")` construct while
+> `Decimal("2.0")`, `Decimal("2E+1")` and `Decimal("-0")` each raise, and
+> `Decimal("0")` is the only spelling of a zero total. `Decimal("2E+0")` is not a
+> case: it and `Decimal("2")` are one representation, `(0, (2,), 0)`, so a
+> validator cannot tell them apart and this clause does not ask it to. That subsumes the two invariants a reader would
 > otherwise reach for — non-negativity, and at most **nine** fractional digits,
 > which holds because every row contributing to it carries at most nine — and it is
 > deliberately **not** bounded in magnitude: §1's predicate governs inputs and not
@@ -1458,12 +1474,24 @@ the ADRs it depends on rather than replacing them.
 > reservation for that call — §3's cancellation rule asserted on the projection and
 > not on the exception alone, at the one boundary the mint adds to it.
 
-> **Normative.** The suite drives a refusal **lifted by a release**, which §4 now
-> names as one of the three ways one clears: an accounted total of 90, a ceiling of
+> **Normative.** The suite drives a refusal **lifted by a release**, which §4
+> names as the one way a refusal clears with no act outside the mechanism: an accounted total of 90, a ceiling of
 > 100, an outstanding reservation of 10 and an estimate of 1 refused at 101; the
 > outstanding handle released; the same estimate admitted in the same period under
 > the same configuration. It asserts the `SpendCeilingError` from the first attempt
 > states the **projected** figure that crossed and not only the accounted one.
+
+> **Normative.** It drives the **other** ways §4 says a refusal clears, each as a
+> refused call retried and then admitted, because an enumeration nothing exercises
+> is where a wrong one hides: the ceiling raised in configuration; the clock
+> advanced past the period boundary; an open claim gaining its completion, which
+> ends the `SpendUndeterminedError` §2's indeterminacy caused; and a store read and
+> an injected clock that raised once and succeed on the retry. Each is driven
+> through the suite's own fixtures — the configuration, the clock and the rows —
+> and none through a tool call, which is §4's point that no route from inside a
+> turn reaches any of them. The sixth way, erasure, is the lane's rather than the
+> suite's, because `clear()` is `AuditTrail`'s member and not one this suite's
+> Protocols expose; it is driven below.
 
 > **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
 > asserts on the projection rather than on the exception alone: a `CancelledError`
@@ -1618,12 +1646,15 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** `accounted`'s **representation** invariant (§5, over §2's one
 > representation) is driven as hostile constructions in its own right, because it
 > is the one a validator list built from "finite, non-negative, nine digits" passes
-> without carrying: `Decimal("2.0")`, `Decimal("2E+0")` and `Decimal("-0")` each
-> raise, while `Decimal("2")`, `Decimal("0")`, `Decimal("0.000000001")` and
-> `Decimal("100")` each construct. `ceiling` is driven with the same values and the
-> **opposite** expectation for the scale ones — a configured `Decimal("2.0")`
-> ceiling constructs, because §2's rule governs results and a ceiling is an input —
-> which is what stops a lane from applying one numeric validator to both fields.
+> without carrying: `Decimal("2.0")`, `Decimal("2E+1")` and `Decimal("-0")` each
+> raise, while `Decimal("2")`, `Decimal("20")`, `Decimal("0")` and
+> `Decimal("0.000000001")` each construct. The positive-exponent fixture is
+> `Decimal("2E+1")` and deliberately not `Decimal("2E+0")`, which is `Decimal("2")`
+> in `Decimal`'s own representation and would make the case unwritable. `ceiling`
+> is driven with the same values and the **opposite** expectation for the scale
+> ones — a configured `Decimal("2.0")` ceiling constructs, because §2's rule
+> governs results and a ceiling is an input — which is what stops a lane from
+> applying one numeric validator to both fields.
 
 > **Normative.** The same property is driven **end to end** rather than only at the
 > model, since a construction test passes against an implementation that never
@@ -1635,6 +1666,20 @@ the ADRs it depends on rather than replacing them.
 > `Decimal("0")` and the bytes are `"0"`: an accumulator seeded from the first row
 > rather than from zero preserves the sign and fails exactly here, and a suite
 > asserting only equality passes it, since `Decimal("-0") == Decimal("0")`.
+
+> **Normative.** The **projected** total is driven for the same property, because
+> §2's representation clause governs both results and only one of them has a model
+> to enforce it. An accounted total of `Decimal("2")` and a declared estimate of
+> `Decimal("1.0")` project `Decimal("3.0")` under a naive sum where §2 requires
+> `Decimal("3")`, and the projection reaches the user through
+> `SpendCeilingError`'s message (§4): so the suite drives that pair over a ceiling
+> of `Decimal("2.5")` and asserts the projected figure the error states is the
+> canonical one, on its exact tuple or on the rendered text and never on `Decimal`
+> equality, which `Decimal("3.0")` satisfies. It drives the same with a declared
+> `Decimal("-0")` against an accounted zero, where the projection is `Decimal("0")`
+> and not `Decimal("-0")`. An implementation that canonicalised the ledger's total
+> and not the projection passes every clause above and states the wrong number in
+> the one place a user reads it.
 
 > **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
 > rather than describing it: **each of the seven** vectors §5 states is asserted to
@@ -1665,7 +1710,12 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** The lane drives `clear()` interleaved with an in-flight
 > invocation in both orderings, and asserts ADR-0192 §6's outcome together with
 > this ADR's budget consequence: the erased invocation's spend is not counted, and
-> nothing is minted to recover it.
+> nothing is minted to recover it. It drives erasure as §4's sixth lifting path in
+> the same place: a call refused at a projected 101 against a ceiling of 100,
+> `clear()`, and the same call admitted in the same period under the same
+> configuration, with the accounted total `Decimal("0")` (§7) rather than a
+> preserved figure. That is the promise this ADR makes about a spend counter
+> outliving an erasure, asserted from the outside.
 
 > **Normative.** The lane asserts that a refused call left **no** claim and no
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
