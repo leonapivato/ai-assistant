@@ -423,11 +423,11 @@ class RecipientGrant(BaseModel):                       # core/types.py
     @classmethod
     def established_from(                            # the one construction path (§2)
         cls,
-        confirmed: PermissionDecision,
+        confirmed: PermissionDecision,               # the recorded CONFIRM
+        answer: PermissionDecision,                  # the recorded resolving ALLOW
         *,
         id: DurableIdentifier,                       # minted by the caller that records
-        decided_at: UtcInstant,
-        expires_at: UtcInstant,
+        expires_at: UtcInstant,                      # the instant the user chose (§9)
     ) -> RecipientGrant: ...
 
 
@@ -933,32 +933,37 @@ coordinator has not yet decided.
 > `RecipientGrant.established_from`, a classmethod on the record in
 > `ai_assistant.core.types`, landed by the wave-2 lane (§14). It is a **pure
 > function** — it reads no clock, no store and no seam, and it performs no I/O —
-> taking the recorded `PermissionDecision` the user answered together with the
-> `id`, the `decided_at` and the `expires_at` the recording caller supplies, and
+> taking the **two** recorded decisions the act is made of, the `CONFIRM` the user
+> was asked and the resolving `ALLOW` that records their answer to it, together
+> with the grant's own `id` and the `expires_at` the user chose, and
 > returning the `RecipientGrant`. It is the shape `PermissionDecision.from_request`
 > already has for a decision (ADR-0021 §1), for the same reason: the subject is
 > **transcribed by `core`** rather than asserted by whoever collected the act.
 
-> **Normative.** `established_from` transcribes `tool` from the supplied
-> decision's own `tool`, `account` and `destinations` from that decision's
+> **Normative.** `established_from` transcribes `tool` from the **confirmation**'s
+> own `tool`, and `account` and `destinations` from that confirmation's
 > `egress_binding` — the binding's `account` and its derived
-> `canonical_destination_set` — all three by value and unchanged, and it sets
-> `established_by` to that decision's own `id`. It **accepts no `tool`, no
-> `account`, no `destinations` and no `established_by` from its caller**, so a
-> surface has no parameter through which to substitute a subject or to stamp an
-> invented act. That removes the capability rather than forbidding it, which is
+> `canonical_destination_set` — all three by value and unchanged; it sets
+> `established_by` to that confirmation's own `id` (§1); and it sets `decided_at`
+> to the **answer**'s `decided_at`, which is the instant the user decided and is
+> read off a recorded decision rather than supplied. It **accepts no `tool`, no
+> `account`, no `destinations`, no `established_by` and no `decided_at` from its
+> caller**, so a surface has no parameter through which to substitute a subject,
+> to stamp an invented act, or to backdate one. That removes the capability rather than forbidding it, which is
 > the move ADR-0021 §3 made when it split `PermissionRuling` off
 > `PermissionDecision` — *"Splitting the types removes the capability rather than
 > forbidding it"*.
 
 > **Normative.** `established_from` **refuses**, raising `ValueError`, where the
-> supplied decision's ruling was not a `CONFIRM`; where its `egress_binding` is
-> `None`; where that binding is an `OriginUnrecordedBinding`; and where it is an
-> `EgressBinding` whose `planned_with_external_content` is `True`. Those are this
-> section's own rules — the act rides an answer to a recorded `CONFIRM`, and no
-> grant is established from a confirmation whose recorded origin is external or
-> unrecorded — restated as the function's own preconditions, and a refusal mints
-> **nothing looser** in place of the grant. `RecipientGrant`'s
+> confirmation's ruling was not a `CONFIRM`; where the answer's ruling is not an
+> `ALLOW`; where the answer's `resolves` is unset or is not the confirmation's
+> `id`; where the confirmation's `egress_binding` is `None`; where that binding is
+> an `OriginUnrecordedBinding`; and where it is an `EgressBinding` whose
+> `planned_with_external_content` is `True`. Those are this section's own rules —
+> the act rides **an answer** to a recorded `CONFIRM`, and no grant is established
+> from a confirmation whose recorded origin is external or unrecorded — restated
+> as the function's own preconditions, and a refusal mints **nothing looser** in
+> place of the grant. `RecipientGrant`'s
 > construction validators then apply unchanged — the non-empty, duplicate-free,
 > canonically ordered destination set, the `established_by` pairing (§1), and
 > `expires_at` strictly after `decided_at` (§9).
@@ -971,6 +976,16 @@ coordinator has not yet decided.
 > part of it — read on this act rather than on a binding. Which surfaces offer
 > it, and how they carry it, stays undecided here (§13); what is decided is that
 > there is one door and every one of them goes through it.
+
+> **Normative.** The **answer is recorded before the grant is**. The decision a
+> caller passes as `answer` is one `AuditTrail.record` has accepted, not one the
+> caller has merely composed, and the grant is recorded after it. A pure function
+> cannot check this for itself — it is handed a record and cannot ask a trail
+> whether the record is there — so it is stated as an obligation on the caller,
+> and it is the half `established_by` exists to make visible afterwards. What the
+> function *can* check, and does, is that the answer resolves **this**
+> confirmation with an `ALLOW`: an unanswered `CONFIRM` on its own no longer
+> reaches the constructor, which is what round 19 found it could.
 
 > **Normative.** `established_from` lives on `RecipientGrant` in
 > `ai_assistant.core.types` and **nowhere else**. It is a constructor of a shared
@@ -1067,8 +1082,8 @@ the store's refusal at `record`.
 
 **Where it lives was round 17's third blocker, and the answer is the one
 ADR-0021 §1 already gave for the neighbouring record.** Architecture review read
-the four refusals as permissions workflow and directed them into `permissions/`.
-Three grounds keep them in `core`.
+the builder's refusals as permissions workflow and directed them into
+`permissions/`. Three grounds keep them in `core`.
 
 *`PermissionDecision.from_request` is the precedent, and it is exact.* It is a
 transcribing construction path for a permission record, in `core/types.py`, whose
@@ -1084,10 +1099,12 @@ it."* It therefore does not distinguish this function from the ratified one.
 *The refusals are conditions under which the record would misdescribe itself,
 which is what a constructor is for.* One is structural — a decision with no
 `egress_binding` has no `account` and no destination set to transcribe, so there
-is no grant to build rather than a grant that may not be built. One is the
-field's own meaning: `established_by` is "the `id` of the answered `CONFIRM`'s
-recorded decision" (§1), so a record naming a decision that was not a `CONFIRM`
-is a record whose field is false. The remaining two are §2's content floor, and
+is no grant to build rather than a grant that may not be built. Three are the
+fields' own meanings: `established_by` is "the `id` of the answered `CONFIRM`'s
+recorded decision" (§1), so a record naming a decision that was not a `CONFIRM`,
+or one no recorded `ALLOW` answers, is a record whose field is false — and
+`decided_at` is the instant the user decided, which is the answer's and not a
+number a caller may choose. The remaining two are §2's content floor, and
 they are the pair the charge actually reaches — but `core` already states this
 class of rule about this pair of arms: `PermissionDecision.authorises` answers
 `False` for an `OriginUnrecordedBinding` against every request (ADR-0184 §6), and
@@ -2529,6 +2546,19 @@ narrowings of one store, not three implementations.
 > destination set is partly covered draws `CONFIRM` and that the confirmation
 > names every member of the set (§8).
 
+> **Normative.** The lane ships the **account-member** tests for §3's third
+> clause, on both enforcement points and no other test in this section reaches
+> them: a grant whose destination set is the connected-account member alone
+> covers a request whose arguments select no recipient beyond the service, and
+> covers **nothing** where they select one — asserted with a selected recipient
+> whose strings are chosen to *coincide* with the account's, so the pair fails
+> against an implementation that flattened both arms to an identity or to
+> canonical text. The negative half is owed at `AuditTrail.record` too: an
+> account-only grant does not contain a decision's selected-recipient member, and
+> `record` refuses the row. Without these, a flattening store passes the
+> destination, account, partial-coverage and handoff tests while authorising a
+> send to a recipient the user never named.
+
 > **Normative.** The lane ships a test asserting that a grant whose destination
 > set covers the request's, established against a **different** `BoundAccount`,
 > covers nothing — and one asserting the same for a grant differing only in the
@@ -2651,12 +2681,16 @@ narrowings of one store, not three implementations.
 
 > **Normative.** The lane ships the **negative** establishment tests against
 > `RecipientGrant.established_from` (§2), each asserting `ValueError` **by type**:
-> a decision whose recorded `egress_binding` carries
+> a confirmation whose recorded `egress_binding` carries
 > `planned_with_external_content` as `True`; one carrying an
-> `OriginUnrecordedBinding`; one whose `egress_binding` is `None`; and one whose
-> ruling was not a `CONFIRM`. Each asserts the refusal **and** that no
-> `RecipientGrant` was returned by any other route — the function raises rather
-> than returning a narrowed grant. Nothing else in this section reaches the clause, and
+> `OriginUnrecordedBinding`; one whose `egress_binding` is `None`; one whose
+> ruling was not a `CONFIRM`; an `answer` whose ruling is a `DENY`; one whose
+> `resolves` is unset; and one whose `resolves` names a **different** decision.
+> The last three are the pair that separates an *asked* confirmation from an
+> *answered* one, and no other test in this section reaches it: without them a
+> pending `CONFIRM` could be handed to the constructor twice over and become a
+> live grant the user never assented to. Each asserts the refusal, and the
+> function raises rather than returning a narrowed grant. Nothing else in this section reaches the clause, and
 > what it guards is a seeding path rather than a tidiness one: a surface that
 > recorded such a grant leaves a live authorisation over recipients an attacker's
 > content chose, which every *later* call carrying `False` then spends — with §4's
@@ -2666,21 +2700,24 @@ narrowings of one store, not three implementations.
 
 > **Normative.** The lane ships the **transcription** test against
 > `RecipientGrant.established_from`: the grant it returns has a `tool` equal to
-> the supplied **decision**'s `tool` by value, an `account` and `destinations`
-> equal to that decision's binding's `account` and derived
-> `canonical_destination_set` by value — not merely equivalent, and not re-derived
-> — and an `established_by` **equal to that decision's own `id`**, asserted by
-> equality and not by presence (§2). The mutation test rides beside it: mutating
-> the supplied decision after the call changes nothing about the returned grant,
-> which is what "by value" means here as it does at `from_request`.
+> the **confirmation**'s `tool` by value, an `account` and `destinations` equal to
+> that confirmation's binding's `account` and derived `canonical_destination_set`
+> by value — not merely equivalent, and not re-derived — an `established_by`
+> **equal to that confirmation's own `id`**, and a `decided_at` **equal to the
+> answer's**, each asserted by equality and not by presence (§2). The last two are
+> asserted against a fixture in which the confirmation's and the answer's ids and
+> instants differ, so an implementation reading either value off the wrong
+> decision fails. The mutation test rides beside it: mutating either supplied
+> decision after the call changes nothing about the returned grant, which is what
+> "by value" means here as it does at `from_request`.
 
 > **Normative.** The lane ships the **signature** test that makes the clause above
 > unwritable-around, in the shape a roster test takes: read over
 > `inspect.signature(RecipientGrant.established_from)`, the parameter names are
-> exactly the supplied decision, `id`, `decided_at` and `expires_at` — there is no
-> parameter by which a caller supplies `tool`, `account`, `destinations` or
-> `established_by`, and a fifth subject parameter added later is a **red test**
-> rather than a silent widening. A builder that copied the three subject values
+> exactly the two decisions, `id` and `expires_at` — there is no parameter by
+> which a caller supplies `tool`, `account`, `destinations`, `established_by` or
+> `decided_at`, and a subject parameter added later is a **red test** rather than
+> a silent widening. A builder that copied the three subject values
 > correctly but also accepted an override would pass every other assertion here,
 > and §2's whole reason for naming a function is that the capability is absent
 > rather than forbidden.
