@@ -68,8 +68,24 @@ class _Writer:
         self.tls: str | None = None
         self.fails = False
         self.fails_to_close = False
+        self.releases_before_it_fails = True
+        self.aborts = 0
         self.close_gate: LoopSuspension | None = None
         self._ledger = ledger
+
+    @property
+    def transport(self) -> _Transport:
+        """The transport under this writer, for the abort path.
+
+        ``StreamWriter.close`` delegates to it, and production reaches past the
+        writer to it when a close raises — a close that failed may have failed
+        *before* releasing anything, and no channel reached a holder, so nothing
+        else will ever try again.
+
+        Returns:
+            A stand-in that gives the socket back when it is aborted.
+        """
+        return _Transport(self)
 
     def write(self, data: bytes) -> None:
         """Record ``data``."""
@@ -107,18 +123,31 @@ class _Writer:
     def close(self) -> None:
         """Record that the writer was closed, and give its socket back.
 
+        **Whether it gives the socket back before it fails is armable**, and the
+        harder arrangement is the honest one: a close that raised may have raised
+        on its first statement, having released nothing. A double that always
+        released first would let an unguarded caller pass a case about the guard.
+        Adversarial review found that on round 6.
+
         Raises:
             OSError: Where this writer was armed to fail *synchronously*, which a
                 transport that is already broken does. The channel's ``close``
                 must swallow it like any other release failure, and an earlier
                 draft called it outside the guard.
         """
-        if not self.closed and self._ledger is not None:
-            self._ledger.open -= 1
-        self.closed = True
+        if self.fails_to_close and not self.releases_before_it_fails:
+            msg = "the transport was already broken"
+            raise OSError(msg)
+        self.give_the_socket_back()
         if self.fails_to_close:
             msg = "the transport was already broken"
             raise OSError(msg)
+
+    def give_the_socket_back(self) -> None:
+        """Report this writer's release to the ledger, once."""
+        if not self.closed and self._ledger is not None:
+            self._ledger.open -= 1
+        self.closed = True
 
     async def wait_closed(self) -> None:
         """Wait for the close, suspending or failing where this writer was armed.
@@ -133,6 +162,32 @@ class _Writer:
         if self.fails or self.fails_to_close:
             msg = "the far end had already gone"
             raise OSError(msg)
+
+
+@final
+class _Transport:
+    """What a writer delegates its release to, so an ``abort`` can be observed.
+
+    Only the one method production reaches for, and it releases unconditionally:
+    that is what ``abort`` is — the release that does not wait on a far end and
+    does not fail for one.
+
+    Attributes:
+        writer: The writer whose socket this gives back.
+    """
+
+    def __init__(self, writer: _Writer) -> None:
+        """Bind this transport to its writer.
+
+        Args:
+            writer: The write half above it.
+        """
+        self.writer = writer
+
+    def abort(self) -> None:
+        """Drop the connection, giving the socket back however close went."""
+        self.writer.aborts += 1
+        self.writer.give_the_socket_back()
 
 
 @final
@@ -191,7 +246,13 @@ class _Sockets:
         gate: A suspension to hold the next open at, after its socket exists.
         breaks_on_close: Whether the writer it hands out raises from its
             *synchronous* ``close``, as one over an already-broken transport
-            does. It gives the socket back first, so the ledger still falls.
+            does.
+        releases_before_it_fails: Whether that failing close gives the socket
+            back before it raises. ``False`` is the harder and more honest
+            arrangement — a close can fail on its first statement — and it is
+            what makes a case about the abort path bite.
+        handed: The last writer it handed out, for the cases that read what
+            happened to it.
     """
 
     def __init__(self) -> None:
@@ -201,6 +262,8 @@ class _Sockets:
         self.asked: dict[str, object] = {}
         self.gate: _Handoff | None = None
         self.breaks_on_close = False
+        self.releases_before_it_fails = True
+        self.handed: _Writer | None = None
 
     async def __call__(
         self, host: str, port: int, **kwargs: object
@@ -228,6 +291,8 @@ class _Sockets:
         self.open += 1
         writer = _Writer(ledger=self)
         writer.fails_to_close = self.breaks_on_close
+        writer.releases_before_it_fails = self.releases_before_it_fails
+        self.handed = writer
         gate, self.gate = self.gate, None
         if gate is not None:
             # Held *after* the streams exist and released into a normal return.
@@ -634,6 +699,38 @@ async def test_a_cancellation_survives_a_release_that_fails(
 
     with pytest.raises(asyncio.CancelledError):
         await opening
+    assert sockets.open == 0
+
+
+async def test_a_release_that_fails_before_releasing_anything_is_aborted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppressing a failed release is not the same as having released.
+
+    A close that raises may have raised on its first statement, having given
+    nothing back — and on this path no channel reached a holder, so nothing else
+    will ever try again: the socket is ownerless. ``abort`` is the harder release
+    the standard library keeps for exactly that. Adversarial review found the
+    suppression standing alone on round 6, and the case that missed it did so
+    because the writer double released *before* it raised.
+    """
+    sockets = _Sockets()
+    sockets.breaks_on_close = True
+    sockets.releases_before_it_fails = False
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+
+    def refuses(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        msg = "the channel could not be constructed"
+        raise TransportError(msg)
+
+    monkeypatch.setattr(egress, "_StreamChannel", refuses)
+
+    with pytest.raises(TransportError, match="could not be constructed"):
+        await StreamOutboundTransport().open_channel(ENDPOINT)
+
+    assert sockets.handed is not None
+    assert sockets.handed.aborts == 1
     assert sockets.open == 0
 
 

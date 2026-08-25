@@ -77,7 +77,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
 
             # 3. The negative arm. The probe is a registered, selected, invoked
             #    tool that reaches for a route at the world and finds none.
-            probe = m25.UndesignatedProbe()
+            probe = m25.UndesignatedProbe(route=None)
             m25.register_probe(composition, probe)
             result = await m25.drive_the_probe(composition)
 
@@ -90,8 +90,12 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             assert result.failure is not None
             assert result.failure.kind is ToolFailureKind.INTERNAL
 
-            # The two zeros, from two instruments that have each been seen to fire.
-            assert list(capability.attempts) == []
+            # The two zeros, from two instruments that have each been seen to
+            # fire. Snapshotted, because the two controls below deliberately move
+            # the fake and this is the reading the exit is stated over.
+            undesignated = list(capability.attempts)
+
+            assert undesignated == []
             assert creators.calls == []
 
             # 4. The positive control for the fake, over the same fake in the
@@ -104,12 +108,40 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             # The control moves the connection instrument by nothing, because the
             # fake opens nothing — which is what makes the two records independent.
             assert creators.calls == []
+
+            # 5. The positive control for the **probe**, and it comes last for the
+            #    same reason the fake's does. The identical callable, registered
+            #    under its own id in this same composition and driven through the
+            #    same invocation seam — but handed the capability. It finds a
+            #    route and reaches an endpoint of its own choosing with it, so the
+            #    zero at step 3 is a zero from a detector that has been seen to
+            #    fire rather than one that could never have fired. Adversarial
+            #    review found the uncontrolled detector on round 6.
+            armed = m25.UndesignatedProbe(route=capability)
+            m25.register_probe(composition, armed, m25.ARMED_PROBE)
+            control = await m25.drive_the_probe(composition, m25.ARMED_PROBE)
+
+            assert armed.reached_for_a_route is True
+            assert armed.route is capability
+            assert armed.opened == m25.PROBE_ENDPOINT
+            assert control.outcome is ToolOutcome.SUCCEEDED
+            assert list(capability.attempts) == [
+                TransportAttempt(endpoint=CONFIGURED, served=True),
+                TransportAttempt(endpoint=m25.PROBE_ENDPOINT, served=True),
+            ]
+            assert creators.calls == []
         finally:
             await composition.engine.aclose()
     finally:
         creators.remove()
 
-    _report(probe=probe, capability=capability, creators=creators)
+    _report(
+        probe=probe,
+        armed=armed,
+        undesignated=undesignated,
+        capability=capability,
+        creators=creators,
+    )
 
 
 async def test_every_creator_the_running_loop_exposes_is_classified() -> None:
@@ -168,6 +200,8 @@ async def test_a_deployment_that_configures_no_integration_registers_no_egress_t
 def _report(
     *,
     probe: m25.UndesignatedProbe,
+    armed: m25.UndesignatedProbe,
+    undesignated: list[TransportAttempt],
     capability: FakeOutboundTransport,
     creators: m25.LoopCreators,
 ) -> None:
@@ -179,23 +213,28 @@ def _report(
 
     Args:
         probe: The undesignated probe, for its execution marker.
+        armed: The same probe handed the capability, for the detector's control.
+        undesignated: The fake's attempt record **as it stood** when the probe had
+            run and before either control was driven, which is the reading the
+            exit is stated over.
         capability: The fake, for the attempt record.
         creators: The loop instruments, for what they saw.
     """
-    unserved = [attempt for attempt in capability.attempts if not attempt.served]
+    del capability
     warnings.warn(
         "\n\nmilestone 25 — the transport capability's exit (ADR-0191 §9, #1427)\n"
         f"  probe execution marker    {int(probe.reached_for_a_route)} of 1  "
         "the undesignated tool ran as far as acquiring a route; must be one\n"
         f"  routes found by the probe {int(probe.route is not None)} of 1  "
         "capabilities it could obtain having been handed none; must be zero\n"
-        f"  undesignated attempts     {len(unserved)} of "
-        f"{len(capability.attempts)}  attempts on the fake not from the seam's "
-        "bound call; must be zero\n"
+        f"  undesignated attempts     {len(undesignated)} of 1  attempts the "
+        "probe put on the fake having been handed no route; must be zero\n"
+        f"  detector control          {int(armed.opened is not None)} of 1  "
+        "endpoints the same probe reached once handed one; must be one\n"
         f"  loop creator calls        {len(creators.calls)} of "
         f"{len(m25.OFF_DEVICE_CREATORS)}  off-device creators called outside the "
         "calibration; must be zero\n"
-        f"  positive control          {len(capability.attempts)} of 1  attempts "
-        "the seam's bound call put on the fake; must be one\n",
+        "  positive control          1 of 1  attempts the seam's bound call put "
+        "on the fake; must be one\n",
         stacklevel=2,
     )

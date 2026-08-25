@@ -662,6 +662,16 @@ def _release(writer: asyncio.StreamWriter) -> None:
         writer.close()
     except OSError as exc:
         _log.debug("egress_orphaned_streams_release_failed", error_type=type(exc).__name__)
+        # **A close that raised may have raised before it released anything**, and
+        # this is the last party that could ever give the socket back: no channel
+        # reached a holder, so nothing else will try. ``abort`` is the harder
+        # release the standard library keeps for exactly that — it drops the
+        # transport without waiting on the far end. A failure from *it* is
+        # suppressed on the same ground as the first: there is nothing further to
+        # try, and raising would replace the exception in flight. Adversarial
+        # review found the un-aborted path on round 6.
+        with suppress(OSError):
+            writer.transport.abort()
 
 
 def _release_orphaned_streams(
