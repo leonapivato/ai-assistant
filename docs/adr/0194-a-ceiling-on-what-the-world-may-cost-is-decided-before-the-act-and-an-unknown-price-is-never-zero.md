@@ -1803,18 +1803,46 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** The **paired lane** lands `SpendGate` and `SpendLedger` as a
 > triad — both Protocols, a shared conformance suite for each, and canonical fakes
 > in `ai_assistant.testing` — together with the `SpendTotal`, `SpendPeriod` and
-> `SpendAdmissionHandle` types, §4's three error classes, §1's four **new**
-> settings — it adds no fifth and changes none that exists — and the **primary
+> `SpendAdmissionHandle` types, §4's three error classes and the **primary
 > production implementation**, which is the `permissions` store that also satisfies
 > ADR-0192's ledger. That is the whole of it: it lands under ADR-0137 §2's pairing
 > and under §3's rule that a triad is never split.
 
+> **Normative.** That lane adds **no field to `core.config.Settings` and reads
+> none**. Its implementation takes §1's currency, its two ceilings and its
+> allowance as **explicit constructor values**, which is the shape §5 already
+> fixes — `app/composition.py` is the sole constructor, the sole wirer and the
+> sole reader of those settings — so the paired lane builds every fixture directly
+> and nothing in it depends on a configuration field existing. §1's four fields
+> are the consumer group's, for the reason two clauses below.
+
 > **Normative.** Every other consumer is a **follow-on lane**, briefed only after
 > the paired lane has merged and against its merged text, which is ADR-0137 §4.
-> The invoker's call to `admit_invocation`, the composition-root wiring, the
-> `AssistantEngine` member and the CLI command are **one consumer group**: each is
-> adaptation to a contract already landed, none carries substantial new machinery,
-> and they draw one class of finding, which is ADR-0137 §4's own grouping test.
+> §1's four **new** settings — no lane adds a fifth and none changes one that
+> exists — the invoker's call to `admit_invocation`, the composition-root wiring,
+> the `AssistantEngine` member and the CLI command are **one consumer group**:
+> each is adaptation to a contract already landed, none carries substantial new
+> machinery, and they draw one class of finding, which is ADR-0137 §4's own
+> grouping test.
+
+> **Normative.** The four settings land in that group and **not** in the paired
+> lane, and that placement is decided here rather than left to a lane, because a
+> ceiling a user can configure that nothing consults is worse than one that
+> arrives later. Landed apart, a merged tree exists in which
+> `world_spend_currency="USD"` and `world_spend_day_ceiling=Decimal("0")` load
+> without error, no surface reports anything wrong, and a confirmed `send_email`
+> executes anyway — because `ToolInvoker` does not consult `SpendGate` until this
+> group. A user who reads a configured ceiling as a ceiling would be wrong for the
+> length of that window, which is the one failure this whole ADR exists to
+> prevent. The four fields, the invoker's consultation and the composition-root
+> wiring are therefore **one change**, and no lane splits them.
+
+> **Normative.** Where a clause below says "the lane" without naming which, it
+> binds whichever of the two lands the surface that clause drives: a fixture over
+> `Settings` or over §6's command is the **consumer group's**, since §1's fields
+> and that command land there; every other is the **paired lane's**. The clauses
+> that name a lane explicitly say which, and this rule settles the rest rather
+> than leaving a reader to infer it.
 
 > **Normative.** That group **extends `ToolInvoker`'s own triad in the same
 > change**, because it changes what `invoke` observably does: every implementation
@@ -2050,6 +2078,24 @@ the ADRs it depends on rather than replacing them.
 > reservation for that call — §3's cancellation rule asserted on the projection and
 > not on the exception alone, at the one boundary the mint adds to it.
 
+> **Normative.** Every factory clause above drives a **granted** admission, so the
+> suite drives the factory on a **refusal** as well, and asserts the mint sits on
+> the far side of the comparison: with an accounted total of 100, a ceiling of 100
+> and a positive countable estimate — a refusal §3's strictly-greater rule
+> guarantees — a **counting** factory is asserted never called, and a factory
+> raising `CancelledError` leaves that refusal **unchanged**, `SpendCeilingError`
+> and not a propagated cancellation. It drives the same two factories on a
+> guaranteed `SpendUndeterminedError` — a declared amount that is not countable,
+> §4's first ground — with the same two assertions. §3 makes the injected factory
+> a dependency of the *handle*, and a handle is a consequence of a grant, so an
+> implementation minting before it compares passes every distinctness, collision
+> and mint-failure clause above; under the raising factory it turns a call this
+> mechanism **refused** into a cancelled one, which ADR-0029 §4 then classifies
+> `INDETERMINATE` for a side-effecting tool — telling a user the act may have
+> happened when the ceiling stopped it before any callable existed. The two
+> clauses are read together deliberately: the granted path requires that same
+> `CancelledError` to propagate, and only the pair pins *where* the mint is.
+
 > **Normative.** The suite drives a refusal **lifted by a release**, which §4
 > names as the one way a refusal clears with no act outside the mechanism: an
 > accounted total of 90, a ceiling of
@@ -2242,6 +2288,29 @@ the ADRs it depends on rather than replacing them.
 > `ceiling is None` treats zero as no ceiling at all, admits the positive call §3
 > requires it to refuse, and passes every other ceiling fixture here — including
 > both spellings of zero below, which it also admits.
+
+> **Normative.** The suite carries that same zero ceiling through the **read**
+> path, which the clause above does not reach because it asserts only on the
+> admission: under a configured ceiling of zero, the `SpendTotal` that
+> `spend_totals` returns for that period states `ceiling == Decimal("0")` —
+> asserted on `as_tuple()`, never on truthiness and never on the field's mere
+> presence — and `accounted` is `Decimal("0")` beside it. The **consumer group**
+> then carries the same value the rest of the way and asserts it survives each
+> seam: the `AssistantEngine` relay, the wire round-trip through `wire/codec.py`
+> as the bytes `"0"` (§5), and §6's rendering, where the period is stated as
+> having a ceiling of zero rather than none. It drives the indeterminate case at
+> the same configuration, where §6's "no further call in that period will be
+> admitted" line is **present**, since that period's own `ceiling` is present.
+
+> **Normative.** That is stated because a `configured_ceiling or None` — or any
+> other falsiness test — at the **producer** passes every admission clause above:
+> the gate refuses correctly, and the model it builds says no ceiling is
+> configured. `assistant spend` then tells a user their period has no ceiling
+> while every priced call they make is being refused, and on an indeterminate
+> period drops §6's consequence line as well, which §6 requires exactly where a
+> ceiling is present. A zero ceiling is the configuration that refuses the most,
+> so it is the one where a renderer saying "no ceiling" is furthest from the
+> truth — and the falsiness bug is invisible at every other ceiling value.
 
 > **Normative.** The suite drives `Decimal("0E-999999999999999999")` — countable
 > by §1, numerically zero, and carrying an exponent no context can be sized from —
@@ -2456,7 +2525,8 @@ the ADRs it depends on rather than replacing them.
 > §5 carries resolved offsets in place of a zone name; a lane that finds two here
 > has added a field §5's exact schema forbids.
 
-> **Normative.** The lane drives §1's configuration **dependencies** at load,
+> **Normative.** The **consumer group** drives §1's configuration
+> **dependencies** at load — it is that group that lands the four fields,
 > which no admission fixture reaches because a valid fixture supplies a currency
 > without being asked: each ceiling alone and the allowance alone with
 > `world_spend_currency` unset raises `ConfigurationError` naming the field, and
@@ -2475,19 +2545,22 @@ the ADRs it depends on rather than replacing them.
 > three-character non-ASCII value each refused, `"USD"` accepted — since §5's
 > hostile constructions test `SpendTotal` and not `Settings`.
 
-> **Normative.** The lane loads a **day ceiling above the month ceiling** — §1's
+> **Normative.** The consumer group loads a **day ceiling above the month
+> ceiling** — §1's
 > `day=100` beside `month=10` — asserting it is **accepted** and that the month is
 > simply the binding one, with an estimate of 20 refused on the month while the day
 > is nowhere near crossed. §1 says nothing refuses a configuration on that ground;
 > a settings validator quietly imposing `day <= month` passes every dependency and
 > crossing fixture here and rejects a configuration this ADR calls valid.
 
-> **Normative.** The lane refuses a zero allowance at load in each of §1's
-> spellings, and asserts the calendar month whose exclusive end is not
+> **Normative.** The consumer group refuses a zero allowance at load in each of
+> §1's spellings, that being a `Settings` fixture. The paired lane asserts the
+> calendar month whose exclusive end is not
 > representable is closed at the latest instant representable in both UTC and the
 > configured zone rather than refusing — driven in a **positive-offset** zone and a
 > **negative-offset** one, with the rendering §6 requires exercised on the clamped
-> bound rather than only its construction.
+> bound rather than only its construction — that rendering half being the consumer
+> group's, since §6's command lands there.
 
 > **Normative.** It drives §1's **lower** clamp in the same two shapes, which the
 > clause above does not reach: at a `checked_clock` reading of
@@ -2510,6 +2583,24 @@ the ADRs it depends on rather than replacing them.
 > holds. The fixture asserts the reconstructed figure equals the one the same rows
 > produced before the reopen, and that a call which was refused before it is
 > refused after it.
+
+> **Normative.** The lane reopens the holder a second time over a **persisted open
+> claim**, and that is a separate fixture rather than a case of the one above,
+> because the two catch different implementations. The clause above reconstructs a
+> *number* from completion rows; a holder that re-reads those rows correctly while
+> holding open claims in memory alone passes it, and then, after a restart, states
+> that period's `accounted` as a figure and admits a call where §2 requires
+> `accounted=None` and a refusal. The fixture writes a claim carrying no
+> completion, reopens the holder over that store, and asserts that
+> **indeterminacy** is reconstructed too: `spend_totals` states every period the
+> claim falls in with `currency` present and `accounted=None`, and an admission
+> against a ceiling configured for such a period refuses with
+> `SpendUndeterminedError` naming that period — the same two outcomes the
+> conformance suite's open-claim clause requires before any restart. It then
+> asserts both end where §2 says they end and not before: the claim gaining its
+> completion, and separately `clear()` erasing it, each makes the period
+> determinate again and admits the same call. Indeterminacy is a fact about the
+> rows the store holds, not about the process that observed them being appended.
 
 > **Normative.** The lane drives `clear()` interleaved with an in-flight
 > invocation in both orderings, and asserts ADR-0192 §6's outcome together with
