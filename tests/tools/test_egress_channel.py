@@ -657,6 +657,56 @@ async def test_the_opener_names_the_endpoint_and_no_octet_in_its_refusal(
     )
 
 
+@pytest.mark.parametrize(
+    ("host", "implicit_tls"),
+    [
+        pytest.param("127.0.0.1\x00mail.example.invalid", True, id="nul-under-implicit-tls"),
+        pytest.param("127.0.0.1\x00mail.example.invalid", False, id="nul-under-starttls"),
+        pytest.param("mail.example.invalid\r", True, id="carriage-return"),
+        pytest.param("mail\nexample.invalid", True, id="newline"),
+        pytest.param("mail.example.invalid\x1b", True, id="escape"),
+    ],
+)
+async def test_a_host_a_resolver_would_truncate_is_refused_before_it_resolves(
+    monkeypatch: pytest.MonkeyPatch, host: str, implicit_tls: bool
+) -> None:
+    r"""§4: the destination pin, closed at the last point before ``getaddrinfo``.
+
+    ``"127.0.0.1\x00mail.example.invalid"`` is one string to Python and two to the
+    resolver, which stops at the ``NUL`` and resolves ``127.0.0.1`` — a connection
+    to a host the endpoint does not name. Under the upgrade mode that is a
+    cleartext channel to the truncated destination; under implicit TLS the name a
+    certificate is verified against is truncated the same way, which is why both
+    modes are rows. Adversarial review found it reaching the opener on round 4.
+
+    **This is where the rule lives now.** It was a validator on
+    ``TransportEndpoint`` until architecture review found, on round 12, that
+    ADR-0191 §1 had not written that refusal and settles this type's construction
+    rules itself (golden rule 5). Refusing here loses nothing: this method is the
+    only route to a resolver under ``src/``, so an endpoint built any way at all
+    is refused before it reaches one — which a rule on the type could not claim
+    for an endpoint constructed through ``model_construct``.
+
+    The ledger asserts the refusal is *before* the acquisition rather than after
+    it, and the message names the code point rather than the host: rendering a
+    host that carries a control character is the injection shape the rule is over.
+
+    Args:
+        host: A host carrying one control character.
+        implicit_tls: Which TLS mode the endpoint names.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    endpoint = TransportEndpoint(host=host, port=465, implicit_tls=implicit_tls)
+
+    with pytest.raises(TransportError, match="control character") as failure:
+        await StreamOutboundTransport().open_channel(endpoint)
+
+    assert sockets.asked == {}
+    assert sockets.open == 0
+    assert host not in str(failure.value)
+
+
 async def test_a_host_the_resolver_refuses_is_a_transport_error_not_a_unicode_one() -> None:
     """The same clause against the real resolver rather than a substitute.
 

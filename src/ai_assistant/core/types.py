@@ -12639,6 +12639,18 @@ class TransportEndpoint(BaseModel):
     could reassign ``host`` after the comparison would be holding a different
     endpoint from the one that was checked.
 
+    **Its construction rules are ADR-0191 §1's, and no others.** §1 fixes them —
+    a host that is neither empty nor only whitespace, a port in ``1..65535`` — and
+    settling this type is that document's job (golden rule 5), so a refusal it did
+    not write does not belong here however sensible it reads: a narrower accepted
+    domain binds every future holder and no ADR decided it. The host a resolver
+    would truncate at a ``NUL`` is refused where a resolver is actually reached,
+    at ADR-0154 §1's designated seam —
+    ``ai_assistant.tools.egress._truncating_character``, applied by both
+    ``parse_smtp_endpoint`` and ``StreamOutboundTransport.open_channel``, which
+    between them are the only constructor and the only route to ``getaddrinfo``
+    under ``src/``. Architecture review found the rule sitting here on round 12.
+
     Attributes:
         host: The host the connection is opened to, and the name a certificate is
             verified against. Never derived from a recipient's domain.
@@ -12660,50 +12672,3 @@ class TransportEndpoint(BaseModel):
     implicit_tls: bool = Field(
         description="Whether TLS is established before the greeting, or must be upgraded to.",
     )
-
-    @field_validator("host")
-    @classmethod
-    def _host_carries_no_control_character(cls, value: str) -> str:
-        r"""Refuse a host carrying a control character, ``NUL`` above all.
-
-        **This is the pin, enforced where it cannot be forgotten.** ``getaddrinfo``
-        hands the host to a C library that stops at a ``NUL``, so
-        ``"127.0.0.1\x00mail.example.invalid"`` resolves to ``127.0.0.1`` — a
-        connection to a host that is *not* the one this value names, which is
-        exactly what ADR-0191 §4's "opens a connection to the host and port of the
-        ``TransportEndpoint`` it was handed" forbids and what #83 is about. Under
-        the upgrade TLS mode that yields a cleartext channel to the truncated
-        destination; under implicit TLS the hostname a certificate is verified
-        against is truncated the same way. Adversarial review found it on round 4.
-
-        Refused **here** rather than in an implementation, on this contract's own
-        reasoning about ``read``'s domain: making the spelling unrepresentable
-        closes it, where asking every implementation to remember does not. No host
-        this seam could legitimately be given carries one — a DNS name is letters,
-        digits, hyphens and dots, and an IP literal is narrower still — so the rule
-        costs nothing it should not.
-
-        Args:
-            value: The host, already non-blank.
-
-        Returns:
-            It unchanged.
-
-        Raises:
-            ValueError: If any character is a control character. **The message
-                this validator writes** names the offending code point rather
-                than the host; pydantic renders the input it refused alongside
-                it, which is pydantic's behaviour and not something a validator
-                can withhold. ``ai_assistant.tools.egress.parse_smtp_endpoint``
-                converts the refusal into its own binding refusal, whose text is
-                written fresh, so the seam's callers are not handed a configured
-                endpoint inside a message.
-        """
-        offending = next((ch for ch in value if unicodedata.category(ch) == "Cc"), None)
-        if offending is not None:
-            msg = (
-                f"a transport endpoint's host carries no control character; got one at "
-                f"U+{ord(offending):04X}"
-            )
-            raise ValueError(msg)
-        return value

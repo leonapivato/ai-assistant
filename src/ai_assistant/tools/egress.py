@@ -113,6 +113,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ssl
+import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -633,9 +634,31 @@ class StreamOutboundTransport:
                 was connected and could not be verified. All three are converted
                 from the standard library's own types so that every holder of the
                 capability sees one taxonomy — the shared refusal type the
-                canonical fake raises too — rather than ``asyncio``'s.
+                canonical fake raises too — rather than ``asyncio``'s. A host
+                carrying a control character is refused as one too, before
+                anything resolves it (:func:`_truncating_character`).
             CancelledError: Re-raised after the release below, never absorbed.
         """
+        offending = _truncating_character(endpoint.host)
+        if offending is not None:
+            # **The load-bearing half of the pin, and the last one before a
+            # resolver sees the host** (:func:`_truncating_character`). This
+            # method is the only route to ``getaddrinfo`` in ``src/``, so refusing
+            # here closes the truncation for *every* endpoint however it was
+            # built, not only for one this seam parsed. It is a ``TransportError``
+            # because that is what this method raises for an endpoint it will not
+            # connect (ADR-0191 §1), and it is raised before anything is acquired,
+            # so there is nothing to release.
+            #
+            # The message names the code point and never the host: rendering a
+            # host that carries a control character into a message is the
+            # injection shape the rule exists over.
+            msg = (
+                f"the endpoint's host carries a control character at "
+                f"U+{ord(offending):04X}, so it names a destination a resolver "
+                f"would truncate"
+            )
+            raise TransportError(msg)
         # **Shielded, so a cancellation arriving here cannot orphan a connection.**
         # Without it there is a window ADR-0060 §1 forbids: the open completes,
         # this frame is scheduled to receive its streams, and a cancellation
@@ -817,6 +840,44 @@ async def _release_orphaned_streams(
     await _release(writer)
 
 
+def _truncating_character(host: str) -> str | None:
+    r"""The first control character in ``host``, or ``None`` where there is none.
+
+    **``getaddrinfo`` hands the host to a C library that stops at a ``NUL``**, so
+    ``"127.0.0.1\x00mail.example.invalid"`` is one string to Python and two to the
+    resolver: it resolves ``127.0.0.1``, a host the value does not name. Under the
+    upgrade TLS mode that is a cleartext channel to the truncated destination;
+    under implicit TLS the name a certificate is verified against is truncated the
+    same way. Either breaks ADR-0191 §4's "opens a connection to the host and port
+    of the ``TransportEndpoint`` it was handed", which is what #83 is about.
+    Adversarial review found it reaching the opener on round 4.
+
+    The rule is over control characters rather than over ``NUL`` alone: a bare
+    ``\r`` or ``\n`` in a host is a header-injection shape wherever such a value is
+    later written into a protocol line, and none of them is a host anything
+    legitimate configures — a DNS name is letters, digits, hyphens and dots, and an
+    IP literal is narrower still.
+
+    **Enforced here rather than on the type**, at ADR-0154 §1's designated seam.
+    An earlier shape put it in ``TransportEndpoint``'s own validators, where it was
+    a refusal ADR-0191 §1 did not write: §1 marks exhaustiveness where it means it
+    ("exactly three fields … and no others") and settles this type's construction
+    rules itself, so a narrower accepted domain than the one it fixed is contract
+    surface no ADR decided (golden rule 5). Architecture review found that on
+    round 12. **No production path is lost by the move**: under ``src/`` the only
+    thing that builds a ``TransportEndpoint`` is :func:`parse_smtp_endpoint`, and
+    the only route to a resolver is
+    :meth:`StreamOutboundTransport.open_channel` — both of which refuse it below.
+
+    Args:
+        host: The host to inspect.
+
+    Returns:
+        The first character whose Unicode category is ``Cc``, or ``None``.
+    """
+    return next((character for character in host if unicodedata.category(character) == "Cc"), None)
+
+
 def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     """Read an endpoint this seam will pin a connection to, or refuse it.
 
@@ -862,6 +923,18 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     if not host or host.strip() != host:
         msg = "the bound transport endpoint names no host"
         raise TransportPinError(msg)
+    if _truncating_character(host) is not None:
+        # **The configured half of the pin** (:func:`_truncating_character`). The
+        # message names neither the offending code point nor the host: this is
+        # configuration rather than content, but it is still not this seam's to
+        # render, and a control character reaching a log line is the injection
+        # shape the rule exists over.
+        msg = (
+            "the bound transport endpoint names a host carrying a control "
+            "character, which a resolver would truncate; it is refused before "
+            "anything resolves it"
+        )
+        raise TransportPinError(msg)
     port = _port(port_text, scheme)
     parsed: TransportEndpoint | None = None
     try:
@@ -869,10 +942,12 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     except ValidationError:
         parsed = None
     if parsed is None:
-        # **The type is the pin, and this keeps its refusal in the seam's own
-        # taxonomy.** ``TransportEndpoint`` refuses a host carrying a control
-        # character — a ``NUL`` truncates at ``getaddrinfo`` — and one with no
-        # UTF-8 encoding, neither of which this grammar's punctuation check sees.
+        # **What the type still refuses, kept in the seam's own taxonomy.**
+        # ``TransportEndpoint``'s ``host`` is ``NonBlankEncodableText``, so text
+        # with no UTF-8 encoding is refused there, which this grammar's
+        # punctuation check does not see. (The control-character rule is the
+        # clause above, at this seam, rather than on the type — see
+        # :func:`_truncating_character`.)
         # A ``ValidationError`` escaping here would be the wrong type for a
         # refusal about a *binding* (ADR-0191 §4), and pydantic renders the input
         # it refused, so the endpoint an operator configured would reach whatever
@@ -883,9 +958,8 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
         # round 10 of adversarial review found it: a redaction the exception
         # chain undoes is not one.
         msg = (
-            "the bound transport endpoint names a host this seam will not pin; a "
-            "host carrying a control character, or text with no UTF-8 encoding, "
-            "is refused before anything resolves it"
+            "the bound transport endpoint names a host this seam will not pin; "
+            "text with no UTF-8 encoding is refused before anything resolves it"
         )
         raise TransportPinError(msg) from None
     return parsed
