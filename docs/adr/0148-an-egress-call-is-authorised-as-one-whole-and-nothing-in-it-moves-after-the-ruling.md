@@ -26,14 +26,15 @@
   its own; and no outcome is inferred from the absence of a record — which ADR-0192
   §3 reads forward onto the second record, requiring the recovery scan to complete
   every open claim under that `approval_ref` **before** it commits the step's
-  transition, so a crash always strands the pair on the side a later scan can still
-  resolve. The two reads are **not** thereby identical, and ADR-0192 §3 says so
-  rather than claiming otherwise: an invocation row may read `SUCCEEDED` or `FAILED`
-  under a step that reads `INDETERMINATE`, because the seam can record an outcome and
-  the process die before the plan records one. The difference runs one way only — the
-  step is the more ignorant of the pair, never the more confident — and neither
-  record is derived from the other, which is this section's own rule. No sentence of
-  §§1–8 or
+  transition, so a crash inside that scan always strands the pair on the side a
+  later scan can still resolve. The two reads are **not** thereby identical, and
+  ADR-0192 §3 says so rather than claiming otherwise. They can differ in either
+  direction: an invocation row reading `SUCCEEDED` or `FAILED` under a step that
+  reads `INDETERMINATE`, where the seam recorded an outcome and the process died
+  before the plan recorded one; or a terminal step over a claim still open, where
+  the completion write failed and the call's own result stood. What holds across
+  both is this section's own rule — neither record is derived from the other, and
+  neither is inferred from the other's absence. No sentence of §§1–8 or
   §§10–15 is touched, and this ADR's Decision text below is not rewritten (ADR-0070
   §1). The 2026-08-22 amendment note below is unaffected and stays whole. Refs
   #1503, #1544.
