@@ -747,6 +747,22 @@ the two properties it has rather than letting a reader assume the stronger one.
 > release is ever applied inside a critical section already running. What is
 > removed is the wait.
 
+> **Normative.** What a release **records is a reservation, not a value**, and
+> which reservation it names is decided **when `release_admission` is called** and
+> never later. A call naming a handle that identifies no reservation outstanding at
+> that moment — an unknown value, or one already retired — is discarded there and
+> then, and nothing is recorded. Only the moment of application is deferred to the
+> next critical section; the resolution is not, and the two must not be read as one
+> deferral. An implementation recording the raw value and matching it at
+> application time gets the §11 unknown-handle and release-race fixtures right in
+> isolation and still loses a live reservation: a release of an unknown `"h"`
+> queued while an admission is paused, that admission then minting `"h"` and
+> returning it, and the queued entry retiring a reservation taken **after** the
+> release that supposedly names it. §3's lifetime rule stops a value being
+> re-delivered but does not stop this, because the value was never delivered when
+> the release naming it was made — which is why this clause is stated rather than
+> inferred.
+
 > **Normative.** That is a liveness rule rather than a refinement, because the
 > alternative contradicts the deadline clause above. The admission's store read is
 > inside the critical section, so a gate blocked on a store that never answers
@@ -2265,6 +2281,20 @@ the ADRs it depends on rather than replacing them.
 > of 10 standing in for the completion just appended, and 90 plus 10 plus 10 is
 > 110. An implementation that applies a release inside a running admission passes
 > every race and double-count fixture above and admits it.
+
+> **Normative.** It extends that race with §3's **resolution-at-call-time** rule,
+> which the two clauses it sits between reach separately and never together: an
+> admission paused after its row snapshot, `release_admission` called meanwhile
+> with a handle **no reservation carries** — a value the suite chooses and the
+> holder has never delivered — and that paused admission then resumed over an id
+> factory whose next candidate is **that same value**. The admission's reservation
+> is asserted to stand: it is counted by the next projection, an estimate that
+> fits only without it is **refused**, and the reservation ends only when its own
+> handle is released. An implementation queueing the raw value and matching it when
+> the queue drains passes the unknown-handle clause above, both halves of the race
+> clause, and every lifetime-uniqueness fixture, and retires here a reservation
+> taken after the release that names it — the one interleaving in which an unknown
+> handle is not a no-op.
 
 > **Normative.** The suite drives §3's liveness rule with **two** invocations,
 > which the single blocked gate above cannot reach: one whose `admit_invocation` is
