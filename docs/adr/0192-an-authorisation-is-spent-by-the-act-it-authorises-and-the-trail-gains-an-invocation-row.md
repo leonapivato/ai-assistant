@@ -345,15 +345,25 @@ surface can state an execution at all, because ADR-0186's two operations return
 > appearance would be inventing the certainty.
 
 > **Normative.** **Where a row did land, it is an open claim for an act that
-> certainly never ran, and every reader already has its rule.** Nothing is repaired:
-> ADR-0014 §4's recovery scan completes it `INDETERMINATE` like any other (§3), a
-> further claim under that decision is refused while it is open and after it
-> completes (§1), and a spend evaluation over that scope fails closed (§5). That is a
-> **spent authorisation**, which is the direction this section fails in everywhere
-> else — never an unrecorded act — and it is the residue of a store that answered
-> neither yes nor no. It is stated here rather than discovered by an implementer,
-> because an implementation that instead re-entered the callable, re-claimed, or
-> deleted the row to "clean up" would be defeating §1's whole guarantee.
+> certainly never ran, and in the ordinary case it stays open for good.** Nothing is
+> repaired. `invoke` raises, so the executor commits the step out of `RUNNING` on
+> that exit — `FAILED` where an `AssistantError` left, `interrupted_outcome` where a
+> `CancelledError` did — and §3's clause on **a claim left open under a step that is
+> not `RUNNING`** governs from there: no recovery scan returns for a terminal step,
+> so nothing completes that claim, and this ADR does not license a scan over other
+> step states to close it. Only a process that dies **before** that transition leaves
+> the step `RUNNING`, and there the ordinary scan finds the claim and completes it
+> `INDETERMINATE` like any other. Either way a further claim under that decision is
+> refused while the claim is open (§1) and a spend evaluation over that scope fails
+> closed (§5).
+
+> **Normative.** That is a **spent authorisation**, which is the direction this
+> section fails in everywhere else — never an unrecorded act — and it is the residue
+> of a store that answered neither yes nor no. It is stated here rather than
+> discovered by an implementer, because an implementation that instead re-entered the
+> callable, re-claimed, or deleted the row to "clean up" would be defeating §1's whole
+> guarantee. The operator remedy, if the budget ADR wants one, is that ADR's; a
+> rewritten row is not on offer (§3, §6).
 
 > **Normative.** A `CancelledError` the **claim path's own collaborator** raises —
 > the ledger's clock, its store — where **no external cancellation is pending** is
@@ -690,6 +700,21 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > append an invocation under a decision's id, which the join below then resolves to
 > two different rows under one identifier.
 
+> **Normative.** **The invariant binds the store from both sides, so
+> `AuditTrail.record` is bound by it too.** That member is already write-once — "re-recording
+> an id already present raises rather than overwriting" — and "already present" is
+> read over **every row the store holds**, of either kind: a decision whose `id` names
+> a claim or a completion is refused `AuditError`, inside `record`'s own atomic act
+> and by the same comparison the ledger's collision check makes. Without it the
+> invariant would hold only against ids the ledger mints, and a caller choosing a
+> decision id equal to a claim's would put two records under one identifier from the
+> other side — which §2's join then resolves to two different rows, exactly the
+> failure the clause above refuses. This narrows nothing a caller could rely on: a
+> `DurableIdentifier` is the caller's to mint, and a store already refused a duplicate
+> decision id. Nothing is superseded by saying so: before this ADR the store held one
+> row kind, so "already present" had one reading and ADR-0021 §4's rule is extended
+> onto the kind this ADR adds rather than changed.
+
 > **Normative.** That bound reads the rows the store holds **now** and holds nothing
 > across an erasure, which is what makes it available here at all. It consults no
 > generation, no epoch, no high-water mark and no record of an id the store used to
@@ -903,6 +928,18 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > is superseded** — relabelling a callable's own failure would destroy its type and
 > its cause, which is the reason §2 gives. §1's "a clock that raises refuses the
 > claim" means both halves and is not a claim that both arrive as one class.
+
+> **Normative.** The **identifier factory** is split the same way and for the same
+> reason, and it is stated here rather than left to be inferred from the clock's arm.
+> An exception the **factory callable itself raises** on its own account propagates
+> **unwrapped**, its type and cause intact — ADR-0026 §2's rule reaches any injected
+> callable a guard consumes, and relabelling it would destroy exactly what that rule
+> preserves. A factory that instead **returns** a value no row can be built from —
+> blank text, a wrong type, anything `DurableIdentifier` rejects — is a non-conforming
+> collaborator's *output* and not an exception of its own, so it is the guard-rejection
+> arm: the ledger raises `AuditError` carrying its cause. The translation clause two
+> paragraphs above is read subject to both arms, on this collaborator as on the clock,
+> and §9 pins the pair on both members.
 
 > **Normative.** Where such a failure prevents a refusal above from being **decided
 > at all** — the store will not answer whether the decision is recorded, or whether
@@ -2519,12 +2556,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > clause under test: the ledger **commits the row and then raises**, with the store
 > gated so the write is durable before the failure reaches the frame. The test
 > asserts that the callable is **never entered**, that `invoke` attempts **no**
-> completion and raises as §1 requires, that the committed row **stands** — nothing
-> deleted, no compensating append, no marker — and that a recovery pass then finds
-> that claim open and completes it `INDETERMINATE`. Without it a suite certifies an
-> implementation that cleans up after itself, which is the rollback §6 refuses to
-> offer, and it leaves §1's honest statement about this append untested on the one
-> branch it was written for.
+> completion and raises as §1 requires, and that the committed row **stands** —
+> nothing deleted, no compensating append, no marker. It asserts **no recovery**: the
+> executor commits the step out of `RUNNING` on that exit, so no scan returns for it
+> and the claim stays open, which is §3's not-`RUNNING` clause and the state §1
+> names. A recovery assertion here would pin behaviour this ADR states cannot happen
+> unless the process dies before the transition, which is a different case with its
+> own test above. Without the case a suite certifies an implementation that cleans up
+> after itself, which is the rollback §6 refuses to offer.
 
 > **Normative.** **#234 is narrowed by this and is not closed.** What §1 removes is
 > one way `invoke` could hand the executor a `CancelledError` for a call nothing
@@ -2667,6 +2706,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > that treats the id space as the invocation rows alone appends under the decision's
 > id and fails the unchanged-row assertion, which is §2's one-id-space clause under
 > test.
+
+> **Normative.** The **other side of that invariant** is pinned in `AuditTrail`'s own
+> suite, because every case above drives ids the *ledger* mints and none drives the
+> one a caller chooses: `record` is called with a `PermissionDecision` whose `id` the
+> store already holds as a **claim**, and again as a **completion**, and each is
+> refused `AuditError` with the existing row unchanged field by field and no decision
+> appended. The pair runs **concurrently** as well as sequentially — a `record` and a
+> claim append racing on one id — because the refusal is inside `record`'s atomic act
+> and a check-then-write implementation passes the sequential case and loses the race.
+> Without it an implementation keeping decisions and invocations in separate tables
+> satisfies every collision case above while one durable identifier names two
+> records.
 
 > **Normative.** The factory's own **faults** are pinned at that same boundary, by
 > ADR-0026 §2's split and for the same reason the clock's two arms are named apart
