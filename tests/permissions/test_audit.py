@@ -520,13 +520,14 @@ async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTr
     """A database created here is labelled, so a future migration has a marker to read.
 
     The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
-    store had none of. Exactly one row, so the label is unambiguous.
+    store had none of. Exactly one row, so the label is unambiguous. Version 2 is
+    the invocation shape (ADR-0192 §2), which is what this code writes.
     """
     rows = ephemeral._conn.execute(
         "SELECT key, value FROM meta WHERE key = 'schema_version'"
     ).fetchall()
 
-    assert rows == [("schema_version", "1")]
+    assert rows == [("schema_version", "2")]
 
 
 @pytest.mark.integration
@@ -536,9 +537,11 @@ async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Pa
     The marker arrives after this store had users, so every trail already on disk
     carries none. Refusing them would make a Tier 1 record the user is entitled to
     keep unopenable by the code that wrote it. Backfilling is sound because
-    ``_migrate`` is additive and keyed on column presence: it brings any pre-marker
-    file to exactly the shape version 1 names, so the stamp records what this open
-    established rather than an assumption about what was there before.
+    ``_migrate`` is additive and keyed on column presence, and
+    ``CREATE TABLE IF NOT EXISTS`` adds the invocation table to any file at all:
+    together they bring a pre-marker file to exactly the shape the current version
+    names, so the stamp records what this open established rather than an
+    assumption about what was there before.
     """
     path = tmp_path / "audit.db"
     old = _write_legacy_trail(path, "c-old")
@@ -555,6 +558,111 @@ async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Pa
     finally:
         reopened.close()
 
+    assert _stored_schema_version(path) == "2"
+
+
+def _write_version_one_trail(path: Path, decision_id: str) -> PermissionDecision:
+    """Seed ``path`` with a version-1 database: decisions and a marker, no invocations.
+
+    The shape this store wrote between the marker landing (ADR-0049 §1's pattern)
+    and ADR-0192 — every binding column present, so ``_migrate`` has nothing to do,
+    and the ``invocations`` table absent, which is the whole of the step to
+    version 2.
+    """
+    old = decision(decision_id, request=action(step_id="step-old"))
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        legacy.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, execution_id, step_id, "
+            "outcome, expires_at_us, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision_id,
+                0,
+                None,
+                old.execution_id,
+                old.step_id,
+                old.ruling.outcome.value,
+                None,
+                old.model_dump_json(),
+            ),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+    return old
+
+
+def _tables(path: Path) -> set[str]:
+    """Every table name the file at ``path`` holds."""
+    raw = sqlite3.connect(str(path))
+    try:
+        return {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        raw.close()
+
+
+@pytest.mark.integration
+async def test_a_version_one_database_is_opened_and_restamped(tmp_path: Path) -> None:
+    """A pre-ADR-0192 trail opens, gains the invocation shape, and says so.
+
+    Both halves are the decision. **Opened**, because refusing would strand every
+    audit trail written before ADR-0192 — the same Tier 1 record the pre-marker
+    case is about, and ``CREATE TABLE IF NOT EXISTS`` is all the migration this
+    step needs. **Restamped**, because a file that has grown invocation rows is no
+    longer one the previous version of this code may open: its ``clear()`` knows
+    only ``decisions``, so it would leave the invocation rows behind and make
+    ADR-0192 §6's total erasure silently partial, and its uniqueness check sees
+    only ``decisions``, so it could record a decision under an id an invocation
+    already holds. ADR-0049 §1 rules that a downgrade is a fault to report; the
+    marker is what lets it be reported.
+    """
+    path = tmp_path / "audit.db"
+    old = _write_version_one_trail(path, "c-old")
+    assert _stored_schema_version(path) == "1"
+    assert "invocations" not in _tables(path)
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-old") == old  # the history survives the upgrade
+        assert await reopened.export_invocations() == []  # ...and the new table is readable
+    finally:
+        reopened.close()
+
+    assert _stored_schema_version(path) == "2"
+    assert "invocations" in _tables(path)
+
+
+@pytest.mark.integration
+async def test_a_version_one_database_that_fails_to_migrate_keeps_its_marker(
+    tmp_path: Path,
+) -> None:
+    """A refused upgrade must not relabel a database it did not manage to bring up.
+
+    The restamp shares the setup transaction with the create and the migration, so
+    a corrupt legacy row rolls it back with everything else. The alternative is a
+    file labelled 2 whose invocation table was never created — which the *next*
+    open would then trust and never try to build again.
+    """
+    path = tmp_path / "audit.db"
+    _write_version_one_trail(path, "c-old")
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute("ALTER TABLE decisions DROP COLUMN step_id")  # forces `_migrate` to run
+        legacy.execute("UPDATE decisions SET data = ? WHERE id = ?", ("{not valid json", "c-old"))
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    with pytest.raises(AuditError):
+        SqliteAuditTrail(path=path)
+
     assert _stored_schema_version(path) == "1"
 
 
@@ -562,8 +670,9 @@ async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Pa
 async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -> None:
     """A second open neither re-stamps nor trips over the marker already there.
 
-    The stamp is written only where none was found, so reopening cannot lose the
-    primary-key race a blind insert would.
+    The stamp is written only where none was found and the restamp only where an
+    older openable version was, so reopening cannot lose the primary-key race a
+    blind insert would.
     """
     path = tmp_path / "audit.db"
     SqliteAuditTrail(path=path).close()
@@ -574,7 +683,7 @@ async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -
     finally:
         reopened.close()
 
-    assert rows == [("schema_version", "1")]
+    assert rows == [("schema_version", "2")]
 
 
 @pytest.mark.integration
@@ -625,7 +734,7 @@ async def test_a_newer_schema_is_refused_before_the_decisions_table_exists(
     finally:
         raw.close()
 
-    with pytest.raises(AuditError, match="supports only version"):
+    with pytest.raises(AuditError, match="can open only version"):
         SqliteAuditTrail(path=path)
 
     check = sqlite3.connect(str(path))
@@ -645,7 +754,10 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
     """A downgrade is reported at open, not deferred to the first raw SQLite error.
 
     The same rule the trail applies to a row that no longer validates: a database
-    this code cannot account for is a fault to report, not records to hand on.
+    this code cannot account for is a fault to report, not records to hand on. The
+    marker is moved past the current version rather than to it: ``'2'`` would name
+    the shape this code writes, and the refusal under test is for the one it does
+    not know.
     """
     path = tmp_path / "audit.db"
     trail = SqliteAuditTrail(path=path)
@@ -656,12 +768,12 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     raw = sqlite3.connect(str(path))
     try:
-        raw.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+        raw.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
         raw.commit()
     finally:
         raw.close()
 
-    with pytest.raises(AuditError, match="supports only version"):
+    with pytest.raises(AuditError, match="can open only version"):
         SqliteAuditTrail(path=path)
 
 
@@ -727,7 +839,9 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
 
     The type guard refuses what cannot be read as a version; it must not refuse a
     version legibly stored in the other of SQLite's two integral forms, which is
-    what an untyped ``meta`` column yields for an unquoted literal.
+    what an untyped ``meta`` column yields for an unquoted literal. Version 1 is
+    openable and restamped, so the parse is observable in both the open and the
+    label left behind.
     """
     path = tmp_path / "audit.db"
     raw = sqlite3.connect(str(path))
@@ -744,6 +858,8 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
         assert len(await trail.export()) == 1
     finally:
         trail.close()
+
+    assert _stored_schema_version(path) == "2"
 
 
 @pytest.mark.integration
@@ -797,7 +913,7 @@ async def test_clearing_the_trail_leaves_it_openable(tmp_path: Path) -> None:
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "1"
+    assert _stored_schema_version(path) == "2"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.export() == []
@@ -1080,10 +1196,10 @@ def test_a_journal_opened_during_setup_is_owner_only(
     observed: list[int | None] = []
     original = SqliteAuditTrail._check_schema_version
 
-    def observing(trail: SqliteAuditTrail, conn: sqlite3.Connection) -> bool:
-        labelled = original(trail, conn)
+    def observing(trail: SqliteAuditTrail, conn: sqlite3.Connection) -> int | None:
+        stored = original(trail, conn)
         observed.append(_journal_mode(path))
-        return labelled
+        return stored
 
     monkeypatch.setattr(SqliteAuditTrail, "_check_schema_version", observing)
 

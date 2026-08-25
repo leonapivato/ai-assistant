@@ -30,6 +30,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -59,12 +60,13 @@ from ai_assistant.core.types import (
     ToolInvocation,
     ToolOutcome,
 )
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from ai_assistant.core.types import PermissionDecision, ToolDefinition
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 class LedgerSubject(AuditTrail, InvocationLedger, Protocol):
@@ -250,6 +252,10 @@ class LedgerHarness(Protocol):
         """Hold ``subject``'s next entry into ``operation`` open inside its resource."""
         ...
 
+    def log_of(self, subject: LedgerSubject) -> ResourceLog:
+        """When each armed call was inside ``subject``'s resource (ADR-0060 §3)."""
+        ...
+
 
 async def _claim(subject: LedgerSubject, authorisation: PermissionDecision) -> ToolInvocation:
     """Record ``authorisation`` if it is not recorded yet, then claim under it."""
@@ -270,6 +276,75 @@ async def _complete(
     return await subject.complete_invocation(
         claim_id=claim.id, outcome=outcome, incurred_cost=cost, failure_kind=kind
     )
+
+
+#: What a released-early resource looks like from outside, said once.
+_RELEASED_EARLY = (
+    "the resource reached the next caller while the cancelled call's work was still using it"
+)
+
+
+async def _cancelled_inside_the_resource(
+    harness: LedgerHarness,
+    ledger: LedgerSubject,
+    operation: str,
+    first_call: Callable[[], Awaitable[object]],
+    second_call: Callable[[], Awaitable[object]],
+) -> None:
+    """Cancel ``first_call`` inside ``operation``'s resource and watch the next caller.
+
+    ADR-0192 §9 names two writes that "run from paths that may themselves be
+    cancelled" — the claim append and the completion — and owes each "a write that
+    survives that path". The surviving half is asserted by the caller, which knows
+    what a coherent trail looks like for its own write; this is the half every
+    resource-holding method shares, and it is ``core.protocols``' cancellation
+    clause (ADR-0060 §3) on the two members ADR-0192 adds.
+
+    **The second caller is what makes it a test of the invariant** rather than of
+    propagation: a single cancelled call in isolation looks identical whether the
+    resource was released early or not, which is why pre-ADR-0054 code — raising
+    ``CancelledError`` correctly and dropping the connection anyway — passed the
+    weaker case. Cancelled **twice**, because deferring one cancellation is not the
+    contract: a second delivered while the deferred wait runs must not escape and
+    unwind out of the resource either.
+
+    Returns once the dust has settled — the first call ended cancelled, the second
+    completed whole, and neither was inside the resource while the other was.
+    """
+    log = harness.log_of(ledger)
+    # Armed *after* the caller's preconditions, so a fake arming its one resource
+    # suspends the call under test rather than a setup write.
+    suspended = harness.arm(ledger, operation)
+    visited_before = log.visits
+
+    first = asyncio.ensure_future(first_call())
+    second: asyncio.Task[object] | None = None
+    try:
+        await suspended.reached()
+        first.cancel()
+        await settle()
+
+        second = asyncio.ensure_future(second_call())
+        await settle()
+        assert not second.done(), _RELEASED_EARLY
+
+        first.cancel()
+        await settle()
+        assert not second.done(), _RELEASED_EARLY
+    finally:
+        suspended.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert second is not None
+    await second
+
+    # Decisive where the blocked-caller check above is not: a store whose work runs
+    # on an executor can leave a second call pending for reasons that have nothing
+    # to do with the resource. A delta, because a fake's preconditions pass through
+    # the same logged resource.
+    assert not log.overlapped, _RELEASED_EARLY
+    assert log.visits - visited_before == 2, "both calls should have reached the resource by now"
 
 
 async def _rows(subject: LedgerSubject) -> list[ToolInvocation]:
@@ -424,6 +499,66 @@ class InvocationCompleterContract:
         assert not isinstance(raised.value, InvalidCompletionError)
         assert await _rows(ledger) == []
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            pytest.param("claim_id", None, id="a-claim-id-that-is-not-text"),
+            pytest.param("outcome", "SUCCEEDED", id="an-outcome-that-is-not-the-enum"),
+            pytest.param("incurred_cost", None, id="a-cost-that-is-not-a-cost"),
+        ],
+    )
+    async def test_an_argument_the_signature_does_not_name_is_an_argument_fault(
+        self, ledger: LedgerSubject, field_name: str, value: object
+    ) -> None:
+        """Every argument is *validated* before it is read, not dereferenced.
+
+        ADR-0192 §2's two refusal orders are "exhaustive over the **classes a
+        refusal arrives in**", so a value the signature does not name must arrive
+        as ``AuditError`` and not as whatever a field read on it happens to raise.
+        The failure this catches is an implementation that validates most of its
+        arguments and reaches into one — ``incurred_cost.model_dump_json()`` on a
+        ``None`` raises ``AttributeError``, which is not an ``AssistantError`` at
+        all and leaves this boundary through a hole in the order.
+
+        Static typing makes none of these reachable from a conforming caller,
+        which is exactly why an implementation drifts here unnoticed: the two
+        implementations diverged, one refusing a non-text ``claim_id`` and the
+        other stringifying it into a lookup that then reported the *claim* as
+        missing — a different class, for a fault that is not about the claim.
+        """
+        arguments: dict[str, Any] = {
+            "claim_id": "no-such-claim",
+            "outcome": ToolOutcome.FAILED,
+            "incurred_cost": UNKNOWN_COST,
+        }
+        arguments[field_name] = value
+
+        with pytest.raises(AuditError) as raised:
+            await ledger.complete_invocation(**arguments)
+
+        assert not isinstance(raised.value, InvalidCompletionError), (
+            "an argument fault says nothing about the claim"
+        )
+        assert await _rows(ledger) == []
+
+    async def test_a_claim_id_is_read_as_the_type_the_signature_names(
+        self, ledger: LedgerSubject
+    ) -> None:
+        """``" x "`` and ``"x"`` name one claim, because ``Identifier`` strips.
+
+        An implementation looking the raw text up refuses this as an unknown claim
+        while the row it names is sitting open — and the two implementations must
+        not disagree about which claims exist.
+        """
+        claim = await _claim(ledger, allowed())
+
+        completion = await ledger.complete_invocation(
+            claim_id=f"  {claim.id}  ", outcome=ToolOutcome.FAILED, incurred_cost=UNKNOWN_COST
+        )
+
+        assert completion.completes == claim.id
+        assert await ledger.open_invocations(decision_id=claim.decision_id) == []
+
     async def test_a_completion_never_reports_an_unrecorded_authorisation(
         self, ledger: LedgerSubject
     ) -> None:
@@ -507,6 +642,75 @@ class InvocationCompleterContract:
         assert completion.incurred_cost is not None
         assert completion.incurred_cost.amount == Decimal("1.00")
 
+    # --- cancelled while the write holds its resource (ADR-0192 §9) --------
+
+    async def test_a_cancelled_completion_holds_its_resource_and_leaves_a_coherent_trail(
+        self, harness: LedgerHarness
+    ) -> None:
+        """The completion is one of the two writes ADR-0192 §9 owes a surviving path.
+
+        Two halves, and the second is what makes this ADR-0192's case rather than
+        ADR-0060's.
+
+        **The resource.** A cancelled completion must not hand the connection to
+        the next caller while the work it started is still using it, which is
+        ``core.protocols``' clause on any method that acquires one.
+
+        **The trail.** Whatever the cancellation did, what is left must be a state
+        §3's commit-state clause can name. Either the completion did not commit,
+        and the claim is **left open** — "the honest state, and not a licence to
+        write a wrong outcome" — or it committed before the failure, and it stands
+        with the claim closed. Never a completion carrying an outcome nobody
+        submitted, never two completions of one claim, and never a claim that is
+        both closed and absent from the completions. The cancelled call submits
+        ``SUCCEEDED`` and the surviving one ``FAILED``, so an implementation that
+        wrote the wrong row's outcome is visible rather than plausible.
+
+        Both implementations are conforming and they land differently: a store that
+        shields its worker (ADR-0054) commits the cancelled completion, and one
+        whose write is on the event loop never runs its body. Asserting the
+        *disjunction* is the contract; asserting either branch would write one
+        implementation into the suite.
+        """
+        ledger = harness.open()
+        authorisation = allowed("d-open", definition=natural())
+        first_claim = await _claim(ledger, authorisation)
+        second_claim = await _claim(ledger, authorisation)
+
+        await _cancelled_inside_the_resource(
+            harness,
+            ledger,
+            "complete_invocation",
+            lambda: ledger.complete_invocation(
+                claim_id=first_claim.id, outcome=ToolOutcome.SUCCEEDED, incurred_cost=PRICED
+            ),
+            lambda: ledger.complete_invocation(
+                claim_id=second_claim.id, outcome=ToolOutcome.FAILED, incurred_cost=UNKNOWN_COST
+            ),
+        )
+
+        held = await _rows(ledger)
+        assert len({row.id for row in held}) == len(held), "no id names two rows"
+        completions = [row for row in held if row.completes is not None]
+        surviving = [row for row in completions if row.completes == second_claim.id]
+        assert len(surviving) == 1, "the second completion landed whole"
+        assert surviving[0].outcome is ToolOutcome.FAILED
+        assert surviving[0].incurred_cost == UNKNOWN_COST
+
+        open_now = {row.id for row in await ledger.open_invocations(decision_id="d-open")}
+        cancelled = [row for row in completions if row.completes == first_claim.id]
+        if cancelled:
+            assert len(cancelled) == 1, "a claim is completed once"
+            assert cancelled[0].outcome is ToolOutcome.SUCCEEDED, (
+                "a committed completion carries what its caller submitted, not another outcome"
+            )
+            assert cancelled[0].incurred_cost == PRICED
+            assert first_claim.id not in open_now, "a completed claim has left the open set"
+        else:
+            assert first_claim.id in open_now, (
+                "an uncommitted completion leaves its claim open, which is the honest state"
+            )
+
     # --- the collaborators, split where ADR-0026 §2 splits them ------------
 
     async def test_a_rejected_clock_reading_surfaces_as_this_layers_error(
@@ -572,6 +776,50 @@ class InvocationCompleterContract:
             await _complete(ledger, claim)
 
         assert await _rows(ledger) == before
+
+    @pytest.mark.parametrize(
+        "drawn",
+        [
+            pytest.param(" claim-1 ", id="whitespace-around-a-held-id"),
+            pytest.param("\ud800", id="text-with-no-utf-8-encoding"),
+        ],
+    )
+    async def test_a_factory_output_is_read_as_the_type_before_it_is_used(
+        self, harness: LedgerHarness, drawn: str
+    ) -> None:
+        """A drawn id is normalised and refused by ``DurableIdentifier``, not by a likeness.
+
+        Both parameters are cases a hand-rolled "text, and not blank" check passes
+        and the type does not, and each is a different loss.
+
+        ``" claim-1 "`` is the sharper one. ``Identifier`` **strips**, so it and
+        ``"claim-1"`` are one identifier to every model that holds one — but two to
+        a check that returns its input unchanged. The collision check then clears,
+        and the row is stored under the id the *model* carries, replacing the claim
+        already there: an append-only store losing a row, and one durable
+        identifier naming two acts, which is precisely what ADR-0192 §2's single id
+        space forbids.
+
+        A lone surrogate has no UTF-8 encoding at all (ADR-0087 §7), so no row can
+        be written down under it; ``.strip()`` cannot see that.
+
+        The assertion is on what the store *holds*, not on which of the two the
+        implementation takes: refusing the draw and drawing again are both
+        conforming, and neither may lose the live row.
+        """
+        drawing = ScriptedIdentifiers(forced=["claim-1"])
+        ledger = harness.open(identifiers=drawing)
+        claim = await _claim(ledger, allowed())
+        assert claim.id == "claim-1"
+        before = await _rows(ledger)
+        drawing.forced = [drawn, "fresh-1"]
+
+        with contextlib.suppress(AuditError):
+            await _complete(ledger, claim)
+
+        held = {row.id: row for row in await _rows(ledger)}
+        assert held["claim-1"] == before[0], "the claim already there is not replaced"
+        assert set(held) <= {"claim-1", "fresh-1"}, "no row is stored under an id the type refuses"
 
     # --- the redraw, over one id space ------------------------------------
 
@@ -994,6 +1242,46 @@ class InvocationLedgerContract(InvocationCompleterContract):
 
         assert first.id != second.id
 
+    async def test_a_cancelled_claim_holds_its_resource_and_leaves_a_coherent_trail(
+        self, harness: LedgerHarness
+    ) -> None:
+        """The claim is the other write ADR-0192 §9 owes a surviving path.
+
+        The resource half is :meth:`InvocationCompleterContract`'s. The trail half
+        is §1's: a claim is a write-ahead record of an attempt, so what the store
+        holds afterwards must be **observable** — §9 says in terms that "where the
+        claim's outcome cannot be observed, the implementation does not satisfy §1
+        and the conformance suite says so". Either the append landed, in which case
+        the claim is a whole row and ``open_invocations`` returns it, or it did
+        not, in which case nothing of it is in the store. Never a half-row, never
+        an id naming two acts, and never a claim the recovery read cannot see.
+
+        Under a non-spendable authorisation so a second claim is admissible at all
+        — the consume is not what this case is about, and refusing the second would
+        make the blocked-caller check untestable.
+        """
+        ledger = harness.open()
+        authorisation = allowed("d-open", definition=natural())
+        await ledger.record(authorisation)
+
+        await _cancelled_inside_the_resource(
+            harness,
+            ledger,
+            "claim_invocation",
+            lambda: ledger.claim_invocation(decision=authorisation),
+            lambda: ledger.claim_invocation(decision=authorisation),
+        )
+
+        held = await _rows(ledger)
+        assert 1 <= len(held) <= 2, "the surviving claim landed, and no call appended twice"
+        assert len({row.id for row in held}) == len(held), "no id names two acts"
+        assert all(row.completes is None for row in held)
+        assert all(row.decision_id == "d-open" for row in held)
+        observable = {row.id for row in await ledger.open_invocations(decision_id="d-open")}
+        assert observable == {row.id for row in held}, (
+            "every claim that landed is one the recovery read can see"
+        )
+
     # --- what the store must already hold ---------------------------------
 
     async def test_a_claim_under_an_unrecorded_decision_is_refused(
@@ -1038,6 +1326,23 @@ class InvocationLedgerContract(InvocationCompleterContract):
 
         with pytest.raises(UnrecordedAuthorisationError):
             await ledger.claim_invocation(decision=unauthorised)
+
+    async def test_a_value_that_is_not_a_decision_is_an_argument_fault(
+        self, ledger: LedgerSubject
+    ) -> None:
+        """The decision is *validated* before any field of it is read.
+
+        ``decision.model_dump()`` is a field read, so an implementation calling it
+        first lets a value that is not a decision escape as ``AttributeError`` —
+        which is not an ``AssistantError``, and so is outside the classes ADR-0192
+        §2's order is exhaustive over. ``FakeToolInvoker._revalidated`` states the
+        same ordering for the same reason (ADR-0152 §1).
+        """
+        with pytest.raises(AuditError) as raised:
+            await ledger.claim_invocation(decision=None)  # type: ignore[arg-type]  # the fault
+
+        assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
+        assert await _rows(ledger) == []
 
     async def test_an_argument_fault_is_decided_before_the_authority(
         self, ledger: LedgerSubject

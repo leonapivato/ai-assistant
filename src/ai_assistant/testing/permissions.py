@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -40,6 +40,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CostBasis,
+    DurableIdentifier,
     Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
@@ -58,7 +59,7 @@ from ai_assistant.testing.cancellation import SuspendableResource
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
-    from ai_assistant.core.types import ActionRequest, DurableIdentifier
+    from ai_assistant.core.types import ActionRequest
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
@@ -771,11 +772,9 @@ class FakeAuditTrail:
             InvalidCompletionError: If ``claim_id`` names no recorded claim or
                 names one a completion already names.
         """
-        named = _checked_argument("claim_id", lambda: str(claim_id))
+        named = _checked_argument("claim_id", lambda: _identifier(claim_id))
         settled = _checked_argument("outcome", lambda: ToolOutcome(outcome))
-        cost = _checked_argument(
-            "incurred_cost", lambda: ToolCost.model_validate(incurred_cost.model_dump())
-        )
+        cost = _checked_argument("incurred_cost", lambda: _detached_cost(incurred_cost))
         kind = (
             None
             if failure_kind is None
@@ -975,29 +974,70 @@ class FakeAuditTrail:
         return sorted(by_id, key=lambda decision: decision.decided_at, reverse=True)
 
 
+def _detached_cost(value: ToolCost) -> ToolCost:
+    """Rebuild ``value`` as a validated, detached :class:`ToolCost`.
+
+    A raw, non-model value is validated rather than dereferenced, which is
+    ``FakeToolInvoker._revalidated``'s ordering (ADR-0152 §1, "before reading any
+    field of it"): ``value.model_dump()`` is a field read, so calling it first
+    would let such a value escape as an ``AttributeError`` — neither ``AuditError``
+    nor any class ADR-0192 §2's refusal order admits. The durable store has the
+    identical guard at the identical place.
+
+    Raises:
+        ValidationError: If it is not a cost this trail can record.
+    """
+    given: object = value
+    return ToolCost.model_validate(given.model_dump() if isinstance(given, ToolCost) else given)
+
+
 def _revalidated_decision(decision: PermissionDecision) -> PermissionDecision:
     """Rebuild ``decision`` as a validated, detached ``PermissionDecision``.
 
+    A raw, non-model value is validated rather than dereferenced, on
+    :func:`_detached_cost`'s ordering and for its reason: ADR-0192 §2's refusal
+    order puts ``AuditError`` first "where an argument is not valid" and is
+    exhaustive over the classes a refusal arrives in, and ``decision.model_dump()``
+    on something that is not a decision raises ``AttributeError`` straight through
+    it. The durable store guards the same argument the same way.
+
     Raises:
-        AuditError: If it does not satisfy its own model.
+        AuditError: If it is not a valid record, or does not satisfy the model.
     """
+    given: object = decision
     try:
-        return PermissionDecision.model_validate(decision.model_dump())
+        raw = given.model_dump() if isinstance(given, PermissionDecision) else given
+        return PermissionDecision.model_validate(raw)
     except ValidationError as exc:
-        msg = f"decision {decision.id!r} is not a valid record: {exc}"
+        named = repr(given.id) if isinstance(given, PermissionDecision) else "the given value"
+        msg = f"decision {named} is not a valid record: {exc}"
         raise AuditError(msg) from exc
 
 
+#: The one validator for every identifier this fake is handed or is returned —
+#: the *type*, not a hand-rolled likeness of it.
+#:
+#: An earlier version checked "text, and not blank" and returned the value
+#: **unchanged**, which is not what :data:`DurableIdentifier` means:
+#: :data:`~ai_assistant.core.types.Identifier` strips, so ``" x "`` and ``"x"`` are
+#: one identifier to every model that holds one and were two to the check. A
+#: factory returning both in turn passed the collision check twice and the second
+#: row then overwrote the first under the stripped key — an append-only store
+#: losing a row, and one durable id naming two acts, which is exactly what
+#: ADR-0192 §2's single id space forbids. It also missed text with no UTF-8
+#: encoding, which the type refuses and a ``.strip()`` cannot see. The durable
+#: store validates through the same adapter (``permissions/audit.py``); a fake
+#: that admits what the store refuses is not a stand-in for it.
+_IDENTIFIER: Final[TypeAdapter[str]] = TypeAdapter(DurableIdentifier)
+
+
 def _identifier(value: object) -> str:
-    """Return ``value`` if it is a usable ``DurableIdentifier``, else reject it.
+    """Return ``value`` normalised as a ``DurableIdentifier``, else reject it.
 
     Raises:
-        ValueError: If it is not text, or is blank.
+        ValidationError: If it is not text, is blank, or has no UTF-8 encoding.
     """
-    if not isinstance(value, str) or not value.strip():
-        msg = f"an identifier must be non-blank text, got {type(value).__name__}"
-        raise ValueError(msg)
-    return value
+    return _IDENTIFIER.validate_python(value)
 
 
 def _checked_argument[T](name: str, build: Callable[[], T]) -> T:
