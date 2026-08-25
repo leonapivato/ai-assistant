@@ -972,22 +972,76 @@ replacing them.
 > admit rather than refuse, because `admit_invocation` returned before it consulted
 > any of them.
 
-> **Normative.** The suite drives an exact sum whose result needs **more
-> significant digits than a default 28-digit context carries**, built from
-> countable amounts — which takes many rows rather than one large one, since §1
-> bounds each — in **both** directions: one crossing the ceiling and refused, and
-> one staying below it and admitted. The second is what pins the result rather than
-> a precision, and a suite carrying only the first does not discharge this clause.
+> **Normative.** It drives that same configuration again with each **estimate**
+> state that refuses where a ceiling *is* configured: a declared amount that is not
+> countable (§1), an `UNKNOWN` basis with no allowance set (§2), and a cost
+> denominated in a currency other than `world_spend_currency` (§2). Each is
+> **admitted**, and the ledger is not consulted in any of them. Without these three
+> the clause above is discharged by an implementation that tests the estimate
+> *before* it tests whether a ceiling exists: it passes every case listed there and
+> still refuses a call in the one configuration that must refuse nothing.
 
-> **Normative.** The suite drives §1's countability predicate on every side: a
-> configured ceiling and an allowance outside it refused at load; a declared amount
-> outside it refusing the call; a reported one outside it making the period
-> indeterminate; and — the case the predicate's wording exists for — a value
-> written with ten fractional digits that is numerically equal to one with none,
-> accepted as countable. It asserts that in **none** of those cases is the
-> allowance substituted, and it drives every one of them again under a hostile
-> ambient `decimal` context — a precision of ten, with traps armed — asserting the
-> same classifications and no leaked `decimal` exception.
+> **Normative.** The suite drives an exact sum in the **admitted** direction under
+> a hostile ambient `decimal` context — a precision of ten, with traps armed:
+> countable rows whose exact accounted total needs more significant digits than
+> that context carries, while the projected total stays **below** the ceiling, so
+> the call is admitted and `spend_totals` states the exact sum. That is what pins
+> the result rather than a precision, and a suite that drives only refusals does not
+> discharge this clause: an implementation computing in the caller's context would
+> round or trap exactly here, where it must admit and state an exact figure.
+
+> **Normative.** The admitted case is bounded at **twenty-four** significant
+> digits, not twenty-eight, and the suite does not ask for more of it. §1 bounds
+> every contributing amount below `1E15` and to nine fractional digits, so a total
+> that stays under a likewise countable ceiling carries at most fifteen integer and
+> nine fractional digits. A below-ceiling sum needing a twenty-ninth digit is not a
+> fixture anyone can build, and the hostile context above is what tests the same
+> property in its place.
+
+> **Normative.** The suite drives the case needing **more significant digits than a
+> default 28-digit context carries** where such a total is in fact reachable — an
+> **accounted** total, which §1's predicate does not bound, because that predicate
+> governs inputs and not results. One fixture serves it: enough completion rows in
+> one period that their exact sum exceeds `Decimal("1E19")` while retaining nine
+> fractional digits, which takes rows in the ten thousands since §1 bounds each
+> below `1E15`. Against that fixture the suite drives two reads of the same number:
+> a `spend_totals` read with a **reporting currency and no ceiling**, where the
+> exact total is stated and nothing is refused; and an admission with a ceiling
+> configured, where the projected total exceeds it and the call is refused with
+> `SpendCeilingError`. A conforming implementation sizes its context from the
+> operands (§2) and neither rounds the stated total nor answers the comparison out
+> of a default context.
+
+> **Normative.** The suite drives §1's countability predicate at **both** of its
+> boundaries, by naming the values rather than asking for one outside the range.
+> The magnitude bound is strict, so it is pinned at the number itself: exactly
+> `Decimal("1E15")` is **not** countable, and `Decimal("999999999999999.999999999")`
+> — the largest countable value below it — **is**. The scale bound is pinned
+> independently of magnitude, so an implementation cannot satisfy it with an
+> over-magnitude fixture: `Decimal("0.000000001")`, nine non-zero fractional
+> digits, is countable, and `Decimal("0.0000000001")`, a non-zero tenth, is not.
+
+> **Normative.** Those four values are driven on **each** of the four amounts §1's
+> predicate governs, with the classification's stated consequence asserted in each
+> place: as a configured **ceiling** and as the **allowance**, where a non-countable
+> value is refused at load with `ConfigurationError` naming the field and a
+> countable one loads; as a **declared** `ToolCost.amount` with a ceiling
+> configured, where a non-countable value refuses the call with
+> `SpendUndeterminedError` and a countable one is carried into the projection; and
+> as a **reported** cost on a completion row, where a non-countable value makes the
+> period's accounted total indeterminate and a countable one is summed into it. A
+> suite carrying only over-magnitude fixtures discharges neither bound: an
+> implementation that dropped the fractional-digit half of the predicate, and one
+> that wrote `<=` where §1 says strictly less than, each pass it.
+
+> **Normative.** The suite also drives the case the predicate's wording exists for
+> — a value written with ten fractional digits that is numerically equal to one
+> with none, accepted as countable, because the test is on the value and not on the
+> representation. It asserts that in **none** of the non-countable cases is the
+> allowance substituted, and it drives every case in this clause and the two above
+> it again under a hostile ambient `decimal` context — a precision of ten, with
+> traps armed — asserting the same classifications and no leaked `decimal`
+> exception.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
