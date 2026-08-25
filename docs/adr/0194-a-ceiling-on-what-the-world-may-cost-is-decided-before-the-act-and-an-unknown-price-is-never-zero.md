@@ -5,7 +5,7 @@
 - **Decides `core` contract surface and implements none of it (golden rule 5).**
   It adds **two** Protocols, two `core/types.py` models and three
   `core/errors.py` classes, and it lands none of them: the triad and its primary
-  implementation are a separate lane, sequenced behind ADR-0192's (§11). **Because this ADR decides a
+  implementation are separate lanes, sequenced behind ADR-0192's (§11). **Because this ADR decides a
   contract surface, its required review set is adversarial *and* architecture**,
   even though the PR carrying it is prose only — `CONTRIBUTING.md` → "Stop when
   the required reviews are green" and ADR-0015 §1.
@@ -263,12 +263,15 @@ trigger rather than pre-deciding it here.
 
 > **Normative.** Every sum and comparison this mechanism performs is the
 > **mathematically exact one**, and the result is what conformance pins — never a
-> precision. An implementation using `decimal.Context` sets its precision from the
-> operands so that no addition or comparison rounds, and traps `Inexact` and
-> `Rounded` so that a failure to do so raises rather than answering quietly. Two
-> conforming implementations therefore return the same admission decision for the
-> same inputs at every magnitude; none rounds to a currency's minor unit, and none
-> compares two amounts through `float`.
+> precision, a rounding mode or an exponent range. An implementation using
+> `decimal.Context` sizes **both** its precision and its exponent bounds from the
+> operands, so that no addition or comparison rounds, overflows or goes subnormal
+> on any well-formed input, and it traps `Inexact`, `Rounded`, `Overflow`,
+> `Underflow` and `Subnormal` so that a failure to size it raises rather than
+> answering quietly. Two conforming implementations therefore return the same
+> admission decision for the same inputs at every magnitude and every exponent;
+> none rounds to a currency's minor unit, and none compares two amounts through
+> `float`.
 
 > **Normative.** A trapped computation is a **refusal** under admission and an
 > **indeterminate** total under a read — the same fail-closed direction the rest
@@ -347,10 +350,18 @@ the two properties it has rather than letting a reader assume the stronger one.
 > entered. A refused call reaches no callable, appends no claim, and appends no
 > completion.
 
-> **Normative.** The admission compares the projected total (§2) against each
-> configured ceiling for the period that contains the invoker's current instant,
-> and refuses where the projected total is **strictly greater** than a ceiling.
-> A projected total exactly equal to a ceiling is admitted.
+> **Normative.** Where **neither ceiling is configured**, `admit_invocation`
+> returns before it reads the clock, reads the store or performs any arithmetic.
+> It cannot refuse in that configuration — not on a crossed ceiling, not on a
+> raising clock, not on a failed store read, not on a trapped computation — which
+> is what makes §1's "no ceiling configured means no ceiling" unconditional in
+> fact and not only in wording.
+
+> **Normative.** Where at least one ceiling is configured, the admission compares
+> the projected total (§2) against each configured ceiling for the period that
+> contains the invoker's current instant, and refuses where the projected total is
+> **strictly greater** than a ceiling. A projected total exactly equal to a ceiling
+> is admitted.
 
 > **Normative.** The instant that fixes the period is read from an injected
 > `Clock` wrapped by `checked_clock` (ADR-0026), and no caller supplies it. A
@@ -409,10 +420,11 @@ above the seam inherits none of that.
 admission is a read followed by ADR-0192's claim, which is a second operation, so
 two invocations whose admissions both run *before* either claim lands can each
 project a total that does not yet include the other. §2's open-claim rule is what
-keeps that window narrow rather than wide: once the first claim is appended, the
-second admission counts it — as an `UNKNOWN` is counted — so the exposure is the
-interleave between one call's admission read and its own claim append, and not
-the whole duration of a call. It is bounded, and it is **unreachable today**, because
+keeps that window narrow rather than wide: the moment the first claim is appended
+the period is indeterminate, so a second admission is refused for as long as that
+claim stands open, whatever the allowance is set to. The exposure is therefore the
+interleave between one call's admission read and its own claim append, and not the
+whole duration of a call. It is bounded, and it is **unreachable today**, because
 ADR-0029 §7 rules that "one executor runs at a time". It is not unreachable
 forever. The obligation is stated in §8 and belongs to the ADR that lands parallel
 execution: it either moves the admission into the claim's own atomic operation or
@@ -429,10 +441,16 @@ clause as it stands.
 > **Normative.** A call is refused with `SpendCeilingError` where a **configured
 > ceiling would be crossed** — and only then. It is refused with
 > `SpendUndeterminedError` where the period's spend **could not be reduced to a
-> number**: the period is indeterminate under §2, the store read failed, the
-> injected clock raised, or the arithmetic trapped. No other class escapes
-> `admit_invocation`; a backend exception is translated rather than propagated,
-> so `tools/` never sees a store's own error type.
+> number**, on exactly four grounds: the period is indeterminate under §2, the
+> store read failed, the injected clock raised, or the arithmetic trapped. No other
+> `Exception` escapes `admit_invocation`; a backend exception is translated rather
+> than propagated, so `tools/` never sees a store's own error type.
+
+> **Normative.** A `BaseException` that is not an `Exception` — a `CancelledError`
+> delivered from outside, above all — is **propagated unchanged** and is never
+> translated into either class. The enumeration above is over operational failures
+> the seam decides; a cancellation is neither a refusal nor a budget fact, and
+> ADR-0029 §4 and ADR-0031 already own how one is classified.
 
 > **Normative.** The two are separate classes because their messages state
 > different facts and one of them would otherwise be false. A ceiling refusal
@@ -447,17 +465,22 @@ clause as it stands.
 > classes.
 
 > **Normative.** The ceiling never produces a `CONFIRM`, never routes a question
-> to the user, and no per-call answer overrides it. The only way to spend past a
-> ceiling is to change the configured ceiling.
+> to the user, and no per-call answer overrides it. A refusal is lifted only by
+> changing the configuration or by the period rolling over — never from inside a
+> turn. (That a call *admitted* under the projection may still carry the accounted
+> total past a ceiling, because its declaration understated it, is §2's stated
+> overrun and not an override of a refusal: nothing was refused.)
 
 > **Normative.** Neither class is a `PermissionDeniedError` and no lane makes
 > either one.
 
 > **Normative.** Both messages are **payload-free**. A `SpendCeilingError` states
-> the ceiling that was crossed, its period, its currency and the accounted total;
-> a `SpendUndeterminedError` states the period and **which** of §2's grounds made
-> the total unavailable, and states no amount. Neither carries an argument value, a
-> recipient, an account, a tool output or a digest of any of them.
+> the ceiling that was crossed, its period, its currency and the accounted total.
+> A `SpendUndeterminedError` names **which of the four grounds above** applied, and
+> names the period only where one was determined — a clock that raised leaves no
+> period to name, and the message says the clock failed rather than inventing one.
+> It states no amount. Neither carries an argument value, a recipient, an account,
+> a tool output or a digest of any of them.
 
 **A refusal rather than a confirmation, and the user has already been asked.**
 Every call that reaches this seam has passed ADR-0021 §5's floors, and every
@@ -797,18 +820,32 @@ here.
 discharges two deferrals, and it names the ADRs it depends on rather than
 replacing them.
 
-### 11. What the implementing lane owes, and what it is sequenced behind
+### 11. Two lanes, what each owes, and what both are sequenced behind
 
-> **Normative.** The implementing lane lands `SpendGate` and `SpendLedger` as a
+> **Normative.** The **paired lane** lands `SpendGate` and `SpendLedger` as a
 > triad — both Protocols, a shared conformance suite for each, and canonical fakes
 > in `ai_assistant.testing` — together with the `SpendTotal` and `SpendPeriod`
-> types, §4's three error classes, §1's four settings, the invoker's call to
-> `admit_invocation`, the engine operation and the CLI command, in one change
-> under ADR-0137 §2.
+> types, §4's three error classes, §1's four settings, and the **primary
+> production implementation**, which is the `permissions` store that also satisfies
+> ADR-0192's ledger. That is the whole of it: it lands under ADR-0137 §2's pairing
+> and under §3's rule that a triad is never split.
 
-> **Normative.** That lane is sequenced **after** ADR-0192's implementation has
-> merged. It reads the completion rows that ADR lands and cannot be written
-> against a record that does not exist.
+> **Normative.** Every other consumer is a **follow-on lane**, briefed only after
+> the paired lane has merged and against its merged text, which is ADR-0137 §4.
+> The invoker's call to `admit_invocation`, the composition-root wiring, the
+> `AssistantEngine` member and the CLI command are **one consumer group**: each is
+> adaptation to a contract already landed, none carries substantial new machinery,
+> and they draw one class of finding, which is ADR-0137 §4's own grouping test.
+
+> **Normative.** The `AssistantEngine` widening carries its own triad obligation in
+> that same change: the shared `AssistantEngine` conformance suite and the
+> canonical `FakeAssistantEngine` gain `spend_totals` alongside the Protocol
+> member. A Protocol change extends its triad in the change that makes it, and
+> ADR-0137 §3 forbids splitting that.
+
+> **Normative.** Both lanes are sequenced **after** ADR-0192's implementation has
+> merged. They read the completion rows and the open claims that ADR lands and
+> cannot be written against a record that does not exist.
 
 > **Normative.** The conformance suite pins the clock and drives at least: a
 > projected total exactly equal to a ceiling, admitted; one cent over, refused; a
@@ -827,19 +864,37 @@ replacing them.
 > on real IANA zones: a civil date whose midnight is **repeated** across a backward
 > transition, one whose midnight **does not exist** across a forward transition,
 > and one that is **skipped whole** — with a row placed on each side of the
-> selected instant, and the zero-length period asserted for the third. A suite that
-> exercises only UTC does not discharge this clause.
+> selected instant. For the third, what is asserted is what the Protocol can
+> observe: `spend_totals` selects a period from the current instant, and no instant
+> selects a skipped date, so the suite pins the two **adjacent** daily periods and
+> the single boundary they share, which is the observable consequence of the
+> skipped date's period being zero-length. A suite that exercises only UTC does not
+> discharge this clause.
 
 > **Normative.** The suite pins each refusal to its class under §4: a crossed
 > ceiling to `SpendCeilingError`, and an indeterminate period, a failed store read,
 > a raising clock and a trapped computation each to `SpendUndeterminedError` — and
-> asserts that no backend exception type escapes either member.
+> asserts that no backend exception type escapes either member, while a
+> `CancelledError` delivered during either member propagates unchanged.
+
+> **Normative.** The suite drives §3's short-circuit: with **neither** ceiling
+> configured, a raising clock, a failed store read and an indeterminate period each
+> admit rather than refuse, because `admit_invocation` returned before it consulted
+> any of them.
 
 > **Normative.** The suite drives an exact sum at a magnitude where a default
 > 28-digit context would round, in **both** directions: one that crosses the
 > ceiling and is refused, and one that stays below it and is admitted. The second
 > is what pins the result rather than a precision, and a suite carrying only the
 > first does not discharge this clause.
+
+> **Normative.** `SpendTotal` **validates its own invariants** rather than relying
+> on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves, so a
+> renderer's lookup cannot fail on a value the model accepted; `period_start` is
+> strictly before `period_end` except on §1's zero-length period, where they are
+> equal; `ceiling` is non-`None` only where `currency` is; and `accounted` is
+> non-`None` only where `currency` is. A construction violating any of them raises
+> at validation, and the shared contract drives each as a hostile construction.
 
 > **Normative.** The lane refuses a zero allowance at load in each of §1's
 > spellings, and asserts the calendar month whose exclusive end is not
@@ -850,9 +905,15 @@ replacing them.
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
 > ADR-0034 §1's pre-callable exit.
 
-> **Normative.** The lane changes no tool's declared `ToolCost`. In particular it
-> does not re-declare `send_email`'s `UNKNOWN`; the honest declaration stands and
-> §2's allowance is the mechanism that makes it usable.
+> **Normative.** The lane drives §2's stated overrun end to end: a call whose
+> declaration understates it is **admitted**, its reported cost carries the
+> accounted total past the ceiling, that row is counted rather than excused, and
+> the next call is refused. This is the property this ADR promises and the one it
+> does not, asserted rather than described.
+
+> **Normative.** Neither lane changes any tool's declared `ToolCost`, and neither
+> re-declares `send_email`'s `UNKNOWN`. The honest declaration stands, and §2's
+> allowance is the mechanism that makes it usable.
 
 ## Consequences
 
