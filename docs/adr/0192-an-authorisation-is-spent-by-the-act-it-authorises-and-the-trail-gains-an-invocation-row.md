@@ -310,10 +310,12 @@ surface can state an execution at all, because ADR-0186's two operations return
 > where it raises, `invoke` learns that it raised and nothing more, and the
 > commit-state clause below governs whether a row nonetheless stands. A draft
 > phrased over "claim landed or did not" promised the second, which no shield can
-> buy. This is the treatment ADR-0034 §1 already gives the executor's own
-> claim — "a cancellation absorbed while the **claim itself** was in flight, where
-> the write is known to have landed" — transcribed to this one, and it is what makes
-> the "claim landed or did not" question answerable at all under ADR-0060.
+> buy. It is the treatment ADR-0034 §1 already gives the executor's own claim — "a
+> cancellation absorbed while the **claim itself** was in flight, where the write is
+> known to have landed" — transcribed to this one, and what it buys under ADR-0060 is
+> that a claim which *did* land is not lost to a cancellation delivered mid-append:
+> the `id` reaches `invoke` and the completion can be written. It buys no answer on
+> the branch where the task raises, and this ADR promises none.
 
 > **Normative.** An external cancellation is **delivered onward whatever the append
 > did**. Where the append failed and a cancellation is pending, `invoke` re-raises
@@ -697,16 +699,19 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > **Normative.** Process scope is also **testable**, and testability is not what
 > separates the two: the ids of a conforming factory are disjoint across two
 > instances constructed in one process against one store, and §9 pins that case
-> directly rather than leaving the suite weaker than this clause. The **fork** arm is
-> testable the same way and by the same means ADR-0049 §5 already uses: the nonce
-> comes from an injectable factory, so a case pins two *identical* nonces and asserts
-> the ids still differ — which makes the pid, and not the nonce, the thing under
-> test.
+> directly rather than leaving the suite weaker than this clause. The **fork** arm
+> needs a real `fork` and §9 says so: two factories exercised in one process share a
+> pid whether it was read at construction or at allocation, so such a case cannot
+> tell the conforming construction from the one this clause rejects.
 
-> **Normative.** It is satisfied **by construction and never by improbability**. A
-> per-process nonce with a monotonic counter satisfies it; retaining the issued ids
-> satisfies it; a bare probabilistic draw does **not**, and no lane may offer one
-> here. ADR-0045 §4 already rules on that shape in this corpus — a "probabilistic
+> **Normative.** It is satisfied **by construction and never by improbability**, and
+> **every satisfying construction carries the allocation-time pid component** the
+> clause above requires. A nonce with a monotonic counter satisfies it *with* that
+> component and not without — a nonce and counter alone are exactly what a `fork`
+> copies; retaining the issued ids satisfies it on the same terms, since a child
+> inherits the retained set and would refuse its own fresh ids while reissuing the
+> parent's after a `clear()`; a bare probabilistic draw does **not**, and no lane may
+> offer one here. ADR-0045 §4 already rules on that shape in this corpus — a "probabilistic
 > generator (`uuid4`) makes a collision unlikely, not impossible" — and this is not a
 > property an unlikely failure is acceptable in: the collision it prevents records
 > one call's outcome and cost against another call's claim, silently.
@@ -2773,16 +2778,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > satisfies every collision case above while one durable identifier names two
 > records.
 
-> **Normative.** The **fork** arm of §2's uniqueness obligation is pinned
-> deterministically and not by running one: two factories are constructed from the
-> **same** injected nonce — the state a `fork` copies — and each allocates against
-> one store; the ids they mint are disjoint, because the pid is read at allocation
-> and folded in (§2). The case is stated over identical nonces on purpose, so that
-> the pid and nothing else is what differentiates them, which is ADR-0049 §5's own
-> shape for the same obligation. A factory that freezes its prefix at construction
-> passes every same-process case above and fails this one. The stale-completion
-> consequence is pinned beside it: with the parent's id reissued, a completion held
-> against an erased claim must not land on the other factory's claim.
+> **Normative.** The **fork** arm of §2's uniqueness obligation is pinned by an
+> actual `fork`, in ADR-0049 §5's own shape and for its own reason — nothing short of
+> one distinguishes a pid read at allocation from a prefix frozen at construction,
+> because two factories in one process share a pid either way. A factory is
+> constructed in the parent with a **single fixed** injected nonce; two children are
+> forked before either allocates; each mints an id and reports it back through a
+> pipe; the two ids differ **despite the identical nonce**, which is what proves the
+> pid-in-prefix and not the nonce closes the case. It is guarded on
+> `hasattr(os, "fork")` and skipped where the platform has none, exactly as ADR-0049
+> §5 guards its own. A factory that freezes its prefix at construction passes every
+> same-process case above and fails this one.
 
 > **Normative.** The factory's own **faults** are pinned at that same boundary, by
 > ADR-0026 §2's split and for the same reason the clock's two arms are named apart
