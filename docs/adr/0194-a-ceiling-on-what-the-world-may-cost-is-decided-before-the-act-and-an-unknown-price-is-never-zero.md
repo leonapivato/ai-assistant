@@ -1939,6 +1939,16 @@ the ADRs it depends on rather than replacing them.
 > a ceiling. It also asserts that no backend exception type escapes either member,
 > while a `CancelledError` delivered during either member propagates unchanged.
 
+> **Normative.** The lane drives the trap on the **read** side too, and the two are
+> not one fixture: `spend_totals` must return the affected periods as
+> **indeterminate** — `currency` present, `accounted=None` (§§2, 5) — and not raise.
+> An implementation translating a trap correctly inside `admit_invocation` can
+> still leak the `decimal` exception out of `spend_totals`, or raise
+> `SpendUndeterminedError` from it, and pass every admission-side trap assertion.
+> §5 permits that member exactly one raised class and only where it cannot produce
+> the values at all; a trapped sum is not that case, because the other period's
+> figure is still computable.
+
 > **Normative.** The sixth ground, a **trapped computation**, is the *lane's* to
 > drive and not this suite's, and that follows from §2 rather than leaving a gap.
 > §2 requires a context sized from its own operands, under which the traps are "a
@@ -2131,6 +2141,13 @@ the ADRs it depends on rather than replacing them.
 > the invocation still outstanding: a call admitted late in a day, the clock
 > advanced past midnight, and the reservation still counted in the next admission's
 > projection whichever period it falls in; then released, and no longer counted.
+> It drives a backward step **within one period** as well, which the boundary case
+> below never reaches: a completion of 90 recorded at 15:00, the clock stepped back
+> to 10:00 **the same day**, and an estimate of 20 against a ceiling of 100 —
+> `spend_totals` still states 90 and the admission projects 110 and **refuses**,
+> because §2 counts every row in the calendar interval and not the rows earlier
+> than the current instant. A ledger filtering at `recorded_at <= now` computes
+> zero here and admits, while passing every rollover fixture beside it.
 > It drives the same with a clock that steps **backward** across the boundary,
 > since §7 permits one, and asserts that **while the first call is still
 > outstanding** no combination of rollover and step admits a pair of calls whose
@@ -2147,6 +2164,14 @@ the ADRs it depends on rather than replacing them.
 > otherwise would be requiring an implementation that rewrote history, which §7
 > forbids in as many words, so this clause exists to stop a lane reading the one
 > above it as the wider claim.
+
+> **Normative.** The suite pins the **order** of the returned tuple —
+> `CALENDAR_DAY` first, `CALENDAR_MONTH` second — by asserting the exact sequence
+> of `period` values rather than looking each entry up, and the consumer group
+> asserts the same through the relayed engine member and the CLI's rendered order.
+> §5 states the order as part of the contract; a producer returning the month first
+> satisfies every totals, coherence and error-ordering fixture here and changes what
+> every reader of the surface sees.
 
 > **Normative.** The suite drives `spend_totals`' coherence: with a clock that
 > steps between reads, both returned entries carry bounds selected from **one**
@@ -2207,6 +2232,16 @@ the ADRs it depends on rather than replacing them.
 > from the accumulator's own `as_tuple()`, rounds or traps on it rather than
 > comparing it exactly. The stated total is asserted digit for digit, so rounding
 > it is a failure rather than a near miss.
+
+> **Normative.** The suite drives a configured ceiling of **zero** as a ceiling
+> that *binds*, which the exotic-zero fixture below does not reach because it only
+> requires behaviour equal to `Decimal("0")`. With a zero ceiling and an accounted
+> total of zero, the **smallest positive countable estimate** is refused, while a
+> `FREE` call and a zero-amount one are **admitted** at equality (§3's
+> strictly-greater rule). An implementation testing `if ceiling:` rather than
+> `ceiling is None` treats zero as no ceiling at all, admits the positive call §3
+> requires it to refuse, and passes every other ceiling fixture here — including
+> both spellings of zero below, which it also admits.
 
 > **Normative.** The suite drives `Decimal("0E-999999999999999999")` — countable
 > by §1, numerically zero, and carrying an exponent no context can be sized from —
