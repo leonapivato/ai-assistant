@@ -134,17 +134,27 @@ class _Sockets:
     ``held_resources`` hook needs a ledger — and this is the smallest thing that
     is one.
 
+    **It also models where the cancellation window actually is.** The standard
+    library's ``open_connection`` awaits while a socket already exists and closes
+    that socket itself if it is cancelled there; production's ``open_channel``
+    performs no ``await`` of its own after it returns. So the suspension the
+    conformance suite arms goes *here*, and what the case then measures of
+    production is that it neither absorbs the cancellation nor leaves anything of
+    its own behind — which is the half a substitute cannot fake.
+
     Attributes:
         open: Pairs of streams handed out and not yet closed.
         refuses: Whether the next open fails before anything is acquired.
         asked: The arguments the last open was called with.
+        gate: A suspension to hold the next open at, after its socket exists.
     """
 
     def __init__(self) -> None:
-        """Start having opened nothing and refusing nothing."""
+        """Start having opened nothing, refusing nothing and holding nothing."""
         self.open = 0
         self.refuses = False
         self.asked: dict[str, object] = {}
+        self.gate: LoopSuspension | None = None
 
     async def __call__(
         self, host: str, port: int, **kwargs: object
@@ -170,7 +180,17 @@ class _Sockets:
             msg = "nothing is listening"
             raise ConnectionRefusedError(msg)
         self.open += 1
-        return asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING), _Writer(ledger=self)
+        writer = _Writer(ledger=self)
+        gate, self.gate = self.gate, None
+        if gate is not None:
+            try:
+                await gate.hold()
+            except BaseException:
+                # What CPython's own ``create_connection`` does: it closes the
+                # socket it made before letting the cancellation out.
+                writer.close()
+                raise
+        return asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING), writer
 
 
 def _reader_of(channel: ByteChannel) -> asyncio.StreamReader:
@@ -304,18 +324,16 @@ class TestStreamChannelContract(ByteChannelContract):
 class TestStreamOutboundTransportContract(OutboundTransportContract):
     """The production opener, run through the opener contract.
 
-    **It opts out of exactly one obligation, and states why.**
-    ``open_channel``'s acquisition and its return are separated by no ``await``:
-    the standard library's ``open_connection`` hands back a pair of streams and the
-    channel is constructed synchronously, so there is no window for a cancellation
-    to land in while *this* implementation holds them. ADR-0060 §1's clause is
-    vacuous over it rather than unmet — the reduction ``PlanStoreContract`` makes
-    for a store that acquires nothing whose safety outlives the coroutine. The
-    *release* obligation is not vacuous and is exercised by the ordinary
-    establishment failure the suite arms below.
+    **The cancellation case is armed inside the substituted opener, not inside
+    ``open_channel``'s own frame.** An earlier draft opted out of it on the ground
+    that production performs no ``await`` after the acquisition returns; both
+    review lenses rejected that on round 2, and correctly — the window is the one
+    inside ``open_connection``, which suspends while a socket already exists. So
+    the suspension goes where the window is, and the case still measures something
+    of production rather than of the substitute: that a cancellation delivered
+    there is neither absorbed nor converted, and that nothing this implementation
+    obtained is left held.
     """
-
-    suspends_inside_its_acquisition = False
 
     @pytest.fixture(autouse=True)
     def _sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,21 +386,17 @@ class TestStreamOutboundTransportContract(OutboundTransportContract):
         self.patch.setattr(egress, "_StreamChannel", refuses)
 
     def suspend_next_open(self, transport: OutboundTransport) -> SuspendedCall:
-        """Unreachable: this implementation suspends inside no acquisition.
+        """Hold the next open where the socket already exists.
 
         Args:
-            transport: The subject.
+            transport: The subject, which holds no state of its own.
 
         Returns:
-            Never; this raises.
-
-        Raises:
-            NotImplementedError: Always. The case that would call it opts out on
-                :attr:`suspends_inside_its_acquisition`.
+            The lever the suite drives.
         """
         del transport
-        msg = "open_channel holds what it acquired across no await"
-        raise NotImplementedError(msg)
+        self.sockets.gate = LoopSuspension()
+        return self.sockets.gate
 
     def held_resources(self, transport: OutboundTransport) -> int:
         """Pairs of streams acquired and not given back.

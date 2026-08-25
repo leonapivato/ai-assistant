@@ -39,18 +39,19 @@ directory, the model seam is constructed and never called, the embedder is the
 hashing one, and the transport is the fake. That is a property of this arrangement
 and is not a rule about what any composition may open.
 
-**Where this arm departs from a literal reading of §9, and why** — the one place,
-narrowed after round 1. The bound call is driven through the composition's **own**
-registered ``SmtpEgressTransport`` (:func:`drive_a_bound_call`), so the seam, the
-registration, the endpoint and the capability are all this deployment's. What an
-offline gate cannot supply is the credential: the seam reads a connection record
-and a keyring entry before it opens anything, and the production root wires
-:class:`~ai_assistant.secret_store.KeyringSecretStore`, which ADR-0125 §7 forbids
-to fall back to a file, an environment variable or an in-memory map. So those two
-collaborators — and nothing else — are displaced on the registered object by
-:func:`arrange_the_seams_collaborators`, which asserts the wiring it displaces
-before displacing it. Recorded as an issue against ADR-0191 §9 rather than edited
-into the ADR.
+**Where this arm departs from a literal reading of §9, and why** — one edge,
+narrowed twice under review. The bound call is driven through the composition's
+**own** registered ``SmtpEgressTransport`` (:func:`drive_a_bound_call`), so the
+seam, the registration, the endpoint, the connection store and the capability are
+all this deployment's. The single thing an offline gate cannot supply is the
+credential: the root wires
+:class:`~ai_assistant.secret_store.KeyringSecretStore`, and ADR-0125 §7 is
+categorical that this seam never falls back to a file, an environment variable or
+an in-memory map — so provisioning one here would either write the developer's
+real OS keyring or need exactly the escape hatch that ADR refuses. That one face,
+and nothing else, is displaced by :func:`arrange_the_seams_collaborators`, which
+asserts the wiring it displaces before displacing it. Recorded as issue #1560
+against ADR-0191 §9 rather than edited into the ADR.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
-from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
+from ai_assistant.tools.connection_store import ConnectionEntry
 from ai_assistant.tools.egress import SmtpEgressTransport
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 from ai_assistant.tools.registry import InMemoryToolRegistry
@@ -257,23 +258,28 @@ async def drive_a_bound_call(composition: Composition) -> None:
     await _seam(composition).transmit(binding(), arguments())
 
 
-def arrange_the_seams_collaborators(composition: Composition) -> None:
+async def arrange_the_seams_collaborators(composition: Composition) -> None:
     """Give the registered seam a connection record and a credential to read.
 
-    **The one thing in this arm that an offline gate forces.** The seam reads the
-    connection record twice around a credential read (ADR-0148 §6) and refuses
-    before opening a channel unless both answer, and the production root wires
-    :class:`~ai_assistant.secret_store.KeyringSecretStore` — which ADR-0125 §7
-    forbids to fall back to a file, an environment variable or an in-memory map.
-    Provisioning a credential here would either put one in the developer's own OS
-    keyring or need exactly the escape hatch that ADR is written against, so the
-    two faces are displaced on the seam itself instead.
+    **The record goes into the deployment's own store, through the store's own
+    write.** ``SqliteConnectionStore.append`` is the primitive every provisioning
+    act commits through (ADR-0148 §6's compare-and-swap), and the store is the one
+    object the root wired to both the seam and the provisioner — so the bound call
+    below reads its record by the production edge rather than past it. An earlier
+    draft displaced that edge too, and architecture review was right to call it a
+    different object graph.
 
-    **The wiring they displace is asserted before they displace it**, which is what
-    keeps this from hiding the thing it touches: the store the seam was reading is
-    the *same object* the provisioner writes through (ADR-0102 §7, ADR-0152 §10),
-    and a deployment that had wired a second handle would fail here rather than
-    silently pass the control.
+    **The credential face is the one thing an offline gate cannot supply, and it
+    is displaced.** The root wires
+    :class:`~ai_assistant.secret_store.KeyringSecretStore`, and ADR-0125 §7 is
+    categorical that this seam "never falls back to a file, an environment variable
+    or an in-memory map" — so provisioning here would either write the developer's
+    real OS keyring or need exactly the escape hatch that ADR refuses. What the
+    displacement buys is that the seam reaches ``open_channel`` at all; what it
+    costs is disclosed here, in the arm, in PR #1555 and in issue #1560.
+
+    **The wiring it displaces is asserted before it displaces it**, so this cannot
+    hide the thing it touches.
 
     Args:
         composition: The built deployment.
@@ -284,9 +290,21 @@ def arrange_the_seams_collaborators(composition: Composition) -> None:
     # ADR-0151 §10 says the root wires "the one implementation", and it is reached
     # through a Protocol everywhere else.
     assert isinstance(provisioner, KeyringConnectionProvisioner)
-    assert seam._records is provisioner._store
+    store = provisioner._store
+    assert seam._records is store
 
-    seam._records = _Records()
+    filed = await store.append(
+        ConnectionEntry(
+            reference=REFERENCE,
+            revision=1,
+            identity=IDENTITY,
+            state=ProvisioningState.ACTIVE,
+            slot=SLOT,
+        ),
+        expected_latest=None,
+    )
+    assert filed is not None
+
     seam._secrets = _Keyring()
 
 
@@ -362,32 +380,6 @@ def binding() -> EgressBinding:
         transport_endpoint=ENDPOINT,
         planned_with_external_content=False,
     )
-
-
-@final
-class _Records:
-    """A ``ConnectionRecords`` face holding one active record that never moves."""
-
-    async def latest(self, reference: str, /) -> StoredEntry | None:
-        """The reference's latest entry.
-
-        Args:
-            reference: The connection to read.
-
-        Returns:
-            The one active entry, whatever is asked for.
-        """
-        del reference
-        return StoredEntry(
-            1,
-            ConnectionEntry(
-                reference=REFERENCE,
-                revision=1,
-                identity=IDENTITY,
-                state=ProvisioningState.ACTIVE,
-                slot=SLOT,
-            ),
-        )
 
 
 @final

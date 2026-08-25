@@ -88,7 +88,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    same composition and through that composition's **own**
             #    registered seam. Without it the zero above is satisfied by a
             #    recorder nothing could ever reach.
-            m25.arrange_the_seams_collaborators(composition)
+            await m25.arrange_the_seams_collaborators(composition)
             await m25.drive_a_bound_call(composition)
 
             assert list(capability.attempts) == [TransportAttempt(endpoint=CONFIGURED, served=True)]
@@ -150,6 +150,12 @@ async def test_a_deployment_that_configures_no_integration_is_handed_no_transpor
     """
     creators = m25.LoopCreators()
     try:
+        # Calibrated here too, and not borrowed from the arm above: those are a
+        # different instance over a different composition, and a zero read from an
+        # instrument this test never saw fire is the vacuous zero ADR-0191 §9's
+        # general clause refuses. Adversarial review found it on round 2.
+        assert await creators.calibrate() == sorted(m25.OFF_DEVICE_CREATORS)
+
         capability = FakeOutboundTransport()
         composition = m25.build(tmp_path, capability=capability, integration=False)
         try:
