@@ -468,8 +468,10 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > ADR draws no new line. The guard's **own** rejection of a non-conforming reading —
 > `checked_clock`'s owner-labelled `ValueError`, `ClockReadingError` — is a
 > `ValueError` and not an `AssistantError`, so the ledger translates it to
-> `AuditError` and a `ToolInvoker` never meets a non-`AssistantError` from this
-> seam. An exception **the clock callable itself raises** propagates **unwrapped**:
+> `AuditError`, so a `ToolInvoker` never meets a non-`AssistantError` **the ledger
+> itself produced**. An exception **the clock callable itself raises** propagates
+> **unwrapped** and does reach the invoker as itself — §1 and §3 say what `invoke`
+> does with one on each path, and neither leaves it to an implementation:
 > ADR-0026 §2 rules that "The guard covers the reading, not the invocation. An
 > exception raised by the clock callable itself propagates unwrapped", and ADR-0034
 > §2 already applies that split at the neighbouring seam, "raising `PlanningError`
@@ -628,14 +630,28 @@ the count.
 > not retry the act, and does not re-claim. A `SUCCEEDED` side effect is not
 > reported as failed because a disk was full.
 
-> **Normative.** A **`BaseException` that is not a cancellation**, raised anywhere
-> on the completion path — the clock callable during `complete_invocation` included
-> — is not a "completion failure" the clause above absorbs. It propagates unchanged,
-> the `ToolResult` does not reach the caller, and no diagnostic stands in for it.
-> The rule above is about a store or a clock that **refuses**; a process being torn
-> down is not a refusal, and converting a `KeyboardInterrupt` into a returned result
-> is the conversion ADR-0029 §3 forbids. The claim is left open by that exit as by
-> any other, and §3's open-claim clause governs it.
+> **Normative.** The clause above is `invoke`'s and it is decided by **class, not
+> by origin**. Every `Exception` raised on the completion path is a completion
+> failure it absorbs — the ledger's own refusals, the `AuditError` it translated,
+> and an exception the **clock callable** raised on its own account and the ledger
+> propagated unwrapped (§2). Each is surfaced as the diagnostic below carrying its
+> own type and cause; none of them changes what `invoke` returns.
+
+> **Normative.** A **`BaseException` that is not a cancellation** is not absorbed,
+> wherever on the completion path it arose. It propagates unchanged, the
+> `ToolResult` does not reach the caller, and no diagnostic stands in for it — a
+> process being torn down is not a refusal, and converting a `KeyboardInterrupt`
+> into a returned result is the conversion ADR-0029 §3 forbids. The claim is left
+> open by that exit as by any other.
+
+> **Normative.** Where an **external cancellation is already propagating** and the
+> completion path then raises — an `Exception` or a `BaseException` alike — the
+> cancellation is what leaves `invoke`. ADR-0060 §1's propagation clause and
+> ADR-0034 §1's precedence for an absorbed cancellation decide this and are not
+> superseded here. The completion-path exception is attached to it as a cause and
+> reaches the operator as the diagnostic below; it does not stand in the
+> cancellation's place, and the claim is left open as in every other completion
+> failure.
 
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic carrying the cause, and it is a diagnostic
@@ -774,6 +790,23 @@ the seam returned while the claim it belongs to is still open, and review found 
 eleven lines below the clause asserting otherwise. What survives is the modest
 thing, which is also the true one: neither record is guessed from the other, and
 each says only what its own writer established.
+
+**Absorbing the clock callable's own exception at `invoke` rather than exempting
+it, and the two are a real fork.** Review proposed the exemption: since ADR-0026 §2
+has that exception propagate unwrapped from the guard, let it propagate out of
+`invoke` too. It is coherent, and it is the wrong half of this ADR's own trade. §3
+exists because "reporting a known-successful side effect as failed is the one
+outcome worse than an incomplete record", and a clock wired wrong is exactly the
+irrelevant fault that should not be allowed to do that — the side effect happened,
+the tool said so, and the only thing that failed is the bookkeeping. ADR-0026 §2's
+rule binds the **guard**, which must not relabel a callable's failure and destroy
+its type; it says nothing about whether a consumer may act on one, and ADR-0034 §2
+is the precedent for a consumer that does. So the type survives intact — in the
+diagnostic, with its cause — and `invoke` returns the result the call produced. The
+clause is written by **class** rather than by origin for the same reason the
+refusal orders are exhaustive over classes: an implementation cannot reliably tell
+which side of the guard an `Exception` came from, and a rule it cannot apply is not
+a rule.
 
 **A claim with no completion is ADR-0184's third state, one store over.** That ADR
 minted a value rather than a marker precisely so "the absence is its own value", and
@@ -1275,11 +1308,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > and asserts that the instant the admission was decided on is the instant stored on
 > the row.
 
-> **Normative.** Two further failure paths are pinned. A **`clear()` landing between
-> a claim and its completion** leaves the call's result standing, emits the
+> **Normative.** Four further failure paths are pinned. A **`clear()` landing
+> between a claim and its completion** leaves the call's result standing, emits the
 > diagnostic, refuses the completion `InvalidCompletionError`, and leaves **no
 > claim** — nothing recreated (§§3, 6). A **completion-path clock callable raising
-> `KeyboardInterrupt`** propagates unchanged and returns no `ToolResult` (§3).
+> an `Exception`** is absorbed: `invoke` returns the call's own `ToolResult` and the
+> exception reaches the operator with its own type and cause (§3). The **same clock
+> raising `KeyboardInterrupt`** is not absorbed: it propagates unchanged and no
+> `ToolResult` reaches the caller (§3). **An external cancellation already
+> propagating when the completion path raises**, in either class, leaves `invoke` as
+> the `CancelledError`, with the completion-path exception as its cause and in the
+> diagnostic (§3, ADR-0060 §1).
 
 > **Normative.** The conformance suite for `InvocationLedger` pins the clock at the
 > boundary: an exact-window reading, a reading one unit outside it, a reading that
@@ -1365,7 +1404,13 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** The conformance suite exercises the consume under **concurrent**
 > invocation rather than assuming a single-threaded caller, as ADR-0021 §4's suite
-> does for concurrent resolution and for the same reason.
+> does for concurrent resolution and for the same reason. It exercises the
+> **completion** invariant the same way: two coroutines completing one open claim
+> must produce exactly one appended completion and one `InvalidCompletionError`,
+> never two rows. §2 makes both members decide every refusal inside the same atomic
+> operation as the append, so an implementation that separates the check from the
+> write fails the contract — and only a racing test finds that, exactly as ADR-0021
+> §4 found it for two resolutions of one `CONFIRM`.
 
 The lane is sequenced behind the transport-capability lane of this milestone (#85),
 which also touches `core/protocols.py`, and ahead of the recipient-policy lane
