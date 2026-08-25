@@ -975,17 +975,24 @@ the count.
 > converting a `KeyboardInterrupt` into a returned result is the conversion ADR-0029
 > §3 forbids. The claim is left open by that exit as by any other.
 
-> **Normative.** **One case is left uncontracted, deliberately and in terms**: a
-> `BaseException` that is not a `CancelledError` raised **inside a retained append
-> task**. This ADR states no outward class, no outcome, no diagnostic and no
-> absorption for it, and §9 requires no test of it — the same stance §1 already takes
-> toward `BaseException` generally ("this ADR asks the executor to derive **nothing**
-> from those"), applied where it is forced. ADR-0031 §4 *measured* the mechanism:
-> `Task.__step` sets a `KeyboardInterrupt` on the future **and** re-raises it into the
-> event loop, which is the loop coming down. What a frame that may never resume
-> "returns" is not a thing a seam contract can bind, and a draft that specified one
-> collided with three clauses of this section at once — the absorption arm below, the
-> diagnostic matrix's rule that a non-`Exception` carries no class, and ADR-0029 §3.
+> **Normative.** **One thing is left uncontracted, and it is exactly one**: the
+> **outward class** at `invoke`'s boundary of a `BaseException` that is not a
+> `CancelledError` raised **inside a retained append task**. ADR-0031 §4 *measured*
+> the mechanism — `Task.__step` sets a `KeyboardInterrupt` on the future **and**
+> re-raises it into the event loop, which is the loop coming down — and what class a
+> frame that may never resume observes is not something a seam contract can bind. So
+> this ADR states no outward class for that one case and §9 asserts none.
+
+> **Normative.** **Everything else about that case still holds, and the silence
+> reaches no further.** The call does **not** return: no `ToolResult` reaches the
+> caller and none is manufactured. No completion is written and no outcome is
+> invented. The claim is left open where one landed, as on every other
+> `BaseException` exit. And the **diagnostic matrix below is unaffected**: a
+> `BaseException` that is not an `Exception` yields a diagnostic carrying the
+> operation, the outcome where the path has one, and **no class field at all** —
+> wherever it arose, the retained appends included. That last is the clause an
+> earlier draft of this section contradicted by demanding the real class be logged,
+> and it is restated here so the two cannot drift apart again.
 
 > **Normative.** **Nothing of ADR-0029 §3 is superseded by that silence**, and §7
 > adds no scope for it. §3's rule is that a `BaseException` propagates unchanged, and
@@ -2089,9 +2096,23 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the group that first needs an invoker holding a ledger.
 
 > **Normative.** **The recovery group** (`orchestration/`) lands §3's recovery-scan
-> completions and their ordering, the scan's use of `AuditTrail.open_invocations`
-> through the trail it already holds, and the executor-level test below. It is the
-> only consumer that calls that member (§2).
+> completions and their ordering, the scan's two collaborators and their injection,
+> and the executor-level test below. The scan reads open claims through
+> `AuditTrail.open_invocations` — the trail it already holds — and writes each
+> `INDETERMINATE` completion through `InvocationLedger.complete_invocation`, because
+> that member exists on the ledger and nowhere else. It is the only consumer that
+> calls `open_invocations` (§2).
+
+> **Normative.** The scan therefore holds **both** Protocols, and the composition
+> root injects the same object as each (§2). It is not given a fourth Protocol for
+> the write: `complete_invocation` is already contracted, already conformance-tested
+> and already implemented by that object, and minting a completion-only capability
+> would be a second name for one member. What the scan must **not** do is claim —
+> `claim_invocation` is the seam's act (§1) and no lane outside `tools/` calls it —
+> and that is the same posture `orchestration/` already keeps toward the `record`,
+> `export` and `clear` it holds through `AuditTrail` today. The wiring test asserts
+> the scan is constructed with both and that a recovery pass calls
+> `open_invocations` and `complete_invocation` and **no other ledger member**.
 
 > **Normative.** **The surface group** lands §4's two `AssistantEngine` operations,
 > that Protocol's new conformance obligations and its fake, the `PROTOCOL_VERSION`
@@ -2263,8 +2284,11 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > preserves its cause" is a statement about the object where one survives, and here
 > none does. Cause preservation is pinned on the paths where the object **does**
 > propagate — the two below (§3). The **same clock
-> raising `KeyboardInterrupt`** is not absorbed: it propagates unchanged and no
-> `ToolResult` reaches the caller (§3). **An external cancellation already
+> raising `KeyboardInterrupt`** is not absorbed: **no `ToolResult` reaches the
+> caller**, no completion is written, the claim is left open and the diagnostic
+> carries **no class** — and the test asserts those and stops there, asserting
+> **nothing** about the class `invoke` raises outward, because that clock runs inside
+> a retained append and §3 leaves exactly that uncontracted. **An external cancellation already
 > propagating when the completion path raises**, in either class, leaves `invoke` as
 > the `CancelledError`, with the completion-path exception as its cause and in the
 > diagnostic (§3, ADR-0060 §1).
@@ -2472,13 +2496,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the cancellation ADR-0054 permits the store to re-raise in its place, reporting
 > neither the fault nor the open claim.
 
-> **Normative.** **No test is written for a non-cancellation `BaseException` raised
-> inside a retained append**, and none may be: §3 leaves that case uncontracted, so a
-> suite asserting any outward class, outcome or diagnostic for it would pin behaviour
-> this ADR declines to state. Two earlier drafts of this clause did — one demanding
-> the unchanged class ADR-0031 §4 measured to be unavailable, the next demanding a
+> **Normative.** **No test asserts the outward class of a non-cancellation
+> `BaseException` raised inside a retained append**, and none may be: §3 leaves that
+> one thing uncontracted, so a suite asserting it would pin behaviour this ADR
+> declines to state. Two earlier drafts of this clause did — one demanding the
+> unchanged class ADR-0031 §4 measured to be unavailable, the next demanding a
 > converted one that collided with the absorption arm and the diagnostic matrix — and
-> both are withdrawn.
+> both are withdrawn. The rest of that case **is** tested, here and in the matrix
+> above: no `ToolResult` returned, no completion written, the claim left open, and a
+> diagnostic carrying no class (§3).
 
 > **Normative.** What **is** pinned is the `BaseException` the **tool callable**
 > raises, because that path is contracted and answers differently: the callable is
