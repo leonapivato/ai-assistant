@@ -101,8 +101,10 @@ from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
+from ai_assistant.tools.egress import SmtpEgressTransport, StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
+from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1472,6 +1474,61 @@ async def test_the_egress_binder_is_wired_over_the_store_the_provisioner_writes(
         provisioner = engine._connections._provisioner
         assert isinstance(provisioner, KeyringConnectionProvisioner)
         assert binder._records is provisioner._store
+    finally:
+        await engine.aclose()
+
+
+async def test_the_root_constructs_the_transport_capability_and_hands_it_in(
+    tmp_path: Path,
+) -> None:
+    """ADR-0191 §1, §3: production reaches the world through an injection, not a default.
+
+    **The state this replaces is the whole reason ADR-0191 §3 exists.**
+    ``SmtpEgressTransport.__init__`` took a ``connect`` parameter whose default was
+    the one function in ``tools`` that opened a socket, ``build_send_email_integration``
+    took it as an optional keyword, and this root passed nothing — so the signature
+    said the transport was supplied and production supplied none. The property "a
+    subsystem handed no capability has no route to the world" was simply not true of
+    the object that transmits.
+
+    Asserted by walking to the object the seam would open its channels with, because
+    that is the only place the difference is visible: a default argument and an
+    injected argument produce the same type here, and what changed is that there is
+    now exactly one construction site for it and it is this function.
+    """
+    engine = build_engine(
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            send_email_connection="conn-0001",
+            send_email_endpoint="smtps://mail.example.invalid:465",
+        ),
+        data_dir=tmp_path,
+    )
+    try:
+        registry = engine._runner._registry
+        assert isinstance(registry, InMemoryToolRegistry)
+        tool = registry._live[SEND_EMAIL.id].implementation
+        assert isinstance(tool, SendEmail)
+        seam = tool._transport
+        assert isinstance(seam, SmtpEgressTransport)
+
+        assert isinstance(seam._transport, StreamOutboundTransport)
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_with_no_integration_constructs_no_transport(
+    tmp_path: Path,
+) -> None:
+    """ADR-0191 §3: absence of configuration never selects a default implementation.
+
+    The root builds the capability *inside* the branch that builds the integration,
+    so an unconfigured deployment registers no tool that could reach one and hands
+    nothing out. Read through the registry, which is the surface a plan reaches.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert await engine._runner._registry.get(SEND_EMAIL.id) is None
     finally:
         await engine.aclose()
 
