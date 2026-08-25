@@ -1974,6 +1974,29 @@ the ADRs it depends on rather than replacing them.
 > ceiling, where a total is stated and **nothing is refused even while the period
 > is indeterminate**; and no currency configured at all, where no total is stated.
 
+> **Normative.** The suite drives a **zero-contribution estimate against a ledger
+> that already refuses**, in both of the ways it can, because every zero-estimate
+> fixture above meets a ledger that would have admitted anyway and none of them
+> proves the ledger was consulted at all. With a ceiling of 100 and an accounted
+> total of **101** — reachable by §2's stated overrun, a declaration the reported
+> cost exceeded — a `FREE` call and a same-currency `PER_CALL` call of
+> `Decimal("0")` are each **refused** with `SpendCeilingError`, since the
+> projection is 101 and §3 refuses strictly above. With that period's ceiling
+> configured and its accounted total **indeterminate** — an open claim in the
+> current day — the same two calls are each refused with
+> `SpendUndeterminedError`. An implementation short-circuiting a zero
+> contribution to an immediate grant, without reading the clock or the rows,
+> passes the equality fixture above, the zero-ceiling fixtures below and every
+> `FREE`-completion fixture beside them, and then lets the world be reached in the
+> two configurations where the mechanism is most certain it should not be.
+
+> **Normative.** That is not §3's no-ceiling short-circuit and does not narrow it:
+> that one is over **configuration** — neither ceiling set, nothing read, nothing
+> refusable — and this one is over the **estimate**, which decides nothing on its
+> own. A zero contribution changes what the projection *adds*, never whether the
+> comparison happens, and §3's own short-circuit clause is exhaustive about the one
+> case in which `admit_invocation` may return before it reads anything.
+
 > **Normative.** The suite drives §2's per-period indeterminacy where the two
 > periods **disagree**, since every other indeterminacy fixture here puts the
 > unmeasurable row in the current day and makes both periods indeterminate at
