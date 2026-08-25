@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     RiskLevel,
     ToolCost,
+    ToolDefinition,
     ToolFailureKind,
     ToolInvocation,
     ToolOutcome,
@@ -69,7 +70,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
-    from ai_assistant.core.types import RecordedInvocation, ToolDefinition
+    from ai_assistant.core.types import RecordedInvocation
     from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
@@ -1678,6 +1679,56 @@ class InvocationLedgerContract(InvocationCompleterContract):
         with pytest.raises(UnrecordedAuthorisationError):
             await ledger.claim_invocation(decision=lying)
 
+        assert await _rows(ledger) == []
+
+    @pytest.mark.parametrize(
+        "depth", ["tool", "cost"], ids=["the-tool", "the-cost-inside-the-tool"]
+    )
+    async def test_a_decision_carrying_a_subclass_beneath_it_is_an_argument_fault(
+        self, ledger: LedgerSubject, depth: str
+    ) -> None:
+        """§1 compares the decision the ledger was *passed*, and a subclass survives.
+
+        ``PermissionDecision.tool`` is declared a ``ToolDefinition``, and pydantic's
+        default ``revalidate_instances="never"`` keeps whatever instance the caller
+        constructed the decision with. So this decision is **normally constructed**
+        rather than tampered, and it is unequal to the recorded one by the frozen
+        model's own equality — the assertion below states that premise rather than
+        assuming it. An implementation that compares a snapshot serialised through
+        the *declared* type drops the subclass's own field, finds the two equal, and
+        admits a claim under an authorisation for a tool the store never approved:
+        ADR-0192 §1's attack shape, reached without tampering with anything.
+
+        The refusal is the argument fault, first in ADR-0192 §2's order — the value
+        cannot be recorded as what it is, so no comparison that would lose it is
+        reached. Both depths are pinned because the check has to *descend*: the
+        ``ToolCost`` inside the definition is a level below the field the shape is
+        usually stated on.
+        """
+        recorded = allowed("d-1")
+        await ledger.record(recorded)
+
+        if depth == "tool":
+
+            class _ExtendedTool(ToolDefinition):
+                smuggled: str = "state the store never approved"
+
+            substituted: ToolDefinition = _ExtendedTool(**dict(recorded.tool))
+        else:
+
+            class _ExtendedCost(ToolCost):
+                smuggled: str = "state the store never approved"
+
+            substituted = recorded.tool.model_copy(
+                update={"cost": _ExtendedCost(**dict(recorded.tool.cost))}
+            )
+        carried = PermissionDecision(**{**dict(recorded), "tool": substituted})
+        assert carried != recorded
+
+        with pytest.raises(AuditError) as raised:
+            await ledger.claim_invocation(decision=carried)
+
+        assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
         assert await _rows(ledger) == []
 
     @pytest.mark.parametrize(

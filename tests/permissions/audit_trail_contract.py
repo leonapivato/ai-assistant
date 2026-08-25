@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     RiskLevel,
     ToolCost,
+    ToolDefinition,
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
@@ -1405,6 +1406,36 @@ class AuditTrailContract:
         reread = await trail.get("d-1")
         assert reread is not None
         assert reread.parameters_digest == original.parameters_digest
+
+    async def test_a_decision_carrying_a_subclass_beneath_it_is_refused(
+        self, trail: AuditTrail
+    ) -> None:
+        """What the trail stores is what it was handed, or nothing is.
+
+        The obligation is on the *declared* type
+        (:meth:`test_detachment_survives_a_caller_supplied_subclass`), and a nested
+        subclass is where that stops being free. Pydantic's default
+        ``revalidate_instances="never"`` keeps a ``ToolDefinition`` subclass on
+        ``PermissionDecision.tool`` through ordinary construction, so a store
+        rebuilding through the declared type drops the field that subclass declares
+        of its own and records a smaller thing than it was passed.
+
+        Refused rather than trimmed, because the snapshot is not only stored: under
+        ADR-0192 §1 a claim is admitted by comparing it, and a snapshot equal to a
+        decision nobody held is an admission rather than a lossy record.
+        """
+
+        class _ExtendedTool(ToolDefinition):
+            smuggled: str = "state the trail never saw"
+
+        held = decision("d-1")
+        carried = PermissionDecision(**{**dict(held), "tool": _ExtendedTool(**dict(held.tool))})
+
+        with pytest.raises(AuditError):
+            await trail.record(carried)
+
+        assert await trail.get("d-1") is None
+        assert await trail.export() == []
 
     async def test_the_stored_snapshot_is_detached_from_the_caller(self, trail: AuditTrail) -> None:
         """The write-path half of ADR-0018 §4's rule.
