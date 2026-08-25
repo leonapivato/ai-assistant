@@ -17,14 +17,17 @@ issue is newer and wins. History does not live here either: git holds this
 file's, and the tracker and the ADR ledger hold the work's (ADR-0019).
 
 **The narrative is bound by that same rule, not just the milestone entries.**
-No sentence here asserts the state of the code — what is built, what is not,
-what a subsystem does today, not even dated. A track's motivation is its durable
-*argument*, plus a pointer at whatever holds the state: a ratified ADR, which is
-dated and append-only (ADR-0019 §4), or the track's issue, which is live and
-mutable and governed by the precedence rule above. Neither home is a sentence in
-this file, and that is the whole of it — an observation written here loses the
-date that made it true, and the precedence rule never fires on it because it
-does not read as a pointer that could disagree with anything (#1568).
+Do not write the state of the code into a sentence here — what is built, what
+is not, what a subsystem does today — and dating it is not a way round that. A
+track's motivation is its durable *argument* plus a pointer at whatever holds
+the state: a ratified ADR, which is dated and append-only (ADR-0019 §4), or the
+track's issue, which is live and mutable and governed by the precedence rule
+above. Neither home is a sentence in this file. An observation written here
+loses the date that made it true, and the precedence rule never fires on it
+because it does not read as a pointer that could disagree with anything. This
+paragraph is a rule for what gets written, not a certificate that nothing here
+breaches it — a document that audited its own contents would be making exactly
+the kind of claim it forbids (#1568).
 
 ## Design stances
 
@@ -201,8 +204,8 @@ ruling recorded on #1312.
 
 - **Hub-owned intent routing.** `ask` → typed operation, one-directional — a
   typed operation is never re-read — with its own confirm rule, distinct from the
-  tool seam. Conceptually moved here from `track:web-client`'s deferred list;
-  #1230's list still names it.
+  tool seam. Conceptually moved here from `track:web-client`'s deferred list
+  (#1230).
 - The **engagement surface** the Gap register names as on-no-track debt. This
   track is its natural eventual home, but it stays undesigned until ruled.
 
@@ -218,12 +221,12 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised whole, per
-call, with no standing authorisation) — and each of them turns on a **recorded
-origin** "the authoriser evaluates at the moment it rules" (ADR-0154 §4, item
-(ii)), which is why origin takes this track's first milestone. Milestones are
-ordered by **dependency only**, and each closes on a QA-driven exit ruling
-recorded on #1427. Voice holds milestones 19–22 (#1318); this track starts
-at 23.
+call, with no standing authorisation) — and the obligation ADR-0154 §4 leaves
+open across them (item (ii)) rests on a **recorded origin** "the authoriser
+evaluates at the moment it rules", which is why origin takes this track's first
+milestone. Milestones are ordered by **dependency only**, and each closes on a
+QA-driven exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318);
+this track starts at 23.
 
 - **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
   through proposal, consolidation, facet assembly and tool-argument
@@ -290,7 +293,7 @@ tracker — so the claim decays into them rather than into this document.
 | VISION promise | Where it stands |
 | --- | --- |
 | Understood — a persistent user model | ADR-0072 (profile and inferred model are bands of one store), ADR-0005/0038/0040/0050 (provenance and the supersession law), ADR-0077 (the observer proposes beliefs from episodes). The mechanism is decided; how well it holds is `track:memory` (#1231, #1029) |
-| In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths — ADR-0102 gives them their CLI doors and milestone 15 their browser surface. *Export*'s missing interface is #692 (ADR-0004 §6, ADR-0073 §10) |
+| In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths — ADR-0102 gives them their CLI doors and milestone 15 their browser surface. *Export*'s surface is #692 (ADR-0004 §6, ADR-0073 §10) |
 | More Capable Over Time | ADR-0009/0022 for the explicit loop, ADR-0077 for the ambient one; ADR-0119/0120 are the instrument that judges it. Whether it is improving is `track:memory`'s pre-registered exits, and the owner's measures gate (#881) is what acts on the answer once real usage exists |
 | Context determines usefulness | ADR-0008's facets, fed by readers (ADR-0093/0095/0140) and rendered into the prompt (ADR-0096; #1082 is the gap that had left that arm vacuous). Device as a context facet, a permission input and the audit trail's "approved from where" is #920 |
 | Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (`backlog`), not a milestone. Closing the seam *by construction* — an injected transport capability rather than import contracts (#85), an approved-recipient policy beyond the tier ceiling (#68) — is `track:world` milestone 25 |
