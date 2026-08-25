@@ -35,7 +35,7 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 from permission_builders import AT, action, decision, ruling, tool
@@ -67,8 +67,46 @@ from ai_assistant.testing.cancellation import settle
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
+    from pydantic import BaseModel
+
     from ai_assistant.core.types import RecordedInvocation, ToolDefinition
     from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
+
+
+def _undeclared(value: BaseModel, state: dict[object, object]) -> None:
+    """Put ``state`` into ``value``'s instance dict, whatever its keys look like.
+
+    Written through an untyped view because that is exactly the point: a model's
+    ``__dict__`` is annotated ``dict[str, Any]`` and nothing enforces it at
+    runtime, so a caller's value can carry keys of any hashable type at all — and
+    an implementation that ``sorted()``s them raises ``TypeError`` from inside its
+    own refusal the moment two of them differ in type.
+    """
+    holder = cast("dict[object, object]", value.__dict__)
+    holder.update(state)
+
+
+class Undescribable:
+    """A value that refuses to describe itself, and can still be a mapping key.
+
+    The shape ``describe_untrusted`` exists for: a diagnostic that reaches for
+    ``repr`` on the caller's value can be made to raise from inside the ``except``
+    block that exists to report the fault, replacing this layer's refusal with
+    whatever the value threw (``core/types.py``).
+    """
+
+    def __repr__(self) -> str:
+        """Refuse, which is the whole of this class."""
+        msg = "this value will not describe itself"
+        raise RuntimeError(msg)
+
+    def __hash__(self) -> int:
+        """Hashable, so it can be an undeclared ``__dict__`` key too."""
+        return 1
+
+    def __eq__(self, other: object) -> bool:
+        """Identity, since equality would have to describe the other side."""
+        return self is other
 
 
 class LedgerSubject(AuditTrail, InvocationLedger, Protocol):
@@ -637,6 +675,39 @@ class InvocationCompleterContract:
         assert completion.incurred_cost.amount == Decimal("1.00")
         stored = [row for row in await _rows(ledger) if row.completes == claim.id]
         assert stored[0].incurred_cost == completion.incurred_cost
+
+    @pytest.mark.parametrize(
+        "tamper",
+        [
+            pytest.param("undescribable", id="a-field-that-cannot-be-described"),
+            pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
+        ],
+    )
+    async def test_malformed_model_state_is_still_an_argument_fault(
+        self, ledger: LedgerSubject, tamper: str
+    ) -> None:
+        """The refusal must survive the value it is refusing (ADR-0192 §2).
+
+        Both parameters are ways the *diagnostic* can destroy the diagnosis. A
+        field whose ``__repr__`` raises turns a message that reaches for ``repr``
+        into whatever it threw, from inside the ``except`` block. Undeclared
+        ``__dict__`` keys of two different types turn a ``sorted`` over them into a
+        ``TypeError``. Either leaves this boundary as a class §2's order does not
+        admit, and a consumer catching ``AuditError`` catches neither.
+        """
+        claim = await _claim(ledger, allowed())
+        cost = ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("1.00"), currency="USD")
+        if tamper == "undescribable":
+            cost.__dict__["amount"] = Undescribable()
+        else:
+            _undeclared(cost, {1: "one", "extra": "text"})
+
+        with pytest.raises(AuditError):
+            await ledger.complete_invocation(
+                claim_id=claim.id, outcome=ToolOutcome.FAILED, incurred_cost=cost
+            )
+
+        assert [row.completes for row in await _rows(ledger)] == [None]
 
     async def test_a_claim_id_is_read_as_the_type_the_signature_names(
         self, ledger: LedgerSubject
@@ -1550,6 +1621,36 @@ class InvocationLedgerContract(InvocationCompleterContract):
         with pytest.raises(UnrecordedAuthorisationError):
             await ledger.claim_invocation(decision=lying)
 
+        assert await _rows(ledger) == []
+
+    @pytest.mark.parametrize(
+        "tamper",
+        [
+            pytest.param("undescribable", id="a-field-that-cannot-be-described"),
+            pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
+        ],
+    )
+    async def test_a_malformed_decision_is_still_an_argument_fault(
+        self, ledger: LedgerSubject, tamper: str
+    ) -> None:
+        """:meth:`test_malformed_model_state_is_still_an_argument_fault` on the claim path.
+
+        The decision's own ``id`` is the value the refusal names, so it is the one
+        whose ``__repr__`` a message must not call — and a decision is the argument
+        a caller is most likely to have built by hand.
+        """
+        authorisation = allowed()
+        await ledger.record(authorisation)
+        handed = authorisation.model_copy()
+        if tamper == "undescribable":
+            handed.__dict__["id"] = Undescribable()
+        else:
+            _undeclared(handed, {1: "one", "extra": "text"})
+
+        with pytest.raises(AuditError) as raised:
+            await ledger.claim_invocation(decision=handed)
+
+        assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
         assert await _rows(ledger) == []
 
     async def test_an_argument_fault_is_decided_before_the_authority(
