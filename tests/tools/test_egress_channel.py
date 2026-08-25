@@ -291,6 +291,8 @@ class _Sockets:
             back before it raises. ``False`` is the harder and more honest
             arrangement — a close can fail on its first statement — and it is
             what makes a case about the abort path bite.
+        close_gate: A suspension to hold the next writer's ``wait_closed`` at, so
+            a case can arrive *during* the release rather than before or after it.
         holds_the_close_waiter: Whether the writer it hands out models a far end
             that has stopped reading — its synchronous ``close`` succeeds and
             gives nothing back, and only a dropped transport settles it. That is
@@ -308,6 +310,7 @@ class _Sockets:
         self.gate: _Handoff | None = None
         self.breaks_on_close = False
         self.releases_before_it_fails = True
+        self.close_gate: LoopSuspension | None = None
         self.holds_the_close_waiter = False
         self.handed: _Writer | None = None
 
@@ -339,6 +342,7 @@ class _Sockets:
         writer.fails_to_close = self.breaks_on_close
         writer.releases_before_it_fails = self.releases_before_it_fails
         writer.holds_the_close_waiter = self.holds_the_close_waiter
+        writer.close_gate, self.close_gate = self.close_gate, None
         self.handed = writer
         gate, self.gate = self.gate, None
         if gate is not None:
@@ -715,8 +719,17 @@ async def test_a_host_the_resolver_refuses_is_a_transport_error_not_a_unicode_on
     stops it. The case runs against the standard library's own ``getaddrinfo``
     because the point is that its exception type is not the one the ``except``
     clause obviously wants; a substitute would be asserting the arrangement.
+
+    **The endpoint is the upgrade mode, and that is not incidental.** Under
+    implicit TLS ``open_channel`` builds a TLS context first, and
+    ``ssl.create_default_context`` reads the system trust store — filesystem work
+    in a unit test, and an unusable ``SSLKEYLOGFILE`` would fail this case with a
+    ``FileNotFoundError`` instead of the ``UnicodeError`` it is about. The upgrade
+    mode reaches the resolver without building one. Adversarial review found it on
+    round 13; #1565 records the wider class, since every other case here that
+    opens an implicit-TLS endpoint loads the trust store too.
     """
-    unresolvable = TransportEndpoint(host="\u200d.invalid", port=465, implicit_tls=True)
+    unresolvable = TransportEndpoint(host="\u200d.invalid", port=587, implicit_tls=False)
     # **And it reaches no resolver**, which is why this is a unit test rather than
     # an integration one (`CONTRIBUTING.md`, "No network or filesystem in unit
     # tests"). ``socket.getaddrinfo`` encodes the host with the ``idna`` codec
@@ -846,6 +859,50 @@ async def test_an_orphaned_release_has_finished_before_the_cancellation_is_deliv
     assert sockets.handed is not None
     assert sockets.handed.aborts == 1
     assert sockets.handed.released is True
+
+
+async def test_a_cancellation_arriving_during_an_orphan_release_is_not_absorbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0060 §1: deferring delivery is permitted, dropping it is not.
+
+    The release now waits, and a wait is a place a cancellation can land. Where
+    it lands during an **ordinary** failure's cleanup — the channel could not be
+    constructed, so a ``TransportError`` is in flight — suppressing it and letting
+    the older exception leave tells the caller that the endpoint broke when what
+    happened is that the caller cancelled. That is the inversion ADR-0060 §1
+    forbids in the strongest terms, and it is not the same case as the two waits
+    that run with a ``CancelledError`` already in flight, where a swallowed second
+    one still leaves a cancellation. Adversarial review found it on round 13,
+    against the wait this holder added on round 12.
+
+    So all three are armed at once: the constructor fails, the release suspends
+    inside ``wait_closed``, and the caller cancels while it is held. What must
+    leave is the cancellation — and the socket must still have been given back,
+    because deferring the delivery is the whole reason the wait is allowed.
+    """
+    sockets = _Sockets()
+    gate = LoopSuspension()
+    sockets.close_gate = gate
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+
+    def refuses(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        msg = "the channel could not be constructed"
+        raise TransportError(msg)
+
+    monkeypatch.setattr(egress, "_StreamChannel", refuses)
+    opening = asyncio.ensure_future(StreamOutboundTransport().open_channel(ENDPOINT))
+    await gate.reached()
+
+    opening.cancel()
+    await settle()
+    gate.release()
+    await settle()
+
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert sockets.open == 0
 
 
 async def test_the_channels_close_aborts_a_release_that_failed_before_releasing(
