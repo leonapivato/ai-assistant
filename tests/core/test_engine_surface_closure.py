@@ -138,6 +138,18 @@ _NAMESPACE: Final = {
 #: The walk reaches it through **two** optional hops, ``Question.retires ->
 #: Retirement.warrant``, and terminates immediately: ``BeliefBand``, ``bool`` and
 #: ``Attestation`` are all already here.
+#: ``ToolInvocation`` and ``RecordedInvocation`` are **not** here yet, and their
+#: absence is this test working rather than an omission. ADR-0192 §9 says they join
+#: this set; the operations that name them are §4's and land with that ADR's
+#: *surface* group, so nothing on the surface reaches them today and
+#: :func:`test_the_walk_reaches_every_promoted_type` would fail on a promotion the
+#: walk cannot arrive at. What the paired lane owed was the **placement**: they are
+#: declared *after* :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, so
+#: :func:`_declared_by_this_change` counts them and
+#: :func:`test_the_promoted_set_is_the_one_the_adrs_gathered` fails the moment the
+#: walk reaches them — which is what makes the surface group add them here rather
+#: than remember to. Declared ahead of that boundary they would have been sorted as
+#: pre-existing leaves and this check would never have asked.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "ContinuationToken",

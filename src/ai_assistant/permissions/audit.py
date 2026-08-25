@@ -249,14 +249,48 @@ _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 # know only ``decisions``, so it erases half of what ADR-0192 §6 says is one record
 # and can mint a decision over an invocation's id. The restamp is what makes that
 # downgrade the reported fault ADR-0049 §1 already calls for.
+# **Four of the six columns are `GENERATED ALWAYS ... VIRTUAL` over the blob, and
+# that is the whole of their integrity.** A stored projection is a second copy of a
+# value the record already carries, and a filter narrowing by one decides on a value
+# nothing revalidates: alter an open claim's `decision_id` and the claims-under read
+# ADR-0192 §1's consume is decided over no longer sees it, so a spent authorisation
+# admits a second act — and no read narrowed by a column can see what the narrowing
+# removed, so validating what a filter *returns* cannot close it. Deriving the column
+# from `data` closes it by construction instead: the two cannot disagree, because
+# there is only one of them, and SQLite refuses an `UPDATE` of a generated column
+# outright. Indexed exactly as a stored column is, at no cost to any read.
+#
+# `id` is generated too and carries a UNIQUE index rather than being the primary key,
+# because SQLite forbids a generated column in one — the constraint is identical and
+# the derivation is what matters here.
+#
+# The two that remain stored, and why they must be. `seq` is the durable append
+# order, allocated inside the insert from the table's own maximum; it is not in the
+# record and cannot be, since `ToolInvocation`'s fields are ADR-0192 §2's and adding
+# one is a contract change. `recorded_at_us` is `_sort_key`'s integer microseconds,
+# and `json_extract` yields the stored ISO-8601 *text*, which does not sort as an
+# instant (a whole second serialises without a fraction and sorts after the same
+# second with one). Both are checked against the record wherever a read returns the
+# row (:func:`_as_projected`), and neither decides an admission: `seq` orders the set
+# and `recorded_at_us` orders a listing.
+#
+# `seq` is deliberately **not** the ordering ADR-0192 §1's "first" and "last" are
+# read by way of `recorded_at`: a stored instant is what a reader is shown, and a
+# wall clock that steps backwards must not make a completed act stop being the most
+# recent one.
 _CREATE_INVOCATIONS = (
     "CREATE TABLE IF NOT EXISTS invocations("
-    "id TEXT PRIMARY KEY, seq INTEGER NOT NULL, decision_id TEXT NOT NULL, "
-    "recorded_at_us INTEGER NOT NULL, completes TEXT, outcome TEXT, "
-    "data TEXT NOT NULL)"
+    "seq INTEGER NOT NULL, recorded_at_us INTEGER NOT NULL, data TEXT NOT NULL, "
+    "id TEXT GENERATED ALWAYS AS (json_extract(data, '$.id')) VIRTUAL, "
+    "decision_id TEXT GENERATED ALWAYS AS (json_extract(data, '$.decision_id')) VIRTUAL, "
+    "completes TEXT GENERATED ALWAYS AS (json_extract(data, '$.completes')) VIRTUAL, "
+    "outcome TEXT GENERATED ALWAYS AS (json_extract(data, '$.outcome')) VIRTUAL)"
 )
 
 _INVOCATION_INDEXES = (
+    # The primary key `id` cannot be, because SQLite refuses a generated column in
+    # one. Same constraint, same enforcement, and the derivation is kept.
+    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_id ON invocations(id)",
     # A *unique* index, so "a claim is completed once" survives even a bug in the
     # checked read. SQLite treats NULLs as distinct, so it constrains completions
     # only and leaves claims unaffected.
@@ -1155,6 +1189,17 @@ class SqliteAuditTrail:
         **once** — that one reading is both what the admission is decided on and
         what the row stores, so a retry cannot be admitted inside the window and
         stamped outside it.
+
+        **And it is read only where the answer needs it.** Every arm of §1's
+        conjunction but the window is decided over the store's own history, so
+        reading the clock in front of them lets a clock that raises stand in for a
+        refusal that was already settled: §1 says a claim refused because the
+        authorisation is spent raises ``AuthorisationSpentError``, and a collaborator
+        the ledger did not have to consult must not turn that into some other class
+        — one that, by ADR-0026 §2, is not even the ledger's to translate and leaves
+        unwrapped. :func:`_once` reads on first ask and never again, so "exactly one
+        guarded reading per append" is unchanged and so is the rule that the instant
+        decided on is the instant stored.
         """
         with self._transaction(f"claim an invocation under decision {snapshot.id!r}") as conn:
             row = conn.execute("SELECT data FROM decisions WHERE id = ?", (snapshot.id,)).fetchone()
@@ -1174,12 +1219,12 @@ class SqliteAuditTrail:
                     f"authorisation it did not record authorises nothing"
                 )
                 raise UnrecordedAuthorisationError(msg)
-            recorded_at = self._reading()
-            self._refuse_if_spent(conn, snapshot, recorded_at)
+            reading = _once(self._reading)
+            self._refuse_if_spent(conn, snapshot, reading)
             claim = ToolInvocation(
                 id=self._mint(conn),
                 decision_id=snapshot.id,
-                recorded_at=recorded_at,
+                recorded_at=reading(),
             )
             self._append(conn, claim)
             return claim.model_dump_json()
@@ -1312,24 +1357,16 @@ class SqliteAuditTrail:
         """Insert ``row``, allocating the next durable append ordinal for it."""
         next_seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM invocations").fetchone()
         ordinal = int(next_seq[0])
+        # Only the three columns that are not derived from the blob are supplied;
+        # SQLite computes the other four from `data` and refuses to be told them.
         conn.execute(
-            "INSERT INTO invocations("
-            "id, seq, decision_id, recorded_at_us, completes, outcome, data"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                row.id,
-                ordinal,
-                row.decision_id,
-                _sort_key(row.recorded_at),
-                row.completes,
-                None if row.outcome is None else row.outcome.value,
-                row.model_dump_json(),
-            ),
+            "INSERT INTO invocations(seq, recorded_at_us, data) VALUES (?, ?, ?)",
+            (ordinal, _sort_key(row.recorded_at), row.model_dump_json()),
         )
 
     @staticmethod
     def _refuse_if_spent(
-        conn: sqlite3.Connection, decision: PermissionDecision, now: datetime
+        conn: sqlite3.Connection, decision: PermissionDecision, now: Callable[[], datetime]
     ) -> None:
         """Apply ADR-0192 §1's conjunction to the claims already under ``decision``.
 
@@ -1338,6 +1375,11 @@ class SqliteAuditTrail:
         read gated by ADR-0016 §3 is invoked under one ``ALLOW`` as often as the
         pipeline needs it, and refusing the second read would break working
         behaviour to protect nothing.
+
+        ``now`` is a **callable** and is invoked in the window arm alone, which is
+        the only arm an instant decides. Every arm above it is a statement about the
+        store's history, and taking a reading to answer them would let a clock that
+        raises replace a refusal §1 names with an exception it does not.
 
         Raises:
             AuthorisationSpentError: If a further claim is not admitted.
@@ -1381,7 +1423,7 @@ class SqliteAuditTrail:
             # property of the store.
             raise _refuse("the tool offers no keyed idempotency")
         window = decision.tool.idempotency_window
-        elapsed = now - claims[0].recorded_at
+        elapsed = now() - claims[0].recorded_at
         if window is None or elapsed <= timedelta(0) or elapsed >= window:
             # Measured from the **first** claim in the append order and never from
             # the last: measuring from the most recent one would renew the window
@@ -1664,25 +1706,24 @@ def _as_projected(row: Sequence[Any]) -> ToolInvocation:
     the blob followed by the projection columns, which every invocation read
     selects in that order.
 
-    **The decoded blob is authoritative, not the projection columns**, exactly as
-    it is for a decision found by its binding
-    (:meth:`SqliteAuditTrail.resolution_of`). The columns beside ``data`` are the
-    fast filter :meth:`SqliteAuditTrail._append` maintains, and every read that
-    selects by one *acts* on the answer: ``decision_id`` decides which claims
-    ADR-0192 §1's consume is read over, ``completes`` decides whether a claim is
-    open — to the completion path and to the recovery scan alike — and the join
-    pairs a row with the authorisation a listing then attributes it to. A row
-    whose column was altered while its blob stayed intact would silently drop out
-    of the set that refuses a second act, or be attributed to a decision it does
-    not name. That is a corrupt store, reported rather than acted on.
+    **The decoded blob is authoritative, not the columns**, exactly as it is for a
+    decision found by its binding (:meth:`SqliteAuditTrail.resolution_of`). Four of
+    the five are `GENERATED ALWAYS` over ``data`` (:data:`_CREATE_INVOCATIONS`), so
+    for those the comparison is structurally true rather than a check — it is kept
+    because it costs a tuple compare and because a future edit that un-derives one
+    would otherwise pass silently, and it is not what makes them trustworthy.
 
-    **What it does not close, and cannot.** A column altered so the row falls out
-    of an index's range *hides* it, and no read narrowed by that column can see
-    what the narrowing removed — a property every projected column in this store
-    has, the decision rows' ``resolves`` and binding columns included, and issue
-    #1574 holds the structural answer (a generated column cannot disagree with the
-    blob because it is the blob). Every whole-table listing does surface it, since
-    it narrows by nothing.
+    ``recorded_at_us`` is the one that is genuinely a second copy: it is
+    `_sort_key`'s integer microseconds and cannot be derived from the ISO-8601 text
+    the blob holds, which does not sort as an instant. It decides no admission — it
+    decides the order a listing is served in — and serving a row in the order some
+    other instant would put it in is the trail misreporting, which is what this
+    refuses.
+
+    **What no comparison closes.** ``seq`` is the durable append order, allocated at
+    insert and absent from the record, so nothing here can hold it to anything; and
+    an edit that rewrites ``data`` itself moves the derived columns with it, which
+    is a rewritten record rather than a disagreeing copy. Both are issue #1574.
 
     Raises:
         AuditError: If the stored row no longer validates, or if any projected
@@ -1738,6 +1779,23 @@ def _join(invocation: ToolInvocation, decision: str | None) -> RecordedInvocatio
         capability=named.tool.capability,
         egress_call=named.egress_binding is not None,
     )
+
+
+def _once[T](read: Callable[[], T]) -> Callable[[], T]:
+    """Wrap ``read`` so it runs on the first ask and hands back that value after.
+
+    The clock's "exactly one guarded reading per append" (ADR-0192 §1) written as a
+    property of the reading rather than of the call graph, so the reading can be
+    deferred past every refusal that does not need it and still be one reading.
+    """
+    taken: list[T] = []
+
+    def _read() -> T:
+        if not taken:
+            taken.append(read())
+        return taken[0]
+
+    return _read
 
 
 def _checked_argument[T](name: str, build: Callable[[], T]) -> T:

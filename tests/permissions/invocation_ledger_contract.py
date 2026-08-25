@@ -65,7 +65,7 @@ from ai_assistant.testing.cancellation import settle
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
-    from ai_assistant.core.types import PermissionDecision, ToolDefinition
+    from ai_assistant.core.types import PermissionDecision, RecordedInvocation, ToolDefinition
     from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
@@ -345,6 +345,37 @@ async def _cancelled_inside_the_resource(
     # the same logged resource.
     assert not log.overlapped, _RELEASED_EARLY
     assert log.visits - visited_before == 2, "both calls should have reached the resource by now"
+
+
+async def recent_invocations(subject: LedgerSubject) -> list[RecordedInvocation]:
+    """The bounded listing, called the way a surface consumer calls it."""
+    return await subject.recent_invocations()
+
+
+async def export_invocations(subject: LedgerSubject) -> list[RecordedInvocation]:
+    """The unbounded listing."""
+    return await subject.export_invocations()
+
+
+#: The two joined listings, named so a parametrised case can arm the operation it
+#: is about. Their names are the member names, which is what ``harness.arm`` takes.
+_LISTINGS = (recent_invocations, export_invocations)
+
+
+def _over_the_same_store(
+    harness: LedgerHarness, first: LedgerSubject, **built: Any
+) -> LedgerSubject:
+    """A second, independently constructed subject over ``first``'s store.
+
+    ADR-0192 §9: "Where a store under test cannot be opened twice, the suite
+    **skips with its reason stated** ... and never by omitting the case." A subject
+    whose store is a dict cannot reach these cases at all, so the skip is stated
+    once here rather than repeated in each of them.
+    """
+    store = harness.store_of(first)
+    if store is None:
+        pytest.skip("this store cannot be opened twice, so two instances are unreachable")
+    return harness.open(store=store, **built)
 
 
 async def _rows(subject: LedgerSubject) -> list[ToolInvocation]:
@@ -1356,6 +1387,42 @@ class InvocationLedgerContract(InvocationCompleterContract):
 
         assert not isinstance(raised.value, UnrecordedAuthorisationError)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            pytest.param("id", "d-elsewhere", id="the-decision-it-names"),
+            pytest.param("ruling", ruling(PermissionOutcome.DENY), id="the-ruling-it-carries"),
+        ],
+    )
+    async def test_the_submitted_decision_is_observed_before_the_first_await(
+        self, harness: LedgerHarness, field_name: str, value: object
+    ) -> None:
+        """ADR-0065, on the other of the two values ADR-0192 §9 names.
+
+        The cost case above pins what is *persisted*; this pins what the admission
+        was *decided on*, which is the half a post-call mutation test cannot reach.
+        An implementation that validates, suspends and then re-reads the caller's
+        object decides the authority against whatever the object says by then — it
+        would look up ``d-elsewhere``, or read a ``DENY`` — so it refuses a claim
+        this ADR admits, or admits one under an authorisation the store never
+        recorded. Both mutations are of a frozen model through ``__dict__``, which
+        is the bypass ADR-0021 §4 pins ``record`` against for the same reason.
+        """
+        ledger = harness.open()
+        authorisation = allowed("d-1")
+        await ledger.record(authorisation)
+        suspension = harness.arm(ledger, "claim_invocation")
+
+        claiming = asyncio.ensure_future(ledger.claim_invocation(decision=authorisation))
+        await suspension.reached()
+        authorisation.__dict__[field_name] = value
+        suspension.release()
+        claim = await claiming
+
+        assert claim.decision_id == "d-1", "the row derives from the pre-await snapshot"
+        held = await ledger.open_invocations(decision_id="d-1")
+        assert [row.id for row in held] == [claim.id]
+
     # --- the consume ------------------------------------------------------
 
     async def test_a_second_claim_while_one_is_open_is_refused(self, ledger: LedgerSubject) -> None:
@@ -1533,6 +1600,37 @@ class InvocationLedgerContract(InvocationCompleterContract):
             await ledger.claim_invocation(decision=authorisation)
 
         assert completion.recorded_at < claim.recorded_at
+
+    async def test_a_spent_authorisation_is_refused_as_spent_without_consulting_the_clock(
+        self, harness: LedgerHarness
+    ) -> None:
+        """Every arm of §1's conjunction but the window is decided without an instant.
+
+        ADR-0192 §1 says a claim refused because the authorisation is spent raises
+        ``AuthorisationSpentError``, and §2 puts that class in the order. An
+        implementation reading the clock in front of the conjunction lets a
+        collaborator it did not have to consult stand in for a refusal the store's
+        own history had already settled — and by ADR-0026 §2 an exception the clock
+        *callable* raises is not even the ledger's to translate, so what the caller
+        meets is not an ``AuditError`` at all.
+
+        The clock yields one reading and then fails, so the first claim is stamped
+        and the second must be refused without a second reading. The count is
+        asserted as well as the class: an implementation that reads and swallows the
+        failure would raise the right class for the wrong reason.
+        """
+        clock = ScriptedClock([AT, RuntimeError("the clock is down")])
+        ledger = harness.open(now=clock)
+        authorisation = allowed()
+        await ledger.record(authorisation)
+        await ledger.claim_invocation(decision=authorisation)
+        assert clock.readings == 1
+
+        with pytest.raises(AuthorisationSpentError):
+            await ledger.claim_invocation(decision=authorisation)
+
+        assert clock.readings == 1, "the refusal needed no instant, so none was taken"
+        assert len(await _rows(ledger)) == 1
 
     async def test_a_rejected_reading_refuses_the_claim_and_appends_nothing(
         self, harness: LedgerHarness
@@ -1835,8 +1933,12 @@ class InvocationLedgerContract(InvocationCompleterContract):
         assert len(appended) == 1, f"expected exactly one winner, got {results}"
         assert len(refused) == 1, f"the loser must be refused, got {results}"
 
+    @pytest.mark.parametrize("listing", _LISTINGS, ids=lambda call: call.__name__)
     async def test_the_join_against_a_concurrent_clear_is_all_or_nothing(
-        self, ledger: LedgerSubject, harness: LedgerHarness
+        self,
+        ledger: LedgerSubject,
+        harness: LedgerHarness,
+        listing: Callable[[LedgerSubject], Awaitable[list[RecordedInvocation]]],
     ) -> None:
         """The race the store-side join exists for (ADR-0192 §2).
 
@@ -1844,11 +1946,16 @@ class InvocationLedgerContract(InvocationCompleterContract):
         one, and it passes every claim and completion race above. Only this
         distinguishes it: either answer is acceptable, and a row without its
         decision is not.
+
+        **Both listings**, because §9 says both and because they are two entry
+        points a store may serialise differently — the bounded one is the method a
+        surface consumer actually calls, and a limit clause is exactly the kind of
+        thing that gets its own code path.
         """
         claim = await _claim(ledger, allowed("d-1"))
         await _complete(ledger, claim)
-        suspension = harness.arm(ledger, "export_invocations")
-        reading = asyncio.ensure_future(ledger.export_invocations())
+        suspension = harness.arm(ledger, listing.__name__)
+        reading = asyncio.ensure_future(listing(ledger))
         await suspension.reached()
         erasing = asyncio.ensure_future(ledger.clear())
         await asyncio.sleep(0)
@@ -1893,6 +2000,133 @@ class InvocationLedgerContract(InvocationCompleterContract):
         appended = [row for row in results if not isinstance(row, BaseException)]
         assert len(appended) == 1, f"expected exactly one winner, got {results}"
         assert len(await _rows(first)) == 1
+
+    @pytest.mark.optional_obligation
+    async def test_two_instances_over_one_store_settle_the_retry_admission_once(
+        self, harness: LedgerHarness
+    ) -> None:
+        """The second branch of the consume, through the door a per-instance lock leaves.
+
+        A store may have made the *first* claim atomic and written the retry
+        admission as a check followed by an append; layering the two-instance arm on
+        it is what ADR-0192 §9 asks for, because an implementation excluding on an
+        ``asyncio.Lock`` passes both single-object races and admits two acts here.
+
+        One clock for both instances, because that is what the composition root
+        injects: two clocks each starting at ``AT`` would put the second instance's
+        reading *at* the first claim, and a zero elapsed time is a lapsed window
+        (ADR-0029 §5's fail-closed rule) rather than the race under test.
+        """
+        clock = StepClock()
+        first = harness.open(now=clock)
+        second = _over_the_same_store(harness, first, now=clock)
+        authorisation = allowed()
+        claim = await _claim(first, authorisation)
+        await _complete(first, claim, ToolOutcome.FAILED, kind=ToolFailureKind.UNAVAILABLE)
+
+        results = await asyncio.gather(
+            first.claim_invocation(decision=authorisation),
+            second.claim_invocation(decision=authorisation),
+            return_exceptions=True,
+        )
+
+        appended = [row for row in results if not isinstance(row, BaseException)]
+        refused = [row for row in results if isinstance(row, AuthorisationSpentError)]
+        assert len(appended) == 1, f"expected exactly one winner, got {results}"
+        assert len(refused) == 1, f"the loser must be refused, got {results}"
+        assert len([row for row in await _rows(first) if row.completes is None]) == 2
+
+    @pytest.mark.optional_obligation
+    async def test_two_instances_over_one_store_complete_one_claim_once(
+        self, harness: LedgerHarness
+    ) -> None:
+        """The completion's write-once guarantee through the same door (ADR-0192 §9).
+
+        A claim completed twice is two outcomes for one act, and the second could
+        carry a different one — which is the record saying two contradictory things
+        about what happened, on the row a recovery scan reads.
+        """
+        first = harness.open()
+        second = _over_the_same_store(harness, first)
+        claim = await _claim(first, allowed())
+
+        results = await asyncio.gather(
+            _complete(first, claim), _complete(second, claim), return_exceptions=True
+        )
+
+        appended = [row for row in results if not isinstance(row, BaseException)]
+        refused = [row for row in results if isinstance(row, InvalidCompletionError)]
+        assert len(appended) == 1, f"expected exactly one winner, got {results}"
+        assert len(refused) == 1, f"the loser must be refused, got {results}"
+        assert len([row for row in await _rows(first) if row.completes is not None]) == 1
+
+    @pytest.mark.optional_obligation
+    @pytest.mark.parametrize("listing", _LISTINGS, ids=lambda call: call.__name__)
+    async def test_two_instances_over_one_store_join_against_a_clear_all_or_nothing(
+        self,
+        harness: LedgerHarness,
+        listing: Callable[[LedgerSubject], Awaitable[list[RecordedInvocation]]],
+    ) -> None:
+        """The join race where the erasure is a *different object's* (ADR-0192 §9).
+
+        The single-object version can be passed by a store whose read and whose
+        ``clear`` merely share one ``asyncio.Lock``. Here they share nothing but the
+        file, so what has to hold the answer together is the store's own
+        serialisation — which is the reason §2 puts the join inside one operation
+        rather than the reason the suite could have settled for.
+        """
+        first = harness.open()
+        second = _over_the_same_store(harness, first)
+        claim = await _claim(first, allowed("d-1"))
+        await _complete(first, claim)
+        suspension = harness.arm(first, listing.__name__)
+
+        reading = asyncio.ensure_future(listing(first))
+        await suspension.reached()
+        erasing = asyncio.ensure_future(second.clear())
+        await asyncio.sleep(0)
+        suspension.release()
+        rows = await reading
+        await erasing
+
+        assert len(rows) in {0, 2}
+        assert all(row.tool == "smtp" for row in rows)
+
+    @pytest.mark.optional_obligation
+    async def test_a_replacement_factory_does_not_reissue_across_an_erasure(
+        self, harness: LedgerHarness
+    ) -> None:
+        """The reset ADR-0192 §2 scopes to the **process** and not to the instance.
+
+        Driven **across a ``clear()``**, and the interleaving is the point rather
+        than a variation: with rows still in the store the ledger's redraw hides a
+        reset allocator — the reissued id collides, the ledger draws again, and the
+        two ids differ for a reason that has nothing to do with the factory. With
+        nothing left to collide with, the factory is the only thing under test.
+
+        The second subject is built **the way the composition root builds the
+        first** — its own factory, default-constructed — because that is the
+        replacement §2 says nothing forbids. A factory whose prefix is fixed and
+        whose counter is per-instance passes every same-instance draw case and
+        reissues here.
+
+        The stale-completion consequence is asserted beside it, which is why the
+        reissue matters at all: a completion held by a call that outlived the first
+        instance must not land on a claim the second one appended and be recorded as
+        that call's outcome.
+        """
+        first = harness.open()
+        second = _over_the_same_store(harness, first)
+        kept = await _claim(first, allowed("d-1"))
+        await first.clear()
+
+        fresh = await _claim(second, allowed("d-1"))
+
+        assert fresh.id != kept.id, "a replacement factory is a new instance, not a new process"
+        with pytest.raises(InvalidCompletionError):
+            await _complete(second, kept)
+        held = await _rows(second)
+        assert [row.id for row in held] == [fresh.id]
 
     @pytest.mark.optional_obligation
     async def test_a_new_process_draws_away_from_a_claim_a_previous_one_left(

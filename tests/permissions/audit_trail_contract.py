@@ -33,6 +33,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     BoundAccount,
     CostBasis,
+    EgressBinding,
     Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
@@ -457,6 +458,192 @@ class AuditTrailContract:
     # ``InvocationLedgerContract``, which is where a case can inject the factory
     # that forces the collision; this suite has no hook for one, and reaching into
     # a subject's private allocator would be a case about an attribute name.
+
+    # --- the three invocation reads (ADR-0192 §2) -------------------------
+    # ADR-0192 §9 lands these members' obligations "in that Protocol's existing
+    # conformance suite", which is this one: they are `AuditTrail` members, and an
+    # implementation must not be able to pass its own suite while failing them.
+    #
+    # What is here is what an `AuditTrail` owes about a *read*. Everything needing a
+    # collaborator this suite cannot inject — a clock, an identifier factory, a
+    # second instance over one store — or a race, a cancellation or a consume, is
+    # `InvocationLedgerContract`'s, because those are obligations of the writes and
+    # of the ledger's own collaborators rather than of these three members.
+
+    async def test_a_listed_row_carries_the_tool_its_decision_names(
+        self, trail: AuditTrail
+    ) -> None:
+        """The identity lives on the decision, so the listing is where they are paired.
+
+        A page can hold a completion whose claim and whose decision are not on it,
+        which is why the row is served joined rather than left for a caller to look
+        up (ADR-0192 §2).
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        claim = await ledger.claim_invocation(decision=authorisation)
+
+        listed = await ledger.export_invocations()
+
+        assert [held.invocation for held in listed] == [claim]
+        assert listed[0].tool == authorisation.tool.id
+        assert listed[0].capability == authorisation.tool.capability
+        assert listed[0].egress_call is False
+
+    async def test_egress_call_is_true_exactly_when_the_decision_carries_a_binding(
+        self, trail: AuditTrail
+    ) -> None:
+        """The discriminator is the binding's presence (ADR-0178 §4), not a copy of it."""
+        ledger = _as_ledger(trail)
+        plain = _allowing("d-plain")
+        crossing = _allowing("d-egress").model_copy(
+            update={
+                "egress_binding": EgressBinding(
+                    spans=(),
+                    account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+                    transport_endpoint="test://endpoint/one",
+                    planned_with_external_content=False,
+                )
+            }
+        )
+        await trail.record(plain)
+        await trail.record(crossing)
+        await ledger.claim_invocation(decision=plain)
+        await ledger.claim_invocation(decision=crossing)
+
+        by_decision = {
+            held.invocation.decision_id: held for held in await ledger.export_invocations()
+        }
+
+        assert by_decision["d-plain"].egress_call is False
+        assert by_decision["d-egress"].egress_call is True
+
+    async def test_the_listings_are_ordered_newest_first_with_ties_broken_by_id(
+        self, trail: AuditTrail
+    ) -> None:
+        """One total order, and it is stated rather than left to the store's insertion.
+
+        Asserted as a *sort key* rather than as a fixed sequence, so the case says
+        the same thing whatever the trail's clock does — which is what lets it live
+        in a suite that injects no clock.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        for _ in range(3):
+            claim = await ledger.claim_invocation(decision=authorisation)
+            await ledger.complete_invocation(
+                claim_id=claim.id,
+                outcome=ToolOutcome.FAILED,
+                incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+            )
+
+        listed = [held.invocation for held in await ledger.export_invocations()]
+
+        assert len(listed) == 6
+        keys = [(-row.recorded_at.timestamp(), row.id) for row in listed]
+        assert keys == sorted(keys)
+
+    async def test_the_bounded_listing_is_a_prefix_of_the_whole_one(
+        self, trail: AuditTrail
+    ) -> None:
+        """``recent_invocations`` bounds ``export_invocations``; it does not reorder it."""
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        for _ in range(3):
+            claim = await ledger.claim_invocation(decision=authorisation)
+            await ledger.complete_invocation(
+                claim_id=claim.id,
+                outcome=ToolOutcome.FAILED,
+                incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+            )
+
+        whole = await ledger.export_invocations()
+        bounded = await ledger.recent_invocations(limit=2)
+
+        assert bounded == whole[:2]
+        assert await ledger.recent_invocations() == whole  # the default page holds all six
+
+    @pytest.mark.parametrize("limit", [0, -1], ids=["zero", "negative"])
+    async def test_a_limit_that_is_not_strictly_positive_is_refused(
+        self, trail: AuditTrail, limit: int
+    ) -> None:
+        """``recent``'s own refusal, for ``recent``'s own reason (ADR-0073 §2)."""
+        with pytest.raises(ValueError, match="limit"):
+            await _as_ledger(trail).recent_invocations(limit=limit)
+
+    async def test_a_listing_hands_back_a_detached_snapshot(self, trail: AuditTrail) -> None:
+        """Reading is not a way to reach into the store (ADR-0021 §4)."""
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        claim = await ledger.claim_invocation(decision=authorisation)
+
+        listed = await ledger.export_invocations()
+        listed[0].invocation.__dict__["decision_id"] = "d-tampered"
+
+        assert (await ledger.export_invocations())[0].invocation == claim
+
+    async def test_the_open_set_is_the_claims_no_completion_names(self, trail: AuditTrail) -> None:
+        """The exact set ADR-0192 §3's recovery scan is written against.
+
+        A completed claim has left it, an uncompleted one is in it, and the order is
+        the trail's own append order — the scan acts on this answer, so "every open
+        claim and nothing else" is the whole of what it may be handed.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        settled = await ledger.claim_invocation(decision=authorisation)
+        await ledger.complete_invocation(
+            claim_id=settled.id,
+            outcome=ToolOutcome.SUCCEEDED,
+            incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+        )
+        first_open = await ledger.claim_invocation(decision=authorisation)
+        second_open = await ledger.claim_invocation(decision=authorisation)
+
+        assert await ledger.open_invocations(decision_id="d-allow") == [first_open, second_open]
+
+    async def test_the_open_set_is_scoped_to_the_decision_it_names(self, trail: AuditTrail) -> None:
+        """An unknown decision has none, and a claim under another one is not here."""
+        ledger = _as_ledger(trail)
+        mine = _allowing("d-mine")
+        theirs = _allowing("d-theirs")
+        await trail.record(mine)
+        await trail.record(theirs)
+        claim = await ledger.claim_invocation(decision=mine)
+        await ledger.claim_invocation(decision=theirs)
+
+        assert await ledger.open_invocations(decision_id="d-mine") == [claim]
+        assert await ledger.open_invocations(decision_id="d-never-recorded") == []
+
+    async def test_clear_erases_both_row_kinds(self, trail: AuditTrail) -> None:
+        """One erasure over one record (ADR-0192 §6), read back through these members.
+
+        Two erasure acts over one store would let a user destroy the executions and
+        keep the rulings, which is selective erasure with an extra step. The count is
+        over both kinds, so asserting emptiness alone would leave a store free to
+        return the decision-only figure it returned before this ADR.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        claim = await ledger.claim_invocation(decision=authorisation)
+        await ledger.complete_invocation(
+            claim_id=claim.id,
+            outcome=ToolOutcome.FAILED,
+            incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+        )
+
+        assert await trail.clear() == 3
+
+        assert await trail.export() == []
+        assert await ledger.export_invocations() == []
+        assert await ledger.recent_invocations() == []
+        assert await ledger.open_invocations(decision_id="d-allow") == []
 
     # --- the resolution invariant ----------------------------------------
 

@@ -8732,6 +8732,54 @@ class ToolCall(BaseModel):
 
 
 # --- what a call spent, and what it did (ADR-0192 §§1-2) ---------------------
+# --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
+# The types :class:`~ai_assistant.core.protocols.AssistantEngine`'s methods name,
+# and the complete transitive closure of what their fields reach (ADR-0085 §5).
+# **Neither count is written here, and that is the durable form** (#1125,
+# `CONTRIBUTING.md` -> "No state claims in living documents"): both are owned by
+# `tests/core/test_engine_surface_closure.py`, which walks the declared field graph
+# out from every signature on the surface and fails when the promoted set and the
+# reachable set disagree. A figure in a comment goes stale silently at the next
+# method; a figure a check owns cannot. This block carried "twenty-five types …
+# nineteen methods" against a Protocol that had grown past both, which is the drift
+# ADR-0151 §16 assigned to its implementing lane to correct. ADR-0102
+# §3 adds `GrantableSource` for the four grant operations, and §13 records why
+# ADR-0085 §1's "and nothing else" is not thereby falsified — what that exclusion
+# excludes is *lifecycle*, and the closed graph its title claims is preserved
+# rather than moved. They lived in `orchestration` while one concrete engine
+# and one class of consumer was the whole story (ADR-0042 §1); ADR-0084 §5 rules
+# that a client satisfying the same surface over a transport *is* the second
+# implementation ADR-0042's own revisit clause named, so the surface is a
+# Protocol and its types are `core`'s.
+#
+# **The closure is why this block is large.** Promote a type while something its
+# fields reach stays in `orchestration` and `core` imports `orchestration`, which
+# golden rule 2 forbids and `lint-imports` fails. The walk follows *declared
+# field types*, stops at anything already here, and never follows a method — which
+# is what makes it terminate, and what keeps the projection helpers behind
+# (ADR-0085 §6a: the promoted models carry their fields, not their constructors).
+#
+# Every model below is frozen under ADR-0068 §1, every collection is a tuple, and
+# every string is :data:`EncodableText` (ADR-0085 §4c) — the last held
+# mechanically by ``tests/core/test_text_encodability_coverage.py`` rather than by
+# anyone remembering.
+
+
+#: The page size every enumerating method on the engine surface returns when it
+#: is called without ``limit`` (ADR-0085 §3a). One public constant rather than the
+#: three private ones that carried the figure in two `orchestration` modules, so
+#: the Protocol's stated defaults have a name to refer to. ADR-0073 §2's bounded
+#: default, matching ``AuditTrail.recent``.
+#:
+#: **The default is normative, not decorative.** A default written in a
+#: ``Protocol`` method signature binds nobody — each implementation writes its own
+#: — so a client defaulting to 100 against an engine defaulting to 50 would return
+#: a different page for the same call. ADR-0085 §3a therefore makes it a contract
+#: clause: an implementation called without ``limit`` behaves as though this had
+#: been passed.
+DEFAULT_PAGE_SIZE: Final[int] = 50
+
+
 # The trail's second row kind. A `ToolInvocation` is appended twice per attempt —
 # a **claim** immediately before the callable is entered, and a **completion**
 # pointing back at it — so the record says an act was begun even where the process
@@ -8741,10 +8789,25 @@ class ToolCall(BaseModel):
 # lives on the decision, and a bounded page can hold a completion whose claim and
 # whose decision are not on it (ADR-0192 §2).
 #
-# Declared here rather than inside the promoted block below because that is what
-# they are: `core` leaves the engine surface *reaches*, exactly as
-# `SourceReadRecord` and `ReadOutcome` are for ADR-0186 §10's audit reads. The
-# operations that name them are ADR-0192 §4's and land with the surface group.
+# **Declared inside the promoted block, and not ahead of it, although nothing on
+# the surface names them yet.** ADR-0192 §9 says they "join the promoted set
+# `tests/core/test_engine_surface_closure.py` walks", and where they are declared
+# is what decides whether that can ever happen: `_declared_by_this_change()` sorts
+# everything ahead of :data:`DEFAULT_PAGE_SIZE` as a pre-existing leaf the walk
+# terminates at, so a type declared there is invisible to
+# `test_the_promoted_set_is_the_one_the_adrs_gathered` **forever** — including on
+# the day the surface group lands ADR-0192 §4's two operations and the walk starts
+# reaching it. That is the treatment `SourceReadRecord` and `ReadOutcome` get, and
+# it is right for them: they predate the block (ADR-0185 §12) and were inside the
+# closure the day they landed. These two are new here, so it would be a check
+# switched off rather than a check already satisfied.
+#
+# They are **not** added to `PROMOTED` in this lane, because that set is also
+# asserted from the other side: `test_the_walk_reaches_every_promoted_type` fails
+# on a promoted type no signature reaches, and no signature reaches these until
+# §4's operations exist. Landing them here and leaving `PROMOTED` alone is what
+# makes the surface group's lane *have* to add them — the closure check fails the
+# moment the walk arrives — which is §9's clause enforced rather than remembered.
 
 
 class ToolInvocation(BaseModel):
@@ -8897,54 +8960,6 @@ class RecordedInvocation(BaseModel):
             "nothing about whose bytes went where."
         )
     )
-
-
-# --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
-# The types :class:`~ai_assistant.core.protocols.AssistantEngine`'s methods name,
-# and the complete transitive closure of what their fields reach (ADR-0085 §5).
-# **Neither count is written here, and that is the durable form** (#1125,
-# `CONTRIBUTING.md` -> "No state claims in living documents"): both are owned by
-# `tests/core/test_engine_surface_closure.py`, which walks the declared field graph
-# out from every signature on the surface and fails when the promoted set and the
-# reachable set disagree. A figure in a comment goes stale silently at the next
-# method; a figure a check owns cannot. This block carried "twenty-five types …
-# nineteen methods" against a Protocol that had grown past both, which is the drift
-# ADR-0151 §16 assigned to its implementing lane to correct. ADR-0102
-# §3 adds `GrantableSource` for the four grant operations, and §13 records why
-# ADR-0085 §1's "and nothing else" is not thereby falsified — what that exclusion
-# excludes is *lifecycle*, and the closed graph its title claims is preserved
-# rather than moved. They lived in `orchestration` while one concrete engine
-# and one class of consumer was the whole story (ADR-0042 §1); ADR-0084 §5 rules
-# that a client satisfying the same surface over a transport *is* the second
-# implementation ADR-0042's own revisit clause named, so the surface is a
-# Protocol and its types are `core`'s.
-#
-# **The closure is why this block is large.** Promote a type while something its
-# fields reach stays in `orchestration` and `core` imports `orchestration`, which
-# golden rule 2 forbids and `lint-imports` fails. The walk follows *declared
-# field types*, stops at anything already here, and never follows a method — which
-# is what makes it terminate, and what keeps the projection helpers behind
-# (ADR-0085 §6a: the promoted models carry their fields, not their constructors).
-#
-# Every model below is frozen under ADR-0068 §1, every collection is a tuple, and
-# every string is :data:`EncodableText` (ADR-0085 §4c) — the last held
-# mechanically by ``tests/core/test_text_encodability_coverage.py`` rather than by
-# anyone remembering.
-
-
-#: The page size every enumerating method on the engine surface returns when it
-#: is called without ``limit`` (ADR-0085 §3a). One public constant rather than the
-#: three private ones that carried the figure in two `orchestration` modules, so
-#: the Protocol's stated defaults have a name to refer to. ADR-0073 §2's bounded
-#: default, matching ``AuditTrail.recent``.
-#:
-#: **The default is normative, not decorative.** A default written in a
-#: ``Protocol`` method signature binds nobody — each implementation writes its own
-#: — so a client defaulting to 100 against an engine defaulting to 50 would return
-#: a different page for the same call. ADR-0085 §3a therefore makes it a contract
-#: clause: an implementation called without ``limit`` behaves as though this had
-#: been passed.
-DEFAULT_PAGE_SIZE: Final[int] = 50
 
 
 class ContinuationToken(BaseModel):
