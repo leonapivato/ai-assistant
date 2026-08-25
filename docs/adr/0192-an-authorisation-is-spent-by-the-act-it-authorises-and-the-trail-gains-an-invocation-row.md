@@ -3,13 +3,18 @@
 - Status: Proposed
 - Date: 2026-08-24
 - Partially supersedes: ADR-0029 — §5's closing paragraph, "An approval is not
-  consumed by executing it", and §3's sentence "`ToolResult` carries no cost and no
-  disclosure report" as it reaches cost; §1 and §5 below state each scope and what
-  of §§3 and 5 stands. ADR-0021 — §4's paragraph "It bounds resolutions, not
-  executions, and the difference is worth being precise about"; §2 below states the
-  scope and what of §4 stands. ADR-0148 — §9's third clause, as it reaches **where**
-  an attempt's outcome is recorded and not **which four** outcomes there are; §7
-  below states the scope and what of §9 stands.
+  consumed by executing it", and §5's two-part retry conjunction where the preceding
+  attempt's completion did not commit; §3's sentence "`ToolResult` carries no cost
+  and no disclosure report" as it reaches cost; and §4's "the seam stops waiting"
+  together with the delivery of an expiry's classified result, over the two audit
+  writes §§1 and 3 below add to `invoke` and nothing else. ADR-0021 — §4's paragraph
+  "It bounds resolutions, not executions, and the difference is worth being precise
+  about", and with it `export`'s discharge of ADR-0004 §6 **for the store** rather
+  than for the decision rows. ADR-0148 — §9's third clause, as it reaches **where**
+  an attempt's outcome is recorded and not **which four** outcomes there are. **§7
+  below is the clause-by-clause record**: it states every scope above, what of each
+  superseded section stands, and why each is a supersession rather than an
+  amendment.
 - **Decides `core/protocols.py` and `core/types.py` surface, and it is a breaking
   change.** Golden rule 5 asks that it be flagged. It adds two Protocols —
   `InvocationCompleter` and `InvocationLedger`, the second inheriting the first — so
@@ -1365,9 +1370,26 @@ the count.
 > lane writes a second classifier for it — the conversion is **total**, an
 > unrepresentable name becoming `UNREPRESENTABLE_FAULT_CLASS`; the rejected name is
 > "dropped here and goes nowhere, log included"; and the `__name__` read is itself
-> guarded, so a hostile metaclass takes down neither the diagnostic nor the call.
+> guarded, so a metaclass raising an `Exception` from it takes down neither the
+> diagnostic nor the call.
 > This is ADR-0119 §2's rule — no string in the record is derived from data — held
 > at one more emitter, with §3's reserved literal as the escape it already minted.
+
+> **Normative.** **That guard is over `Exception` and this ADR does not widen it.**
+> `fault_class_of` catches `Exception` and deliberately not `BaseException`, "so a
+> `CancelledError` raised *by the name read* is delivered onward as ADR-0060 §1
+> requires" — its own stated rule, and the same one that makes its parameter
+> `Exception`. So the totality this section relies on is totality over `Exception`,
+> and a `BaseException` a hostile metaclass raises from the name read is **not**
+> converted to the reserved literal: it leaves the emitting frame. Nothing new is
+> owed for it. On the claim path it is an exit before the callable, governed by §1's
+> clauses on a `BaseException` there; on the completion path it is governed by this
+> section's own clauses on a `BaseException` raised there — the `CancelledError`
+> branches by the `Task.cancelling()` count, everything else propagating unchanged
+> with no diagnostic standing in for it. Catching one here to protect the diagnostic
+> would classify a cancellation as a fault, which is the one thing `fault_class_of`
+> and ADR-0119 refuse, and it would need the second classifier the clause above
+> forbids.
 
 > **Normative.** Where the exception being reported is a `BaseException` that is
 > **not** an `Exception`, the diagnostic carries **no class at all** — the remaining
@@ -2516,10 +2538,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > `fault_class_of`'s totality is what §3 relies on. A collaborator raising
 > `type("<sentinel>", (RuntimeError,), {})()` yields a diagnostic carrying
 > `UNREPRESENTABLE_FAULT_CLASS` and not the name; an exception whose `__name__` read
-> itself raises yields the same literal and neither takes the diagnostic down nor
-> changes what `invoke` returns; and a completion-path `BaseException` that is not an
-> `Exception` yields a diagnostic with **no class field at all** (§3). No test
-> asserts a raw `type(e).__name__` anywhere on this path.
+> raises an **`Exception`** yields the same literal and neither takes the diagnostic
+> down nor changes what `invoke` returns; and a completion-path `BaseException` that
+> is not an `Exception` yields a diagnostic with **no class field at all** (§3). No
+> test asserts a raw `type(e).__name__` anywhere on this path. **No case asserts a
+> literal where the `__name__` read raises a `BaseException` that is not an
+> `Exception`**, and none may: `fault_class_of` lets that one propagate by design
+> (§3), so a test demanding the literal would demand the widening ADR-0119 refuses.
+> A case pinning the propagation instead is the completion-path `BaseException` case
+> beside it, which reaches it wherever it arose.
 
 > **Normative.** The suite pins **all four shapes of §3's diagnostic matrix**
 > field by field, and asserts the absent fields are absent rather than merely
@@ -2648,6 +2675,20 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > is attempted (§3). The same
 > clock raising it while an external cancellation **is** pending propagates instead,
 > and the test distinguishes the two by the `Task.cancelling()` count alone (§3).
+
+> **Normative.** The **engine operations' own obligations are pinned as
+> conformance cases**, because §4 states them over "every implementation" and no
+> adapter or store case reaches them. Three groups: the **order** — rows at equal
+> `recorded_at` come back by `id` ascending, under a `recorded_at` descending
+> sequence, so an implementation sorting on the instant alone or leaving insertion
+> order for a tie fails; the **prefix invariant** — `recent_invocations(limit=n)`
+> equals the first `n` of `export_invocations()` over the same trail state, for an
+> `n` short of, equal to and past the row count; and **`limit` validation**, refused
+> for a `bool`, a non-integer, zero, a negative and `2**63`, each asserted to raise
+> **before any trail read**, with a trail that records its calls. Without them an
+> engine that forwards a `limit` straight through, or relays the store's order
+> unmaterialised, passes every adapter case §9 names while breaking §4's clauses in
+> terms.
 
 > **Normative.** Each adapter the surface group writes against §4 is tested on
 > **every completion shape §2 admits**, not on `FAILED` alone — a renderer that
