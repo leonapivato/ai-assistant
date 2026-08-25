@@ -420,8 +420,30 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > **Normative.** It has **exactly two well-formed shapes** and a validator refuses
 > every other combination at construction. A **claim** carries `completes`,
 > `outcome`, `incurred_cost` and `failure_kind` all unset. A **completion** carries
-> `completes`, `outcome` and `incurred_cost` all set, and `failure_kind` set when
-> and only when `outcome` is `FAILED`. `completes` is the discriminator.
+> `completes`, `outcome` and `incurred_cost` all set, and `failure_kind` set **only
+> where** `outcome` is `FAILED`. `completes` is the discriminator.
+
+> **Normative.** A `failure_kind` is **transcribed from the `ToolResult` that
+> carried one and is never synthesised**. So a `FAILED` completion derived from a
+> `ToolResult` carries its kind, and a `FAILED` completion derived from an
+> **exception** — a cancellation ADR-0029 §4 classifies `FAILED` through
+> `ToolDefinition.interrupted_outcome` — carries **none**. That is why the shape
+> above permits `FAILED` without a kind rather than requiring one.
+
+> **Normative.** No lane fills that absence. ADR-0031 §3 rules that "The seam never
+> synthesises" `CANCELLED`, and no other member of `ToolFailureKind` describes an
+> externally delivered cancellation: `TIMED_OUT` is a deadline the seam owns,
+> `REFUSED` is an upstream declining, `UNAVAILABLE` is one that could not be
+> reached. Writing any of them here would be the seam inventing a cause, which is
+> the failure ADR-0031 §3 corrected. The absence is the honest value and it is
+> readable as one: a `FAILED` with no kind is a failure this system observed
+> without a reported cause.
+
+> **Normative.** A kindless `FAILED` therefore **admits no further claim** under
+> §1, whose conjunction requires "a recorded `failure_kind` whose `retryable` is
+> true". A cancelled act is not auto-retried, which is the direction ADR-0029 §5 and
+> ADR-0014 §4 already take, and it falls out of the rule rather than needing a
+> clause of its own.
 
 > **Normative.** `core/types.py` gains `RecordedInvocation`, frozen with
 > `extra="forbid"`, whose fields are exactly: `invocation: ToolInvocation`;
@@ -672,13 +694,21 @@ the count.
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
 
-> **Normative.** That diagnostic carries **enumerated fields and no exception
-> content**: the exception's **class**, the ledger operation attempted, the claim's
-> id and its decision's id, and the outcome that was being written. It carries no
-> exception instance, no exception message, no `str()` of one, and no member of a
-> cause chain — not the ledger's own, and not one an injected callable raised. The
-> exception object still preserves its cause (§2); what is bounded here is the
-> **log line**.
+> **Normative.** That diagnostic carries **enumerated fields and no free text**:
+> the exception's **class**, the ledger operation attempted, and the outcome that
+> was being written. It carries no exception instance, no exception message, no
+> `str()` of one, and no member of a cause chain — not the ledger's own, and not one
+> an injected callable raised. The exception object still preserves its cause (§2);
+> what is bounded here is the **log line**.
+
+> **Normative.** It carries **no identifier**: not the claim's, not the decision's,
+> not the step's. `DurableIdentifier` is a non-blank encodable string a caller
+> minted, and ADR-0031 §5's neighbouring finding is that a decision id is not
+> contractually log-safe — an id reading `recipient@example.com` is a conforming
+> value. So the operator gets the class, the operation and the outcome, which name
+> the fault, and no lane adds an id "for correlation". A Tier 2 diagnostic that
+> could be made to carry a recipient is the ADR-0004 §5 breach this clause exists to
+> refuse.
 
 > **Normative.** The bound is ADR-0004 §5's and this ADR does not relax it. A clock
 > or a store this system did not write can raise
@@ -1025,6 +1055,27 @@ the milestone-24 ruling found it.
 > **Normative.** `incurred_cost` is the price of the invocation. It is never money
 > the tool moved, and no lane reads it as a transacted amount (ADR-0016 §4).
 
+> **Normative.** **No integration can populate this field yet, and this ADR mints
+> no channel by which one could.** `ToolImplementation` returns `FrozenJson` and
+> nothing else, ADR-0029 §1 leaves the callable's shape to `tools/` and "does not
+> contract it", and ADR-0031 §3 records the same gap for six `ToolFailureKind`
+> members as issue #192. So a registered integration reports `None`, the row records
+> `UNKNOWN`, and a budget over it fails closed — which is the right interim answer
+> and the reason the field is a `ToolCost` rather than a bare number.
+
+> **Normative.** The implementing lane therefore proves the **path** rather than
+> populating it. `ToolResult.incurred_cost` reaches `ToolInvocation.incurred_cost`
+> unaltered where a figure is supplied at the seam, and a `None` becomes a
+> `ToolCost` whose basis is `UNKNOWN`, both asserted end to end (§9). No lane
+> substitutes `ToolDefinition.cost` at any point on that path to make the test
+> pass — §5's third clause forbids exactly that, and a test that could be satisfied
+> by the declaration would certify the fiction ADR-0016 §4 refused.
+
+> **Normative.** Whichever ADR answers #192 supplies the integration-side carrier
+> for this field alongside the six failure kinds, because it is the same missing
+> channel and splitting it would give `tools/` two ways for a callable to report
+> what it knows. This ADR neither pre-empts that shape nor blocks on it.
+
 > **Normative.** This ADR decides no ceiling, no budget period, no currency
 > reconciliation and no refusal outcome. Those are the budget ADR's, and it cites
 > the field named above rather than reshaping it.
@@ -1339,10 +1390,21 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > and asserts that the instant the admission was decided on is the instant stored on
 > the row.
 
-> **Normative.** The suite proves the diagnostic bound rather than asserting it: a
-> collaborator raising an exception whose message carries a Tier 1 sentinel, with
-> the test failing if that sentinel reaches the log through the message, the
-> `str()`, or any member of the cause chain (§3, ADR-0004 §5). A **completion clock
+> **Normative.** The suite proves the diagnostic bound rather than asserting it,
+> with a Tier 1 sentinel in **three** hostile positions: an exception message, a
+> member of its cause chain, and a claim's or decision's **identifier** — the test
+> failing if the sentinel reaches the log by any route (§3, ADR-0004 §5, ADR-0031
+> §5).
+
+> **Normative.** It pins the cost path end to end: a seam-supplied figure reaching
+> `ToolInvocation.incurred_cost` unaltered, and a `None` arriving as a `ToolCost`
+> whose basis is `UNKNOWN` — with a case asserting that a `ToolDefinition.cost`
+> present on the definition does **not** appear on the row (§5).
+
+> **Normative.** It pins the kindless `FAILED`: a completion derived from a
+> cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
+> `failure_kind`, admits no further claim under §1, and the `INDETERMINATE` branch
+> of the same classification is pinned beside it (§§1–2). A **completion clock
 > raising `CancelledError` directly**, with no external cancellation pending,
 > propagates it unchanged and attempts no second completion (§3).
 
@@ -1526,9 +1588,12 @@ row kinds, and the annotation belongs to the kind that was already there.
   claim, so nothing side-effecting executes. That is the fail-closed direction and
   it is chosen deliberately.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
-  none must.** The default is `None` and `None` becomes `UNKNOWN` on the row, so a
-  tool that never grows the field fails a budget closed rather than silently
-  contributing zero. It also reverses one sentence of ADR-0029 §3, which is
+  none must — and for now none can.** `ToolImplementation` returns `FrozenJson`, so
+  until #192's integration channel lands, every registered tool reports `None`, every
+  row records `UNKNOWN`, and a budget over them fails closed. That is the honest
+  interim state rather than a silent zero, and it is why the field is a `ToolCost`
+  and not a number. The contract lands now because the ceiling ADR needs something
+  stable to cite (§5). It also reverses one sentence of ADR-0029 §3, which is
   recorded rather than glossed (§7).
 - **An `Idempotency.NONE` side-effecting tool now gets exactly one invocation per
   authorisation, enforced by the store.** That is stricter than the trail was and
