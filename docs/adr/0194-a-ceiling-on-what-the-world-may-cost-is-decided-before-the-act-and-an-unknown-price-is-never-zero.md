@@ -225,6 +225,19 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > The mechanism does not refuse on that ground; what is lost is the membership of a
 > handful of instants no clock this system accepts can reach (ADR-0026).
 
+> **Normative.** The **same rule binds at the other end**, and it is stated
+> separately because an implementation that clamped only the late boundary passes
+> every case the clause above describes. Where a period's `start` is not
+> representable — as a `UtcInstant`, or as a civil time in the period's own zone —
+> the `start` is the **earliest instant representable in both**, and the period is
+> opened at it. A **positive-offset** zone reaches this first, and it is reachable
+> from a clock reading `checked_clock` accepts: at `0001-01-02T00:00:00Z` in
+> `Etc/GMT-7` the current calendar month begins on civil `0001-01-01`, whose local
+> midnight is earlier than the earliest instant there is, so an implementation that
+> constructs that midnight raises `OverflowError` where this rule requires a
+> clamped `start`. The mechanism does not refuse on that ground either, and what is
+> lost is the same handful of unreachable instants at the opposite end.
+
 > **Normative.** Both ceilings bind independently and simultaneously where both
 > are set. A call is refused where it would cross **either**. A
 > `world_spend_day_ceiling` above the month ceiling is accepted and is simply
@@ -739,6 +752,27 @@ the two properties it has rather than letting a reader assume the stronger one.
 > do that, and it makes the no-stranded-reservation rule bounded by construction
 > instead of conditional on another invocation's store. §11 drives both halves.
 
+> **Normative.** What the deadline clause above promises is bounded by the store
+> read's **own** cancellation behaviour, and this ADR states that limit rather than
+> implying a stronger one. `permissions/audit.py`'s `_run_to_completion` — the
+> house pattern for a serialised `sqlite3` connection, and ADR-0054's deliberate
+> choice — absorbs a cancellation until the worker *physically* finishes, because
+> releasing the lock while the worker still holds the connection would let a second
+> caller use it concurrently. A gate reading through that pattern over wedged SQL
+> is therefore not stopped by `invoke`'s `timeout`, and every fixture written
+> against a **cancellable fake** passes while it happens.
+
+> **Normative.** That is **not a hazard this ADR introduces**, and it is not this
+> ADR's to close. ADR-0192's completion append already sits inside `invoke` over a
+> store built the same way, so the admission's read is the same limit one seam
+> earlier and not a new class of it; closing it means reading ADR-0054's absorption
+> against ADR-0029 §4's deadline and deciding which yields, which is a change to a
+> rule this ADR does not own. It is filed as **#1563** and scoped out in §8. What
+> this ADR does own it does: §11 requires the lane to drive the **primary** holder
+> through `invoke` and through shutdown rather than only a fake, so whichever
+> strategy the lane takes is a stated and tested one instead of an inherited
+> default nobody looked at.
+
 > **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
 > ADR-0192's completion has been appended or after the failure that prevented it.
 > A release is **idempotent** and raises no `Exception`: an unknown handle and a
@@ -1122,7 +1156,11 @@ whole explanation.
 > `period_start: UtcInstant` and `period_end: UtcInstant`, `period_end` exclusive;
 > `time_zone: NonBlankEncodableText`, the IANA zone those boundaries were computed
 > in; `ceiling: Decimal | None`; `currency: EncodableText | None`; and
-> `accounted: Decimal | None`.
+> `accounted: Decimal | None`. The two bounds are not free values beside the other
+> fields: §11's invariant clause binds them to exactly the boundaries §1's rule
+> computes for this value's own `period` in its own `time_zone`, validated on the
+> model, because the value crosses the wire and a consumer has nothing else to
+> check a producer against.
 
 > **Normative.** Both string fields are `EncodableText`-based and **not** bare
 > `str`, because ADR-0085 §4c binds every string the promoted surface can carry
@@ -1335,7 +1373,15 @@ is where that lands.
 > binds. It is `async` because the member it relays is I/O-bound, which is
 > `CLAUDE.md`'s rule for one.
 
-> **Normative.** `interfaces/cli.py` gains exactly one command, which renders
+> **Normative.** `interfaces/cli.py` gains exactly one command, and it is named
+> here rather than left to the lane: **`spend`**, invoked as `assistant spend`,
+> taking no argument and no option. A command's token is the whole of its public
+> invocation contract — a user's script binds to it, and `spend`, `spending` and
+> `spend-totals` would each satisfy a clause that only described the rendering — so
+> the name is decided where the operation is. It follows the single-noun shape the
+> surface already uses for a read (`beliefs`, `questions`, `conversations`) rather
+> than the hyphenated form reserved for a verb on an object
+> (`forget-conversation`, `export-decisions`). It renders
 > that operation's `SpendTotal` values: each period, its bounds rendered in the
 > value's own `time_zone` and never in the client's, its ceiling and currency
 > where configured, and its accounted total. Where `accounted` is absent it
@@ -1489,6 +1535,16 @@ Scoping something out is a decision, so each carries the condition that reopens 
 > a durable reservation or an admission folded into ADR-0192's own atomic append.
 > Parallel execution *inside* a turn does **not** reopen it: §3 already handles
 > that.
+
+> **Normative.** **Whether a store read inside `invoke` may outlive its deadline**
+> is not decided (**#1563**). ADR-0054's `_run_to_completion` absorbs a cancellation
+> until its worker finishes and ADR-0029 §4 requires `invoke` to enforce a
+> `timeout`; the two have never been read against each other, and ADR-0192's append
+> already sits under both (§3). This ADR neither relaxes §4's deadline nor
+> supersedes ADR-0054's absorption — it states the limit where a reader meets it
+> and requires the lane to test the primary holder against it. Reopened by the
+> decision that reconciles the two, which owes a rule for a store read inside a
+> deadline and a connection-ownership answer at shutdown, and by nothing else.
 
 > **Normative.** **Money a tool moves** is not decided and no ceiling here bounds
 > it. ADR-0016 §7's transacted-cost deferral, untouched: the price of a flight
@@ -2081,11 +2137,29 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
 > both bounds convert into without overflowing**, so neither a renderer's lookup
-> nor its conversion can fail on a value the model accepted; `period_start` is
-> strictly before `period_end` except on §1's zero-length period, where they are
-> equal; `ceiling` is non-`None` only where `currency` is; and `accounted` is
+> nor its conversion can fail on a value the model accepted; `ceiling` is
+> non-`None` only where `currency` is; and `accounted` is
 > non-`None` only where `currency` is. A construction violating any of them raises
 > at validation, and the shared contract drives each as a hostile construction.
+
+> **Normative.** The **bounds must describe the period the value names, in the zone
+> it names**, and `period_start < period_end` is not that invariant. `period_start`
+> and `period_end` are exactly the boundaries §1's rule computes for `period` in
+> `time_zone` — the same rule, including its `fold` selection, its skipped-date
+> handling and both of its representability clamps — so a `CALENDAR_DAY` carrying
+> `2026-01-01` to `2026-02-01` in UTC **raises**, where the ordering invariant
+> alone admits it. This matters because the value crosses the wire (§5): a hub
+> answering with a month's bounds under a daily `period` would otherwise render as
+> a valid daily total, and the renderer has nothing else to check it against.
+
+> **Normative.** Equal bounds are therefore admitted on **one** condition and not
+> as a general exemption: `period` is `CALENDAR_DAY` and that civil date is skipped
+> whole in `time_zone`, which is the only way §1's rule produces a zero-length
+> period. Equal bounds in a zone where that date exists raise, and equal bounds on
+> a `CALENDAR_MONTH` raise unconditionally — no calendar month is skipped whole.
+> A validator written as "start before end, or equal" passes both. Each of the
+> three cases named across these two clauses is driven as a hostile construction
+> beside the invariants above, and each is asserted to raise at validation.
 
 > **Normative.** The **numeric** invariants are driven as hostile constructions
 > too, and they are the ones a validator list is likeliest to omit: a negative
@@ -2188,6 +2262,17 @@ the ADRs it depends on rather than replacing them.
 > **negative-offset** one, with the rendering §6 requires exercised on the clamped
 > bound rather than only its construction.
 
+> **Normative.** It drives §1's **lower** clamp in the same two shapes, which the
+> clause above does not reach: at a `checked_clock` reading of
+> `0001-01-02T00:00:00Z`, a positive-offset zone (`Etc/GMT-7`) whose current
+> month's civil start carries its local midnight below the earliest representable
+> instant, asserting the returned `period_start` is the clamped one and that both
+> periods and their §6 rendering are produced rather than an `OverflowError`; and
+> the negative-offset mirror, where no clamp applies and the ordinary boundary is
+> returned, so the fixture pins the clamp to the case that needs it. An
+> implementation clamping only the late boundary passes every fixture above this
+> one and crashes here.
+
 > **Normative.** The lane drives `clear()` interleaved with an in-flight
 > invocation in both orderings, and asserts ADR-0192 §6's outcome together with
 > this ADR's budget consequence: the erased invocation's spend is not counted, and
@@ -2209,9 +2294,32 @@ the ADRs it depends on rather than replacing them.
 > collapsing §5's two absences into one message passes every other clause here and
 > tells a user "no total" while their calls are being refused.
 
+> **Normative.** It drives §6's command by its **token**: `assistant spend` is the
+> invocation asserted, and the token appears in the CLI's own help output. A suite
+> that reaches the renderer through its Python function alone leaves the one thing
+> a user's script binds to untested, and a rename would pass it.
+
 > **Normative.** The lane asserts that a refused call left **no** claim and no
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
 > ADR-0034 §1's pre-callable exit.
+
+> **Normative.** The lane drives the deadline against the **primary** holder and
+> not only against the suite's cancellable fake, which is what §3's limit clause is
+> about: a real gate whose store read is wedged, reached through
+> `ToolInvoker.invoke` with a short `timeout`, and the same holder taken through
+> shutdown while that read is outstanding. What is asserted is whichever answer the
+> lane's own read strategy gives — the call returning at its deadline, or the
+> deadline bounded by the worker (§3, #1563) — **stated in the test** together with
+> what happens to the connection at shutdown. A lane that writes only fake-backed
+> deadline fixtures inherits ADR-0054's absorption without deciding it, and this
+> clause exists so that cannot happen quietly.
+
+> **Normative.** The lane also drives §5's bounds invariant against the **real**
+> producer rather than only as a hostile construction: the `SpendTotal` values
+> `spend_totals` returns are asserted to carry exactly the boundaries §1's rule
+> computes for their own `period` and `time_zone`, on the DST, skipped-date and
+> both-clamp fixtures above. A model validator and a producer can disagree, and the
+> validator is the only thing a wire consumer has.
 
 > **Normative.** The lane drives §2's stated overrun end to end: a call whose
 > declaration understates it is **admitted**, its reported cost carries the
