@@ -1,6 +1,6 @@
 # 192. An authorisation is spent by the act it authorises, and the trail gains an invocation row
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Partially supersedes: ADR-0029 — §5's closing paragraph, "An approval is not
   consumed by executing it", and §5's two-part retry conjunction where the preceding
