@@ -737,8 +737,9 @@ the two properties it has rather than letting a reader assume the stronger one.
 > under-count, while the completion's own append, which this holder does not
 > serialise against at all, cannot.
 
-> **Normative.** `release_admission` therefore **never waits**, and it is
-> deliberately *not* placed inside the admission's critical section to achieve the
+> **Normative.** `release_admission` therefore **never waits** — it is
+> **synchronous** (§5), so it cannot — and it is deliberately *not* placed inside
+> the admission's critical section to achieve the
 > clause above. It records the release in the holder's own memory — an operation
 > that touches no store, performs no I/O and cannot block — and a recorded release
 > takes effect at the **start of the next admission's critical section**, before
@@ -751,14 +752,14 @@ the two properties it has rather than letting a reader assume the stronger one.
 > inside the critical section, so a gate blocked on a store that never answers
 > holds it for as long as **its own** deadline allows. Were a release made to wait
 > on that exclusion, a *second* invocation whose callable had already returned
-> would block in its `finally` behind the first invocation's store I/O; the
-> no-stranded-reservation rule below, which requires a cancelled release to
-> complete its state change before re-raising, would hold it there through its own
-> expiry, and its `invoke` would outlast the `timeout` its caller set — the one
-> thing the deadline clause above promises this ADR does not do, and it would do it
-> to an invocation that had already succeeded. A release that cannot block cannot
-> do that, and it makes the no-stranded-reservation rule bounded by construction
-> instead of conditional on another invocation's store. §11 drives both halves.
+> would block in its `finally` behind the first invocation's store I/O, and its
+> `invoke` would outlast the `timeout` its caller set — the one thing the deadline
+> clause above promises this ADR does not do, and it would do it to an invocation
+> that had already succeeded. A release that cannot block cannot do that. §5 makes
+> that unconditional by making the member synchronous: there is no await in it to
+> put another invocation's store behind, and the property is a fact about the
+> signature rather than a rule an implementation could satisfy on some paths.
+> §11 drives it.
 
 > **Normative.** A store read that **declines to be cancelled** is therefore not
 > an exception to the clause above; it is the case ADR-0029 §4 already excludes,
@@ -791,10 +792,17 @@ the two properties it has rather than letting a reader assume the stronger one.
 > **Normative.** Neither member leaves a reservation nobody can release. Where
 > `admit_invocation` has recorded a reservation and does not deliver its handle —
 > a `CancelledError` between the two is the reachable case — it **removes that
-> reservation before the exception leaves the member**. Where
-> `release_admission` is cancelled, it completes its own state change first and
-> re-raises afterwards. Both are the same rule: a `BaseException` propagates
-> unchanged (§4), and it does not take a reservation's only key with it.
+> reservation before the exception leaves the member**. That is the whole of the
+> rule: a `BaseException` propagates unchanged (§4), and it does not take a
+> reservation's only key with it.
+
+> **Normative.** `release_admission` needs no clause of its own here, and that is
+> §5's synchronous signature doing the work rather than an omission. A
+> cancellation is delivered at a suspension point; the member has none, and the
+> invoker's `finally` reaches it with no `await`. So there is no interleaving in
+> which a release begins, is interrupted and leaves the reservation standing —
+> the case an `async` release would have had to legislate for, and could not have
+> been tested on.
 
 > **Normative.** A reservation is **in-memory state of the holder** — never a row,
 > never durable, and never a `PermissionDecision`. It is discarded when the process
@@ -929,8 +937,8 @@ turn, which this section now handles.
 > **Normative.** A call is refused with `SpendCeilingError` where a **configured
 > ceiling would be crossed** — and only then. It is refused with
 > `SpendUndeterminedError` where the spend the admission needed **could not be
-> reduced to a number**, on exactly six grounds: an amount the admission reads is
-> not countable under §1; the call's own declared cost has no number at all, being
+> reduced to a number**, on exactly six grounds: the call's **own declared**
+> `ToolCost.amount` is not countable under §1; the call's own declared cost has no number at all, being
 > an `UNKNOWN` basis or a cost in a currency other than `world_spend_currency`
 > with no allowance configured (§2); the injected clock raised; the store read
 > failed; the period is indeterminate under §2; or the arithmetic trapped. No other
@@ -962,6 +970,22 @@ turn, which this section now handles.
 > an open claim, an unpriced cost or an amount that is not countable crossed no
 > ceiling at all, and reporting it as one would tell the user a number about their
 > budget that nothing measured.
+
+> **Normative.** The first ground reaches the **declaration and nothing else**. A
+> **reported** amount on a completion row that is not countable is not this ground
+> however the admission comes to read it: §1 sends it to the accounted total,
+> which §2 makes **indeterminate**, and the refusal that follows is the
+> **fifth** ground — the one that names which periods could not be measured. The
+> distinction is stated because the wider reading is available and wrong on both
+> halves of the order's own rationale: the first two grounds are "facts about the
+> call and need no I/O", and a row is neither. Two conforming implementations
+> would otherwise refuse the same call under different grounds — one naming an
+> amount, the other naming the day and the month — and only the second tells the
+> operator which period to look at and which will clear on its own. The
+> `SpendUndeterminedError` for a non-countable reported amount therefore names
+> every configured period that row falls in, in §5's fixed order, exactly as any
+> other indeterminacy does. §11 drives it on the next admission and not only on
+> the total.
 
 > **Normative.** The refusal is an exit **before the callable is entered**, so it
 > falls in the window ADR-0034 §1 governs and qualifies on that section's second
@@ -1065,25 +1089,49 @@ whole explanation.
 ### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, three `core` types, one holder
 
 > **Normative.** `core/protocols.py` gains **two** Protocols. `SpendGate` has
-> **two** `async` members:
-> `admit_invocation(*, estimate: ToolCost) -> SpendAdmissionHandle`, which
-> evaluates §3's admission, raises under §4 where it refuses, and where it admits
-> takes §3's reservation and returns its handle; and
-> `release_admission(handle: SpendAdmissionHandle) -> None`, which drops that
-> reservation and is the idempotent, no-raising, **never-blocking** member §3
-> requires — it awaits no store and no lock a store read is held under, which is
-> §3's liveness rule and the reason it is `async` only for symmetry with the member
-> beside it. Neither appends a row and neither
-> writes durable state. `SpendLedger` has one member, **`async`** like the two
-> above it and with exactly this signature:
+> **two** members, and exactly **one** of them is `async`:
+> `async def admit_invocation(*, estimate: ToolCost) -> SpendAdmissionHandle`,
+> which evaluates §3's admission, raises under §4 where it refuses, and where it
+> admits takes §3's reservation and returns its handle; and
+> `def release_admission(handle: SpendAdmissionHandle) -> None` —
+> **synchronous** — which drops that reservation and is the idempotent,
+> no-raising, **never-blocking** member §3 requires. Neither appends a row and
+> neither writes durable state.
+
+> **Normative.** `release_admission` is synchronous **because it is not I/O-bound
+> and must not become so**, which is `CLAUDE.md`'s own rule for the choice: §3
+> gives it no store, no I/O and no lock a store read is held under, so there is
+> nothing for it to await. Symmetry with the member beside it is not a ground that
+> rule recognises, and the asymmetry buys three properties an `async` release only
+> approximates. It cannot be made to wait — by construction rather than by clause,
+> which is §3's liveness rule made structural, and a lane cannot later add an
+> await to it without changing the signature this ADR fixes. It carries no
+> suspension point, so a `CancelledError` cannot be delivered inside it and §3's
+> no-stranded-reservation rule holds for it **unconditionally** rather than
+> describing a race. And the invoker's `finally` reaches it with no `await`, so
+> unwinding under a cancellation cannot lose the release.
+
+> **Normative.** An `async` release containing no await would have all three in
+> practice and **none of them in the contract**, and it is refused for the second
+> reason above rather than for tidiness: a cancellation is delivered only at a
+> suspension point, so a shared conformance suite could not drive a
+> cancelled-release fixture against an implementation with none — and those are
+> the conforming ones. The obligation would be unwritable against exactly the
+> implementations it was meant to hold, which is a contract stating a property
+> nothing can check. Making the member synchronous removes the property's
+> antecedent instead of leaving a fixture to fail or be skipped.
+
+> **Normative.** `SpendLedger` has one member, **`async`** like
+> `admit_invocation` above it and with exactly this signature:
 > `async def spend_totals(self) -> tuple[SpendTotal, ...]`. It returns one
 > `SpendTotal` per period this ADR defines, in a fixed order — `CALENDAR_DAY` then
 > `CALENDAR_MONTH` — and returns both entries whatever is configured. It is `async`
 > because it reads a store, which is `CLAUDE.md`'s rule for an I/O-bound method,
 > and because §6's relaying `AssistantEngine` member is `async` for that reason and
 > could not await a synchronous one without either blocking the loop or diverging
-> from the signature it relays. Every member of both Protocols is awaited by the
-> conformance suites and by every caller.
+> from the signature it relays. Both `async` members are awaited by the
+> conformance suites and by every caller; `release_admission` is called, and no
+> caller awaits it.
 
 > **Normative.** `core/types.py` gains `SpendAdmissionHandle`, frozen with
 > `extra="forbid"`, carrying exactly `handle: Identifier` and nothing else. It is a
@@ -1133,8 +1181,9 @@ whole explanation.
 > `SpendAdmissionHandle` refuses, is replaced by a value the holder generates (§3),
 > so neither a `ValidationError` nor the factory's own exception reaches `tools/`.
 
-> **Normative.** `release_admission` raises **no** `Exception` at all, under §4's
-> same `BaseException` exemption. It is called from a `finally` whose call has
+> **Normative.** `release_admission` raises **no** `Exception` at all, and being
+> synchronous it is reached by no `CancelledError` either, so §4's `BaseException`
+> exemption has nothing to except here (§3). It is called from a `finally` whose call has
 > already succeeded or already failed, and a member that could raise there would
 > substitute a book-keeping failure for the outcome the caller was about to
 > report.
@@ -2029,6 +2078,12 @@ the ADRs it depends on rather than replacing them.
 > against an implementation that reserves nothing, and does not discharge this
 > clause.
 
+> **Normative.** The suite asserts `release_admission` is **not** a coroutine
+> function and that calling it returns `None` rather than an awaitable, which is
+> the one thing that keeps §5's signature a contract rather than a habit: an
+> implementation declaring it `async` still satisfies every behavioural clause
+> below, and reintroduces the suspension point §5 removed.
+
 > **Normative.** The suite drives `release_admission` as the no-raising member §5
 > requires: an unknown handle, a handle already released and a handle taken while
 > no ceiling was configured each raise nothing and leave the projection where it
@@ -2169,19 +2224,24 @@ the ADRs it depends on rather than replacing them.
 > already admitted, whose callable has returned and which releases its handle while
 > the first is still blocked. The release returns promptly and the second `invoke`
 > returns within its **own** `timeout`, unaffected by the first invocation's store
-> and by the first invocation's deadline. It drives the same with the second
-> invocation's release **cancelled** while the first is still blocked, and asserts
-> that it still drops the reservation and re-raises without waiting. An
-> implementation that serialises releases behind admissions passes every fixture
-> above this one and returns late on both.
+> and by the first invocation's deadline. It drives the second half in the shape
+> §5's signature leaves available: the second invocation's `finally` running while
+> the whole task is **being cancelled**, where the release still lands and drops
+> the reservation, because a synchronous call in a `finally` completes whatever
+> the task's cancellation state is. An implementation that serialises releases
+> behind admissions passes every fixture above this one and returns late on both.
 
-> **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
-> asserts on the projection rather than on the exception alone: a `CancelledError`
-> delivered inside `admit_invocation` after it would have reserved leaves the later
-> projection unchanged — no reservation nobody holds a handle for — and one
-> delivered inside `release_admission` still drops the reservation. In both the
-> `CancelledError` propagates unchanged, which is the assertion that is *not*
-> sufficient on its own.
+> **Normative.** The suite drives §3's cancellation rule at the **one** boundary
+> that has an interior, and asserts on the projection rather than on the exception
+> alone: a `CancelledError` delivered inside `admit_invocation` after it would have
+> reserved leaves the later projection unchanged — no reservation nobody holds a
+> handle for — and the `CancelledError` propagates unchanged, which is the
+> assertion that is *not* sufficient on its own. There is deliberately no mirror
+> for `release_admission`, and that is the signature rather than a gap: §5 makes it
+> synchronous, a cancellation is delivered only at a suspension point, and the
+> member has none — so a suite asserting a cancellation *inside* it would be
+> asserting over a state no conforming implementation can enter, and would pass or
+> fail on whether an implementation happened to carry a stray await.
 
 > **Normative.** The suite drives a reservation **across a period boundary** with
 > the invocation still outstanding: a call admitted late in a day, the clock
@@ -2352,6 +2412,18 @@ the ADRs it depends on rather than replacing them.
 > suite carrying only over-magnitude fixtures discharges neither bound: an
 > implementation that dropped the fractional-digit half of the predicate, and one
 > that wrote `<=` where §1 says strictly less than, each pass it.
+
+> **Normative.** On that last one the suite drives the **next admission** as well
+> as the total, because §4's first and fifth grounds are both available to an
+> implementation reading that row and only one of them is right: with a ceiling
+> configured on each period and a completion reporting `Decimal("1E15")`, the next
+> call — whose own declaration is countable — is refused with
+> `SpendUndeterminedError` whose message names the **indeterminate periods**, in
+> §5's fixed order, and **not** the amount. An implementation that classified it
+> under the declaration ground passes the totals half of the clause above and
+> every isolated ground fixture, and then sends an operator looking at a `ToolCost`
+> when what they need is to know which period cannot be measured and that the
+> month will still be unmeasurable tomorrow.
 
 > **Normative.** The suite also drives the case the predicate's wording exists for
 > — a value written with ten fractional digits that is numerically equal to one
