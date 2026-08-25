@@ -11,11 +11,14 @@
   the required reviews are green" and ADR-0015 §1.
 - Amends: ADR-0021 §6's **Spend accumulation** deferral and ADR-0029 §7's
   spend-accumulation half.
-- **Partially supersedes ADR-0087** — §2c's enumeration of the types the wire
-  encoding carries, which gains a `Decimal` row because §5 promotes a member
-  carrying one and the table is exhaustive by construction (the codec raises on a
-  type it does not list). No existing row's spelling moves. §10 applies ADR-0070
-  §1 and ADR-0082 §1 to each of the three.
+- **Partially supersedes ADR-0087** — the enumeration of the types the wire
+  encoding carries, in the **three** clauses that state it: §2c's table, §6's
+  inventory of the scalar types the promoted surface reaches, and §9's count of the
+  values §2 gives no encoding. It gains `Decimal` because §5 promotes a member
+  carrying one and the enumeration is exhaustive by construction (the codec raises
+  on a type it does not list). No existing row's spelling moves and §3's
+  exhaustive-three table is untouched (§9). §10 applies ADR-0070 §1 and ADR-0082
+  §1 to each record this ADR takes.
 - **Depends on ADR-0192 by number, and on no field of it.** This ADR cites that
   decision as the thing that records what an invocation cost — a completion row
   carrying a reported figure, and a claim that may stand open — and reshapes
@@ -289,8 +292,10 @@ trigger rather than pre-deciding it here.
 > it would state one nobody reported.
 
 > **Normative.** The **projected total** for a call under admission is the
-> accounted total of the period plus the declared amounts of the admissions still
-> outstanding in it (§3's reservations) plus that call's own **declared** cost —
+> accounted total of the period plus the declared amounts of **every** reservation
+> the gate is holding — §3's, whichever period each was taken in, since a call
+> admitted before a boundary can complete after it — plus that call's own
+> **declared** cost —
 > the `ToolCost` on the `ToolDefinition` the call's recorded decision pins. Every
 > declared amount here is used **only** for the admission arithmetic in §3; none is
 > added to the accounted total and none is written to any row.
@@ -330,6 +335,18 @@ trigger rather than pre-deciding it here.
 > §1 makes every operand countable, so the traps are a backstop against an
 > implementation that failed to size its context rather than a reachable state on
 > well-formed input.
+
+> **Normative.** A computed total has exactly **one** representation, so that two
+> conforming implementations summing the same rows in any order state the same
+> bytes on the wire (§5 carries a `Decimal`'s scale rather than normalising it, and
+> ADR-0087 §4 makes two spellings of one number two values). The representation is
+> the exact value at its **minimal non-negative scale**: as many fractional digits
+> as the value needs and no more — none where it is an integer — and never a
+> positive exponent. Rows of `0.1`, `0.9` and `1` total `Decimal("2")`, never
+> `Decimal("2.0")` and never `Decimal("2E+0")`, whatever order they were added in
+> and however an implementation grouped them. This governs a **result** — the
+> accounted total and the projection — and no input: a declared or configured
+> amount keeps the scale whoever wrote it chose.
 
 > **Normative.** A context is sized from the operands' **effective** scale, not
 > from their raw exponents. `Decimal("0E-999999999999999999")` is countable under
@@ -1213,11 +1230,12 @@ here. ADR-0082 §1 is explicit that a record demanded on book-keeping grounds
 alone — that a list "should mention" a change — is not owed, and none is taken
 here.
 
-**This ADR supersedes one clause and withdraws nothing.** It partially supersedes
-ADR-0087 §2c's enumeration — the one place where carrying its own decision means a
-reader of an earlier ADR must now act differently — adds `core` surface,
-discharges two deferrals, and names the ADRs it depends on rather than replacing
-them.
+**This ADR supersedes one enumeration and withdraws nothing.** It partially
+supersedes ADR-0087's enumeration of the types the wire encoding carries, in the
+three clauses that state it — §2c, §6 and §9 — which is the one place where
+carrying its own decision means a reader of an earlier ADR must now act
+differently. Otherwise it adds `core` surface, discharges two deferrals, and names
+the ADRs it depends on rather than replacing them.
 
 ### 11. Two lanes, what each owes, and what both are sequenced behind
 
@@ -1427,10 +1445,14 @@ them.
 
 > **Normative.** The suite drives `Decimal("0E-999999999999999999")` — countable
 > by §1, numerically zero, and carrying an exponent no context can be sized from —
-> as a configured ceiling, as the allowance, as a declared amount and as a reported
-> one. Each is classified as countable and each is carried through the arithmetic
-> to the same answer as `Decimal("0")` would give, with no trap raised and no
-> allocation attempted from the raw exponent. This is §2's effective-scale clause,
+> as a configured **ceiling**, as a **declared** amount and as a **reported** one.
+> Each is classified as countable and each is carried through the arithmetic to the
+> same answer as `Decimal("0")` would give, with no trap raised and no allocation
+> attempted from the raw exponent. As the **allowance** it is refused at load with
+> `ConfigurationError` and for a different reason entirely — §1 requires an
+> allowance strictly greater than zero in every spelling `Decimal` admits for zero,
+> and this is one — which the suite drives as its own case so that a lane cannot
+> read the countability obligation as licence to accept it. This is §2's effective-scale clause,
 > and an implementation sizing a context from `as_tuple().exponent` fails it by
 > exhausting memory rather than by returning a wrong number.
 
@@ -1496,8 +1518,12 @@ them.
 > non-finite value raises for either field.
 
 > **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
-> rather than describing it: each of the five vectors round-trips through
-> `wire/codec.py` to a value the type cannot distinguish from the original —
+> rather than describing it: **each of the seven** vectors §5 states is asserted to
+> its exact bytes and round-trips through `wire/codec.py` to a value the type
+> cannot distinguish from the original — the threshold pair matters most, since an
+> encoder emitting `"0.0000000001"` where §5 says `"1E-10"` escapes a suite that
+> checks only round-tripping, and `Decimal("-0")` escapes one that checks only
+> equality —
 > `Decimal("1.0")` and `Decimal("1")` reaching **different** bytes is the assertion
 > that catches a normalising implementation — a non-finite `Decimal` raises at the
 > projection, and a `SpendTotal` and a `PermissionDecision` carrying a `PER_CALL`
