@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolInvocation,
     ToolOutcome,
+    describe_untrusted,
 )
 from ai_assistant.permissions._transactions import transaction
 from ai_assistant.permissions.identifiers import IdentifierFactory, ProcessIdentifiers
@@ -1658,8 +1659,11 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     try:
         snapshot = PermissionDecision.model_validate(_field_state(PermissionDecision, given))
     except (ValidationError, ValueError) as exc:
+        # `describe_untrusted` and never `repr`: the id is the caller's, and a
+        # `__repr__` that raises would replace this `AuditError` with whatever it
+        # threw — from inside the `except` block that exists to report it.
         named = (
-            repr(given.__dict__.get("id"))
+            describe_untrusted(given.__dict__.get("id"))
             if isinstance(given, PermissionDecision)
             else "the given value"
         )
@@ -1707,9 +1711,17 @@ def _field_state(kind: type[BaseModel], given: object) -> Any:
     """
     if not isinstance(given, kind):
         return given
-    undeclared = sorted(set(given.__dict__) - set(kind.model_fields))
+    undeclared = set(given.__dict__) - set(kind.model_fields)
     if undeclared:
-        msg = f"the value carries state {kind.__name__} has no field for: {undeclared}"
+        # Described *before* sorting, and described by
+        # :func:`~ai_assistant.core.types.describe_untrusted`. The keys are the
+        # caller's: sorting them directly raises ``TypeError`` the moment two of
+        # them are of different types, and ``repr`` on one of them can raise
+        # anything at all — either way the diagnostic would destroy the diagnosis
+        # and this refusal would leave as some class ADR-0192 §2's order does not
+        # admit. Sorting the *descriptions* keeps the message deterministic.
+        named = sorted(describe_untrusted(key) for key in undeclared)
+        msg = f"the value carries state {kind.__name__} has no field for: {named}"
         raise ValueError(msg)
     return kind.__pydantic_serializer__.to_python(given, warnings=False)
 
