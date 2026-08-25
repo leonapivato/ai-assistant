@@ -1446,6 +1446,29 @@ here; they are what the surveyed projects' own code and documentation say, and
 > nothing is recreated. No lane mints an erasure marker, a cleared generation, or
 > any other value by which the two causes could be told apart.
 
+> **Normative.** **`clear()` erases the consume with everything else, and §1's
+> guarantee is stated over an uncleared trail.** A decision re-recorded after an
+> erasure has no claim under it, so §1 admits an invocation under it — including
+> where the value is byte-for-byte the one that was spent before. This is not a hole
+> to be closed: the consume **is** a row, §1 says so in terms, and a rule surviving
+> the erasure of the rows it is made of would be a second, undeletable record of an
+> act the user asked to have erased. §5's accumulator is scoped the same way — a
+> cleared trail totals nothing, so a ceiling starts again.
+
+> **Normative.** No generation, epoch, tombstone or high-water mark is minted to
+> narrow that. The clause above already refuses an erasure marker for the race, and
+> it is refused here for the stronger reason: any value that let a post-erasure claim
+> be judged against a pre-erasure one would be exactly the residue ADR-0004 §7's
+> erasure right forbids, held about a Tier 1 act. The honest statement is that
+> erasing the record erases what the record enforced, and this ADR makes it rather
+> than implying a durability it does not have.
+
+> **Normative.** Which leaves erasure as the user's own act, and that is where the
+> bound is: `clear()` reaches no surface this ADR promotes (§4), nothing in the
+> request pipeline calls it, and nothing schedules it. So the reachable way to spend
+> an authorisation twice is for the user to erase their own audit trail first — the
+> same trade ADR-0021 §4 already made for a resolution, one row kind over.
+
 > **Normative.** `AuditTrail.export_invocations` and the engine operation above
 > discharge ADR-0004 §6's portability obligation for this row kind.
 
@@ -1723,6 +1746,22 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > shape-by-shape test is owed because every drift this section has had was a clause
 > restating the field list for one case and disagreeing with another.
 
+> **Normative.** It pins the **retry arm end to end at the seam**, because §1's
+> conjunction is only as good as the kind that reaches the row. A `ToolResult` whose
+> outcome is `FAILED` and whose `ToolFailure.kind` is a **retryable** one —
+> `UNAVAILABLE` — passes through `invoke`, and the test asserts the completion
+> carries that kind rather than dropping it, and then that a further claim under the
+> same keyed authorisation is **admitted** inside the window. A `FAILED`-with-kind
+> case is owed separately from the `INDETERMINATE`-with-kind one above: an
+> implementation can preserve one and drop the other, and dropping this one produces
+> a valid kindless completion that silently refuses a legitimate retry as spent.
+
+> **Normative.** It pins the erasure's effect on the consume, because §6 states it
+> as a scope rather than leaving it to be inferred: a decision claimed, completed,
+> erased by `clear()` and then recorded again admits a new claim, and the test
+> asserts that outcome deliberately rather than treating it as undefined. No test
+> asserts a generation, epoch or marker, because §6 mints none.
+
 > **Normative.** It pins the cost **mapping** — the `ToolResult` →
 > `ToolInvocation` boundary, which is the part this ADR decides: a `ToolResult`
 > carrying a figure maps to `ToolInvocation.incurred_cost` unaltered, a `ToolResult`
@@ -1948,6 +1987,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > above and fails this one, which is the point of testing it: the two-read
 > implementation is the natural one, and only this race distinguishes it.
 
+> **Normative.** The **retry admission** is raced too, and it is a second branch
+> rather than a repeat of the first: after one completed retryable `FAILED` claim,
+> §1's conjunction admits a further claim, and an implementation may well have
+> written that admission as a check followed by an append even where it made the
+> first claim atomic. Under a barrier, two coroutines claim from that state and
+> exactly **one** appends, the other refused `AuthorisationSpentError`. A store that
+> passes the first-claim race and fails this one admits the duplicate effect this
+> whole ADR exists to prevent, one state later.
+
 > **Normative.** `clear()`'s **returned count** is pinned over both kinds, on a
 > store holding a decision, a claim and a completion: the call returns **3** and the
 > store is then empty by every read this ADR names. Asserting emptiness alone leaves
@@ -2091,6 +2139,14 @@ row kinds, and the annotation belongs to the kind that was already there.
   by saying that none was reported rather than by choosing one or by hiding the row.
   A kind the tool *did* report is kept on either outcome, because ADR-0029 §3
   requires one on both and ADR-0039 already ruled that it survives the trip.
+- **Erasing the trail erases the consume, and the ADR says so rather than implying
+  otherwise.** The bound §1 adds is a row; `clear()` removes rows; so a decision
+  re-recorded after an erasure can be claimed again, and a cleared trail totals no
+  spend. Closing that would take a generation marker surviving the erasure — a
+  second, undeletable record of an act the user asked to have erased, which ADR-0004
+  §7's right forbids. `clear()` reaches no surface this ADR promotes and nothing in
+  the pipeline calls it, so the reachable way to spend an authorisation twice is for
+  the user to burn their own audit trail first (§6).
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
   call on top of one per gated action, with no retention rule, makes #108 sharper
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
