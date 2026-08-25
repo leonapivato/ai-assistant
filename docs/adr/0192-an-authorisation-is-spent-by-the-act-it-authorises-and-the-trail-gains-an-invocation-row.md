@@ -845,20 +845,31 @@ the count.
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
 
-> **Normative.** That diagnostic carries **enumerated fields and no free text**:
-> the exception's **fault class**, the ledger operation attempted, and — on a
-> completion only — the outcome that was being written. It carries no exception
-> instance, no exception message, no `str()` of one, and no member of a cause chain —
-> not the ledger's own, and not one an injected callable raised. The exception object
-> still preserves its cause (§2); what is bounded here is the **log line**.
+> **Normative.** That diagnostic carries **enumerated fields and no free text**,
+> and **three fields exhaust it**: the ledger **operation** attempted, always; the
+> exception's **fault class**, where the exception is an `Exception`; and the
+> **outcome** that was being written, where the operation is a completion. It carries
+> no exception instance, no exception message, no `str()` of one, and no member of a
+> cause chain — not the ledger's own, and not one an injected callable raised. The
+> exception object still preserves its cause (§2); what is bounded here is the **log
+> line**.
 
-> **Normative.** The outcome field is **absent on a claim-path diagnostic**, and its
-> absence is required rather than tolerated. A claim carries no `ToolOutcome` — §2's
-> shape leaves `outcome` unset on that row — so there is nothing to report, and a
-> lane that filled the field would be inventing the one value this ADR is most
-> careful never to invent. The **operation** field already says which append failed,
-> which is what a reader needs to know why the outcome is missing; nothing else
-> stands in for it, and no literal, sentinel or "n/a" is minted for the position.
+> **Normative.** The two conditions are independent, so the shape is a **matrix of
+> four and this ADR states all four rather than leaving them to be composed**. A
+> failed **claim** raising an `Exception` carries operation and class. A failed
+> **claim** raising a `BaseException` that is not an `Exception` carries operation
+> alone. A failed **completion** raising an `Exception` carries operation, class and
+> outcome. A failed **completion** raising a `BaseException` that is not an
+> `Exception` carries operation and outcome. No other combination exists, and no
+> clause below re-states the field list in a way that contradicts this one.
+
+> **Normative.** The outcome's absence on a claim-path diagnostic is **required
+> rather than tolerated**. A claim carries no `ToolOutcome` — §2's shape leaves
+> `outcome` unset on that row — so there is nothing to report, and a lane that filled
+> the field would be inventing the one value this ADR is most careful never to
+> invent. The operation field already says which append failed, which is what a
+> reader needs in order to know why the outcome is missing; nothing stands in for it,
+> and no literal, sentinel or "n/a" is minted for the position.
 
 > **Normative.** The fault class is `core.types.fault_class_of(exception)` and never
 > a raw `type(exception).__name__`. A class **name** is as attacker-controlled as a
@@ -874,20 +885,20 @@ the count.
 > at one more emitter, with §3's reserved literal as the escape it already minted.
 
 > **Normative.** Where the exception being reported is a `BaseException` that is
-> **not** an `Exception`, the diagnostic carries **no class at all** — the ledger
-> operation and the outcome, and nothing else. That is `fault_class_of`'s own stated
-> rule read forward rather than worked around: its parameter is `Exception` because
-> "a cancellation is not a fault and must never be classified as one", so this ADR
-> neither widens it, nor classifies such an exception by another route, nor
-> substitutes a literal in the field. The operation and the outcome name the fault,
+> **not** an `Exception`, the diagnostic carries **no class at all** — the remaining
+> fields of its row in the matrix above, and nothing else. That is `fault_class_of`'s
+> own stated rule read forward rather than worked around: its parameter is
+> `Exception` because "a cancellation is not a fault and must never be classified as
+> one", so this ADR neither widens it, nor classifies such an exception by another
+> route, nor substitutes a literal in the field. What remains still names the fault,
 > which is what the diagnostic is for; the class was never the load-bearing part.
 
 > **Normative.** It carries **no identifier**: not the claim's, not the decision's,
 > not the step's. `DurableIdentifier` is a non-blank encodable string a caller
 > minted, and ADR-0031 §5's neighbouring finding is that a decision id is not
 > contractually log-safe — an id reading `recipient@example.com` is a conforming
-> value. So the operator gets the class, the operation and the outcome, which name
-> the fault, and no lane adds an id "for correlation". A Tier 2 diagnostic that
+> value. So the operator gets the fields the matrix above allows and nothing more,
+> and no lane adds an id "for correlation". A Tier 2 diagnostic that
 > could be made to carry a recipient is the ADR-0004 §5 breach this clause exists to
 > refuse.
 
@@ -895,7 +906,7 @@ the count.
 > or a store this system did not write can raise
 > `RuntimeError("recipient@example.com")`, and `core/logging.py` redacts by field
 > and cannot reach Tier 1 text embedded in a message under an innocuous one. So the
-> operator gets the class and the operation — which is what names the fault — and
+> operator gets the enumerated fields above — which is what names the fault — and
 > the content stays out of the log rather than being trusted to a redactor that
 > cannot see it.
 
@@ -1703,6 +1714,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > `Exception` yields a diagnostic with **no class field at all** (§3). No test
 > asserts a raw `type(e).__name__` anywhere on this path.
 
+> **Normative.** The suite pins **all four shapes of §3's diagnostic matrix**
+> field by field, and asserts the absent fields are absent rather than merely
+> unchecked: claim with an `Exception` (operation, class); claim with a
+> `BaseException` that is not one (operation alone, **no** outcome and **no**
+> class); completion with an `Exception` (operation, class, outcome); completion
+> with a `BaseException` that is not one (operation, outcome, **no** class). A
+> shape-by-shape test is owed because every drift this section has had was a clause
+> restating the field list for one case and disagreeing with another.
+
 > **Normative.** It pins the cost **mapping** — the `ToolResult` →
 > `ToolInvocation` boundary, which is the part this ADR decides: a `ToolResult`
 > carrying a figure maps to `ToolInvocation.incurred_cost` unaltered, a `ToolResult`
@@ -1718,6 +1738,16 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > carrier to make it writable here: the callable's shape is `tools/`-internal and
 > ADR-0029 §1 declines to contract it, so minting one would be this ADR deciding a
 > surface it has no ADR for.
+
+> **Normative.** The `ToolInvocation` validator is pinned **exhaustively**, not by
+> example. The suite tables the combinations of `completes`, `outcome`,
+> `incurred_cost` and `failure_kind` and asserts that construction succeeds for the
+> **two** shapes §2 declares and is refused for every other — a completion with
+> `incurred_cost` unset among them, which a validator checking only `completes`
+> against `outcome` accepts and which would reach the accumulator and the rendering
+> floor as a completion with no cost. ADR-0029 §3's rule that the self-contradictory
+> combinations are unrepresentable rather than discouraged is the standard being met,
+> and §10's "a rejection test for each" is how that ADR met it.
 
 > **Normative.** It pins the **kindless** completion on both outcomes: a completion
 > derived from a cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
@@ -1834,10 +1864,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > an earlier draft ran them together. On the claim path: an `AuthorisationSpentError`
 > and an `UnrecordedAuthorisationError` each reach the caller **as their own class**,
 > unwrapped and asserted by class rather than by `AuditError` alone; a
-> non-`AssistantError` — the clock callable's `RuntimeError` — reaches the caller as
-> an `AuditError` whose `__cause__` is that exception, type intact; and the test
-> covers all three in one place, because it is their interaction that an earlier
-> draft got wrong (§1). On the completion path none leaves at all, because it is
+> non-`AssistantError` reaches the caller as an `AuditError` whose `__cause__` is
+> that exception, type intact — **parameterised over at least three classes**, a
+> `RuntimeError`, a `ValueError` and an exception class the test defines itself, so
+> an implementation that catches one name rather than the class boundary fails. The
+> named refusals and the translated cases are asserted in one place, because it is
+> their interaction that an earlier draft got wrong (§1). On the completion path none leaves at all, because it is
 > absorbed (§3).
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
