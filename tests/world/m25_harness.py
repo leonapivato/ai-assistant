@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, final
+from typing import TYPE_CHECKING, Any, Final, cast, final
 
 from keyring.errors import PasswordDeleteError
 from pydantic import SecretStr
@@ -94,7 +94,7 @@ from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from ai_assistant.app import Composition
@@ -305,6 +305,92 @@ def the_capability_the_root_handed_out(composition: Composition) -> OutboundTran
         The ``OutboundTransport`` the seam would open its channels with.
     """
     return _seam(composition)._transport
+
+
+def every_tool_that_can_reach_a_transport(
+    composition: Composition,
+) -> dict[str, OutboundTransport]:
+    """Which registered tools can reach a transport, and which one each reaches.
+
+    **This is the handout measured over the population that exists**, rather than
+    over one tool's self-report. ``the_capability_the_root_handed_out`` establishes
+    that the seam holds *this* fake; what it cannot say is that nothing *else* the
+    production root registered holds a transport too — and a regression that
+    handed the capability to a second, undesignated tool is exactly the failure
+    ADR-0191 §3 is written against. Adversarial review pressed on that gap across
+    rounds 6 and 7.
+
+    **What it cannot do, stated plainly.** The production root builds one
+    integration that receives a transport; it has no general tool-construction path
+    a test-authored probe could be built through, and adding one would be the
+    "back door added only for tests" ADR-0191 §3 refuses. So the probe is still
+    registered by this arm — and this survey is what reads whether the probe, sitting
+    in the composition, can reach a route at all.
+
+    It walks the registry's own bindings rather than any source text (ADR-0191 §9's
+    last clause): an object that can open a channel is one with an ``open_channel``
+    to call, and the walk is bounded to three attributes deep and to objects this
+    world defines, which is every tool this composition registers.
+
+    Args:
+        composition: The built deployment.
+
+    Returns:
+        Tool id to the transport that tool can reach, for every registered tool
+        that can reach one. Empty where none can.
+    """
+    reachable: dict[str, OutboundTransport] = {}
+    for tool_id, binding in registry(composition)._live.items():
+        route = _transport_reachable_from(binding.implementation, depth=3)
+        if route is not None:
+            reachable[tool_id] = route
+    return reachable
+
+
+def _transport_reachable_from(holder: object, *, depth: int) -> OutboundTransport | None:
+    """The first object reachable from ``holder`` that can open a channel.
+
+    Args:
+        holder: Where to start, which is a registered tool's callable.
+        depth: How many attributes deep to walk before giving up.
+
+    Returns:
+        The transport, or ``None`` where nothing reachable can open a channel.
+    """
+    if depth == 0:
+        return None
+    for value in _attributes_of(holder):
+        if callable(getattr(value, "open_channel", None)):
+            return cast("OutboundTransport", value)
+        reached = _transport_reachable_from(value, depth=depth - 1)
+        if reached is not None:
+            return reached
+    return None
+
+
+def _attributes_of(holder: object) -> Iterator[object]:
+    """The attribute values held by an object this world defines.
+
+    Bounded to this world's own types — ``ai_assistant``'s and this harness's —
+    because those are what a registered tool is, and walking into a pydantic model
+    or a standard-library container would be a graph search rather than a reading.
+
+    Args:
+        holder: The object to read.
+
+    Yields:
+        Each attribute value it holds, whether it keeps them in ``__dict__`` or in
+        ``__slots__``.
+    """
+    if type(holder).__module__.split(".")[0] not in {"ai_assistant", "m25_harness"}:
+        return
+    names: list[str] = list(vars(holder)) if hasattr(holder, "__dict__") else []
+    for kind in type(holder).__mro__:
+        names.extend(getattr(kind, "__slots__", ()))
+    for name in names:
+        value = getattr(holder, name, None)
+        if value is not None:
+            yield value
 
 
 def registry(composition: Composition) -> InMemoryToolRegistry:
