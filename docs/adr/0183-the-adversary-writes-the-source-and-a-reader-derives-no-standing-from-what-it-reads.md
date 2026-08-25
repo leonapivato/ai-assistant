@@ -41,6 +41,45 @@
   reader belief both reach it on the ordinary ingest path. It is **#1454**, and it
   is `memory/`'s to fix — this is an ADR-only lane and the repair is another
   subsystem's. §8 and §9 record it; nothing in this ADR claims it is closed.
+- **Note (2026-08-25): §13's second deferral is answered, and two facts §5 and §13
+  state about how the calendar parse path is declared are false of the tree.** The
+  bullet defers "How a parser over adversary-chosen bytes is declared and pinned
+  (§5)" and fires it on "a dependency-policy decision about a second axis for
+  pinning"; §5's supporting prose says `dateutil` is "declared **nowhere in the
+  runtime dependencies**". **It is declared.** `python-dateutil>=2.9` is in
+  `[project].dependencies` (`pyproject.toml`), landed by #1448's PR, so the
+  sentence describing that gap and the half of the bullet resting on it are stale.
+  **The issue the bullet names is not the one that carried the residual either**:
+  #1448 was split, and the pinning half became **#1462**. **And the residual is
+  discharged without a second pinning axis.** #1462 is closed by asserting the
+  property §5 actually rests on rather than by freezing a version:
+  `tests/readers/test_parse_path_is_pure_python.py` (PR #1554) fails the gate when
+  the calendar parse path stops being pure Python — checked against the installed
+  metadata *and* against `uv.lock`, so a platform this machine is not also counts —
+  and passes a refresh that only moves a version. A reader of §13 should therefore
+  read the bullet as answered by that test, and follow #1462 rather than #1448.
+  **ADR-0024 §3 is untouched by all of it.** No dependency was pinned and its
+  exact-pin rule is still scoped closed to the four behaviour-affecting embedding
+  packages; nothing here widens that scope, which is the outcome §5 anticipated
+  when it said whether either package argues for an exact pin "is ADR-0024 §3's
+  question and not this ADR's". `icalendar` is still declared as a range and this
+  note does not change that. What #1462's answer removes is the possibility of the
+  *parse-path property* changing with nobody deciding it should, which is the fact
+  §5's memory-safety clause was resting on.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). §5's
+  marked clause — that adversary-chosen bytes may not reach a compiled parse path
+  in which a malformed document is an out-of-bounds access or a controlled
+  allocation — is untouched, and it is that clause the test now instruments. A
+  deferral decides not to decide now; its currency lapses when its question is
+  answered elsewhere, which is an amendment and not a reversal (the treatment
+  ADR-0194 §10 gives ADR-0021 §6, and ADR-0016's header its own discharged
+  deferrals). The defect is in this ADR's own words — a stale phrase and a
+  cross-reference to a split issue, ADR-0070 §1's third and second terms, which
+  ADR-0082 §1's 2026-07-31 note places in bucket 1 — so it is recorded as this
+  appended dated note and the ratified text below is **not** rewritten. No other
+  ADR is its cause, so no `Status` edit is owed (ADR-0082 §1). Refs #1557, #1462,
+  #1448, PR #1554.
 
 ## Context
 
