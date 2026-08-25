@@ -785,10 +785,16 @@ whole explanation.
 > takes §3's reservation and returns its handle; and
 > `release_admission(handle: SpendAdmissionHandle) -> None`, which drops that
 > reservation and is the idempotent no-raising member §3 requires. Neither appends a row and neither
-> writes durable state. `SpendLedger` has one member,
-> `spend_totals() -> tuple[SpendTotal, ...]`, which returns one `SpendTotal` per
-> period this ADR defines, in a fixed order — `CALENDAR_DAY` then
-> `CALENDAR_MONTH` — and returns both entries whatever is configured.
+> writes durable state. `SpendLedger` has one member, **`async`** like the two
+> above it and with exactly this signature:
+> `async def spend_totals(self) -> tuple[SpendTotal, ...]`. It returns one
+> `SpendTotal` per period this ADR defines, in a fixed order — `CALENDAR_DAY` then
+> `CALENDAR_MONTH` — and returns both entries whatever is configured. It is `async`
+> because it reads a store, which is `CLAUDE.md`'s rule for an I/O-bound method,
+> and because §6's relaying `AssistantEngine` member is `async` for that reason and
+> could not await a synchronous one without either blocking the loop or diverging
+> from the signature it relays. Every member of both Protocols is awaited by the
+> conformance suites and by every caller.
 
 > **Normative.** `core/types.py` gains `SpendAdmissionHandle`, frozen with
 > `extra="forbid"`, carrying exactly `handle: Identifier` and nothing else. It is a
@@ -1681,6 +1687,16 @@ the ADRs it depends on rather than replacing them.
 > and not the projection passes every clause above and states the wrong number in
 > the one place a user reads it.
 
+> **Normative.** The **positive-exponent** case is driven through aggregation and
+> not only as a hostile construction, because those two catch different
+> implementations: two completion rows of `Decimal("1E+1")` sum to `Decimal("2E+1")`
+> under `+`, and a `SpendTotal` built from that raises where §2 requires
+> `Decimal("20")`. So the suite asserts the accounted total's tuple is
+> `(0, (2, 0), 0)` and its bytes are `"20"`, and asserts the same through the
+> projection. An implementation that canonicalised scale and sign but left the
+> exponent alone passes both clauses above and fails the ledger read outright,
+> which is a worse failure than a wrong number and is why this is a fixture rather
+> than a remark.
 > **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
 > rather than describing it: **each of the seven** vectors §5 states is asserted to
 > its exact bytes and round-trips through `wire/codec.py` to a value the type
@@ -1716,6 +1732,17 @@ the ADRs it depends on rather than replacing them.
 > configuration, with the accounted total `Decimal("0")` (§7) rather than a
 > preserved figure. That is the promise this ADR makes about a spend counter
 > outliving an erasure, asserted from the outside.
+
+> **Normative.** The consumer group drives §6's CLI rendering in its **ordinary**
+> states and not only on the clamped bound, because each of them is a way a correct
+> total is shown as a wrong fact. Three fixtures: a client configured in a zone
+> **different** from `SpendTotal.time_zone`, where the bounds render in the value's
+> own zone and the client's is not consulted; `currency=None`, where the command
+> says no currency is configured and states no total; and `currency` present with
+> `accounted=None` **and a ceiling configured**, where it says the period is
+> indeterminate *and* that no further call in it will be admitted. A renderer
+> collapsing §5's two absences into one message passes every other clause here and
+> tells a user "no total" while their calls are being refused.
 
 > **Normative.** The lane asserts that a refused call left **no** claim and no
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
