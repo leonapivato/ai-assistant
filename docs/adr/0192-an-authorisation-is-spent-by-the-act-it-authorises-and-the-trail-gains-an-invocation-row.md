@@ -151,14 +151,33 @@ surface can state an execution at all, because ADR-0186's two operations return
 > `ToolResult` and never as data, and neither is ever auto-retried. A
 > `ToolInvoker` propagates each unchanged rather than translating it.
 
-> **Normative.** **Every** failure of the claim append — either refusal above, a
-> malformed argument, a clock that will not read, a store that will not write, any
-> class whatever — is an exit **before the callable is entered**, always, and that
-> is a clause of this contract rather than a property of an implementation. Each is
-> therefore an exit in the window ADR-0034 §1 governs, qualifying on that section's
-> **second** ground — "The contract says the exit precedes the callable" — exactly
-> as a `ToolBindingError` does. The executor commits `RUNNING → FAILED` and never
-> retries, on the window and not on a list of classes.
+> **Normative.** **Every `AssistantError` the claim append raises** — either
+> refusal above, an argument fault, the guard's rejection of a clock reading, a
+> store that will not write — is an exit **before the callable is entered**, always,
+> and that is a clause of this contract rather than a property of an
+> implementation. Each is therefore an exit in the window ADR-0034 §1 governs,
+> qualifying on that section's **second** ground — "The contract says the exit
+> precedes the callable" — exactly as a `ToolBindingError` does. The executor
+> commits `RUNNING → FAILED` and never retries, on the window and not on a list of
+> causes.
+
+> **Normative.** That clause is stated over the `AssistantError` classes §2 names,
+> and it reaches nothing else. It does **not** reach a `BaseException` — a
+> `KeyboardInterrupt`, a `SystemExit` — and it does not reach an exception the clock
+> callable raises on its own account, which §2 propagates unwrapped. This ADR asks
+> the executor to derive **nothing** from either: it states no outcome for them,
+> ADR-0029 §3's "`BaseException` propagates unchanged" stands, and ADR-0034's own
+> treatment of them is untouched.
+
+> **Normative.** The exclusion is deliberate and is not a gap left open. Such an
+> exception carries no marker saying which side of the callable it came from, so a
+> clause obliging the executor to tell a clock's `KeyboardInterrupt` from the
+> callable's would oblige it to read a fact nothing exposes; minting that marker is
+> a change to what `invoke` says about reachability, which ADR-0034 §1 declines
+> ("exposes no 'the callable was reached' fact and this ADR introduces none") and
+> which #234 owns. What the **store** records still tells the two apart, which is
+> the whole point of this ADR: a `BaseException` before the claim leaves no row, and
+> one after it leaves an open claim (§3).
 
 > **Normative.** The claim append is performed so that its outcome is **observable
 > before any cancellation is propagated**: a cancellation delivered while the append
@@ -168,24 +187,24 @@ surface can state an execution at all, because ADR-0186's two operations return
 > the write is known to have landed" — transcribed to this one, and it is what makes
 > the "claim landed or did not" question answerable at all under ADR-0060.
 
-> **Normative.** Where a cancellation is pending and the append **failed**, the
-> append's failure is what leaves the seam: `invoke` raises the `AuditError` — or
-> propagates the clock callable's own exception (§2) — rather than the
-> `CancelledError`. The clause above absorbs the cancellation in order to *observe*
-> the append, and a failed append is an observation with a consequence the
-> cancellation does not carry: nothing could have run. Where the append **landed**,
-> the cancellation is re-raised as the clause above says and the clause below
-> governs.
+> **Normative.** An external cancellation is **delivered onward whatever the append
+> did**. Where the append failed and a cancellation is pending, `invoke` re-raises
+> the `CancelledError`; it does not raise the append's failure in its place, and it
+> converts the cancellation into nothing. ADR-0060 §1's propagation clause,
+> ADR-0034 §1's treatment of an absorbed cancellation and ADR-0029 §4's
+> classification are unchanged by this ADR and none of them is superseded.
 
-> **Normative.** That precedence loses no cancellation. The task remains cancelled
-> and the cancellation is delivered again at the next suspension point in the
-> cancelled scope; what the precedence decides is only **which fact the executor is
-> told first**, and the append failure is the one that is true of the act. The
-> alternative was worse in the direction this ADR cares about: a `CancelledError`
-> from a side-effecting non-`NATURAL` call is classified by
-> `ToolDefinition.interrupted_outcome`, so an append that never landed would be
-> recorded `INDETERMINATE` — an act that may have run — for a call the contract
-> guarantees could not have. ADR-0034 §1 refuses exactly that in this window.
+> **Normative.** The append's failure is not lost by that. It is attached to the
+> propagating `CancelledError` as its cause, and it reaches the operator as the
+> Tier 2 diagnostic §3 requires of every audit-write failure. No claim landed, so
+> the trail records nothing — which is the true thing to record — and this ADR gives
+> the seam no returned reachability fact and the executor no new rule to apply.
+
+> **Normative.** The step's outcome in that case is whatever
+> `ToolDefinition.interrupted_outcome` already computes for a cancellation
+> (ADR-0029 §4), which may be `INDETERMINATE` for a call that provably did not run.
+> This ADR does **not** change that, exactly as it declines to change it for the
+> cancellation cases #234 already owns.
 
 > **Normative.** Where the claim landed and the call is then cancelled before the
 > callable is entered, `invoke` appends the completion carrying the outcome ADR-0029
@@ -275,6 +294,22 @@ record of what was authorised; what this ADR adds is a record of what was
 performed. The paragraph is superseded because its literal answer — "no", and "not
 a deferral" — is now partly yes, which is a change to what was decided and takes a
 supersession under ADR-0070 §1 whatever the reasoning behind it survives.
+
+**An earlier draft let a failed append outrank a pending cancellation, and it was
+wrong on three ratified clauses at once.** The reasoning was that an append which
+did not land proves nothing ran, so reporting `CancelledError` — classified by
+`interrupted_outcome`, possibly `INDETERMINATE` — records an act that may have
+occurred for a call that could not have. The observation is right and the remedy
+was not. ADR-0060 §1 rules that a cancellation from outside "is delivered onward,
+never absorbed" and that a method "never converts such a cancellation into a return
+value"; raising a different exception in its place is that conversion by another
+route. ADR-0034 §1 gives the absorbed cancellation precedence over a competing
+failure in this very window, and ADR-0029 §4 owns the classification. Three
+supersessions to buy a distinction the **store already makes**: no claim landed, so
+there is no row saying an act may have occurred, which is the durable half #234
+asks for and the half this ADR can give. The step's `INDETERMINATE` in that case is
+the residue #234 exists for, and this ADR narrows it and leaves it, as it says
+everywhere else that it does.
 
 **Placing the claim immediately before the callable is what keeps two records from
 disagreeing, and the placement is load-bearing.** ADR-0034 §1 rules that an attempt
@@ -621,15 +656,22 @@ the count.
 > from an audit row would be changing it.
 
 > **Normative.** The two records therefore answer two questions and **are not
-> required to agree**, in one direction and one only: an invocation row may read
-> `SUCCEEDED` or `FAILED` under a step that reads `INDETERMINATE`. That is the crash
-> window between two stores — the seam observed an outcome, wrote it, and the
-> process died before the plan could record it — and the pair is the honest reading
-> of it: the invocation row says what the seam observed, and the step says the plan
-> could not be resolved. Neither is inferred from the other's absence, neither is
-> rewritten to match the other, and this ADR gives no lane, scan or surface a rule
-> for resolving one from the other. §4's rendering floor renders the row, §5's
-> evaluation reads the claim, and ADR-0014 §4 governs the step.
+> required to agree**. They can differ in **both** directions and this ADR states
+> both rather than one. *(i)* An invocation row reads `SUCCEEDED` or `FAILED` under
+> a step that reads `INDETERMINATE`: the seam observed an outcome and wrote it, and
+> the process died before the plan could record one. *(ii)* A step reads `SUCCEEDED`
+> or `FAILED` over a claim that is still **open**: the completion write failed,
+> `invoke` returned the call's own result, and the executor committed the step on
+> it.
+
+> **Normative.** In both directions the same three rules hold and are the whole of
+> what is guaranteed. Neither record is inferred from the other's absence; neither
+> is rewritten to match the other; and no lane, scan or surface is given a rule for
+> resolving one from the other. §4's rendering floor renders the row, §5's
+> evaluation reads the claim, and ADR-0014 §4 governs the step. An open claim under
+> a terminal step is still the positively-read third state of the clause above — it
+> is not resolved by the step beside it, and §5 fails the evaluation closed on it
+> exactly as if the step were `RUNNING`.
 
 > **Normative.** A claim can also be left **open under a step that is not
 > `RUNNING`**: the completion write failed, `invoke` returned, and the executor
@@ -684,8 +726,9 @@ pointing at it, which no later act can find at all. Review found that reversal b
 construction — two open claims under one decision, one completed, then a crash — and
 it is the same class of defect as §6's race clause.
 
-**What the order does not buy is that the two records read the same, and an earlier
-draft of this ADR claimed it did.** Review found the counter-example immediately:
+**What the order does not buy is that the two records read the same, and two drafts
+of this ADR claimed too much about that in turn.** Review found the counter-example
+immediately:
 a `SUCCEEDED` completion lands, the process dies before the executor commits
 `RUNNING → SUCCEEDED`, and the scan then finds a `RUNNING` step with no open claim.
 Under ADR-0014 §4 it records `INDETERMINATE`, so the ledger reads `SUCCEEDED` and
@@ -694,12 +737,15 @@ transaction across two stores, which there is none, or letting the scan write th
 step's outcome from an audit row, which is a change to ADR-0014 §4's transition
 graph that §10 puts out of scope and that would make the plan store's own
 compare-and-swap answerable to a second store. So the clauses above state the
-divergence instead, in the one direction it can occur and with the reading each
-record supports — which is what ADR-0148 §9's own rule already demands of a pair of
-records, that neither be inferred from the other. The claim that was wrong was
-"converge by construction"; what is true is that neither record is guessed from the
-other, and that the difference is always in the conservative direction: the step is
-the more ignorant of the two, never the more confident.
+divergence instead, in **both** directions and with the reading each record
+supports — which is what ADR-0148 §9's own rule already demands of a pair of
+records, that neither be inferred from the other. The second wrong claim was that
+the difference always runs one way, with the step the more ignorant. It does not:
+§3's own completion-failure path produces the reverse, a step committed on a result
+the seam returned while the claim it belongs to is still open, and review found that
+eleven lines below the clause asserting otherwise. What survives is the modest
+thing, which is also the true one: neither record is guessed from the other, and
+each says only what its own writer established.
 
 **A claim with no completion is ADR-0184's third state, one store over.** That ADR
 minted a value rather than a marker precisely so "the absence is its own value", and
@@ -1131,17 +1177,17 @@ rests on all three.
 says what holds between the two.** §3 supplies that and is where the scope points.
 The recovery scan appends the `INDETERMINATE` completion for every claim left open
 under the step's `approval_ref`, completions first and the step's transition second,
-so the window where a crash strands a record always falls on the re-runnable side.
-It does **not** make the two reads identical, and this ADR does not claim it does:
-an invocation row may read `SUCCEEDED` or `FAILED` under a step that reads
-`INDETERMINATE`, because the seam can write its outcome and die before the plan
-records one. What §9 asked for holds in full across that difference — neither
-record is inferred from the other's absence, which is §9's own next sentence read
-forward onto the second record and is also §3's positive-third-state clause — and
-the difference runs in the conservative direction only: the step is the more
-ignorant of the pair, never the more confident. Closing it would take a transaction
-across two stores, or a scan writing a step's outcome from an audit row, which is
-ADR-0014 §4's graph and out of scope (§10).
+so a crash inside the scan always strands the pair on the side a later scan can
+still resolve. It does **not** make the two reads identical and this ADR does not
+claim it does: they can differ in either direction — an invocation row reading
+`SUCCEEDED` under an `INDETERMINATE` step, where the seam wrote and the process died
+before the plan did; or a terminal step over a still-open claim, where the
+completion write failed and the call's own result stood. What §9 asked for holds in
+full across both — neither record is inferred from the other's absence, which is
+§9's own next sentence read forward onto the second record and is also §3's
+positive-third-state clause. Closing the gap would take a transaction across two
+stores, or a scan writing a step's outcome from an audit row, which is ADR-0014
+§4's graph and out of scope (§10).
 
 **Recording it rather than arguing the narrow reading, and the reason is worth
 stating.** The narrow reading is available and was held by an earlier draft: under
@@ -1194,8 +1240,8 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** The conformance suite for `InvocationLedger` pins the clock at the
 > boundary: an exact-window reading, a reading one unit outside it, a reading that
-> steps backwards, a repeated reading, and a clock that raises — each producing the
-> admission this ADR states. It pins the ordering rule against a backwards clock by
+> steps backwards, a repeated reading, and a **non-conforming** reading the guard
+> rejects — each producing the admission this ADR states. It pins the ordering rule against a backwards clock by
 > asserting over append order and not over instants.
 
 > **Normative.** Two writes here run from paths that may themselves be cancelled:
@@ -1213,10 +1259,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > against the row the ledger returned. No test supplies an id and no implementation
 > accepts one.
 
-> **Normative.** It pins the translated failures as **classes**: a clock that
-> raises, a store that cannot be read and a store that cannot be written each
-> surface as an `AuditError` carrying its cause, none escapes as a
-> non-`AssistantError`, and none arrives as one of the three named refusals (§2).
+> **Normative.** It pins the translated failures as **classes**: the guard's own
+> rejection of a non-conforming reading, a store that cannot be read and a store
+> that cannot be written each surface as an `AuditError` carrying its cause, none
+> escapes as a non-`AssistantError`, and none arrives as one of the three named
+> refusals (§2). A clock **callable** that raises is not among them — it is the
+> unwrapped case of the clause below, and the two obligations are named apart here
+> because an earlier draft ran them together and asked one exception for two
+> incompatible shapes.
 
 > **Normative.** The suite pins the **equality** refusal with the attack §1 names:
 > a decision recorded under an id, and a second, structurally different `ALLOW`
@@ -1232,17 +1282,20 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
 > returns the call's own `ToolResult` unchanged, reaches the operator as a
-> diagnostic, and makes a spend evaluation over that scope fail closed (§§3, 5).
+> diagnostic, and makes a spend evaluation over that scope fail closed (§§3, 5) —
+> asserting the **terminal step** beside the open claim, which is §3's second
+> divergence direction and not an anomaly the test may skip.
 > **A recovery scan interrupted between two completions** leaves the step
 > `RUNNING`; a second scan completes the claim still open and only then commits the
 > transition; a third appends nothing (§3). **A crash after the last completion and
 > before the step's transition** leaves a completed claim under a `RUNNING` step,
 > and the next scan appends nothing and records the step `INDETERMINATE` — the
 > divergence §3 states, asserted rather than repaired. **A cancellation delivered
-> while an append that then fails is in flight** surfaces the append's failure and
-> not the `CancelledError` (§1). **A non-cancellation `BaseException` raised from
-> the callable** propagates unchanged, writes no completion, and leaves the claim
-> open (§3).
+> while an append that then fails is in flight** reaches the caller as
+> `CancelledError` carrying the append's failure as its cause, and the task ends
+> cancelled — the append failure never stands in its place (§1, ADR-0060 §1). **A
+> non-cancellation `BaseException` raised from the callable** propagates unchanged,
+> writes no completion, and leaves the claim open (§3).
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
@@ -1306,9 +1359,13 @@ row kinds, and the annotation belongs to the kind that was already there.
   a call was entered, what it cost, how it finished, and — on an egress call that
   succeeded — that it was sent. That is #1503's user-visible half, and it is what
   milestone 24's exit could not be ruled on.
-- **One approval no longer backs an unbounded number of side-effecting acts.** The
-  property ADR-0021 §4 named as absent is now a property of the store, enforced by
-  an atomic append rather than by a convention.
+- **One approval no longer backs an unbounded number of acts on a *spendable*
+  authorisation** — side-effecting and not `NATURAL` (§1). The property ADR-0021 §4
+  named as absent is now a property of the store for those, enforced by an atomic
+  append rather than by a convention. A side-effecting `NATURAL` tool and a gated
+  read are untouched: their authorisations are not spendable and back as many
+  invocations as the pipeline needs, which is ADR-0029 §5's own discriminator and
+  deliberate.
 - **Every side-effecting call now pays two durable writes**, one before the callable
   and one after, on the same store the decision was already written to. That is a
   real cost on the hot path of every tool call and it is accepted: the write before
@@ -1324,12 +1381,13 @@ row kinds, and the annotation belongs to the kind that was already there.
   callable. The cost is one argument and one equality comparison inside the append;
   what it buys is that a `RecordedInvocation` reports the decision the act actually
   ran under.
-- **The two records of one attempt can read differently, and the ADR says so rather
-  than promising otherwise.** A completion can land and the process die before the
-  plan records the outcome, leaving `SUCCEEDED` in the trail under an
-  `INDETERMINATE` step. The divergence runs one way — the step is the more ignorant
-  — and closing it would take a transaction across two stores or a scan writing plan
-  state from an audit row, neither of which this ADR takes.
+- **The two records of one attempt can read differently, in both directions, and
+  the ADR says so rather than promising otherwise.** A completion can land and the
+  process die before the plan records the outcome, leaving `SUCCEEDED` in the trail
+  under an `INDETERMINATE` step; and a completion write can fail while the call's
+  own result stands, leaving a terminal step over an open claim. Closing either
+  would take a transaction across two stores or a scan writing plan state from an
+  audit row, neither of which this ADR takes.
 - **A `ToolInvoker` implementation now holds an `InvocationLedger`.** That is a new
   collaborator on a seam whose whole design was that it holds a registry binding and
   nothing else — the cost #259 priced when it described closing the same hole one
