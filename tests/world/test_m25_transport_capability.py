@@ -4,6 +4,12 @@ One arm, one composition, one fake, four instruments — and every instrument
 calibrated in the composition the zero was measured in. :mod:`m25_harness` is the
 world; this module is the measurement and the figures it reports.
 
+**Five instruments, five controls.** The fake, the loop creators, the probe's
+execution marker, the probe's route detector and the survey over what every
+registered tool can reach — each with a positive control in the composition its
+zero was read in, which is ADR-0191 §9's general clause rather than five separate
+rules.
+
 **Read what the arm claims and not one word more.** Its subject is the *handout*:
 an undesignated tool was handed no capability, so it had none to reach. Nothing
 here says such a tool could not have opened a connection by another route, and
@@ -22,9 +28,12 @@ import m25_harness as m25
 
 from ai_assistant.core.types import ToolFailureKind, ToolOutcome, TransportEndpoint
 from ai_assistant.testing import FakeOutboundTransport, TransportAttempt
+from ai_assistant.tools.send_email import SEND_EMAIL
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from ai_assistant.core.protocols import OutboundTransport
 
 #: The endpoint the deployment configured, as the capability sees it once the seam
 #: has parsed the text the registration carries.
@@ -73,6 +82,9 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    production root gave the designated seam **is** this fake, and it
             #    is the only one in the composition.
             assert m25.the_capability_the_root_handed_out(composition) is capability
+            assert m25.every_tool_that_can_reach_a_transport(composition) == {
+                SEND_EMAIL.id: capability
+            }
             assert list(capability.attempts) == []
 
             # 3. The negative arm. The probe is a registered, selected, invoked
@@ -86,6 +98,14 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             # no-op records zero for a reason that is not the property.
             assert probe.reached_for_a_route is True
             assert probe.route is None
+            # Read off the composition rather than off the probe's own report:
+            # the probe is registered here, and what the survey says is that
+            # nothing it holds reaches a transport. Adversarial review pressed
+            # twice on the probe reporting its own zero, which is right — a
+            # self-report is an arrangement, and this is a reading.
+            reaching = m25.every_tool_that_can_reach_a_transport(composition)
+
+            assert reaching == {SEND_EMAIL.id: capability}
             assert result.outcome is ToolOutcome.FAILED
             assert result.failure is not None
             assert result.failure.kind is ToolFailureKind.INTERNAL
@@ -121,6 +141,13 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             m25.register_probe(composition, armed, m25.ARMED_PROBE)
             control = await m25.drive_the_probe(composition, m25.ARMED_PROBE)
 
+            # ...and the survey instrument's own positive control: a second
+            # registered tool holding a transport is exactly the regression it
+            # exists to catch, so it must see this one.
+            assert m25.every_tool_that_can_reach_a_transport(composition) == {
+                SEND_EMAIL.id: capability,
+                m25.ARMED_PROBE.id: capability,
+            }
             assert armed.reached_for_a_route is True
             assert armed.route is capability
             assert armed.opened == m25.PROBE_ENDPOINT
@@ -138,8 +165,8 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
     _report(
         probe=probe,
         armed=armed,
+        reaching=reaching,
         undesignated=undesignated,
-        capability=capability,
         creators=creators,
     )
 
@@ -201,8 +228,8 @@ def _report(
     *,
     probe: m25.UndesignatedProbe,
     armed: m25.UndesignatedProbe,
+    reaching: dict[str, OutboundTransport],
     undesignated: list[TransportAttempt],
-    capability: FakeOutboundTransport,
     creators: m25.LoopCreators,
 ) -> None:
     """Report the arm's figures the way milestones 23 and 24 report theirs.
@@ -214,13 +241,13 @@ def _report(
     Args:
         probe: The undesignated probe, for its execution marker.
         armed: The same probe handed the capability, for the detector's control.
+        reaching: Which registered tools could reach a transport at the moment the
+            probe had run, which is the survey's reading of the handout.
         undesignated: The fake's attempt record **as it stood** when the probe had
             run and before either control was driven, which is the reading the
             exit is stated over.
-        capability: The fake, for the attempt record.
         creators: The loop instruments, for what they saw.
     """
-    del capability
     warnings.warn(
         "\n\nmilestone 25 — the transport capability's exit (ADR-0191 §9, #1427)\n"
         f"  probe execution marker    {int(probe.reached_for_a_route)} of 1  "
@@ -231,6 +258,9 @@ def _report(
         "probe put on the fake having been handed no route; must be zero\n"
         f"  detector control          {int(armed.opened is not None)} of 1  "
         "endpoints the same probe reached once handed one; must be one\n"
+        f"  tools reaching a route    {len(reaching)}  registered tools that can "
+        f"reach a transport ({', '.join(sorted(reaching))}); must be the "
+        "designated seam alone\n"
         f"  loop creator calls        {len(creators.calls)} of "
         f"{len(m25.OFF_DEVICE_CREATORS)}  off-device creators called outside the "
         "calibration; must be zero\n"

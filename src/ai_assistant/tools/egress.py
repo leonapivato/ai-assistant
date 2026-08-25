@@ -494,6 +494,14 @@ class _StreamChannel:
             await self._writer.wait_closed()
         except OSError as exc:
             _log.debug("egress_channel_close_failed", error_type=type(exc).__name__)
+            # **Suppressing the failure is not the same as having released**, and
+            # the holder has already called ``close``: nothing else will try
+            # again. So the harder release follows, on the same reasoning as
+            # :func:`_release` and suppressed on the same ground. Adversarial
+            # review found this half on round 7, having found the opener's on
+            # round 6.
+            with suppress(OSError):
+                self._writer.transport.abort()
 
 
 def _tls_context() -> ssl.SSLContext:
@@ -575,11 +583,23 @@ class StreamOutboundTransport:
         # this method observes it finishing and releases what it produced —
         # `_release_orphaned_streams` below. Adversarial and architecture review
         # both pressed on this window across rounds 2 to 4.
+        try:
+            context = _tls_context() if endpoint.implicit_tls else None
+        except OSError as exc:
+            # **Inside the taxonomy, because building the context touches the
+            # file system.** ``ssl.create_default_context`` loads the trust store
+            # and, where ``SSLKEYLOGFILE`` names an unusable path, opens that
+            # too — so a deployment's environment can make this raise a raw
+            # ``OSError`` before any socket exists. Constructing it in the
+            # argument list left that outside every ``except`` below, which
+            # adversarial review found on round 7.
+            msg = f"the connection to {endpoint.host}:{endpoint.port} could not be secured"
+            raise TransportError(msg) from exc
         opening = asyncio.ensure_future(
             asyncio.open_connection(
                 endpoint.host,
                 endpoint.port,
-                ssl=_tls_context() if endpoint.implicit_tls else None,
+                ssl=context,
                 server_hostname=endpoint.host if endpoint.implicit_tls else None,
                 limit=TRANSPORT_OCTET_CEILING,
             )

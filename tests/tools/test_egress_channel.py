@@ -702,6 +702,59 @@ async def test_a_cancellation_survives_a_release_that_fails(
     assert sockets.open == 0
 
 
+async def test_the_channels_close_aborts_a_release_that_failed_before_releasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same rule one layer up: the holder called ``close`` and will not again.
+
+    ADR-0191 §1 has ``close`` suppress an ordinary release failure rather than
+    raise it — which says what the *caller* is told, not that the socket was given
+    back. A ``StreamWriter.close`` that raises on its first statement has released
+    nothing, and the holder has already made its one call. Adversarial review
+    found this half on round 7, having found the opener's on round 6; the
+    conformance hook arms the easier ordering, so this case arms the harder one.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    channel = await StreamOutboundTransport().open_channel(ENDPOINT)
+    writer = _writer_of(channel)
+    writer.fails_to_close = True
+    writer.releases_before_it_fails = False
+
+    await channel.close()
+
+    assert writer.aborts == 1
+    assert sockets.open == 0
+
+
+async def test_a_tls_context_that_cannot_be_built_is_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1: one taxonomy, including the step before any socket exists.
+
+    Building the context is file-system work — ``ssl.create_default_context``
+    loads the trust store, and ``SSLKEYLOGFILE`` naming an unusable path makes it
+    open that too — so a deployment's environment can make it raise. Constructing
+    it in the opener's argument list put that outside every ``except``, and a raw
+    ``OSError`` reaching a holder is the shared refusal type broken for a case an
+    operator can actually configure.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+
+    def unusable() -> ssl.SSLContext:
+        msg = "SSLKEYLOGFILE names a directory that does not exist"
+        raise FileNotFoundError(msg)
+
+    monkeypatch.setattr(egress, "_tls_context", unusable)
+
+    with pytest.raises(TransportError, match="could not be secured"):
+        await StreamOutboundTransport().open_channel(ENDPOINT)
+
+    assert sockets.asked == {}
+    assert sockets.open == 0
+
+
 async def test_a_release_that_fails_before_releasing_anything_is_aborted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
