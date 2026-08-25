@@ -219,18 +219,33 @@ surface can state an execution at all, because ADR-0186's two operations return
 > and the exceptions the paragraph above translates into one, and it reaches nothing
 > else. It does **not** reach a `BaseException` — a `KeyboardInterrupt`, a
 > `SystemExit`. This ADR asks the executor to derive **nothing** from those: it
-> states no outcome for them, ADR-0029 §3's "`BaseException` propagates unchanged"
-> stands, and ADR-0034's own treatment of them is untouched.
+> states no outcome for them, and ADR-0034's own treatment of them is untouched.
 
-> **Normative.** The exclusion is deliberate and is not a gap left open. Such an
-> exception carries no marker saying which side of the callable it came from, so a
+> **Normative.** ADR-0029 §3's "`BaseException` propagates unchanged" stands on this
+> path **subject to the one carve-out §3 states and to nothing else**. The claim
+> append is driven as a retained, shielded await like every other ledger append (§3),
+> so the **outward class** at `invoke`'s boundary of a non-cancellation
+> `BaseException` raised *inside that retained task*, while no external cancellation
+> is propagating, is the case §3 declines to state — on the claim path as on the
+> completion path, because §3's carve-out is written over any retained append and not
+> over completions alone. That is stated here rather than left to be composed: an
+> implementer reading §1 alone would otherwise be promised a class §3 does not
+> contract. Everything else of §3's rule holds here unchanged, the silence reaches no
+> further than the outward class (§3), and what the **store** records is unaffected —
+> which is the distinction the clause below turns on.
+
+> **Normative.** The exclusion of `BaseException` from the classifying clause — the
+> one stated two paragraphs above, and not §3's carve-out — is deliberate and is not
+> a gap left open. Such an exception carries no marker saying which side of the
+> callable it came from, so a
 > clause obliging the executor to tell a clock's `KeyboardInterrupt` from the
 > callable's would oblige it to read a fact nothing exposes; minting that marker is
 > a change to what `invoke` says about reachability, which ADR-0034 §1 declines
 > ("exposes no 'the callable was reached' fact and this ADR introduces none") and
 > which #234 owns. What the **store** records still tells the two apart, which is
 > the whole point of this ADR: a `BaseException` before the claim leaves no row, and
-> one after it leaves an open claim (§3).
+> one after it leaves the claim's row — open, or **closed where a completion had
+> already committed**, which §3's commit-state clause governs (§3).
 
 > **Normative.** A `CancelledError` is the one class where that reasoning does not
 > apply, and the clauses below treat it separately for that reason. It is resolved by
@@ -935,9 +950,13 @@ the count.
 
 > **Normative.** A **`BaseException` that is not a cancellation** — a
 > `KeyboardInterrupt`, a `SystemExit` — is not an exit that clause reaches, and no
-> outcome is invented for one. ADR-0029 §3 requires it to propagate unchanged, and
-> ADR-0029 §§3–4 compute no `ToolOutcome` for it, so there is nothing to pass
-> `complete_invocation` and this ADR mints nothing to fill the argument. `invoke`
+> outcome is invented for one. ADR-0029 §3 requires it to propagate unchanged; on
+> this path — one raised on the way *to* the completion, from the callable awaited
+> directly or from `invoke`'s own frame — that rule holds without qualification, the
+> one case this section declines to state being the outward class of one raised
+> *inside* a retained append (below). ADR-0029 §§3–4 compute no `ToolOutcome` for
+> it, so there is nothing to pass `complete_invocation` and this ADR mints nothing to
+> fill the argument. `invoke`
 > writes no completion, lets it propagate, and leaves the claim **open** — which is
 > the exact state the clause below governs, and the honest one: the process is being
 > torn down and the outcome was never established. Where a recovery scan later finds
@@ -974,7 +993,9 @@ the count.
 > alike. It propagates unchanged, the `ToolResult` does not reach the caller, and no
 > diagnostic stands in for it: a process being torn down is not a refusal, and
 > converting a `KeyboardInterrupt` into a returned result is the conversion ADR-0029
-> §3 forbids. The claim is left open by that exit as by any other.
+> §3 forbids. The claim is left open by that exit as by any other — **unless the
+> append had already committed**, which the commit-state clause below governs on this
+> branch as on every other.
 
 > **Normative.** **One thing is left uncontracted, and it is exactly one**: the
 > **outward class** at `invoke`'s boundary of a `BaseException` that is not a
@@ -1011,9 +1032,9 @@ the count.
 > is **closed**; where it had not, the claim is **left open**. Nothing is deleted,
 > rewritten or compensated to make the two cases look alike — §6 offers no selective
 > delete and ADR-0060 §1 already rules that an abandoned append may have committed.
-> Every clause below that says "the claim is left open" is read subject to this one,
-> and says so where it appears; a draft promising it unconditionally promised a
-> rollback this store does not have.
+> Every clause of this ADR that says "the claim is left open" — above this one and
+> below it — is read subject to this one, and says so where it appears; a draft
+> promising it unconditionally promised a rollback this store does not have.
 
 > **Normative.** **Nothing of ADR-0029 §3 is superseded by that silence**, and §7
 > adds no scope for it. §3's rule is that a `BaseException` propagates unchanged, and
@@ -1145,10 +1166,14 @@ the count.
 > the content stays out of the log rather than being trusted to a redactor that
 > cannot see it.
 
-> **Normative.** The result of those clauses is a claim left **open**, which is the
-> state the clause above governs and which no reader resolves. That is the honest
-> record of an act whose outcome this system failed to write down, and it is
-> preferred to every alternative that writes a number down instead.
+> **Normative.** The result of those clauses is a claim left **open where no
+> completion committed**. The commit-state clause above decides which case a given
+> failure is, here as everywhere: where the append had already committed, the row
+> stands in the trail and the claim it names is closed, and nothing is deleted or
+> compensated to make the failure look like the other case. Where it had not, the
+> claim is open and no reader resolves it. That is the honest record of an act whose
+> outcome this system failed to write down, and it is preferred to every alternative
+> that writes a number down instead.
 
 > **Normative.** One case is exempt, and it is exempt because there is nothing to
 > leave open: where `clear()` erased the claim, the completion is refused
@@ -1450,7 +1475,8 @@ close #234.** That issue records that "the executor holds no fact about how far 
 call got", so a cancellation during the seam's own pre-call work is classified
 `INDETERMINATE` by `ToolDefinition.interrupted_outcome` even where nothing could
 have run. Under §1's placement the claim **is** that fact, durably: a cancellation
-before the claim leaves no row, one after it leaves an open claim. What #234 asks to
+before the claim leaves no row, one after it leaves the claim's row — open, or
+closed where a completion had already committed (§3). What #234 asks to
 change is the executor's *classification*, which reads a declaration and not this
 store, and changing it is a Protocol decision of #234's own. So this ADR narrows the
 cost — the record distinguishes the two cases even where the step's status does
@@ -1683,9 +1709,9 @@ the milestone-24 ruling found it.
 > **Normative.** **The test of that refusal is owed there too, and not here.** An
 > evaluation needs a scope, a ceiling and a refusal outcome, and §10 leaves all three
 > to that ADR, so no group in §9 could write the case without first inventing them —
-> and none is asked to. What §9 owes is the fact the evaluation reads, that a failed
-> completion leaves the claim open; the ADR that answers the ceiling owes the case
-> that reads it and fails closed.
+> and none is asked to. What §9 owes is the fact the evaluation reads, that a
+> completion which failed before committing leaves the claim open; the ADR that
+> answers the ceiling owes the case that reads it and fails closed.
 
 > **Normative.** `incurred_cost` is the price of the invocation. It is never money
 > the tool moved, and no lane reads it as a transacted amount (ADR-0016 §4).
@@ -1758,10 +1784,11 @@ decision, so it is recorded as a supersession and not left to the anticipation
 
 **The accumulator had to be told about the open claim, and review found that hole
 in the one section written to close it — both lenses, independently.** §3 requires
-a completion attempt on every exit and also rules that a completion which will not
-write leaves the claim open while the call's own result stands. So a call that
-reported a real price, whose completion write then failed, leaves a claim, no
-completion, and — under the summing clause read alone — a total of zero. That is
+a completion attempt on every exit and also rules that a completion which does not
+commit leaves the claim open while the call's own result stands. So a call that
+reported a real price, whose completion write then failed before committing, leaves
+a claim, no completion, and — under the summing clause read alone — a total of zero.
+That is
 the precise direction this section was written against, arriving through §3's own
 failure path rather than through a tool that lied. The answer is not a new field:
 the open claim is already the durable record that an act may have run, and the
@@ -2067,8 +2094,9 @@ still resolve. It does **not** make the two reads identical and this ADR does no
 claim it does: they can differ in either direction — an invocation row reading
 `SUCCEEDED` under an `INDETERMINATE` step, where the seam wrote and the process died
 before the plan did; or a terminal step over a still-open claim, where the
-completion write failed and the call's own result stood. What §9 asked for holds in
-full across both — neither record is inferred from the other's absence, which is
+completion write failed before committing and the call's own result stood. What §9
+asked for holds in full across both — neither record is inferred from the other's
+absence, which is
 §9's own next sentence read forward onto the second record and is also §3's
 positive-third-state clause. Closing the gap would take a transaction across two
 stores, or a scan writing a step's outcome from an audit row, which is ADR-0014
@@ -2274,8 +2302,10 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > completion carrying that kind, unaltered, and one carrying a kind under a
 > `SUCCEEDED` outcome is refused at construction (§2). A **completion clock raising
 > `CancelledError` directly**, with no external cancellation pending, is **absorbed**:
-> `invoke` returns the call's own `ToolResult` unchanged, the claim is left open, the
-> diagnostic carries no class, and no second completion is attempted (§3). The same
+> `invoke` returns the call's own `ToolResult` unchanged, the claim is left open —
+> the clock raises before any append, so nothing committed and §3's commit-state
+> clause leaves it open — the diagnostic carries no class, and no second completion
+> is attempted (§3). The same
 > clock raising it while an external cancellation **is** pending propagates instead,
 > and the test distinguishes the two by the `Task.cancelling()` count alone (§3).
 
@@ -2295,11 +2325,26 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** The adapter's **negatives** are asserted over **every** barred
 > claim and on **every** row in **every** state, not over one word on one row. §4
 > bars *sent*, *read*, *received*, *delivered*, *seen* and *acted on*, and bars
-> naming a recipient, an account, an endpoint or a destination on an invocation row
-> — so the suite asserts each of those is absent from what the adapter renders,
-> across the claim row, all four completion outcomes, and both values of
-> `egress_call`. A single-word check is what an implementation walks around: a
-> renderer emitting "attempted and reported success; delivered to
+> naming a recipient, an account, an endpoint or a destination on an invocation row.
+> The assertions are scoped to **what the adapter itself authors** — the labels,
+> phrases and sentences it chooses — and to the **structured fields** it emits: the
+> adapter makes none of those six claims in its own words, and emits no recipient,
+> account, endpoint or destination field. They are **not** a substring search over
+> the whole rendering, and a suite written as one is wrong rather than strict. A
+> barred word carried **inside a value the row itself holds**, inserted as data and
+> neutralised on render (§4), passes and must: §4 requires the tool identifier and
+> the capability to be rendered, `VisibleIdentifier` admits `read_email`, and an
+> assertion rejecting that row would forbid conforming output while proving nothing.
+> What is barred is the **claim** that something was read, not the letters.
+
+> **Normative.** Those negatives ride across the claim row on both values of
+> `egress_call`, and across **every completion shape §2 admits** — the shapes the
+> clause above enumerates and no count of outcomes, because `ToolOutcome` has three
+> members and the shapes are more: `FAILED` with no kind, `INDETERMINATE` with no
+> kind, `INDETERMINATE` with a reported kind, `FAILED` with a reported kind, and
+> `SUCCEEDED`, which carries no kind at all, on a row whose `egress_call` is true and
+> again on one where it is false. A single-word check is what an implementation walks
+> around: a renderer emitting "attempted and reported success; delivered to
 > alice@example.com" satisfies an assertion about *sent* alone while breaking both
 > the truthfulness rule and the Tier 1 disclosure one. On
 > the kindless two it renders that no kind was reported, renders no kind of its own,
@@ -2397,10 +2442,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the claim append, whose outcome §1 requires to be observable before a cancellation
 > is propagated, and the completion, which §3 requires on the cancellation and
 > deadline exits. The paired lane owes both a write that survives that path.
-> Where the completion cannot be written the claim is left open, which is the honest
-> state and not a licence to write a wrong outcome; where the **claim**'s outcome
-> cannot be observed, the implementation does not satisfy §1 and the conformance
-> suite says so.
+> Where the completion **does not commit** the claim is left open, which is the
+> honest state and not a licence to write a wrong outcome — and where it committed
+> before the failure it stands and the claim is closed, which §3's commit-state
+> clause governs and the failure-path cases below assert; where the **claim**'s
+> outcome cannot be observed, the implementation does not satisfy §1 and the
+> conformance suite says so.
 
 > **Normative.** The suite pins the minted `id` at the same boundary: every id
 > comes from the injected factory, ids are fresh across two claims under one
@@ -2629,10 +2676,11 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > forbids.
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
-> written against them. **A completion write that fails** leaves the claim open,
-> returns the call's own `ToolResult` unchanged, and reaches the operator as a
-> diagnostic (§3) — asserting the **terminal step** beside the open claim, which is
-> §3's second divergence direction and not an anomaly the test may skip.
+> written against them. **A completion write that fails before it commits** leaves
+> the claim open, returns the call's own `ToolResult` unchanged, and reaches the
+> operator as a diagnostic (§3) — asserting the **terminal step** beside the open
+> claim, which is §3's second divergence direction and not an anomaly the test may
+> skip.
 > **A recovery scan interrupted between two completions** leaves the step
 > `RUNNING`; a second scan completes the claim still open and only then commits the
 > transition; a third appends nothing (§3). **A crash after the last completion and
@@ -2650,8 +2698,9 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > §5's fail-closed rule is written for the ADR that answers the ceiling, and §10
 > leaves that ADR the scope, the ceiling and the refusal outcome, so observing the
 > evaluation here would mean inventing the contract §10 defers. What §9 owes is the
-> **fact** such an evaluation reads — that a failed completion leaves the claim open —
-> and the clause above stops there; §5 says where the case that reads it is owed.
+> **fact** such an evaluation reads — that a completion which failed before
+> committing leaves the claim open — and the clause above stops there; §5 says where
+> the case that reads it is owed.
 
 > **Normative.** The **mutation bypass** is pinned on both write paths and on both
 > returns, because a frozen model makes it look closed and does not close it (§2).
@@ -2880,8 +2929,9 @@ row kinds, and the annotation belongs to the kind that was already there.
 - **The two records of one attempt can read differently, in both directions, and
   the ADR says so rather than promising otherwise.** A completion can land and the
   process die before the plan records the outcome, leaving `SUCCEEDED` in the trail
-  under an `INDETERMINATE` step; and a completion write can fail while the call's
-  own result stands, leaving a terminal step over an open claim. Closing either
+  under an `INDETERMINATE` step; and a completion write can fail **before it
+  commits** while the call's own result stands, leaving a terminal step over an open
+  claim. Closing either
   would take a transaction across two stores or a scan writing plan state from an
   audit row, neither of which this ADR takes.
 - **`AuditTrail` gains a recovery query, and the scan stops reconstructing a
@@ -2953,7 +3003,7 @@ row kinds, and the annotation belongs to the kind that was already there.
   unchanged; what changes is which class `invoke` raises. It narrows #234 by one
   case and closes none of it.
 - **An audit write can now fail without failing the call**, and that asymmetry is
-  deliberate. A completion that will not write leaves an open claim and an operator
+  deliberate. A completion that does not commit leaves an open claim and an operator
   diagnostic, and the tool's own result is returned unchanged — because reporting a
   known-successful side effect as failed is the one outcome worse than an
   incomplete record. The residue is paid at the budget instead: an open claim fails
