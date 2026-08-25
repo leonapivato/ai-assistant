@@ -3524,7 +3524,7 @@ row kinds, and the annotation belongs to the kind that was already there.
   re-recorded after an erasure can be claimed again, and a cleared trail totals no
   spend. Closing that would take a generation marker surviving the erasure — a
   second, undeletable record of an act the user asked to have erased, which ADR-0004
-  §7's right forbids. `clear()` reaches no surface this ADR promotes and nothing in
+  §6's deletion right forbids. `clear()` reaches no surface this ADR promotes and nothing in
   the pipeline calls it, so the reachable way to spend an authorisation twice is for
   the user to burn their own audit trail first (§6).
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
