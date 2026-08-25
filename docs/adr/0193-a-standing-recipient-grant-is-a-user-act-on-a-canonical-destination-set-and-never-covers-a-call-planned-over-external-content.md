@@ -987,6 +987,15 @@ coordinator has not yet decided.
 > confirmation with an `ALLOW`: an unanswered `CONFIRM` on its own no longer
 > reaches the constructor, which is what round 19 found it could.
 
+> **Normative.** The lane that lands the first **establishing surface** ships the
+> ordering pair, and this ADR assigns it there because no earlier lane has a
+> caller to test it with: the grant is recorded **only after** `AuditTrail.record`
+> has accepted the answer, and an answer the trail **refuses** leaves no grant —
+> asserted over the store's contents and not over what the surface returned. That
+> is not the deferral §13 makes: the obligation is fixed here, in a marked clause,
+> and the surface lane discharges it rather than deciding it. The content floor is
+> not assigned this way and could not be, which is why `established_from` exists.
+
 > **Normative.** `established_from` lives on `RecipientGrant` in
 > `ai_assistant.core.types` and **nowhere else**. It is a constructor of a shared
 > record and not a subsystem operation: it holds no store, is given no seam, reads
@@ -2353,24 +2362,26 @@ narrowings of one store, not three implementations.
 > exercise a policy at all — so the two halves are only joined here.
 
 > **Normative.** The lane ships the **independent-floor** tests, which no other
-> policy test in this section reaches: with a live grant covering every member of
-> the request's canonical destination set in place, a request whose declared cost
-> is `CostBasis.UNKNOWN` still draws `CONFIRM`, and one the policy's own
-> thresholds `DENY` still draws `DENY` (§3's *only-effect* clause — a grant
-> "never converts a `DENY` into anything" and satisfies no floor stated over any
-> fact but recipient authorisation). A policy returning `ALLOW` the moment
-> `covering` succeeds passes the successful-handoff, origin and call-count tests
-> above while converting both. Each case asserts **zero** `covering` calls beside
-> its outcome, against the same recording seam the call-count clause uses: both
-> outcomes are settled by the request alone, so §7's lookup clause puts them on
-> the far side of the seam, and a policy that consults the store first and then
-> refuses on the request's own facts lets a store failure disturb an answer the
-> request had already given. A policy returning `ALLOW` the moment
-> `covering` succeeds also converts both, and the `ActionPolicy` suite it runs does not
-> catch it: `test_an_undeclared_cost_is_never_auto_granted` asserts
+> policy test in this section reaches. With a live grant covering every member of
+> the request's canonical destination set in place, **each** of four requests
+> still draws the outcome it drew without the grant: one whose declared cost is
+> `CostBasis.UNKNOWN` draws `CONFIRM`; one whose `risk_level` reaches the policy's
+> own confirm threshold draws `CONFIRM`; one whose `reversibility` reaches it
+> draws `CONFIRM`; and one the policy's thresholds `DENY` draws `DENY`. Each case
+> asserts **zero** `covering` calls beside its outcome, against the recording seam
+> the call-count clause already uses, because every one of the four is settled by
+> the request alone and §7's lookup clause puts those on the far side of the seam:
+> a policy consulting the store first and then ruling on the request's own facts
+> lets a store failure disturb an answer the request had already given. This is
+> §3's *only-effect* clause as a test — a grant "never converts a `DENY` into
+> anything" and satisfies no floor stated over any fact but recipient
+> authorisation. A policy returning `ALLOW` the moment `covering` succeeds
+> suppresses all four while passing the successful-handoff, origin and call-count
+> tests above, and the `ActionPolicy` suite it also runs does not catch it:
+> `test_an_undeclared_cost_is_never_auto_granted` asserts
 > `not (ALLOW and authorised_by is None)`, and a route-(b) `ALLOW` sets
 > `authorised_by`. ADR-0021 §5's floors are about a policy deciding **by itself**;
-> §3's clause is about what a grant discharges, and only this pair tests it.
+> §3's clause is about what a grant discharges, and only these four test it.
 
 > **Normative.** The lane ships a test asserting that an `ActionPolicy` whose
 > `RecipientGrants.covering` raises `RecipientGrantError` returns **no** `ALLOW`
@@ -2802,6 +2813,18 @@ read the bullets below before treating it as open.
   for §7's lookup, and §1 keeps the two apart mechanically: `covering` does not
   read `planned_with_external_content` at all, so the external-content obligation
   is discharged by the policy from the request and never from this seam.
+- **"A genuine function of its argument" has a stated subject, and both of its
+  terms are untouched.** ADR-0021 §3's sentence is drawn from one removal:
+  *"It also removes two things a policy had no business doing: minting an `id`,
+  and reading a clock. `decided_at` and `id` are supplied by the caller that
+  records, which leaves `decide` a genuine function of its argument — which is in
+  turn what makes §5's monotonicity obligations checkable at all."* §7 keeps both
+  removals — `decide` mints no id and reads no clock, and §9 puts the clock in the
+  store on ADR-0007 §2's precedent — and §3's monotonicity clause keeps the
+  consequence the sentence was drawn for, holding requests "equal in every other
+  respect" with the grants in the store held equal, which is checkable against the
+  canonical fake §14 lands. A reader acting on that sentence keeps the clock and
+  the id out of their policy; this reader does.
 - **The clause carries its own condition.** §3's first bullet is "**`decide` must
   return `authorised_by is None`** from a policy constructed **with no
   authorisation source**. Today that is *every* policy". A policy constructed
