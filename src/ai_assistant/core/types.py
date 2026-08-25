@@ -12690,9 +12690,14 @@ class TransportEndpoint(BaseModel):
             It unchanged.
 
         Raises:
-            ValueError: If any character is a control character. The message names
-                the offending code point and never the host, which is
-                configuration this type is not the place to render.
+            ValueError: If any character is a control character. **The message
+                this validator writes** names the offending code point rather
+                than the host; pydantic renders the input it refused alongside
+                it, which is pydantic's behaviour and not something a validator
+                can withhold. ``ai_assistant.tools.egress.parse_smtp_endpoint``
+                converts the refusal into its own binding refusal, whose text is
+                written fresh, so the seam's callers are not handed a configured
+                endpoint inside a message.
         """
         offending = next((ch for ch in value if unicodedata.category(ch) == "Cc"), None)
         if offending is not None:

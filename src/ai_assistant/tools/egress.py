@@ -116,9 +116,10 @@ import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
-from typing import TYPE_CHECKING, Any, Final, final
+from typing import TYPE_CHECKING, Final, final
 
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConnectionStoreError, ToolError, TransportError
 from ai_assistant.core.types import (
@@ -585,12 +586,14 @@ class StreamOutboundTransport:
         try:
             reader, writer = await asyncio.shield(opening)
         except asyncio.CancelledError:
-            # **Deferred, and deliberately unbounded** (ADR-0060 §1 permits an
-            # unbounded deferral that is documented as one). The open is not
-            # cancelled: cancelling it would race its own establishment and leave
-            # *its* partial state to it, whereas letting it finish gives this
-            # method one thing to observe and one thing to close. ADR-0029 §4's
-            # invocation deadline is what bounds the call as a whole.
+            # **Delivery is not deferred — this re-raises at once.** What ADR-0060
+            # §1's resource clause is satisfied by here is its *second* limb: the
+            # streams are "still held exclusively by work the method started and
+            # can observe finishing", and the callback is that observation. The
+            # open is deliberately not cancelled: cancelling it would race its own
+            # establishment and leave *its* partial state to it, whereas letting
+            # it finish gives this method one thing to observe and one thing to
+            # close. ADR-0029 §4's invocation deadline bounds the call as a whole.
             opening.add_done_callback(_release_orphaned_streams)
             raise
         except (OSError, UnicodeError) as exc:
@@ -618,7 +621,9 @@ class StreamOutboundTransport:
             raise
 
 
-def _release_orphaned_streams(opened: asyncio.Future[tuple[Any, asyncio.StreamWriter]]) -> None:
+def _release_orphaned_streams(
+    opened: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
+) -> None:
     """Close streams an open produced that its caller never received.
 
     Registered by :meth:`StreamOutboundTransport.open_channel` when a cancellation
@@ -657,6 +662,9 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
         TransportPinError: If ``endpoint`` is not a form this seam will pin. The
             message names the defect and never the endpoint, which is
             configuration rather than content but is not this seam's to render.
+            A host :class:`~ai_assistant.core.types.TransportEndpoint` itself
+            refuses arrives here as this type too, rather than as pydantic's —
+            see the conversion below.
     """
     scheme, separator, authority = endpoint.partition("://")
     if not separator or scheme not in _DEFAULT_PORTS:
@@ -678,9 +686,24 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     if not host or host.strip() != host:
         msg = "the bound transport endpoint names no host"
         raise TransportPinError(msg)
-    return TransportEndpoint(
-        host=host, port=_port(port_text, scheme), implicit_tls=scheme == "smtps"
-    )
+    port = _port(port_text, scheme)
+    try:
+        return TransportEndpoint(host=host, port=port, implicit_tls=scheme == "smtps")
+    except ValidationError as exc:
+        # **The type is the pin, and this keeps its refusal in the seam's own
+        # taxonomy.** ``TransportEndpoint`` refuses a host carrying a control
+        # character — a ``NUL`` truncates at ``getaddrinfo`` — and one with no
+        # UTF-8 encoding, neither of which this grammar's punctuation check sees.
+        # A ``ValidationError`` escaping here would be the wrong type for a
+        # refusal about a *binding* (ADR-0191 §4), and pydantic renders the input
+        # it refused, so the endpoint an operator configured would reach whatever
+        # caught it. The message below is written fresh for both reasons.
+        msg = (
+            "the bound transport endpoint names a host this seam will not pin; a "
+            "host carrying a control character, or text with no UTF-8 encoding, "
+            "is refused before anything resolves it"
+        )
+        raise TransportPinError(msg) from exc
 
 
 def _port(port_text: str, scheme: str) -> int:
