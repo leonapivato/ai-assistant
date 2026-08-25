@@ -535,6 +535,25 @@ the two properties it has rather than letting a reader assume the stronger one.
 > a binding failure. A `ToolBindingError` therefore pre-empts every refusal in §4,
 > and no lane may move the admission earlier to save a store read.
 
+> **Normative.** The admission runs **inside the deadline `invoke` already
+> enforces** — the required `timeout` of ADR-0029 §4, enforced by the seam and not
+> by the caller. A gate blocked on its store therefore cannot outlast it: the seam
+> stops waiting, which is the whole of what §4 promises, and `invoke(timeout=...)`
+> keeps meaning what it meant before this ADR. An implementation that admitted
+> outside the deadline would have moved the one await §4 exists for out of its
+> reach, in the window before the callable is even created.
+
+> **Normative.** A deadline that expires during the admission is classified by
+> ADR-0029 §4's **existing** rule, unchanged and unnarrowed: `FAILED` where the
+> tool is not `side_effecting` or its `idempotency` is `NATURAL`, `INDETERMINATE`
+> otherwise, read off the detached copy §2's step 1 captured. This ADR adds no case
+> and relaxes none — an expiry before the callable was created is one where nothing
+> can have acted, and classifying it `INDETERMINATE` for a side-effecting
+> non-`NATURAL` tool is over-cautious rather than wrong, which is the direction
+> ADR-0014 §4 refuses to guess against. What this ADR does add is that **no
+> reservation survives it**: the expiry reaches the member as a cancellation, and
+> §3's rule below removes a reservation whose handle will never be delivered.
+
 > **Normative.** Where **neither ceiling is configured**, `admit_invocation`
 > returns before it reads the clock, reads the store or performs any arithmetic.
 > It cannot refuse in that configuration — not on a crossed ceiling, not on a
@@ -551,8 +570,8 @@ the two properties it has rather than letting a reader assume the stronger one.
 > **Normative.** An admission that is granted **reserves its own declared
 > contribution**, in the same atomic step as the decision. The store read, the
 > comparison and the reservation are one critical section over the holder's state,
-> with no other admission interleaved; `admit_invocation` returns an opaque
-> **admission handle**; and the projected total of every later admission counts
+> with no other admission interleaved **and no release interleaved either**;
+> `admit_invocation` returns an opaque **admission handle**; and the projected total of every later admission counts
 > the declared amounts of the admissions this holder has granted whose handles are
 > still outstanding. The Nth concurrent invocation therefore sees the N−1
 > reservations already taken and cannot project a total that omits a call already
@@ -610,6 +629,16 @@ the two properties it has rather than letting a reader assume the stronger one.
 > neither period while it ran; carrying it counts the call in one period too many
 > for as long as it is in flight, which is the fail-closed direction and is bounded
 > by the call.
+
+> **Normative.** `release_admission` participates in that **same** exclusion, and
+> saying so is not pedantry: an implementation that serialised admissions against
+> each other while letting a release run between an admission's row snapshot and
+> its comparison admits a call it must refuse. Concretely — accounted 90, one
+> reservation of 10, a ceiling of 100 — an admission snapshots 90, the first call's
+> completion of 10 lands and its handle is released, and the admission then reads
+> no reservation and projects 100 for a further estimate of 10, where the truth at
+> that instant is 110. The snapshot, the comparison, the reservation **and every
+> release** are one critical section over the holder's state.
 
 > **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
 > ADR-0192's completion has been appended or after the failure that prevented it.
@@ -1717,6 +1746,25 @@ the ADRs it depends on rather than replacing them.
 > turn reaches any of them. The sixth way, erasure, is the lane's rather than the
 > suite's, because `clear()` is `AuditTrail`'s member and not one this suite's
 > Protocols expose; it is driven below.
+
+> **Normative.** The suite drives a gate that **stays blocked** past the caller's
+> deadline: `admit_invocation` awaiting a store that never answers, `invoke` given
+> a short `timeout`, and the call returning a classified `ToolResult` within it
+> rather than hanging — `FAILED` for a non-`side_effecting` tool and for a
+> `NATURAL` one, `INDETERMINATE` for a side-effecting non-`NATURAL` one, which is
+> ADR-0029 §4's rule unchanged. It asserts the callable was never created and that
+> the later projection counts no reservation. A suite whose gate fake always
+> answers leaves the one window where a new await sits outside the deadline
+> untested.
+
+> **Normative.** The suite drives the release **race** the exclusion clause exists
+> for, since the concurrency clauses above all hold the releases still: an
+> admission paused after its row snapshot, the outstanding call's completion
+> appended and its handle released while that admission is paused, and the
+> admission then resumed. Accounted 90, reservation 10, ceiling 100, second
+> estimate 10 — the second is **refused**, because 90 plus the completed 10 plus 10
+> is 110. An implementation that serialises admissions against each other but not
+> against releases passes every race and double-count fixture above and admits it.
 
 > **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
 > asserts on the projection rather than on the exception alone: a `CancelledError`
