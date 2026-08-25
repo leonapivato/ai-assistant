@@ -169,18 +169,27 @@ surface can state an execution at all, because ADR-0186's two operations return
 > commits `RUNNING → FAILED` and never retries, on the window and not on a list of
 > causes.
 
-> **Normative.** **No ordinary `Exception` leaves `invoke` unwrapped from the claim
-> path.** ADR-0026 §2's split binds the **ledger**, which propagates an exception its
-> clock callable raised without relabelling it (§2) — and `invoke`, one frame out and
-> a consumer rather than a guard, translates it. Every `Exception` that escapes the
-> claim append, whatever raised it, leaves `invoke` as an `AuditError` carrying it as
-> the cause, so the clause above reaches it and ADR-0034 §1's second ground
-> classifies the step `FAILED`. The type is destroyed nowhere: it survives on the
+> **Normative.** **No `Exception` leaves `invoke` from the claim path as a
+> non-`AssistantError`, and none of the named refusals is wrapped.** An
+> `AssistantError` escaping the claim append leaves `invoke` **unchanged** —
+> `AuthorisationSpentError` and `UnrecordedAuthorisationError` as the clause above
+> requires, an `AuditError` the ledger translated likewise — because §2's exhaustive
+> refusal orders would mean nothing if a caller could not catch the class they name.
+> Only an exception that is **not** an `AssistantError` is translated, and then to an
+> `AuditError` carrying it as the cause: that is the `RuntimeError` a wired-wrong
+> clock callable raises, and nothing else. ADR-0026 §2's split binds the **ledger**,
+> which propagates such an exception without relabelling it (§2); `invoke` is one
+> frame out and a consumer rather than a guard, which ADR-0034 §2 is the precedent
+> for. Either way what reaches the caller is an `AssistantError`, so the clause above
+> reaches it and ADR-0034 §1's second ground classifies the step `FAILED`. The type is destroyed nowhere: it survives on the
 > cause chain and as the diagnostic's fault class (§3). ADR-0034 §2 is the precedent
 > for a consumer that acts on a callable's failure, and the alternative is a
 > `RuntimeError` from a wired-wrong clock leaving a step `RUNNING` until a recovery
 > scan makes it `INDETERMINATE` — a provably pre-callable exit recorded as an act
 > that may have run, which is the misclassification ADR-0034 §1 exists to refuse.
+> The narrowing is what keeps both properties at once: the named refusals stay
+> catchable by the class §2 promises, and no exit from the claim append leaves the
+> executor without a rule.
 
 > **Normative.** That clause is stated over the `AssistantError` classes §2 names
 > and the exceptions the paragraph above translates into one, and it reaches nothing
@@ -909,9 +918,27 @@ the count.
 > act **idempotent** without a marker, a generation or a resume point. A crash
 > partway through leaves the step `RUNNING`, so the next scan finds the same step
 > and completes whatever is still open; a claim already completed is no longer open,
-> so no rerun ever attempts a second completion of one and §2's
-> `InvalidCompletionError` is not reachable by this path. A crash after the last
-> completion and before the transition costs one scan that appends nothing.
+> so no **rerun** ever attempts a second completion of one, and that is the whole of
+> what the ordering buys. A crash after the last completion and before the transition
+> costs one scan that appends nothing.
+
+> **Normative.** `clear()` is the one interleaving that does make §2's
+> `InvalidCompletionError` reachable here, and the scan is not defeated by it. Between
+> enumerating an open claim and completing it, an erasure can remove that claim; the
+> completion then refuses exactly as it does for any completion naming no claim (§2,
+> §6). That refusal is neither a fault to repair nor a reason to abandon the
+> transition — the claim it named no longer exists, so there is nothing left to
+> complete, and §6's `clear()` wins here as everywhere. The scan re-reads the open
+> claims under that `approval_ref` and proceeds by the rule above: the transition is
+> committed once none is open, which after an erasure is trivially so.
+
+> **Normative.** The **re-read** is a property of the rule and not a special case for
+> erasure. "Transition only after no claim under that decision is still open" is read
+> against the store at the moment of the transition and never against a list
+> enumerated earlier; a scan transitioning from a stale enumeration would also
+> transition over a claim opened between the two reads. So erasure costs the scan one
+> more read of something it had to read anyway, and no marker, generation or resume
+> point is minted for it.
 
 > **Normative.** The scan **completes open claims and writes no other outcome.**
 > Where it finds claims under that `approval_ref` already completed, it leaves them
@@ -1793,10 +1820,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > exception the clock **callable** raises on its own account leaves that member
 > **unwrapped**, with its type and cause intact and nothing relabelled. It pins
 > `invoke`'s own exit separately, because the two boundaries answer differently and
-> an earlier draft ran them together: on the claim path every `Exception` reaching
-> `invoke` leaves it as an `AuditError` whose `__cause__` is that exception, type
-> intact (§1); on the completion path none leaves at all, because it is absorbed
-> (§3).
+> an earlier draft ran them together. On the claim path: an `AuthorisationSpentError`
+> and an `UnrecordedAuthorisationError` each reach the caller **as their own class**,
+> unwrapped and asserted by class rather than by `AuditError` alone; a
+> non-`AssistantError` — the clock callable's `RuntimeError` — reaches the caller as
+> an `AuditError` whose `__cause__` is that exception, type intact; and the test
+> covers all three in one place, because it is their interaction that an earlier
+> draft got wrong (§1). On the completion path none leaves at all, because it is
+> absorbed (§3).
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
@@ -1862,6 +1893,25 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > reads rows and decisions in two operations passes the claim and completion races
 > above and fails this one, which is the point of testing it: the two-read
 > implementation is the natural one, and only this race distinguishes it.
+
+> **Normative.** The **writes** race `clear()` as well, and this is a different test
+> from the one above rather than a restatement of it: an implementation may
+> synchronise erasure and appends differently, validate a decision or an open claim,
+> let the erasure land, and then append a row into a store emptied after the check
+> that admitted it. Under a barrier, `claim_invocation` and `complete_invocation`
+> each run against a concurrent `clear()`. The store ends **empty**, and each write
+> ends one of exactly two ways: it landed before the erasure and was erased with
+> everything else, or it was refused after it — `UnrecordedAuthorisationError` for a
+> claim whose decision the store no longer holds, `InvalidCompletionError` for a
+> completion whose claim it no longer holds. **No row survives the erasure and no row
+> is appended after it.** §6's `clear()` wins over a write in flight as much as over
+> one already written, and only this race shows whether an implementation agrees.
+
+> **Normative.** The recovery scan's own interleaving with `clear()` is pinned
+> beside them: an erasure landing between the scan's enumeration and its completion
+> leaves the completion refused `InvalidCompletionError`, the scan re-reading, and
+> the step's transition committed — never the scan abandoning the step in `RUNNING`
+> and never a completion recreated over an erased claim (§3, §6).
 
 The paired lane is sequenced behind the transport-capability lane of this milestone —
 **ADR-0191**, ratified and merged while this ADR was in review, which also touches
