@@ -2370,6 +2370,31 @@ the ADRs it depends on rather than replacing them.
 > forbids in as many words, so this clause exists to stop a lane reading the one
 > above it as the wider claim.
 
+> **Normative.** The suite drives the same one-instant coherence on **admission**:
+> with a clock that steps between reads, `admit_invocation` selects **both** periods
+> from **one** instant. The fixture is arranged so that either single instant
+> refuses while only a mixed pair admits — a day ceiling of 100 and a month ceiling
+> of 1000, 999 accounted earlier in August, nothing accounted on August 31, 99
+> accounted on September 1, and an estimate of 2 — and it asserts a
+> `SpendCeilingError` naming **exactly one** period. Read wholly at August 31 the
+> month projects 1001 and crosses; read wholly at September 1 the day projects 101
+> and crosses; and no instant crosses both, so a refusal naming both is as much a
+> failure here as an admission. A gate taking its day from the August 31 read and
+> its month from the September 1 read projects 2 against 100 and 101 against 1000
+> and admits a call no instant permits. Which of the two periods is named is left
+> to the instant the implementation read, because both readings refuse and neither
+> is the thing under test.
+
+> **Normative.** The clock fixtures above this one do **not** reach it, which is why
+> it is written separately rather than folded into them: every one of them steps the
+> clock **between** calls, so an implementation reading the clock once per period
+> **inside a single admission** passes all of them and every other admission fixture
+> in this section. §3 fixes the rule already — the comparison is against each
+> configured ceiling "for the period that contains the invoker's current instant",
+> one instant and not one per period — and §5 fixes the counterpart for
+> `spend_totals`, which the clause below drives; this clause is the only place the
+> admission half of it is driven.
+
 > **Normative.** The suite pins the **order** of the returned tuple —
 > `CALENDAR_DAY` first, `CALENDAR_MONTH` second — by asserting the exact sequence
 > of `period` values rather than looking each entry up, and the consumer group
