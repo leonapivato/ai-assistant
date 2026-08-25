@@ -114,8 +114,17 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > `world_spend_currency: str | None`, `world_spend_month_ceiling: Decimal | None`,
 > `world_spend_day_ceiling: Decimal | None` and
 > `world_spend_unknown_allowance: Decimal | None`, each defaulting to `None`. They
-> are the whole of this mechanism's configuration and no other setting conditions
-> it.
+> are the whole of what this mechanism **adds** to configuration: no lane adds a
+> fifth field, and no setting other than these four turns the mechanism on, changes
+> what it refuses, or changes a total.
+
+> **Normative.** It reads exactly one **existing** setting besides them,
+> `Settings.timezone`, which is what the calendar periods below are computed in.
+> That is a dependency and not a second knob — the zone is the user's one answer to
+> "what day is it", already ratified and already read by every other dated surface,
+> and this mechanism neither validates it again nor carries a zone of its own. The
+> composition root reads five settings in total (§5), and a reader counting only
+> four cannot implement the period rule.
 
 > **Normative.** `world_spend_currency` is validated on **shape only** — exactly
 > three uppercase ASCII letters, ISO-4217's alphabetic form, neither normalised
@@ -144,8 +153,9 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > **Normative.** A **configured** amount that is not countable is refused at load
 > with `ConfigurationError`, naming the field. A **declared** amount that is not
 > countable refuses the call at admission with `SpendUndeterminedError` where a
-> ceiling is configured — it is §4's **fifth** ground, and it is not a crossing: no
-> ceiling was reached, and the projection could not be formed at all. A
+> ceiling is configured — it is §4's **first** ground, first in that section's
+> evaluation order as well as in its list, and it is not a crossing: no ceiling was
+> reached, and the projection could not be formed at all. A
 > **reported** amount that is not countable makes its period's accounted total
 > **indeterminate** (§2).
 
@@ -269,9 +279,15 @@ and it refuses work the user authorised, in a currency `core` chose for a user i
 does not know; too high and it is decoration. **What would change this is a
 standing grant** — an authorisation that lets a call execute with no per-call
 user act (ADR-0021 §6, #68, and the ADR ADR-0148 §3's third clause reserves it
-to). When such an authorisation can cover an egress call, the ground under this
-clause is gone and the default is reopened by that fact; §8 records it as the
-trigger rather than pre-deciding it here.
+to) — **or** a priced tool a policy may auto-`ALLOW` outright, which that floor
+does not reach: it binds a non-empty `discloses`, and a `PER_CALL` tool may
+declare none. The paragraph above is about reaching the *world*, and this
+mechanism counts every registered tool (§1), so the two are not the same set and
+the narrower claim would not carry the ceiling's own scope. Neither route is
+walked in the tree today — nothing declares a `PER_CALL` cost (§5) and nothing
+populates `authorised_by` — and when either is, the ground under this clause is
+gone and the default is reopened by that fact; §8 records both as the trigger
+rather than pre-deciding it here.
 
 ### 2. What is counted: a declared estimate before, a reported figure after, and an unknown price that is never zero
 
@@ -304,20 +320,43 @@ trigger rather than pre-deciding it here.
 > basis in the configured currency contributes its `amount`.
 
 > **Normative.** A cost whose basis is `UNKNOWN` contributes
-> `world_spend_unknown_allowance` where that setting is set, and where it is not,
-> it contributes **more than any ceiling**: in the projected total the call is
-> refused, and in the accounted total the period becomes **indeterminate**. An
-> `UNKNOWN` cost is never treated as zero and never omitted from a total.
+> `world_spend_unknown_allowance` where that setting is set. Where it is not the
+> cost has no number at all, and the two sides part rather than sharing one: a
+> **declared** `UNKNOWN` cost refuses the call at admission with
+> `SpendUndeterminedError` where a ceiling is configured — §4's **second** ground,
+> and like the first it is not a crossing, since no ceiling was reached and the
+> projection was never formed — while a **reported** `UNKNOWN` cost makes its
+> period's accounted total **indeterminate**. An `UNKNOWN` cost is never treated as
+> zero and never omitted from a total.
 
-> **Normative.** An indeterminate accounted total refuses admission **only while
-> at least one ceiling is configured**. Where neither ceiling is set, nothing is
-> refused whatever the total says: §1's "no ceiling configured means no ceiling"
-> is unconditional, and this clause is what makes it so.
+> **Normative.** No implementation substitutes a large number for an unpriced cost,
+> and that is why the refusal is the undetermined class rather than a crossing. A
+> stand-in "greater than any ceiling" would have to be a particular `Decimal`, §4
+> makes a `SpendCeilingError` state the projected total that crossed, and two
+> implementations picking `Decimal("1E15")` and `Decimal("1E16")` would refuse the
+> same call while reporting different contract values — which §2's one-representation
+> rule exists to forbid. There is no projected total here to state, and the class
+> that says so is the one whose whole subject is a spend that could not be reduced
+> to a number.
+
+> **Normative.** An indeterminate accounted total refuses admission **only where
+> that period's own ceiling is configured**. A period nobody set a ceiling for is a
+> reporting figure and enforces nothing (§1), so with only a day ceiling set, a
+> month that cannot be measured refuses nothing. It does not need to: a period
+> contains its days, so an open claim or an unpriced completion in the **current**
+> day makes that day indeterminate too and the day ceiling refuses on its own
+> period. What the narrowing excludes is exactly the case where the unmeasurable
+> row is in an *earlier* day of the same month — a bound the user never stated
+> refusing work they authorised, which is the direction §1 declines a defaulted
+> ceiling for. Where **neither** ceiling is set nothing is refused whatever either
+> total says: §1's "no ceiling configured means no ceiling" is unconditional, and
+> this clause is what makes it so.
 
 > **Normative.** A cost denominated in a currency other than `world_spend_currency`
 > is **never converted**. It is treated exactly as an `UNKNOWN` basis is by the
-> clause above — the allowance where one is configured, and otherwise a
-> contribution greater than any ceiling. A cost whose *amount* is not countable is
+> clauses above — the allowance where one is configured, and otherwise §4's second
+> ground when declared and an indeterminate period when reported.
+> A cost whose *amount* is not countable is
 > **not** treated that way; §1's clause governs it, and the allowance never reaches
 > it. No implementation reads an exchange rate, and no lane adds one
 > without its own ratified decision (§8).
@@ -527,8 +566,9 @@ the two properties it has rather than letting a reader assume the stronger one.
 > words.
 
 > **Normative.** A factory failure is deliberately **not** a refusal. §4 enumerates
-> `SpendUndeterminedError` over five grounds, each of them a way the period's
-> *spend* could not be reduced to a number, and a handle generator that misbehaved
+> `SpendUndeterminedError` over six grounds, each of them a way the spend the
+> admission needed could not be reduced to a number, and a handle generator that
+> misbehaved
 > is none of them; raising one would tell the user a fact about their budget that
 > nothing measured, which is the confusion §4 keeps two classes to prevent. Nor may
 > the underlying error escape: §5 closes `admit_invocation`'s `Exception` set at
@@ -670,12 +710,27 @@ turn, which this section now handles.
 
 > **Normative.** A call is refused with `SpendCeilingError` where a **configured
 > ceiling would be crossed** — and only then. It is refused with
-> `SpendUndeterminedError` where the period's spend **could not be reduced to a
-> number**, on exactly five grounds: the period is indeterminate under §2, an
-> amount the admission reads is not countable under §1, the store read failed, the
-> injected clock raised, or the arithmetic trapped. No other
+> `SpendUndeterminedError` where the spend the admission needed **could not be
+> reduced to a number**, on exactly six grounds: an amount the admission reads is
+> not countable under §1; the call's own declared cost has no number at all, being
+> an `UNKNOWN` basis or a cost in a currency other than `world_spend_currency`
+> with no allowance configured (§2); the injected clock raised; the store read
+> failed; the period is indeterminate under §2; or the arithmetic trapped. No other
 > `Exception` escapes `admit_invocation`; a backend exception is translated rather
 > than propagated, so `tools/` never sees a store's own error type.
+
+> **Normative.** The six are evaluated in **that order**, after §3's no-ceiling
+> short-circuit and before any comparison against a ceiling, and the **first** one
+> that holds is the one the message names. Without a fixed order two conforming
+> implementations meeting a non-countable amount and a raising clock in the same
+> call would send the operator to two different repairs, each satisfying its own
+> clause. The order is not arbitrary: the first two are facts about the call and
+> need no I/O, so they are decided before anything is read; the clock precedes the
+> store because the period is what selects the rows; indeterminacy is a property of
+> rows already read; and a trap can only arise once operands exist. A crossing is
+> knowable only last, so a `SpendCeilingError` never pre-empts a
+> `SpendUndeterminedError` and a call that could not be measured is never reported
+> as one that overspent.
 
 > **Normative.** A `BaseException` that is not an `Exception` — a `CancelledError`
 > delivered from outside, above all — is **propagated unchanged** and is never
@@ -686,9 +741,9 @@ turn, which this section now handles.
 > **Normative.** The two are separate classes because their messages state
 > different facts and one of them would otherwise be false. A ceiling refusal
 > names the ceiling that was crossed; a refusal on a clock failure, a trapped sum,
-> an open claim or an amount that is not countable crossed no ceiling at all, and
-> reporting it as one would tell the user a number about their budget that nothing
-> measured.
+> an open claim, an unpriced cost or an amount that is not countable crossed no
+> ceiling at all, and reporting it as one would tell the user a number about their
+> budget that nothing measured.
 
 > **Normative.** The refusal is an exit **before the callable is entered**, so it
 > falls in the window ADR-0034 §1 governs and qualifies on that section's second
@@ -735,7 +790,8 @@ turn, which this section now handles.
 > the **projected** total that crossed it — the accounted figure alone would leave
 > a user reading "90 against a ceiling of 100" beside a refusal and no way to see
 > the reservations and the declaration that made 101 (§2, §3).
-> A `SpendUndeterminedError` names **which of the five grounds above** applied, and
+> A `SpendUndeterminedError` names **which of the six grounds above** applied — the
+> first one that held, under the order above — and
 > names the period only where one was determined — a clock that raised leaves no
 > period to name, and the message says the clock failed rather than inventing one.
 > It states no amount. Neither carries an argument value, a recipient, an account,
@@ -906,7 +962,8 @@ whole explanation.
 > `Decimal("2.0")`, `Decimal("2E+1")` and `Decimal("-0")` each raise, and
 > `Decimal("0")` is the only spelling of a zero total. `Decimal("2E+0")` is not a
 > case: it and `Decimal("2")` are one representation, `(0, (2,), 0)`, so a
-> validator cannot tell them apart and this clause does not ask it to. That subsumes the two invariants a reader would
+> validator cannot tell them apart and this clause does not ask it to. That
+> subsumes the two invariants a reader would
 > otherwise reach for — non-negativity, and at most **nine** fractional digits,
 > which holds because every row contributing to it carries at most nine — and it is
 > deliberately **not** bounded in magnitude: §1's predicate governs inputs and not
@@ -1001,7 +1058,8 @@ been a fourth row, and it bought nothing the specification's own form does not.
 > nor `clear`.
 
 > **Normative.** `app/composition.py` is the **sole constructor and sole wirer**:
-> it builds the object, reads §1's four settings, injects the clock, and hands the
+> it builds the object, reads §1's four spend settings **and `Settings.timezone`**,
+> injects the clock, and hands the
 > invoker its `SpendGate` face and the engine its `SpendLedger` face. Those two are
 > the only runtime holders. No subsystem constructs one, and no default is
 > substituted where the composition root did not wire one.
@@ -1163,10 +1221,16 @@ Scoping something out is a decision, so each carries the condition that reopens 
 > resemblance to a mechanism this ADR did land, and not by a lane finding the
 > deferral inconvenient.
 
-- **A default ceiling.** Reopened when an authorisation can cover an egress call
-  with no per-call user act — the standing grant ADR-0021 §6 defers and ADR-0148
-  §3's third clause reserves. The ground under §1's "unset means unbounded" is
-  that per-call act; when it goes, the default is that ADR's question.
+- **A default ceiling.** Reopened when **any priced invocation can execute with no
+  per-call user act**. A standing grant is the route the corpus already names — the
+  one ADR-0021 §6 defers and ADR-0148 §3's third clause reserves — but it is not
+  the only one, so the trigger is written over the property rather than over that
+  route: a `PER_CALL` tool declaring `discloses=()` sits outside ADR-0021 §5's
+  floor, which binds only a **non-empty** `discloses`, so a policy may auto-`ALLOW`
+  it with no standing grant in existence. Nothing in the tree declares a `PER_CALL`
+  cost today (§5), so that route is open and unwalked; the first tool to walk it is
+  the trigger as surely as a standing grant is. The ground under §1's "unset means
+  unbounded" is the per-call act, and it goes when *either* happens.
 - **Per-tool, per-capability and per-protocol ceilings.** Reopened by a decision
   that lands keyed per-user tool configuration — ADR-0016 §7's deferred "tool
   enablement and per-user configuration", which is the store such a ceiling needs.
@@ -1408,6 +1472,19 @@ the ADRs it depends on rather than replacing them.
 > ceiling, where a total is stated and **nothing is refused even while the period
 > is indeterminate**; and no currency configured at all, where no total is stated.
 
+> **Normative.** The suite drives §2's per-period indeterminacy where the two
+> periods **disagree**, since every other indeterminacy fixture here puts the
+> unmeasurable row in the current day and makes both periods indeterminate at
+> once: an unpriced completion in an **earlier** day of the current month, with
+> only the **day** ceiling configured. The month is indeterminate and the day is
+> not, the call is **admitted**, and `spend_totals` states the month's `accounted`
+> as `None` beside the day's figure. It drives the mirror with only the **month**
+> ceiling configured, where the same row refuses. The CLI is driven on the first
+> fixture too: the indeterminate month entry carries `ceiling=None`, so §6's "no
+> further call will be admitted" line is **absent** there and present on the
+> second — a renderer printing it from the absence alone tells a user their calls
+> are blocked when they are not.
+
 > **Normative.** The suite drives the boundary cases §1's period rule exists for,
 > on real IANA zones: a civil date whose midnight is **repeated** across a backward
 > transition, one whose midnight **does not exist** across a forward transition,
@@ -1420,11 +1497,26 @@ the ADRs it depends on rather than replacing them.
 > discharge this clause.
 
 > **Normative.** The suite pins each refusal to its class under §4: a crossed
-> ceiling to `SpendCeilingError`, and an indeterminate period, a non-countable
-> declared amount, a failed store read, a raising clock and a trapped computation
-> each to `SpendUndeterminedError` — and
-> asserts that no backend exception type escapes either member, while a
-> `CancelledError` delivered during either member propagates unchanged.
+> ceiling to `SpendCeilingError`, and all **six** undetermined grounds — a
+> non-countable declared amount, a declared cost with no number at all (an
+> `UNKNOWN` basis and, separately, a foreign-currency one, each with no allowance
+> configured), a raising clock, a failed store read, an indeterminate period and a
+> trapped computation — each to `SpendUndeterminedError`, with the message
+> asserted to name **which** ground. The two unpriced cases are the ones a suite
+> written before §4's second ground existed would leave classed as a crossing, and
+> the assertion that they are *not* `SpendCeilingError` is the point: nothing measured
+> a ceiling. It also asserts that no backend exception type escapes either member,
+> while a `CancelledError` delivered during either member propagates unchanged.
+
+> **Normative.** The suite drives §4's **order** with fixtures where two grounds
+> hold at once, because each ground's isolated test passes under either order and
+> the messages send an operator to different repairs: a non-countable declared
+> amount **and** a raising clock, which must name the amount; a raising clock
+> **and** a failed store read, which must name the clock; a failed store read
+> **and** an indeterminate period, which must name the store; and an indeterminate
+> period **and** a projection that would also cross a ceiling, which must raise
+> `SpendUndeterminedError` and not `SpendCeilingError`. The last is what stops an
+> implementation from reporting an unmeasurable period as an overspend.
 
 > **Normative.** The suite drives §3's short-circuit: with **neither** ceiling
 > configured, a raising clock, a failed store read and an indeterminate period each
@@ -1481,7 +1573,8 @@ the ADRs it depends on rather than replacing them.
 > not on the exception alone, at the one boundary the mint adds to it.
 
 > **Normative.** The suite drives a refusal **lifted by a release**, which §4
-> names as the one way a refusal clears with no act outside the mechanism: an accounted total of 90, a ceiling of
+> names as the one way a refusal clears with no act outside the mechanism: an
+> accounted total of 90, a ceiling of
 > 100, an outstanding reservation of 10 and an estimate of 1 refused at 101; the
 > outstanding handle released; the same estimate admitted in the same period under
 > the same configuration. It asserts the `SpendCeilingError` from the first attempt
@@ -1715,6 +1808,18 @@ the ADRs it depends on rather than replacing them.
 > `EncodableText`-based by construction, which
 > `tests/core/test_text_encodability_coverage.py` already does for every model in
 > `core.types` and this ADR claims no exemption from.
+
+> **Normative.** The lane drives §1's configuration **dependencies** at load,
+> which no admission fixture reaches because a valid fixture supplies a currency
+> without being asked: each ceiling alone and the allowance alone with
+> `world_spend_currency` unset raises `ConfigurationError` naming the field, and
+> `world_spend_currency` set **alone** loads and configures a reporting currency
+> that refuses nothing (§1). Without these a `world_spend_day_ceiling` of
+> `Decimal("10")` loads beside no currency and silently caps nothing, which is a
+> configured ceiling that does not bind. It drives `world_spend_currency`'s own
+> shape rule at load in the same place — `""`, `"usd"`, `"US"`, `"USDD"` and a
+> three-character non-ASCII value each refused, `"USD"` accepted — since §5's
+> hostile constructions test `SpendTotal` and not `Settings`.
 
 > **Normative.** The lane refuses a zero allowance at load in each of §1's
 > spellings, and asserts the calendar month whose exclusive end is not
