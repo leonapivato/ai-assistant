@@ -15,9 +15,9 @@
   `InvocationLedger` — so the implementing lane owes a **triad**: contract, shared
   conformance suite and canonical fake in `ai_assistant.testing`, in one change and
   never deferred (`CONTRIBUTING.md` → "Adding a Protocol"). It also grows two
-  existing Protocols: `AuditTrail` gains two read members and `AssistantEngine`
-  two, so every structural implementation of each must grow them or stop satisfying
-  it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
+  existing Protocols: `AuditTrail` gains **three** read members and
+  `AssistantEngine` two, so every structural implementation of each must grow them or
+  stop satisfying it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
   gains a field, `core/types.py` gains two models and `core/errors.py` three error
   classes. Because the promoted surface's method set changes, the group that lands
   §4's two operations also **bumps `PROTOCOL_VERSION` in that same change**
@@ -975,39 +975,27 @@ the count.
 > converting a `KeyboardInterrupt` into a returned result is the conversion ADR-0029
 > §3 forbids. The claim is left open by that exit as by any other.
 
-> **Normative.** **One case in that clause cannot be honoured, and this ADR states
-> that rather than requiring it**: a `BaseException` that is not a `CancelledError`
-> raised **inside a retained append task**. ADR-0031 §4 *measured* the behaviour and
-> it is not a matter of care — `Task.__step` sets a `KeyboardInterrupt` on the future
-> **and** re-raises it into the event loop, so the awaiting frame sees a
-> `CancelledError` whatever the implementation does, and recovering the real class
-> off the retained task would re-raise an exception the loop already holds. The
-> clause above therefore governs every non-cancellation `BaseException` raised on the
-> completion path **outside** the two appends — the callable's, the clock callable's,
-> the seam's own — and this one is governed here.
+> **Normative.** **One case is left uncontracted, deliberately and in terms**: a
+> `BaseException` that is not a `CancelledError` raised **inside a retained append
+> task**. This ADR states no outward class, no outcome, no diagnostic and no
+> absorption for it, and §9 requires no test of it — the same stance §1 already takes
+> toward `BaseException` generally ("this ADR asks the executor to derive **nothing**
+> from those"), applied where it is forced. ADR-0031 §4 *measured* the mechanism:
+> `Task.__step` sets a `KeyboardInterrupt` on the future **and** re-raises it into the
+> event loop, which is the loop coming down. What a frame that may never resume
+> "returns" is not a thing a seam contract can bind, and a draft that specified one
+> collided with three clauses of this section at once — the absorption arm below, the
+> diagnostic matrix's rule that a non-`Exception` carries no class, and ADR-0029 §3.
 
-> **Normative.** What `invoke` owes for it is what it can deliver. The exception
-> arrives as a `CancelledError` with the `Task.cancelling()` count **unmoved across
-> the call**, which is the state the next clause already classifies: no cancellation
-> request reached this task, so it is a collaborator raising the wrong thing and is
-> never read as a cancellation of this call. `invoke` reads the retained task's own
-> exception, carries its **class** in the diagnostic under §3's bound on that field,
-> writes no completion, invents no outcome and converts nothing into a `ToolResult`.
-> It does **not** promise the caller that class, and no lane "restores" it: the
-> outward exception is the one asyncio delivers, and re-raising the recovered one
-> delivers the interrupt twice.
-
-> **Normative.** That is a **cost of the shield**, priced against what the shield
-> buys. Without the retained task an absorbed cancellation costs the `id` of a claim
-> that landed (§1, ADR-0054) — the failure this section exists to prevent, on every
-> cancellation. With it, one exit — an interpreter torn down *inside an audit append*
-> — reaches the caller under a class it did not have. The second is both rarer and
-> less harmful, and no third option was available. ADR-0031 §4 refused the child task
-> for the **callable** on this exact ground; what differs here is that the callable is
-> **not** what is isolated. It is awaited directly, its own `BaseException`
-> propagates unchanged as ADR-0029 §3 requires, no Ctrl-C during the act is
-> misclassified as an external cancellation, and no watchdog over the callable is
-> acquired — which were §4's other two objections, and neither reaches this design.
+> **Normative.** **Nothing of ADR-0029 §3 is superseded by that silence**, and §7
+> adds no scope for it. §3's rule is that a `BaseException` propagates unchanged, and
+> every path this ADR *does* contract keeps it: the **callable** is awaited directly
+> and is not isolated in a task, so its own `KeyboardInterrupt` and `SystemExit`
+> propagate unchanged exactly as before. Declining to state an outcome is not
+> promising a different one. That is also why ADR-0031 §4's other two objections do
+> not reach this design — no Ctrl-C *during the act* is misclassified as an external
+> cancellation, and no watchdog over the callable is acquired — because the callable
+> is not what the shield isolates.
 
 > **Normative.** A `CancelledError` **a collaborator raised** on the completion path
 > — the ledger's clock, its store — where the `Task.cancelling()` count is
@@ -1831,9 +1819,10 @@ here; they are what the surveyed projects' own code and documentation say, and
 
 > **Normative.** Every read of this row kind returns a **detached snapshot** — the
 > sequence returned and everything mutable it reaches — as every other `AuditTrail`
-> read does (ADR-0018 §3, ADR-0021 §4). The trail's own two reads return a `list`
-> and the engine's two operations return a `tuple` (§§2, 4); both are detached, and
-> neither is a view onto stored state.
+> read does (ADR-0018 §3, ADR-0021 §4). The trail's own three reads return a `list`
+> — the two joined listings and `open_invocations` — and the engine's two operations
+> return a `tuple` (§§2, 4); both are detached, and neither is a view onto stored
+> state.
 
 > **Normative.** This ADR mints no retention rule and no TTL. #108's question is
 > unchanged and now covers both kinds of row; a rule that expires one kind and not
@@ -2483,24 +2472,21 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the cancellation ADR-0054 permits the store to re-raise in its place, reporting
 > neither the fault nor the open claim.
 
-> **Normative.** The non-cancellation `BaseException` raised **inside a retained
-> append** is pinned for what §3 promises, and an earlier draft of this clause pinned
-> what ADR-0031 §4 measured to be impossible. A `KeyboardInterrupt` and a
-> `SystemExit` raised from the **claim** append each reach the caller as a
-> `CancelledError` whose `Task.cancelling()` count is **unmoved**, with the tool
-> callable **never entered**, no completion written, no outcome invented, and the
-> **diagnostic carrying the real class** read off the retained task. The test asserts
-> each of those, and asserts that the interrupt is **not delivered twice** — a lane
-> that re-raises the recovered class hands the loop an exception it already holds
-> (§3, ADR-0031 §4). The same pair is run against the **completion** append.
+> **Normative.** **No test is written for a non-cancellation `BaseException` raised
+> inside a retained append**, and none may be: §3 leaves that case uncontracted, so a
+> suite asserting any outward class, outcome or diagnostic for it would pin behaviour
+> this ADR declines to state. Two earlier drafts of this clause did — one demanding
+> the unchanged class ADR-0031 §4 measured to be unavailable, the next demanding a
+> converted one that collided with the absorption arm and the diagnostic matrix — and
+> both are withdrawn.
 
-> **Normative.** The `BaseException` the **tool callable** raises is pinned beside
-> it and answers differently, which is why the two are named apart: the callable is
+> **Normative.** What **is** pinned is the `BaseException` the **tool callable**
+> raises, because that path is contracted and answers differently: the callable is
 > awaited **directly** and is not isolated in a task, so a `KeyboardInterrupt` and a
 > `SystemExit` from it propagate **unchanged**, asserted by class with the cause
-> intact (ADR-0029 §3, §3 above). A suite carrying only the converted case would
-> certify an implementation that had isolated the callable too — the shape ADR-0031
-> §4 refused outright — and only running both finds it.
+> intact, the claim left open and no completion written (ADR-0029 §3, §3 above). A
+> suite omitting it would admit an implementation that had isolated the callable too
+> — the shape ADR-0031 §4 refused outright — and this is the case that catches it.
 
 > **Normative.** No test asserts that a ledger append is abandoned, and none may be
 > written: neither wait is bounded and the shielded task is awaited to its outcome,
@@ -2536,11 +2522,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** The **mutation bypass** is pinned on both write paths and on both
 > returns, because a frozen model makes it look closed and does not close it (§2).
 > The suite mutates, through `__dict__` and **after** the call returned, the
-> `ToolCost` it passed to `complete_invocation`; every later read — the returned row,
-> `recent_invocations`, `export_invocations`, `open_invocations` — still shows the
-> value as it stood at the append. It mutates the **returned** claim and the
-> **returned** completion the same way and asserts the same thing, reaching
-> recursively into the `ToolCost` a completion row carries. An implementation that
+> `ToolCost` it passed to `complete_invocation`; every later read that can show a
+> completion — the returned row, `recent_invocations` and `export_invocations` —
+> still shows the value as it stood at the append. `open_invocations` is **not** among
+> them and cannot be: it returns claims no completion names (§2), so a completed
+> claim has left that read and a claim carries no cost. It is covered by its own
+> case, on an **open** claim whose returned row is mutated through `__dict__`, with
+> the next `open_invocations` still showing the row as appended. The suite also
+> mutates the **returned** claim and the **returned** completion and asserts the same
+> thing, reaching recursively into the `ToolCost` a completion row carries. An implementation that
 > stores or returns the caller's object passes every mapping and shape case above and
 > fails these, which is why ADR-0021 §4 pins it for `record` rather than resting on
 > `frozen=True`.
@@ -2846,8 +2836,9 @@ row kinds, and the annotation belongs to the kind that was already there.
   `ToolInvocation` and `RecordedInvocation`; `AuthorisationSpentError`,
   `UnrecordedAuthorisationError` and `InvalidCompletionError`, all three under
   `AuditError`; one field on `ToolResult`;
-  two read members on `AuditTrail`; two on `AssistantEngine`; and one obligation on
-  `ToolInvoker.invoke`. One triad lands, and three existing conformance suites and
+  **three** read members on `AuditTrail` — `recent_invocations`,
+  `export_invocations` and `open_invocations`; two on `AssistantEngine`; and one
+  obligation on `ToolInvoker.invoke`. One triad lands, and three existing conformance suites and
   their fakes grow.
 - **Revisit when** the budget ADR lands and finds the field named in §5 does not
   answer it; when #234 changes the executor's classification; when a tool contract
