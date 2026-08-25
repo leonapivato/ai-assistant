@@ -159,6 +159,33 @@ surface can state an execution at all, because ADR-0186's two operations return
 > `ToolResult` and never as data, and neither is ever auto-retried. A
 > `ToolInvoker` propagates each unchanged rather than translating it.
 
+> **Normative.** **`invoke` bounds each of its two ledger awaits by the `timeout`
+> it was given**, so this ADR adds no unbounded wait to a seam whose whole contract
+> is that there is always a deadline and that "the seam stops waiting" (ADR-0029
+> §4). A claim append that has not returned inside that bound is a store that will
+> not write: `invoke` stops waiting, raises an `AuditError`, and **does not enter the
+> callable** — the clause below governs it as it governs every other pre-callable
+> failure, and ADR-0034 §1's second ground classifies the step `FAILED`.
+
+> **Normative.** Stopping there is safe in the one direction that matters, which is
+> why the bound is available at all. The append may still land after `invoke` stopped
+> waiting, and `invoke` cannot know whether it did: what it may leave behind is a
+> **spurious open claim** under a decision no act was performed on. That claim
+> authorises nothing, because the callable was never entered. Its whole cost is
+> §5's — an evaluation that fails closed while it is in scope — and §1's — a later
+> legitimate claim under that decision refused as spent. Both are the fail-closed
+> direction. The unobservable outcome this section refuses to tolerate is the one
+> where the **callable may have run**, and this is not it.
+
+> **Normative.** The bound is also the one place where a claim append's outcome is
+> **not** observed, and it is named here rather than left to make the observability
+> clause below read as absolute. Reaching the bound is treated exactly as an append
+> that failed: where a cancellation is pending it is re-raised carrying the
+> `AuditError` as its cause, and where none is, the `AuditError` leaves `invoke`.
+> What that clause guarantees is that no *unbounded* wait and no *silent* discard
+> stands between the append and the caller — never that a store which has stopped
+> answering can be made to answer.
+
 > **Normative.** **Every `AssistantError` the claim append raises** — either
 > refusal above, an argument fault, the guard's rejection of a clock reading, a
 > store that will not write — is an exit **before the callable is entered**, always,
@@ -956,6 +983,22 @@ the count.
 > the content stays out of the log rather than being trusted to a redactor that
 > cannot see it.
 
+> **Normative.** The **completion** append is bounded by the same `timeout` §1 bounds
+> the claim append by, and it needs no rule of its own: a bound reached is a
+> completion write that failed, which the clauses above already govern in full — the
+> call's own `ToolResult` stands and is returned unchanged, the claim is left open,
+> the operator gets the diagnostic, and §5's evaluation fails closed over that scope.
+> A caller therefore never loses a classified `ToolResult` to a store that has
+> stopped answering, which is the property ADR-0029 §4 exists to give it.
+
+> **Normative.** `invoke`'s own wall clock is therefore **bounded and never
+> unbounded**: at most the callable's deadline plus the two bookkeeping bounds, so at
+> most three times the `timeout` it was handed, in the worst case where all three are
+> reached. This ADR states that figure rather than leaving a caller to find it.
+> `timeout` is the deadline for the **call**, which is what ADR-0029 §4 makes it, and
+> it was never a budget for the seam's whole frame; §7 shows why nothing is owed on
+> that section.
+
 > **Normative.** The result of those clauses is a claim left **open**, which is the
 > state the clause above governs and which no reader resolves. That is the honest
 > record of an act whose outcome this system failed to write down, and it is
@@ -1007,6 +1050,40 @@ the count.
 > transition over a claim opened between the two reads. So erasure costs the scan one
 > more read of something it had to read anyway, and no marker, generation or resume
 > point is minted for it.
+
+> **Normative.** The re-read bounds what the scan can be raced by; it does not bound
+> it to nothing, and this ADR states the remainder rather than implying an atomicity
+> it has not got. A claim opened **after** the re-read and before the transition
+> commits is not prevented by the ordering: those are two operations on two stores,
+> and no gate spanning them is available to `orchestration` under golden rule 1 —
+> nor is one minted here. What removes it as a hazard is §1's own refusal rule.
+> Every completion this scan writes is `INDETERMINATE`, and §1 refuses a further
+> claim under a decision where **any** claim carries `SUCCEEDED` or `INDETERMINATE`.
+> So the moment the scan has completed the claims it found, that decision admits
+> nothing further, ever, and the window before the transition is a window in which
+> no claim can be admitted at all.
+
+> **Normative.** The one case that argument does not reach is a scan that found
+> **none** open — the crash landed after the last completion — where the decision's
+> last claim is completed retryable `FAILED` inside its `KEYED` window, so §1 would
+> still admit one. Admitting it requires an executor live on that step, and
+> **ADR-0014 §4 already excludes that as the recovery scan's own precondition**:
+> "Recovery scans `active_executions()` at startup, which presumes no executor is
+> live for those states". That precondition is what this ADR relies on, named here
+> rather than left as an assumption; it is the same one the scan's own completions
+> already rest on, since a scan and a live `invoke` completing one claim would race
+> whatever this ADR said.
+
+> **Normative.** Where that precondition is violated the outcome is an
+> **already-stated** state and no new one: a claim left open under a step that is
+> not `RUNNING`, exactly as the clause below describes it, which no later scan
+> returns for and which §5 fails closed on. **No act is authorised twice by it** —
+> the claim was admitted by §1's rule at the moment it was appended, and §1 is
+> decided inside the append — so the cost is a stuck evaluation, never a double
+> effect. That is why no gate is minted: the failure the gate would prevent is a
+> liveness cost in the fail-closed direction, and the gate would be a coordination
+> operation spanning two stores that golden rule 1 does not permit and ADR-0014 §4's
+> precondition makes unnecessary.
 
 > **Normative.** The scan **completes open claims and writes no other outcome.**
 > Where it finds claims under that `approval_ref` already completed, it leaves them
@@ -1236,10 +1313,24 @@ nothing in this section inherits that nonce or its hazard.
 > store, calls a second operation to complete a row, or infers a missing half —
 > which is what the store-side join exists to make unnecessary.
 
-> **Normative.** A surface may render an invocation row **as an execution**, which
-> is what the row is. On a **completion whose outcome is `SUCCEEDED`** and whose
-> `RecordedInvocation` carries `egress_call` true, a surface may say that the call
-> was **sent**. It says this on no other row and in no other state.
+> **Normative.** A surface renders an invocation row as **an act the system began on
+> that authorisation** — a call it claimed and then attempted — and **not** as a
+> statement that the tool callable was entered. The claim is written *before* the
+> callable (§1), so it is a write-ahead record of an attempt; §1's own cancellation
+> clause has a path where the claim lands, its completion is written, and the
+> callable is provably never entered. A row saying "this ran" would be asserting a
+> fact no row carries, which is the same fact ADR-0034 §1 declines to mint and #234
+> owns. Review found this stated the other way round, and the correction costs the
+> record nothing: what the user is owed is what the system *did* — it spent an
+> authorisation and attempted a call — and that is exactly what the two rows hold.
+
+> **Normative.** One state does establish entry, and it is the one the surface may
+> say most about: a **completion whose outcome is `SUCCEEDED`** is the tool
+> reporting an outcome back through the seam, which is unreachable without the
+> callable. Where such a completion's `RecordedInvocation` also carries
+> `egress_call` true, a surface may say that the call was **sent**. It says this on
+> no other row and in no other state, and on every other state it says what the row
+> says: attempted, and how it finished, or that it has no completion yet (§3).
 
 > **Normative.** No surface says or implies that anything was **read**, **received**,
 > **delivered**, **seen** or **acted on** by any recipient, on any row, in any
@@ -1258,8 +1349,8 @@ nothing in this section inherits that nonce or its hazard.
 > transmission, no invocation row as a ruling, and no joined pair as a single
 > record.
 
-> **Normative.** No surface derives a count of executions from anything but the
-> rows it holds. The absence of a completion, or of a claim, from a bounded page is
+> **Normative.** No surface derives a count of calls, attempted or completed, from
+> anything but the rows it holds. The absence of a completion, or of a claim, from a bounded page is
 > a fact about the page.
 
 > **Normative.** Every value rendered is inserted into the surface's output as
@@ -1299,8 +1390,11 @@ invocations is subject to the same limit and fails the same honest way.
 §8 barred it because the trail held only rulings: "a resolved `ALLOW` says a call
 was permitted and says nothing about whether, or how many times, it ran". That
 sentence stays true of a decision row and is now false of nothing, because the word
-is granted on a different row — one that *is* an execution, over a decision the
-store has already confirmed carried a binding. The three words that stay barred
+is granted on a different row — a **`SUCCEEDED` completion**, which is the tool
+reporting an outcome back through the seam and so is unreachable without the
+callable, over a decision the store has already confirmed carried a binding. It is
+granted on the one state that establishes the call happened, and on no state that
+merely records it was begun (above). The three words that stay barred
 everywhere are barred for a reason no record can lift: nothing in this system
 observes a recipient. A tool reporting `SUCCEEDED` reports that its own upstream
 accepted the call, and a surface that turned that into "delivered" would be
@@ -1664,6 +1758,26 @@ failure as one of the two the boolean reading produces — an invented `Cancelle
 before the seam was entered". So §§1 and 3 apply those three sections rather than
 changing any of them, and no sentence of any becomes false or over-wide.
 
+**ADR-0029 §4's deadline — nothing is owed either, and the showing is separate
+because the clause at risk is a different one.** Review put it squarely: `invoke`
+gains two awaits it did not have, and a §4 whose promise is that "the seam stops
+waiting" would be falsified by a seam that waits forever on an audit store. It is
+not falsified, because §1 and §3 bound both awaits by that same `timeout` rather
+than leaving them open. Read the section's own sentences against what changes.
+*(a) "Every invocation carries a deadline"* — unchanged; the argument, its validation
+and its refusal of a non-positive value are untouched. *(b) "what it buys is that
+the seam stops waiting, not that the tool stops working"* — still true, and now true
+of the bookkeeping as well as the callable: every wait `invoke` performs is bounded
+by the value it was given. *(c) "the expiry comes back as a classified `ToolResult`"*
+— preserved exactly, and §3's completion bound is what preserves it, since a
+completion append that hung would otherwise swallow a classified result the seam had
+already computed. *(d) The `FAILED`/`INDETERMINATE` classification rule* — this ADR
+computes nothing of its own there and consults §4 for it. What is new is that the
+frame may take longer than one deadline, and §4 never bounded the frame: it bounds
+the wait on the tool. A reader holding only ADR-0029 and acting on §4 acts
+correctly, which is ADR-0070 §1's test, so under ADR-0082 §1 there is nothing to
+record.
+
 **ADR-0148 §9 — partially superseded, on *where* an attempt's outcome is recorded
 and not on *which four* outcomes there are.** Its third clause rules that "The four
 outcomes ADR-0017 §3 requires are the step's and no others", and its reasoning gives
@@ -1868,7 +1982,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **every completion shape §2 admits**, not on `FAILED` alone — a renderer that
 > branches on `FAILED` passes a `FAILED`-only test and then crashes or silently drops
 > a kind on the others. The cases are `FAILED` with no kind, `INDETERMINATE` with no
-> kind, `INDETERMINATE` with a reported kind, and `FAILED` with a reported kind. On
+> kind, `INDETERMINATE` with a reported kind, `FAILED` with a reported kind, and —
+> because §2 admits it and an earlier enumeration here left it out — **`SUCCEEDED`,
+> which carries no kind at all**, on a row whose `egress_call` is true and again on
+> one where it is false. On the `SUCCEEDED` pair the adapter renders the cost the row
+> carries, says **sent** on the egress one and says it on the other **nowhere**, and
+> raises on neither; an adapter that branches on the failure outcomes alone passes
+> every other case here and then crashes, drops the cost, or says "sent" for a
+> successful local call. On
 > the kindless two it renders that no kind was reported, renders no kind of its own,
 > drops neither the row nor the field, and raises nothing; on the kinded two it
 > renders the reported kind exactly and substitutes nothing. The floor is proved on
@@ -1946,6 +2067,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > rejects — each producing the admission this ADR states. It pins the ordering rule against a backwards clock by
 > asserting over append order and not over instants.
 
+> **Normative.** It pins **which** claim the window is measured from, over a chain
+> of at least three, because the single-retry boundary cases above cannot see it. On
+> a ten-second window: a claim at `t=0` completed retryable `FAILED`, a second
+> admitted at `t=9` and completed the same way, and a third attempted at `t=18`,
+> which §1 **refuses** — eighteen seconds have elapsed from the **first** claim in
+> the ledger's append order, whatever the gap from the last. An implementation
+> measuring from the most recent claim admits it and passes every inside- and
+> outside-boundary case above, and it would renew the window indefinitely one
+> retryable failure at a time, which is ADR-0029 §5's window defeated rather than
+> enforced.
+
 > **Normative.** Two writes here run from paths that may themselves be cancelled:
 > the claim append, whose outcome §1 requires to be observable before a cancellation
 > is propagated, and the completion, which §3 requires on the cancellation and
@@ -2010,6 +2142,16 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > named refusals and the translated cases are asserted in one place, because it is
 > their interaction that an earlier draft got wrong (§1). On the completion path none leaves at all, because it is
 > absorbed (§3).
+
+> **Normative.** The two bounds are pinned at the seam, one each, because they fail
+> apart. A ledger whose **claim** append never returns leaves `invoke` as an
+> `AuditError` once the bound is reached, with the tool callable never entered and
+> the executor committing the step `FAILED` — and the property actually under test is
+> that `invoke` **returned at all**, so the test fails by hanging rather than by an
+> assertion where the bound is absent. A ledger whose **completion** append never
+> returns leaves the call's own `ToolResult` returned unchanged, the claim open, and
+> the diagnostic emitted. Both drive a gated ledger against the injected clock rather
+> than real elapsed time (`CONTRIBUTING.md`'s determinism rule).
 
 > **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
@@ -2156,8 +2298,9 @@ row kinds, and the annotation belongs to the kind that was already there.
 ## Consequences
 
 - **A user can be told what happened, for the first time.** The listing states that
-  a call was entered, what it cost, how it finished, and — on an egress call that
-  succeeded — that it was sent. That is #1503's user-visible half, and it is what
+  a call was begun on an authorisation the user granted, what it cost, how it
+  finished, and — on an egress call that succeeded — that it was sent. It does not
+  say the callable was entered, because no row carries that (§4). That is #1503's user-visible half, and it is what
   milestone 24's exit could not be ruled on.
 - **One approval no longer backs an unbounded number of acts on a *spendable*
   authorisation** — side-effecting and not `NATURAL` (§1). The property ADR-0021 §4
