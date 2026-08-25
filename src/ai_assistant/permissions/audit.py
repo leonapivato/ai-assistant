@@ -289,19 +289,27 @@ _CREATE_INVOCATIONS = (
     "outcome TEXT GENERATED ALWAYS AS (json_extract(data, '$.outcome')) VIRTUAL)"
 )
 
-_INVOCATION_INDEXES = (
+#: Keyed by name, because :data:`_INVOCATION_OBJECTS` holds each one to its own
+#: definition and a positional tuple would make that mapping a place to get wrong.
+_INVOCATION_INDEXES = {
     # The primary key `id` cannot be, because SQLite refuses a generated column in
     # one. Same constraint, same enforcement, and the derivation is kept.
-    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_id ON invocations(id)",
+    "invocations_id": "CREATE UNIQUE INDEX IF NOT EXISTS invocations_id ON invocations(id)",
     # A *unique* index, so "a claim is completed once" survives even a bug in the
     # checked read. SQLite treats NULLs as distinct, so it constrains completions
     # only and leaves claims unaffected.
-    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_completes ON invocations(completes)",
+    "invocations_completes": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS invocations_completes ON invocations(completes)"
+    ),
     # The append order, and the per-decision scan every admission rule reads.
-    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_seq ON invocations(seq)",
-    "CREATE INDEX IF NOT EXISTS invocations_decision ON invocations(decision_id, seq)",
-    "CREATE INDEX IF NOT EXISTS invocations_order ON invocations(recorded_at_us DESC, id ASC)",
-)
+    "invocations_seq": "CREATE UNIQUE INDEX IF NOT EXISTS invocations_seq ON invocations(seq)",
+    "invocations_decision": (
+        "CREATE INDEX IF NOT EXISTS invocations_decision ON invocations(decision_id, seq)"
+    ),
+    "invocations_order": (
+        "CREATE INDEX IF NOT EXISTS invocations_order ON invocations(recorded_at_us DESC, id ASC)"
+    ),
+}
 
 #: **The table is append-only, said to SQLite rather than only to the reader.**
 #: ADR-0021 §4's guarantee is that nothing recorded is rewritten, and this store
@@ -336,6 +344,33 @@ _INVOCATIONS_APPEND_ONLY = (
     "BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only; invocation rows are never "
     "updated'); END"
 )
+
+#: **Every object this store defines over ``invocations``, held to its own
+#: definition.** ``CREATE TABLE IF NOT EXISTS`` is a no-op against a table that is
+#: already there under that name *whatever shape it has*, so a file arriving with an
+#: ``invocations`` table of ordinary columns keeps it — and every projection above
+#: then inserts as ``NULL``, because ``_append`` writes only ``seq``,
+#: ``recorded_at_us`` and ``data``. The per-decision scan ADR-0192 §1's consume is
+#: decided over finds no claims at all, and a spent authorisation admits a second
+#: act: the exact failure the generated columns exist to make impossible, walked
+#: around rather than through. The indexes and the append-only trigger are held the
+#: same way and for the same reason — a pre-existing non-unique
+#: ``invocations_completes`` lets one claim be completed twice, and a pre-existing
+#: trigger that does nothing lets ``seq`` be rewritten.
+#:
+#: SQLite stores a definition verbatim but for ``IF NOT EXISTS``, so what it holds is
+#: compared against these very statements rather than against a second copy of them
+#: written out by hand.
+#:
+#: The ``decisions`` table is **not** here, and that is a limit rather than an
+#: oversight: ``_migrate`` reshapes it with ``ALTER TABLE ... ADD COLUMN``, which
+#: rewrites the stored text, so it has no single definition to compare against and
+#: needs a check of a different kind (issue #1575).
+_INVOCATION_OBJECTS: Final = {
+    "invocations": _CREATE_INVOCATIONS,
+    **_INVOCATION_INDEXES,
+    "invocations_append_only": _INVOCATIONS_APPEND_ONLY,
+}
 
 #: **Every column the blob also carries**, selected beside it on every read so
 #: :func:`_as_projected` can hold one to the other. The columns are a filter and an
@@ -569,9 +604,10 @@ class SqliteAuditTrail:
                 conn.execute(_CREATE_TABLE)
                 self._migrate(conn)
                 conn.execute(_CREATE_INVOCATIONS)
-                for statement in (*_INDEXES, *_INVOCATION_INDEXES):
+                for statement in (*_INDEXES, *_INVOCATION_INDEXES.values()):
                     conn.execute(statement)
                 conn.execute(_INVOCATIONS_APPEND_ONLY)
+                self._check_invocation_schema(conn)
                 if stored is None:
                     # Stamped *after* the create/migrate above, so the marker is
                     # only written for a file this open has actually brought to
@@ -596,6 +632,36 @@ class SqliteAuditTrail:
             msg = f"failed to initialise the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         return conn
+
+    def _check_invocation_schema(self, conn: sqlite3.Connection) -> None:
+        """Refuse a file whose invocation objects are not the ones this store defines.
+
+        Run after the creates and **before** the marker is written, inside the same
+        transaction, so a refusal leaves the file exactly as it arrived — unopened,
+        unlabelled, and not carrying a version-2 marker over a version-1 shape.
+
+        Every object is compared to the statement that defines it
+        (:data:`_INVOCATION_OBJECTS` says why each one matters). An object this open
+        created matches by construction; one that was already there matches only if
+        it is the same object, which is the whole question.
+
+        Raises:
+            AuditError: If an object is missing or is not the one this store defines.
+        """
+        held = {
+            str(name): sql
+            for name, sql in conn.execute("SELECT name, sql FROM sqlite_master")
+            if name in _INVOCATION_OBJECTS
+        }
+        for name, statement in _INVOCATION_OBJECTS.items():
+            defined = statement.replace(" IF NOT EXISTS", "", 1)
+            if held.get(name) != defined:
+                msg = (
+                    f"the audit trail at {self._path!r} holds an object named {name!r} "
+                    f"that is not the one this store defines; its invocation rows "
+                    f"cannot be trusted to record what was claimed, so it is not opened"
+                )
+                raise AuditError(msg)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
