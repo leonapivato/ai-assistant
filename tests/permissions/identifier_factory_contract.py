@@ -56,6 +56,17 @@ class IdentifierFactoryContract:
         """
         raise NotImplementedError
 
+    @pytest.fixture
+    def pinned_pair(self) -> Callable[[str], tuple[Any, Any]]:
+        """Return a callable building **two factories over one pinned space**.
+
+        The two-instance reservation case needs both halves at once: a sequence it
+        can predict, so the id it reserves is one the space would really have
+        minted, and two instances over that one space, so the reservation is taken
+        by a different object than the one that draws.
+        """
+        raise NotImplementedError
+
     def test_successive_draws_differ(self, build: Callable[[], Any]) -> None:
         factory = build()
 
@@ -72,22 +83,30 @@ class IdentifierFactoryContract:
         assert isinstance(drawn, str)
         assert drawn.strip()
 
-    def test_a_reserved_identifier_is_never_returned(self, build: Callable[[], Any]) -> None:
+    def test_a_reserved_identifier_is_never_returned(self, pinned: Callable[[str], Any]) -> None:
         """The obligation reaches ids it was **given to reserve** as well as issued ones.
 
         ``open_invocations`` hands back the claims a restarted process reads out of
         the store — ids *this* process never issued, so its own sequence is free to
         mint them, and the ledger's redraw cannot see the reissue once ``clear()``
         has erased the row they named.
+
+        **The reserved ids come from a twin space and never from this one**, which is
+        the whole of what makes this case say anything. Ids drawn from the space that
+        is about to be asked for more are ones its counter has already moved past, so
+        a ``reserve`` that did nothing at all would pass. Two spaces over one nonce
+        mint the *same* sequence, so these are exactly the ids this space would have
+        returned next — which is also the real shape: a previous process's rows, read
+        back out of the store.
         """
-        factory = build()
-        candidates = [factory() for _ in range(_DRAWS)]
-        reserving = build()
-        reserving.reserve(candidates)
+        elsewhere = pinned("reserved")
+        persisted = [elsewhere() for _ in range(_DRAWS)]
+        here = pinned("reserved")
+        here.reserve(persisted)
 
-        drawn = [reserving() for _ in range(_DRAWS)]
+        drawn = [here() for _ in range(_DRAWS)]
 
-        assert not set(drawn) & set(candidates)
+        assert not set(drawn) & set(persisted)
 
     def test_two_instances_in_one_process_draw_from_one_sequence(
         self, build: Callable[[], Any]
@@ -106,7 +125,7 @@ class IdentifierFactoryContract:
         assert len(set(drawn)) == 2 * _DRAWS
 
     def test_a_reservation_taken_by_one_instance_binds_the_next(
-        self, build: Callable[[], Any]
+        self, pinned: Callable[[str], Any], pinned_pair: Callable[[str], tuple[Any, Any]]
     ) -> None:
         """Reservations are process state too, and this is the half that proves it.
 
@@ -115,12 +134,17 @@ class IdentifierFactoryContract:
         reissues: instance A reserves the persisted claim ``x``, ``clear()`` erases
         it, and instance B mints it — at which point the stale completion lands on
         the new claim.
+
+        ``stale`` is drawn from a twin space for the reason the case above gives: an
+        id this space issued is one it has already moved past, so reserving it proves
+        nothing. Over one nonce the twin's first id is exactly what ``second`` would
+        return first, so the only thing that can keep it back is a reservation the
+        *other instance* took.
         """
-        first = build()
-        stale = first()
+        stale = pinned("binding")()
+        first, second = pinned_pair("binding")
         first.reserve([stale])
 
-        second = build()
         drawn = [second() for _ in range(_DRAWS)]
 
         assert stale not in drawn

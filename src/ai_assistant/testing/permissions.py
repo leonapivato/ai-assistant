@@ -430,6 +430,10 @@ class FakeAuditTrail:
         pinned in ``SqliteAuditTrail``'s own tests while *this* clause is in the
         shared conformance suite.
 
+        **And it is named from the snapshot**, because a caller can hand over a raw
+        mapping: it validates into a decision, and ``decision.id`` on a ``dict`` is an
+        ``AttributeError`` raised from inside the refusal that was about to be made.
+
         **The refusal is judged on the rebuilt snapshot rather than on what the
         caller handed over, and the order is load-bearing.**
         ``model_copy(update=...)`` does not validate, so a caller can put a bare
@@ -453,7 +457,7 @@ class FakeAuditTrail:
         snapshot = _revalidated_decision(decision)
         if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
             msg = (
-                f"decision {decision.id!r} is not a valid record: its egress binding "
+                f"decision {snapshot.id!r} is not a valid record: its egress binding "
                 f"records no origin, which is a shape only a row written before "
                 f"ADR-0181 can have; the trail reads such rows and never writes one"
             )

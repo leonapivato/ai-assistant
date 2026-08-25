@@ -40,6 +40,14 @@ class TestProcessIdentifiersContract(IdentifierFactoryContract):
     def pinned(self) -> Callable[[str], Any]:
         return lambda nonce: ProcessIdentifiers(space=IdentifierSpace(nonce=nonce))
 
+    @pytest.fixture
+    def pinned_pair(self) -> Callable[[str], tuple[Any, Any]]:
+        def over_one_space(nonce: str) -> tuple[Any, Any]:
+            space = IdentifierSpace(nonce=nonce)
+            return ProcessIdentifiers(space=space), ProcessIdentifiers(space=space)
+
+        return over_one_space
+
 
 class TestFakeIdentifiersContract(IdentifierFactoryContract):
     """Runs the canonical fake's factory through the shared suite."""
@@ -52,6 +60,14 @@ class TestFakeIdentifiersContract(IdentifierFactoryContract):
     @pytest.fixture
     def pinned(self) -> Callable[[str], Any]:
         return lambda nonce: FakeIdentifiers(space=FakeIdentifierSpace(nonce=nonce))
+
+    @pytest.fixture
+    def pinned_pair(self) -> Callable[[str], tuple[Any, Any]]:
+        def over_one_space(nonce: str) -> tuple[Any, Any]:
+            space = FakeIdentifierSpace(nonce=nonce)
+            return FakeIdentifiers(space=space), FakeIdentifiers(space=space)
+
+        return over_one_space
 
 
 def test_the_default_space_is_shared_by_every_factory_in_this_process() -> None:
