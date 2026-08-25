@@ -172,9 +172,11 @@ Live record: **#1312** — which milestones have closed, and the exit ruling
 that closed each, are recorded there.
 
 **Purpose:** the hub-side conversational engine — the pipeline's terminal step.
-Answering one's own user is not egress: the reply travels back on the wire the
-`ask` arrived on, the shape ADR-0131 gave notifications ("an answer the device
-asked for"), so it does not belong behind "tools are deferred to MCP". This
+A reply is not a tool, so it does not belong behind "tools are deferred to MCP"
+and `tools/` is not on its path: it travels back on the wire the `ask` arrived
+on, the shape ADR-0131 gave notifications ("an answer the device asked for").
+Where that wire is the hub's remote transport the return is ADR-0124 §1's third
+egress boundary, ratified there and traced against all three in ADR-0170. This
 track owns making the assistant *speak*: composing answers from plan + retrieved
 memory + context, streaming them, and eventually routing intents to typed
 operations. It is hub-side work with **no dependency on `track:web-client`'s
@@ -220,10 +222,11 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 (ADR-0094), and what ingested content *becomes* stays with `track:memory`. The
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
-through consolidation), ADR-0148/0154 (an egress call authorised whole, per
-call, with no standing authorisation) — and the obligation ADR-0154 §4 leaves
-open across them (item (ii)) rests on a **recorded origin** "the authoriser
-evaluates at the moment it rules", which is why origin takes this track's first
+through consolidation), ADR-0148/0154 (an egress call authorised as one whole,
+at a designated seam). What those rules are applied *to* is a **recorded
+origin**: "a fact the request carries, never an inference about how a model
+produced it" (ADR-0154 §4, item (ii)). Milestone 24's exit names it and the
+deferred list below waits on it, which is why it takes this track's first
 milestone. Milestones are ordered by **dependency only**, and each closes on a
 QA-driven exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318);
 this track starts at 23.
