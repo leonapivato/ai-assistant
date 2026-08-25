@@ -46,6 +46,50 @@ if TYPE_CHECKING:
 #: The upgrade-mode endpoint, for the cases that branch on the TLS mode.
 UPGRADE: Final = TransportEndpoint(host=ENDPOINT.host, port=587, implicit_tls=False)
 
+#: The real context builder, captured before :func:`_deterministic_tls_context`
+#: substitutes it, so the one case whose subject *is* that function can still
+#: reach it.
+_REAL_TLS_CONTEXT: Final = egress._tls_context
+
+
+def _verifying_context() -> ssl.SSLContext:
+    """A TLS context that verifies, built without reading anything.
+
+    ``ssl.SSLContext(PROTOCOL_TLS_CLIENT)`` starts with ``check_hostname`` on and
+    ``verify_mode`` at ``CERT_REQUIRED`` and loads no certificates, so it stands
+    in for :func:`~ai_assistant.tools.egress._tls_context` without the trust store
+    — and without weakening what :class:`_Writer` asserts about the context it is
+    handed, which is exactly those two settings.
+
+    Returns:
+        The context, with an empty certificate store.
+    """
+    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_tls_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the trust store out of every case in this module.
+
+    ``_tls_context`` calls ``ssl.create_default_context``, which reads the system
+    trust store and honours ``SSLKEYLOGFILE`` — filesystem work, in a module whose
+    header says nothing here opens a socket and which ``CONTRIBUTING.md`` holds to
+    "No network or filesystem in unit tests". It is also a *hidden* failure mode:
+    an unusable keylog path made every implicit-TLS case here raise
+    ``FileNotFoundError`` from the step before the one it was about, so a
+    failure-path case could exercise the wrong branch entirely. Adversarial review
+    found it on rounds 13 and 14.
+
+    The substitute verifies (:func:`_verifying_context`), so nothing a case
+    asserts about the context weakens; the two cases whose subject is the real
+    function reach past this — one substitutes its own unusable builder, the other
+    holds :data:`_REAL_TLS_CONTEXT` and is marked ``integration``.
+
+    Args:
+        monkeypatch: pytest's own, so the substitution is undone per case.
+    """
+    monkeypatch.setattr(egress, "_tls_context", _verifying_context)
+
 
 @final
 class _Writer:
@@ -1023,6 +1067,22 @@ async def test_a_release_that_fails_beside_a_cancellation_is_still_logged(
     failures = [entry for entry in captured if entry["event"] == "egress_channel_close_failed"]
     assert failures, [entry["event"] for entry in captured]
     assert failures[0]["error_type"] == "OSError"
+
+
+@pytest.mark.integration
+def test_the_real_tls_context_verifies_the_certificate_and_the_hostname() -> None:
+    """The settings a deployment actually connects under, read from the real one.
+
+    Every other case here runs against :func:`_verifying_context`, so a weakening
+    of ``_tls_context`` itself — ``check_hostname`` turned off, verification made
+    optional — would not fail one of them. This is the case that would, and it is
+    marked ``integration`` because building the real context reads the system
+    trust store, which is the very thing the substitution keeps out of the rest.
+    """
+    context = _REAL_TLS_CONTEXT()
+
+    assert context.check_hostname is True
+    assert context.verify_mode is ssl.CERT_REQUIRED
 
 
 async def test_a_tls_context_that_cannot_be_built_is_a_transport_error(
