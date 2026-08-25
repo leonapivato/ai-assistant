@@ -741,11 +741,13 @@ class FakeAuditTrail:
                     f"authorisation it did not record authorises nothing"
                 )
                 raise UnrecordedAuthorisationError(msg)
-            recorded_at = self._reading()
-            self._refuse_if_spent(snapshot, recorded_at)
-            claim = ToolInvocation(
-                id=self._mint(), decision_id=snapshot.id, recorded_at=recorded_at
-            )
+            # Read on first ask and never again, and deferred past every arm of
+            # §1's conjunction that the store's own history settles: a clock the
+            # ledger did not have to consult must not turn `AuthorisationSpentError`
+            # into some other class (ADR-0192 §1, and the durable store's ordering).
+            reading = _once(self._reading)
+            self._refuse_if_spent(snapshot, reading)
+            claim = ToolInvocation(id=self._mint(), decision_id=snapshot.id, recorded_at=reading())
             self._invocations[claim.id] = claim
             return claim.model_copy(deep=True)
 
@@ -847,8 +849,11 @@ class FakeAuditTrail:
         )
         raise AuditError(msg)
 
-    def _refuse_if_spent(self, decision: PermissionDecision, now: datetime) -> None:
+    def _refuse_if_spent(self, decision: PermissionDecision, now: Callable[[], datetime]) -> None:
         """Apply ADR-0192 §1's conjunction to the claims already under ``decision``.
+
+        ``now`` is invoked in the window arm alone, which is the only arm an instant
+        decides — the durable store's ordering, and for its reason.
 
         Raises:
             AuthorisationSpentError: If a further claim is not admitted.
@@ -884,7 +889,7 @@ class FakeAuditTrail:
         if decision.tool.idempotency is not Idempotency.KEYED:
             raise refuse("the tool offers no keyed idempotency")
         window = decision.tool.idempotency_window
-        elapsed = now - claims[0].recorded_at
+        elapsed = now() - claims[0].recorded_at
         if window is None or elapsed <= timedelta(0) or elapsed >= window:
             # From the **first** claim in append order and never from the last:
             # measuring from the most recent one would renew the window
@@ -972,6 +977,23 @@ class FakeAuditTrail:
         """
         by_id = sorted(self._decisions.values(), key=lambda decision: decision.id)
         return sorted(by_id, key=lambda decision: decision.decided_at, reverse=True)
+
+
+def _once[T](read: Callable[[], T]) -> Callable[[], T]:
+    """Wrap ``read`` so it runs on the first ask and hands back that value after.
+
+    ADR-0192 §1's "exactly one guarded reading per append" as a property of the
+    reading rather than of the call graph, so the reading can be deferred past every
+    refusal that does not need it. The durable store carries the same helper.
+    """
+    taken: list[T] = []
+
+    def _read() -> T:
+        if not taken:
+            taken.append(read())
+        return taken[0]
+
+    return _read
 
 
 def _detached_cost(value: ToolCost) -> ToolCost:

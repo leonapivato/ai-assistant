@@ -137,22 +137,51 @@ class IdentifierFactoryContract:
         read at allocation rather than captured at construction. A factory that
         freezes its prefix at construction passes every same-process case above and
         fails this one.
+
+        **Both children are forked before either allocates**, which is the shape
+        ADR-0192 §9 states and not an incidental arrangement. Forking one child,
+        reading its id and *reaping* it before forking the second frees its pid for
+        the OS to recycle: the second child can then be given the same pid, and with
+        the same nonce and the same copied counter a **conforming** factory mints
+        the same id — a case that fails at random on the implementation it exists to
+        certify. Reaped only after both have minted, so the two pids cannot be equal
+        and the assertion is about the factory rather than about the scheduler. The
+        gate makes it stronger still: neither child allocates until the parent has
+        forked both and closed the write end, which is the literal reading of
+        "forked before either allocates".
         """
         factory = pinned("SHARED")
+        gate_read, gate_write = os.pipe()  # closed by the parent to release both at once
+        reports = [os.pipe(), os.pipe()]
+        children: list[int] = []
+
+        try:
+            for index, (_, write_fd) in enumerate(reports):
+                child = os.fork()
+                if child == 0:  # pragma: no cover - the child never reports coverage
+                    os.close(gate_write)
+                    for other, (read_end, write_end) in enumerate(reports):
+                        os.close(read_end)
+                        if other != index:
+                            os.close(write_end)
+                    with os.fdopen(gate_read) as gate:
+                        gate.read()  # nothing is allocated until the parent lets go
+                    with os.fdopen(write_fd, "w") as pipe:
+                        pipe.write(factory())
+                    os._exit(0)
+                children.append(child)
+        finally:
+            os.close(gate_write)  # both children are forked; release them together
+            os.close(gate_read)
+            for _, write_fd in reports:
+                os.close(write_fd)
 
         drawn: list[str] = []
-        for _ in range(2):
-            read_fd, write_fd = os.pipe()
-            child = os.fork()
-            if child == 0:  # pragma: no cover - the child never reports coverage
-                os.close(read_fd)
-                with os.fdopen(write_fd, "w") as pipe:
-                    pipe.write(factory())
-                os._exit(0)
-            os.close(write_fd)
+        for child, (read_fd, _) in zip(children, reports, strict=True):
             with os.fdopen(read_fd) as pipe:
                 drawn.append(pipe.read())
-            os.waitpid(child, 0)
+            os.waitpid(child, 0)  # reaped only now, so neither pid was recyclable
 
+        assert len(drawn) == 2
         assert "SHARED" in drawn[0]
         assert drawn[0] != drawn[1], "forked children sharing a nonce must differ by pid"
