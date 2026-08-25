@@ -9025,6 +9025,7 @@ class ConnectionPurger(Protocol):
         ...
 
 
+@runtime_checkable
 class ByteChannel(Protocol):
     """A duplex byte stream to one endpoint, with its own TLS state (ADR-0191 §1).
 
@@ -9177,6 +9178,7 @@ class ByteChannel(Protocol):
         ...
 
 
+@runtime_checkable
 class OutboundTransport(Protocol):
     """The capability of opening a connection off the device (ADR-0191 §1).
 

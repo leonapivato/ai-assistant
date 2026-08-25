@@ -101,6 +101,11 @@ from ai_assistant.testing.traces import (
     FakeTraceStore,
     evaluation_trace,
 )
+from ai_assistant.testing.transport import (
+    FakeByteChannel,
+    FakeOutboundTransport,
+    TransportAttempt,
+)
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
@@ -130,6 +135,7 @@ __all__ = [
     "FakeAssistantEngine",
     "FakeAuditTrail",
     "FakeBatchCompleter",
+    "FakeByteChannel",
     "FakeConnectionEntry",
     "FakeConnectionProvisioner",
     "FakeConnectionPurger",
@@ -148,6 +154,7 @@ __all__ = [
     "FakeNotificationStore",
     "FakeNotificationWriter",
     "FakeObserver",
+    "FakeOutboundTransport",
     "FakePlanStore",
     "FakePlanner",
     "FakeReader",
@@ -173,6 +180,7 @@ __all__ = [
     "SecretMethod",
     "StreamAttempt",
     "StreamCall",
+    "TransportAttempt",
     "attested_proposal",
     "disclosure_of",
     "evaluation_trace",
