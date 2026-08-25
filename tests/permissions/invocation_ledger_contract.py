@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -67,7 +68,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from pydantic import BaseModel
 
@@ -134,6 +135,29 @@ class HostileKey(str):
             msg = "this key will not be compared"
             raise RuntimeError(msg)
         return False
+
+
+class HostileMapping(Mapping[str, object]):
+    """A mapping that is not a decision and refuses to be read as one.
+
+    A value that is not a model reaches ``model_validate`` untouched, which is the
+    ordering the case below is about — and validating a *mapping* walks it. This one
+    raises from ``__getitem__``, so the fault leaves as itself through a check that
+    was going to refuse the value anyway.
+    """
+
+    def __getitem__(self, key: str) -> object:
+        """Refuse to be read."""
+        msg = "this mapping refuses to be read"
+        raise RuntimeError(msg)
+
+    def __iter__(self) -> Iterator[str]:
+        """Offer one key, so a validator has something to reach for."""
+        return iter(("id",))
+
+    def __len__(self) -> int:
+        """Report the one key."""
+        return 1
 
 
 class Unhashable(str):
@@ -1745,8 +1769,15 @@ class InvocationLedgerContract(InvocationCompleterContract):
         with pytest.raises(UnrecordedAuthorisationError):
             await ledger.claim_invocation(decision=unauthorised)
 
+    @pytest.mark.parametrize(
+        "given",
+        [
+            pytest.param(None, id="a-value-with-no-fields-at-all"),
+            pytest.param(HostileMapping(), id="a-mapping-that-refuses-to-be-read"),
+        ],
+    )
     async def test_a_value_that_is_not_a_decision_is_an_argument_fault(
-        self, ledger: LedgerSubject
+        self, ledger: LedgerSubject, given: object
     ) -> None:
         """The decision is *validated* before any field of it is read.
 
@@ -1755,9 +1786,13 @@ class InvocationLedgerContract(InvocationCompleterContract):
         which is not an ``AssistantError``, and so is outside the classes ADR-0192
         §2's order is exhaustive over. ``FakeToolInvoker._revalidated`` states the
         same ordering for the same reason (ADR-0152 §1).
+
+        The second case is the other half of that ordering: validating a value that
+        is not a model *walks* it, so the refusal has to survive the walk as well as
+        the read it replaces.
         """
         with pytest.raises(AuditError) as raised:
-            await ledger.claim_invocation(decision=None)  # type: ignore[arg-type]  # the fault
+            await ledger.claim_invocation(decision=cast("PermissionDecision", given))
 
         assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
         assert await _rows(ledger) == []
