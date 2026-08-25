@@ -396,8 +396,8 @@ one: nothing outside the store can name a row that does not exist yet, so no cal
 ever supplies the `id` a row is stored under and none of §1's three named refusals
 is about a duplicate one. What it does not take away is the collaborator's own obligation, and §2 marks
 it rather than assuming it — the factory repeats no value for the life of the
-factory instance, and an append under an id the store already holds is refused as a
-store fault. That is the store declining to hold one id twice, not a refusal the contract
+process, and an append under an id the store already holds is refused as a store
+fault. That is the store declining to hold one id twice, not a refusal the contract
 offers anybody.
 
 **The discriminator in the spendability clause is ADR-0029 §5's own.** Its retry
@@ -509,7 +509,7 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > the completion's `claim_id`, and holds it nowhere else.
 
 > **Normative.** **The factory never returns a value it has already returned**, for
-> the life of the **factory instance**. That is an obligation of the *factory*, marked
+> the life of the process it runs in. That is an obligation of the *factory*, marked
 > here because the ledger relies on it and would otherwise rely on it silently: a
 > completion names its claim by `id` alone, so an id reissued after the row it first
 > named was erased would let a completion held by one call land on a **different**
@@ -517,27 +517,30 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > injects **one** such factory per store, so two ledgers over one store never mint
 > from independent sequences.
 
-> **Normative.** The **instance** is the right scope, and it is narrower than the
-> process deliberately: it is the scope this obligation can actually be *tested* at
-> (§9), and it still excludes the reuse this clause exists to exclude. The factory
-> instance **outlives `clear()`** — an erasure removes the store's rows, not the
-> ledger's collaborators — so ids drawn either side of an erasure differ and the
-> post-erasure reuse above cannot happen. A restart does not reach it either: after
-> one, the only claims anything can name are the ones §3's recovery scan reads back
-> **out of the store**, and a claim `clear()` erased is not among them; and the only
-> holder of a claim's `id` is the `invoke` call the ledger returned it to, which
-> holds it in memory and nowhere else (above), so no stale holder outlives the
-> process.
+> **Normative.** The process is the right scope and not merely the convenient one:
+> the only holder of a claim's `id` is the `invoke` call the ledger returned it to,
+> which holds it in memory and nowhere else (above), so no stale holder outlives the
+> process. After a restart the only claims anything can name are the ones §3's
+> recovery scan reads back **out of the store**, and a claim `clear()` erased is not
+> among them.
 
-> **Normative.** What the narrowing leaves open is a factory **reconstructed against
-> a store it did not mint for**, inside one process, and the clause below already
-> answers it: a minted id naming a row the store already holds is refused as an
-> `AuditError`, no row appended, no completion redirected, and the row already there
-> unchanged in every field. So a reconstruction costs a **refused claim** — the
-> fail-closed direction, and §1's pre-callable clause then governs it — and never the
-> mis-joined completion this obligation exists to prevent. That is why no
-> process-global registry is required and this ADR mints no process-wide singleton to
-> hold one; the residual risk is paid at the ledger, where it is already paid.
+> **Normative.** The **factory instance** is not enough, and a draft that narrowed
+> the scope to one was wrong. The composition root injects one factory per store, but
+> nothing here makes that factory unreplaceable and §3 adds **no lifecycle
+> obligation** to `ToolInvoker` — no quiescence rule, no drain hook — so a second
+> instance can be constructed while an `invoke` call still holds a claim's `id`.
+> Under instance scope that second instance may legally reissue that `id` once
+> `clear()` has erased the row it first named, and the refusal below **cannot see
+> it**: the store holds no row under that id, so there is no collision to refuse, and
+> the stale completion lands on the **new** claim and is recorded as that call's
+> outcome and cost — precisely the failure the clause above exists to prevent. The
+> process is the scope because it is the lifetime of every possible holder of a claim
+> id, and the obligation is measured against the holders.
+
+> **Normative.** Process scope is also **testable**, and testability is not what
+> separates the two: the ids of a conforming factory are disjoint across two
+> instances constructed in one process against one store, and §9 pins that case
+> directly rather than leaving the suite weaker than this clause.
 
 > **Normative.** It is satisfied **by construction and never by improbability**. A
 > per-process nonce with a monotonic counter satisfies it; retaining the issued ids
@@ -556,9 +559,9 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > consulted at no admission, so a decision re-recorded after an erasure still admits
 > a claim exactly as §6 states. What it bounds is which **row** a pointer names,
 > which is a correctness property of the id space and not a durability of the
-> consume. It is also local to that instance and survives no restart, which a
-> generation, epoch or high-water mark would have had to in order to do the job §6
-> refuses to give it.
+> consume. It is also process-local and survives no restart, which a generation,
+> epoch or high-water mark would have had to in order to do the job §6 refuses to
+> give it.
 
 > **Normative.** Where a factory breaks that obligation the append is **refused**
 > rather than admitted. The store holds each `id` once (§6), so a minted id naming a
@@ -2185,10 +2188,7 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** The **factory's** own obligation (§2) is pinned as a *factory*
 > conformance case, separate from the ledger's, because it is the collaborator that
 > owes it: a factory conforms only where no value it returns repeats for the life of
-> the **instance**, which is the scope §2 states and the whole of what this suite
-> asserts — a factory **reconstructed** mid-process is outside its reach, and §2
-> answers that case at the ledger instead, as a refused append over an unchanged row.
-> The cases are the ones that catch a **reset** —
+> the **process**. The cases are the ones that catch a **reset** —
 > the failure a construction actually has — and not a long draw that could only catch
 > a collision by luck: ids drawn either side of a `clear()` differ (a claim, an
 > erasure, a further claim, three distinct ids), ids drawn under two different
@@ -2197,6 +2197,16 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > satisfies it. **A factory whose non-repetition is only probable does not**, and the
 > suite is not where that failure is caught — §2 puts the obligation on the
 > collaborator for exactly that reason.
+
+> **Normative.** One further case carries the whole of the difference between the
+> process and the **instance**, and without it this suite would certify a factory §2
+> refuses: **two factory instances constructed in one process against one store**,
+> the second built the way the composition root builds the first, each minting under
+> its own ledger over that store — and every id the second returns differs from every
+> id the first returned. A factory holding a per-instance counter and no per-process
+> part passes every case above and fails this one, which is the reset §2's scope is
+> written against; the canonical fake passes it because its nonce is drawn once per
+> process and not once per instance.
 
 > **Normative.** The **ledger's** refusal is pinned beside it, because the two
 > obligations fail apart and the suite that tested only distinct factory outputs saw
@@ -2218,6 +2228,23 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > under the claim's id, replacing the claim with a row pointing at itself, and still
 > produce one completion and one refusal under the concurrent-completion case above —
 > so every specified race passes over a corrupted history.
+
+> **Normative.** The factory's own **faults** are pinned at that same boundary, by
+> ADR-0026 §2's split and for the same reason the clock's two arms are named apart
+> below: an earlier draft stated the clock's and left the factory's to be inferred,
+> and the two collaborators fail in the same two shapes. A factory **callable that
+> raises** on its own account leaves the ledger member **unwrapped**, its type and
+> cause intact and nothing relabelled — the clock callable's arm, applied to the
+> other collaborator. A factory that **returns** a value no row can be built from —
+> blank text, a wrong type, anything `DurableIdentifier` rejects — is the
+> guard-rejection arm instead, surfacing as an `AuditError` carrying its cause,
+> because it is a non-conforming collaborator's *output* and not an exception of its
+> own. Both are parameterised over **both members**, and both assert that **no row
+> was appended** and that every row the store already held is unchanged field by
+> field. Without them an implementation may build the row before it validates the id,
+> and a blank id then reaches the store as a raw model or driver failure that one
+> implementation raises and another quietly accepts, with every uniqueness and
+> collision case above still passing.
 
 > **Normative.** It pins the translated failures as **classes**: the guard's own
 > rejection of a non-conforming reading, a store that cannot be read and a store
@@ -2296,6 +2323,19 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > implementation awaiting the retained task bare loses the append's real failure to
 > the cancellation ADR-0054 permits the store to re-raise in its place, reporting
 > neither the fault nor the open claim.
+
+> **Normative.** The **claim** path's non-cancellation `BaseException` is pinned for
+> its **outward identity**, which no case here otherwise asserts — the completion
+> path's is pinned above, and the failure-path list below reaches only one raised
+> from the **callable**. The retained, shielded task §3 mandates is itself what puts
+> this at risk: ADR-0031 §4 records that awaiting a coroutine which raises a
+> `BaseException` through a child task can deliver a `CancelledError` in its place, so
+> an implementation that then classified Ctrl-C through an interrupted outcome would
+> pass every `Exception` and every `CancelledError` case above. A `KeyboardInterrupt`
+> and a `SystemExit` raised from the **claim** append each reach the caller **as
+> their own class** — asserted by class and not by `BaseException` alone, with the
+> cause intact — the tool callable **never entered**, no completion written and no
+> outcome invented for either (§3).
 
 > **Normative.** No test asserts that a ledger append is abandoned, and none may be
 > written: neither wait is bounded and the shielded task is awaited to its outcome,
@@ -2530,9 +2570,9 @@ row kinds, and the annotation belongs to the kind that was already there.
   that had none, and a new failure mode: a clock that will not read refuses the
   claim, so nothing side-effecting executes. That is the fail-closed direction and
   it is chosen deliberately. The factory carries a marked obligation of its own —
-  it repeats no value for the life of the factory instance (§2) — which is a
-  requirement on a collaborator rather than state held in the store, and so costs the
-  erasure right nothing.
+  it repeats no value for the life of the process (§2) — which is a requirement on a
+  collaborator rather than state held in the store, and so costs the erasure right
+  nothing.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
   none must — and for now none can.** `ToolImplementation` returns `FrozenJson`, so
   until #1558's carrier lands, every registered tool reports `None`, every
@@ -2695,11 +2735,10 @@ distinguishable from a pre-erasure one is residue about an erased Tier 1 act
 whatever it is called, and "opaque" describes its encoding rather than what it is
 for. The hole review found is real — a reissued id would let one call's completion
 land on a different call's claim — and §2 closes it one collaborator earlier
-instead: the factory repeats no value for the life of the factory **instance**, and
-that instance outlives the `clear()` — an erasure removes rows, not collaborators —
-so nothing has to survive the erasure at all. The factory's memory is about
-identifiers it issued; the store's memory, which is the one about acts, still ends
-empty.
+instead: the factory repeats no value for the life of the process, which is exactly
+as long as any holder of a claim id lives, so nothing has to survive the erasure at
+all. The factory's memory is about identifiers it issued; the store's memory, which
+is the one about acts, still ends empty.
 
 **Put `invoke`'s `timeout` over the two ledger appends, so the seam never waits on a
 hung audit store.** Two drafts of this, both refused, and the second is the more
