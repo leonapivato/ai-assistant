@@ -1428,6 +1428,37 @@ the count.
 > them. Where none is open, it appends nothing: no open claim means no call was in
 > flight.
 
+> **Normative.** **"Every open claim" reaches an earlier attempt's claim too, and
+> that is not an outcome invented over a known one.** A decision can carry more than
+> one open claim: a completion write can fail on a first attempt — leaving that claim
+> open with the call's own result standing — and ADR-0029 §5 then admit a retry,
+> whose claim is open when the process dies. The scan completes **both**
+> `INDETERMINATE`. Neither row is overwritten, because neither has a completion; and
+> `INDETERMINATE` is not a value minted to fill a field but ADR-0014 §4's durable
+> ignorance, which is exactly what the record holds about both. That a caller once
+> knew the first attempt's outcome is not a fact the trail has: the outcome was never
+> written, and a reader cannot tell the two claims apart. Writing the honest state
+> over both is what §3 asks for, and it is the same answer §5 fails closed on.
+
+> **Normative.** **The clause below on a claim under a non-`RUNNING` step is not in
+> tension with that, and the difference is the occasion rather than the knowledge.**
+> ADR-0014 §4's scan is the act that resolves a `RUNNING` step, and §3's rule is that
+> it leaves no claim open under the step it resolves — so where that act runs, it
+> writes. Where the step is already terminal the act does not run, this ADR mints no
+> second act to run it, and a scan over other step states would be new machinery
+> ADR-0014 §4 does not have. The two clauses therefore describe the same epistemic
+> state under two different occasions, and neither licenses the other's behaviour.
+
+> **Normative.** **A per-attempt correlation would let recovery complete only the
+> interrupted attempt, and this ADR does not mint one.** A `ToolInvocation` names no
+> step (§2), ADR-0148 §9 already rules that "the **attempt identifier** ADR-0017 §3
+> requires is that step execution", and §10 leaves the graph that would carry it to
+> the ADR that owns it. Adding one here would put a plan-store relation into the
+> audit row — the join §2 refuses — to buy a distinction between two states the
+> record is equally ignorant of. The cost of not having it is stated rather than
+> hidden: recovery is per-decision and not per-attempt, and a decision carrying two
+> open claims has both completed by one act.
+
 > **Normative.** The order is **completions first, transition second**. The
 > recovery act appends the `INDETERMINATE` completion for every claim it finds open
 > under that `approval_ref`, and commits the step's transition out of `RUNNING`
@@ -1533,9 +1564,11 @@ the count.
 > `RUNNING`**: the completion write failed, `invoke` returned, and the executor
 > committed the step's transition on the result it was handed. No recovery scan
 > returns for that step, so that claim stays open for good. This ADR does not repair
-> it and does not license a scan over steps in other states to close it: the outcome
-> was never durably recorded, so there is nothing to recover and any value written
-> there would be invented. Its cost is §5's — the evaluation fails closed while that
+> it and does not license a scan over steps in other states to close it — not because
+> `INDETERMINATE` would be the wrong value there, but because **no act runs**: the
+> write above belongs to ADR-0014 §4's transition out of `RUNNING`, and a scan that
+> returned for a terminal step would be a mechanism this ADR would have to mint and
+> §10 does not take. Its cost is §5's — the evaluation fails closed while that
 > claim is in scope — and any operator remedy is the budget ADR's, not a rewrite of
 > a row.
 
@@ -2485,6 +2518,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > `failure_kind` and admits no further claim under §1, and the `INDETERMINATE`
 > branch of the same classification is pinned beside it, kindless too (§§1–2).
 
+> **Normative.** **Two open claims under one decision** are pinned as their own
+> case, because every recovery case above carries one: a first attempt whose
+> completion write fails leaves its claim open with the call's own result standing,
+> ADR-0029 §5 admits the retry, and the process dies with the retry's claim open too.
+> One scan then appends an `INDETERMINATE` completion for **both**, in the ledger's
+> append order, before committing the step's transition — and the test asserts two
+> completions and not one, because an implementation completing "the" open claim
+> passes every single-claim case above and strands the other permanently (§3). It
+> asserts no correlation between a completion and an attempt, and may not: §3 mints
+> none and §10 leaves the graph that would carry one where it is.
+
 > **Normative.** **Every completion the recovery scan appends is pinned field by
 > field**, and not only counted, because the scan derives its rows from no
 > `ToolResult` at all and the fields are exactly where that shows. Each carries
@@ -2698,8 +2742,8 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > a collision by luck: ids drawn either side of a `clear()` differ (a claim, an
 > erasure, a further claim, three distinct ids), ids drawn under two different
 > decisions differ, and ids drawn across two claims under one decision differ. The
-> canonical fake's factory is a per-process nonce and a monotonic counter, and
-> satisfies it. **A factory whose non-repetition is only probable does not**, and the
+> canonical fake's factory is a per-process nonce and a monotonic counter **with the
+> allocation-time pid folded in** (§2), and satisfies it. **A factory whose non-repetition is only probable does not**, and the
 > suite is not where that failure is caught — §2 puts the obligation on the
 > collaborator for exactly that reason.
 
@@ -2710,8 +2754,21 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > its own ledger over that store — and every id the second returns differs from every
 > id the first returned. A factory holding a per-instance counter and no per-process
 > part passes every case above and fails this one, which is the reset §2's scope is
-> written against; the canonical fake passes it because its nonce is drawn once per
-> process and not once per instance.
+> written against.
+
+> **Normative.** That case is driven **across a `clear()`**, and the interleaving is
+> the point rather than a variation: with rows in the store the ledger's redraw hides
+> a reset allocator — the reissued id collides, the ledger draws again, and the
+> returned ids differ for a reason that has nothing to do with the factory. The case
+> therefore claims under the **first** instance, keeps that claim's `id`, calls
+> `clear()`, constructs the **second** instance the way the composition root
+> constructs the first, and asserts that its first draw is **not** the kept id — with
+> no rows left, nothing collides and the factory is the only thing under test. The
+> stale-completion consequence is asserted beside it: a `complete_invocation` carrying
+> the kept id must not attach to a claim the second instance appended. Without the
+> erasure the suite certifies exactly the allocator §2 refuses; the canonical fake
+> passes because its prefix is drawn once per process and carries the allocation-time
+> pid, not once per instance.
 
 > **Normative.** The **ledger's** behaviour on a collision is pinned beside it,
 > because the two obligations fail apart and the suite that tested only distinct
