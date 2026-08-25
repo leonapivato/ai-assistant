@@ -349,8 +349,10 @@ copied from a decision it did not answer — reaches an identical digest. That i
 caller falsifying its own store, which is the boundary ADR-0018 §3 drew for
 detachment and which route (a) sits behind identically: a caller that chooses a
 `decided_at` to fall inside an expired grant's window is already doing the same
-thing one field over (§6). What the digest closes is every case in which two
-*honest* acts could be confused, and that is the case review raised. The two
+thing one field over (§6). What the digest closes is every case that arises without a
+deliberate erasure and re-mint — round 11's two honest confirmations among them —
+and the cases it does not close all begin with the user destroying a store and a
+caller re-using an identifier out of it (§6's one-directional clause). The two
 directions offered instead stay unavailable: a store-enforced non-rebindable id
 cannot survive `clear`, and preserving the grant's snapshot with the decision is
 round 6's embedded value, refused for storage amplification and for having no
@@ -532,23 +534,29 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > **Normative.** The establishing act is refused on that ground too, with a
 > visible reason, and **no narrower grant is minted in its place** — not over a
 > prefix of the set, not over the account, not over a subset (§2's sixth clause,
-> which already refuses to loosen rather than mint). A revoking record is refused
-> only where its serialisation exceeds **the greater of** the current ceiling and
-> the serialised length of the granting record it names — so a grant admitted
-> under a higher ceiling stays revocable however far the ceiling has since fallen,
-> and a revoking record cannot be a vehicle for bytes the grant it transcribes did
-> not carry. The exemption is for the **inherited** size and for nothing else; a
-> revocation carrying a caller-supplied field far larger than the grant it names
-> is refused like any other over-sized record.
+> which already refuses to loosen rather than mint). A **revoking** record is not
+> measured whole. Its transcribed members are exempt **by construction** — they
+> are byte for byte the grant's own, which the store already admitted — and the
+> ceiling is applied to its **non-transcribed** members alone: `id`,
+> `decided_at` and `revokes`, whose serialisation must not exceed
+> `recipient_grant_max_bytes`. So a grant admitted under any ceiling stays
+> revocable however far the ceiling has since fallen, and a revocation cannot be
+> a vehicle for bytes the grant it transcribes did not carry.
 
-**The exemption had to be narrowed, because "never refused" was a hole with a
-name.** Adversarial review found at round 12 that `DurableIdentifier` is
-`Identifier` with no length bound (verified in the tree), so a revoking record
-naming a small grant could carry a gigabyte in its own `id` and the blanket
-exemption obliged `record` to accept it — one write defeating the bound with no
-higher historical ceiling anywhere in the story. Stating the exemption over the
-transcribed grant's own length keeps what it was for (a lowered ceiling must
-never trap a grant unrevokable) and drops what it was not.
+**Two drafts of this exemption were wrong in opposite directions, and the third
+stops comparing the two records at all.** Round 12 found that a blanket "never
+refused" let a revoking record naming a small grant carry a gigabyte in its own
+`id` — `DurableIdentifier` is `Identifier` with no length bound, verified in the
+tree — so one write defeated the ceiling with no higher historical ceiling
+anywhere in the story. Round 13 found that the repair, a budget of "the greater of
+the current ceiling and the transcribed grant's length", could make an
+exactly-at-ceiling grant **unrevokable**: the revoking record drops
+`established_by` to `null` and gains `revokes`, so a longer new `id` pushes it past
+both bounds and the grant is trapped. Both failures come from measuring a
+revocation against a *whole* whose inherited half was never in question. Budgeting
+only what the revocation adds has neither failure and needs no comparison between
+the two records: the inherited bytes were admitted once and are not re-charged, and
+the new bytes are charged like any others.
 
 > **Normative.** A **revoking** record is never refused on this ground, whatever
 > the count. A ceiling that could block a revocation would trap a user above it
@@ -567,8 +575,14 @@ never trap a grant unrevokable) and drops what it was not.
 
 > **Normative.** `recipient_grant_max_bytes` is by contrast **strictly
 > positive**: zero there would forbid every grant, which is the first ceiling's
-> job and would make two settings able to say one thing. A deployment turns route
-> (b) off in exactly one place.
+> job. `recipient_grant_max_outstanding` of zero is the **stated** way to turn
+> route (b) off — the one a deployment is meant to use and the one §14 pins — and
+> that is a claim about intent rather than about reachability: a
+> `recipient_grant_max_bytes` set below what any real grant serialises to would
+> also leave route (b) unreachable, as an unusably small value of any ceiling
+> would. This ADR does not detect that and states no minimum beyond one, because
+> the smallest admissible grant's size is a function of a declaration's own text
+> and is not a number `core.config` can know.
 
 **The ceiling is stated over *outstanding* rather than over *live*, and the
 substitution is deliberate and in the tighter direction.** Live is outstanding
@@ -1453,26 +1467,48 @@ other half, and the objection was right — a durable pointer that later resolve
 a grant which did not authorise this decision is a **false record**, and
 forbidding later reads makes it unread rather than true.
 
-**The digest is what makes the pointer truthful after the fact rather than merely
-unconsulted.** The row carries the fingerprint of the grant it was validated
-against, and that fingerprint covers every field the record carries but its `id`
-— so a rebound id resolves to a record whose `subject_digest` differs, and the
-mismatch is the statement "this is not the grant this row rested on", available to
-anyone holding the row and the record. Three grants are then distinguishable where two used to
-be: the grant that authorised the row (digest equal), a *different* grant behind
-the same id (digest differs), and no grant at all (nothing resolves). Only the
-first is ever read as the authoriser.
+**The digest gives the pointer a falsifier, which the bare pointer did not have.**
+The row carries the fingerprint of the grant it was validated against, over every
+field the record carries but its `id`, so a rebound id resolves to a record whose
+`subject_digest` differs and the difference is conclusive. That is the direction
+that matters and it is the one the objection was about: a pointer that could
+resolve to a different grant with **nothing on the row to contradict it** is a
+false record, and a pointer whose row carries a fingerprint that the different
+grant fails is not.
+
+> **Normative.** The guarantee is **one-directional**, and no lane states it as
+> more. A **mismatch** is conclusive: this record is not the one the row rested
+> on. A **match** establishes only that this record agrees with the row in every
+> field a `RecipientGrant` carries but its `id` — which is the same user act
+> where neither store has been cleared and an id reused since the row was
+> written, and may not be where either has. The report for a match is therefore
+> **consistent**, never "verified" or "proven", and no surface, export format or
+> later ADR renders it as the stronger word.
 
 **Where the check is available, and where it is deliberately not performed.** No
 component of this system re-resolves a recorded `authorised_by` — not a surface
 (§11), not a policy, not the trail after its own write — and this ADR adds no such
-read. What it adds is the *evidence* that makes an out-of-band check decisive: the
-trail's `export` carries the decision, which carries the ruling, which carries the
-digest, and the grant store's `export` carries every record, from which
-`subject_digest` recomputes. A user holding both exports, or a later ADR that
-decides an operator wants an integrity pass, can tell a rebound pointer from a
-sound one exactly. That is ADR-0004 §6's portability doing the work, and it needs
-no store read inside the render path and no capability any component gains today.
+read. What it adds is the *evidence*: the trail's `export` carries the decision,
+which carries the ruling, which carries the digest, and the grant store's `export`
+carries every record, from which `subject_digest` recomputes. A user holding both
+exports, or a later ADR that decides an operator wants an integrity pass, can
+falsify a rebound pointer — and, under the clause above, can say a sound one is
+consistent rather than proven. That is ADR-0004 §6's portability doing the work,
+and it needs no store read inside the render path and no capability any component
+gains today.
+
+**Architecture review pressed this across four rounds and the ADR ends where the
+evidence does.** Round 9 said forbidding later reads does not make a pointer
+true; round 11 said a caller-supplied instant is not an act identity; round 12
+said an independently cleared trail leaves `established_by` dangling; round 13
+said that with **both** stores cleared and both ids reused inside one clock
+instant, every digested field can be made to agree. Each is right, and each
+narrowed the claim rather than the mechanism: what is left is a fingerprint that
+cannot be made to *disagree* with the act it was taken over and cannot be made to
+*prove* agreement across the user's own erasures. Both halves are stated. The
+alternative — a durable establishment generation no clear can rebind — would have
+to live in a store the user may erase, which is where round 3's tombstone died and
+what the ruling on this seam already excluded.
 
 **The three directions the reviewer offered are each one this loop has ruled on,
 and the digest is none of them.** Non-rebindable identity is round 3's tombstone,
@@ -1685,6 +1721,16 @@ has four recipients.
 > **Normative.** Every grant carries an instant after which it is not live, and
 > there is **no unbounded spelling** of it: no null, no sentinel, no "forever".
 > The user chooses the instant in the establishing act.
+
+> **Normative.** On a **granting** record, `expires_at` is **strictly after**
+> `decided_at`, refused at construction otherwise. A record expiring at or before
+> the instant it was decided is never live for any duration, so it authorises
+> nothing while still occupying an outstanding slot (§1's count ceiling) and
+> blocking an identical grant until the user performs a revocation they had no
+> reason to expect. It is a grant in shape and nothing in effect, and refusing it
+> at construction is cheaper than every clause that would otherwise have to
+> tolerate it. A **revoking** record is unaffected: it is never live and its
+> instants are ordered by no rule (§1).
 
 > **Normative.** Liveness is a property of **granting** records only — those whose
 > `revokes` is `None`. A revoking record is never live, is never returned by
@@ -2238,15 +2284,38 @@ narrowings of one store, not three implementations.
 > ceiling passes the first and fails the other two, which is the round-11 finding
 > stated as a test. It ships one asserting that the establishing act is refused
 > for such a grant with **no** narrower grant recorded in its place, asserted over
-> the store's contents rather than over the surface's return; the **pair** that
-> pins the narrowed revocation exemption — a revoking record transcribing an
-> over-sized grant admitted under an earlier, higher ceiling is **not** refused,
-> and a revoking record naming a *small* grant while carrying a caller-supplied
-> `id` far longer than the current ceiling **is** refused; and a `Settings`
-> construction test that
-> `recipient_grant_max_bytes` of zero is refused while
-> `recipient_grant_max_outstanding` of zero is accepted and turns route (b) off —
-> `covering` answering `None` for every request with an empty store.
+> the store's contents rather than over the surface's return; and the **three**
+> cases that pin the revocation budget, which is measured over the revoking
+> record's non-transcribed members alone (§1). A revoking record transcribing an
+> over-sized grant admitted under an earlier, higher ceiling is **not** refused. A
+> revoking record whose own `id` serialises longer than the current ceiling **is**
+> refused, whatever the size of the grant it names. And a grant admitted at
+> **exactly** the ceiling is revocable by a record whose `id` is longer than the
+> `established_by` the revocation drops — the case a budget measured over the two
+> records' whole lengths would have trapped, and the reason this one is not.
+
+> **Normative.** The lane ships the `Settings` construction tests for both
+> ceilings, over **three** values each: `recipient_grant_max_bytes` refuses zero
+> and refuses a negative, and accepts one; `recipient_grant_max_outstanding`
+> refuses a negative, and **accepts** zero, which turns route (b) off — `covering`
+> answering `None` for every request against an empty store. The negative cases
+> are named because an implementation special-casing only zero satisfies every
+> other assertion here while accepting `-1`, which would refuse every granting
+> write for a reason no message explains.
+
+> **Normative.** The lane ships the `expires_at` ordering tests: a **granting**
+> record whose `expires_at` equals its `decided_at` is refused at construction, one
+> whose `expires_at` precedes it is refused, and one an instant after it is
+> accepted; a **revoking** record is accepted at any ordering, including an
+> `expires_at` transcribed from a grant that has since expired (§9).
+
+> **Normative.** The lane ships the test that pins the digest guarantee's
+> **direction** (§6): a record differing from the row's grant in any digested
+> field yields a mismatch, and a record agreeing in all of them yields equality
+> that the test asserts as *consistency* and not as identity — written so that no
+> later lane reads the suite as certifying that a matching record **is** the
+> authorising act. The comment on that test names the sequence it cannot exclude:
+> both stores cleared, both ids reused, one clock instant.
 
 > **Normative.** The lane ships the **lowered-ceiling** tests, which are the ones
 > no other test in this section reaches, and it ships them **separately for the
@@ -2557,15 +2626,18 @@ green on one tree — and it is ratified only after that, by the one-line
   cost ADR-0021 §4 already accepted for the resolution invariant, taken again for
   the same reason. The dependency is one member wide and cannot append, revoke or
   enumerate, so the trail can validate a grant and can never author one.
-- **A route-(b) row can be checked after the fact, not merely left unread.** The
-  row carries the `subject_digest` of the grant it was validated against, so a
+- **A route-(b) row can be falsified after the fact, not merely left unread.**
+  The row carries the `subject_digest` of the grant it was validated against, so a
   pointer whose id was recycled after a `clear` resolves to a record that fails
   the digest, and the failure is legible to anyone holding the trail's export and
-  the grant store's. That is sixty-four characters per route-(b) decision, and it is
-  what makes the durable pointer *true* rather than only unconsulted — the
-  distinction architecture review blocked on and the one an earlier draft answered
-  by forbidding the read instead. Nothing in this system performs that check;
-  what this ADR ships is the evidence for it, and a later ADR that wants an
+  the grant store's. That is sixty-four characters per route-(b) decision, and the
+  guarantee is one-directional and stated as such: a mismatch is conclusive, a
+  match is *consistency* rather than proof, because a user who clears both stores
+  and reuses both ids can make every digested field agree (§6). What the row no
+  longer is is a pointer with nothing on it to contradict a rebinding, which is
+  the distinction architecture review blocked on and the one an earlier draft
+  answered by forbidding the read instead. Nothing in this system performs the
+  check; what this ADR ships is the evidence for it, and a later ADR that wants an
   integrity pass has it without a migration.
 - **A policy given a grant seam performs one read per ruling, and its conformance
   suite pays for it.** `decide` stays a function of its argument **and its
