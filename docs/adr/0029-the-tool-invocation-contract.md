@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it"; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting", in the window before the callable is entered)
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it"; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting", over the two audit writes ADR-0192 adds to `invoke`)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -33,23 +33,28 @@
   Consequences amended by ADR-0032; §8 amended by ADR-0034 and by ADR-0039 — the
   four `Amended:` notes below, none of which is altered. Refs #1503, #1544.
 - Partially superseded: 2026-08-25 by ADR-0192 — **§4's "the seam stops waiting",
-  in one window and nothing else.** §4 rules that "Every invocation carries a
-  deadline" and that what it buys is "that the seam stops waiting, not that the tool
-  stops working". ADR-0192 §1 makes `invoke` append a claim to the audit store
-  immediately before the callable, and that append is **awaited to its outcome with
-  no deadline over it**: an append abandoned part way may still commit, so a bound
-  there would leave a row that may or may not exist for an act that certainly never
-  happened — the ambiguity ADR-0192 §1 exists to remove, bought back one layer down.
-  So on a store that has stopped answering, the seam waits, in the window **before**
-  the callable is entered and while nothing has run. A reader holding only this ADR
-  would expect that wait to be bounded and would be wrong, so it is a supersession
-  and not an amendment (ADR-0070 §1). **The scope is that one window.** §4's deadline
-  over the callable, its `FAILED`/`INDETERMINATE` classification of an expiry, its
-  validation of the `timeout` argument and its rule that the seam and not the caller
-  enforces it all stand unchanged, and ADR-0192 relies on every one of them — its
-  §3 bounds the *completion* append precisely to preserve §4's own promise that an
-  expiry "comes back as a classified `ToolResult`". This ADR's decision text below is
-  not rewritten (ADR-0070 §1). Refs #1503, #1544.
+  over the two audit writes and nothing else.** §4 rules that "Every invocation
+  carries a deadline" and that what it buys is "that the seam stops waiting, not that
+  the tool stops working". ADR-0192 gives `invoke` two audit writes it did not have —
+  a claim appended immediately before the callable (§1) and a completion after it
+  (§3) — and **neither carries a deadline of the seam's**. A reader holding only this
+  ADR would expect both to be bounded and would be wrong, so it is a supersession and
+  not an amendment (ADR-0070 §1). **The two are unbounded for two different reasons,
+  and both are stated where a reader meets them.** The claim append is unbounded by
+  choice: an append abandoned part way may still commit, so a bound would leave a row
+  that may or may not exist for an act that certainly never happened — the ambiguity
+  ADR-0192 §1 exists to remove, bought back one layer down. The completion append is
+  unbounded because a bound would be a fiction: **ADR-0054** has this project's audit
+  store hold its connection until the worker thread physically finishes, absorbing
+  cancellation to do it, so a deadline over that call returns no caller sooner and
+  only stops the seam admitting it is still waiting. **The scope is those two
+  writes.** §4's deadline over the callable, its `FAILED`/`INDETERMINATE`
+  classification of an expiry, its validation of the `timeout` argument and its rule
+  that the seam and not the caller enforces it all stand unchanged, and ADR-0192
+  relies on every one of them; the expiry is still computed and returned as a
+  classified `ToolResult`, and what is new is only that a store which has stopped
+  answering can delay that return. This ADR's decision text below is not rewritten
+  (ADR-0070 §1). Refs #1503, #1544.
 - Partially superseded: 2026-08-24 by ADR-0192 — **§3's cost omission, and cost
   only.** §3 rules "**`ToolResult` carries no cost and no disclosure report**, and
   both omissions are decisions", and gives cost's reason: "invocation cannot —
