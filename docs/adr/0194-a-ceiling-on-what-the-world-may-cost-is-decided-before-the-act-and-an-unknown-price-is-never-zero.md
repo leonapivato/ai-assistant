@@ -1159,19 +1159,51 @@ whole explanation.
 > **Normative.** `core/types.py` gains `SpendTotal`, frozen with
 > `extra="forbid"`, carrying exactly: `period: SpendPeriod`;
 > `period_start: UtcInstant` and `period_end: UtcInstant`, `period_end` exclusive;
-> `time_zone: NonBlankEncodableText`, the IANA zone those boundaries were computed
-> in; `ceiling: Decimal | None`; `currency: EncodableText | None`; and
-> `accounted: Decimal | None`. The bounds are the ones §1's rule computed for this
-> value's `period` in its `time_zone`; that correspondence is a **producer**
-> obligation checked by the conformance suite and the lane (§11), and deliberately
-> not a validator on the model — see §11's clause on why re-deriving it at
-> validation would make acceptance depend on the consumer's own `tzdata`.
+> `start_offset: timedelta` and `end_offset: timedelta`, the UTC offsets **the
+> producer resolved** as in force at those two instants; `ceiling: Decimal | None`;
+> `currency: EncodableText | None`; and `accounted: Decimal | None`. The bounds are
+> the ones §1's rule computed for this value's `period` in the ledger's configured
+> zone; that correspondence is a **producer** obligation checked by the conformance
+> suite and the lane (§11), and deliberately not a validator on the model.
 
-> **Normative.** Both string fields are `EncodableText`-based and **not** bare
-> `str`, because ADR-0085 §4c binds every string the promoted surface can carry
+> **Normative.** **No zone name crosses the wire, and that is the decision rather
+> than an omission.** An earlier draft carried the IANA zone the boundaries were
+> computed in and had a renderer resolve it. That makes acceptance and rendering of
+> a wire value depend on the **consumer's installed `tzdata`**: the frame would
+> carry a zone *name* and not the rule-set that named it, so a hub on one revision
+> and a client on another — over a zone whose transitions were revised, of which
+> `Asia/Gaza` is the live example — disagree about the boundaries of the same civil
+> day, and the client rejects or misrenders a value its producer computed
+> correctly. ADR-0016 §2 forbids exactly that of a `core/types.py` semantic:
+> intrinsic means "computable from the type's own declaration alone" and "the same
+> answer for every consumer". A test suite running against one installed `tzdata`
+> could not have caught it.
+
+> **Normative.** The **offsets are the whole of what a renderer needs**, and
+> carrying them is a retraction onto a type the encoding already carries rather
+> than an addition to it: `timedelta` is in ADR-0087 §2c's table under §2e, so this
+> ADR widens that enumeration by `Decimal` alone (§9) and by nothing else. A
+> renderer prints each bound as that bound plus its own offset and labels it with
+> that offset; it resolves no zone, reads no `tzdata` and consults no
+> configuration. Two offsets rather than one because a period containing a
+> transition has different offsets at its two ends — which is the case §1's
+> boundary rule exists for — and a single offset would misrender exactly the
+> periods that rule was written to get right.
+
+> **Normative.** What is given up is stated: a reader of a `SpendTotal` alone
+> cannot name the zone, only the offsets. That is accepted, because naming the zone
+> is what created the dependency, and the surface that wants the name has it —
+> `Settings.timezone` is the producer's own configuration (§1), readable where the
+> ledger runs. A later decision that genuinely needs a self-contained civil label
+> adds a producer-resolved one; no lane infers a zone back out of an offset, which
+> is many-to-one and would be a guess.
+
+> **Normative.** The model's **one** string field, `currency`, is
+> `EncodableText`-based and **not** bare `str`, because ADR-0085 §4c binds every
+> string the promoted surface can carry
 > and `tests/core/test_text_encodability_coverage.py` admits no exemption — it
 > discovers every `str` leaf on every model in `core.types` and fails the gate on
-> one that is not wrapped. The zone and currency validators below layer on that
+> one that is not wrapped. The currency validator below layers on that
 > base rather than replacing it, which is what ADR-0085's header means by "the new
 > member's text fields layer on it", and is how `ToolCost.currency` is already
 > typed even though its own rule is the stricter one.
@@ -1181,10 +1213,16 @@ whole explanation.
 > `core/types.py`, `tests/core/test_instant_coverage.py` fails the gate on a bare
 > annotation, and this ADR claims no exemption from either.
 
-> **Normative.** `time_zone` is carried rather than assumed by a reader. The
-> boundaries are the *ledger's* zone, and a surface may be a client configured
-> differently from the process that computed them; a renderer uses this field and
-> never its own configuration.
+> **Normative.** The offsets are carried rather than assumed by a reader. The
+> boundaries were computed in the *ledger's* zone, and a surface may be a client
+> configured differently from the process that computed them; a renderer uses these
+> fields and never its own configuration and never its own `tzdata`.
+
+> **Normative.** Both offsets are whole minutes and within `±24` hours — the range
+> a real UTC offset occupies — and a value outside it raises at validation. This is
+> an **intrinsic** invariant in ADR-0016 §2's sense: it is decided from the field's
+> own value, needs no zone database, and gives the same answer for every consumer,
+> which is the property the zone name could not have.
 
 > **Normative.** `ceiling` is non-`None` only where `currency` is. `accounted` is
 > `None` in exactly two states, which `currency` discriminates: where `currency`
@@ -1300,9 +1338,26 @@ been a fourth row, and it bought nothing the specification's own form does not.
 > **Normative.** This is an **addition to §2c and a change to no byte any
 > conforming encoder was emitting**: the projection raised on a `Decimal` before
 > and encodes one after, so no ratified vector's spelling moves. The record it owes
-> ADR-0087 is in §9 and §10. The consumer group already bumps `PROTOCOL_VERSION`
-> under ADR-0124 §9 for the promoted method it adds, and this ADR claims **no
-> second bump** on this ground.
+> ADR-0087 is in §9 and §10.
+
+> **Normative.** `PROTOCOL_VERSION` **is bumped, once, by the lane that widens the
+> codec** — the implementation lane §11 names — **in that same change**, and this
+> ADR names the bearer rather than leaving it to be inferred. ADR-0124 §9 decides
+> it: a bump is owed by "any change after which a frame a conforming peer at the
+> new version may send would be refused by a conforming peer at the old version",
+> and "the obligation is on whoever makes the change, in the same change". A peer
+> at the new version may emit a `PER_CALL` `Decimal` inside a `PermissionDecision`
+> and a peer at the old version refuses it, so the first limb is met the moment the
+> codec's domain widens.
+
+> **Normative.** The bearer is named because the obligation does **not** travel.
+> Reading it as discharged by a *later* change — a consumer group that bumps for
+> the promoted member it adds — leaves the window between the two, in which a peer
+> carrying the widened codec announces a version an old peer believes it
+> understands. ADR-0124 §9's "in the same change" forbids exactly that window. So
+> the bump sits with the codec widening; a consumer group landing afterwards adds
+> no second bump on this ground, and no lane adds one on the strength of the
+> promoted member alone.
 
 > **Normative.** A `ToolInvoker` implementation holds a `SpendGate`. It acquires
 > no `AuditTrail`, no `SpendLedger` and no additional store handle by this ADR,
@@ -1374,9 +1429,35 @@ is where that lands.
 > `OversizedValueError` under ADR-0085 §8, which this ADR does not lift and makes
 > no claim about the reachability of: §1 bounds each amount and nothing bounds the
 > number of rows, so an accounted total is not bounded and the declaration is a
-> real one. No other `Exception` escapes it, and §4's `BaseException` exemption
-> binds. It is `async` because the member it relays is I/O-bound, which is
-> `CLAUDE.md`'s rule for one.
+> real one. No other **`AssistantError`** escapes it, and §4's `BaseException`
+> exemption binds. It is `async` because the member it relays is I/O-bound, which
+> is `CLAUDE.md`'s rule for one.
+
+> **Normative.** That closed set is over this surface's own failure vocabulary and
+> **not** over a transport's, which is stated because the two are easy to read as
+> one. A hub-backed implementation — `HubClient`, and the `HubEngineClient` §11
+> names — raises `HubUnavailableError` where no hub is listening or the connection
+> goes away mid-request, and `ProtocolError` on a malformed or truncated reply.
+> **Both reach the caller unwrapped**, and neither is a failure this member
+> declares.
+
+> **Normative.** They are not translated to `SpendUndeterminedError`, and that is
+> the substantive half. §4 enumerates that class over six grounds, each of them a
+> way *the spend* could not be reduced to a number; a connection that was not there
+> is none of them, and reporting one as the other would tell a user a fact about
+> their budget that nothing measured — the confusion §4 keeps two classes to
+> prevent, one seam further out.
+
+> **Normative.** This is not an exemption this member claims but the rule the
+> surface already runs on, and it is copied rather than invented.
+> `wire/errors.py`'s `TransportError` is "deliberately **not** an
+> `AssistantError`: **no Protocol method declares one**, and a caller that catches
+> `AssistantError` is catching the engine's failures rather than the wire's"
+> (ADR-0085 §9). `recent_decisions` and `export_decisions` are in exactly this
+> position and declare neither, and ADR-0186 §5 leaves the client's error mapping
+> "derived from the Protocol" for the same reason. An adapter renders the two
+> differently because they mean different things to a user, and §11 drives both
+> paths so no lane closes the gap by translating.
 
 > **Normative.** `interfaces/cli.py` gains exactly one command, and it is named
 > here rather than left to the lane: **`spend`**, invoked as `assistant spend`,
@@ -1387,9 +1468,10 @@ is where that lands.
 > surface already uses for a read (`beliefs`, `questions`, `conversations`) rather
 > than the hyphenated form reserved for a verb on an object
 > (`forget-conversation`, `export-decisions`). It renders
-> that operation's `SpendTotal` values: each period, its bounds rendered in the
-> value's own `time_zone` and never in the client's, its ceiling and currency
-> where configured, and its accounted total. Where `accounted` is absent it
+> that operation's `SpendTotal` values: each period, each bound rendered from the
+> value's **own** `start_offset`/`end_offset` and labelled with that offset — never
+> from the client's zone and never through the client's `tzdata` (§5) — its ceiling
+> and currency where configured, and its accounted total. Where `accounted` is absent it
 > renders which of §5's two states applies, reading `currency` to tell them apart:
 > that no currency is configured and no total is stated, or that the period is
 > indeterminate — and, where **that period's own** `SpendTotal.ceiling` is
@@ -2134,38 +2216,34 @@ the ADRs it depends on rather than replacing them.
 > report different periods.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
-> on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
-> both bounds convert into without overflowing**, so neither a renderer's lookup
-> nor its conversion can fail on a value the model accepted; `ceiling` is
-> non-`None` only where `currency` is; and `accounted` is
+> on its annotations, and **every one of them is decidable from the value alone**:
+> `start_offset` and `end_offset` are whole minutes within `±24` hours; `ceiling`
+> is non-`None` only where `currency` is; and `accounted` is
 > non-`None` only where `currency` is. A construction violating any of them raises
-> at validation, and the shared contract drives each as a hostile construction.
+> at validation, and the shared contract drives each as a hostile construction —
+> an offset of 30 seconds, one of `±24` hours exactly and one beyond it, each
+> raising, beside the currency and absence cases.
 
-> **Normative.** The model's bound invariant is the **intrinsic** one and nothing
-> more: `period_start` is strictly before `period_end`, except on §1's zero-length
-> period where they are equal. It does **not** re-derive §1's boundaries from
-> `period` and `time_zone` and compare, and that is a decision rather than an
-> omission — the tempting stronger validator would reject a `CALENDAR_DAY` carrying
-> a month's bounds, which this one admits.
+> **Normative.** The model's bound invariant is likewise the **intrinsic** one and
+> nothing more: `period_start` is strictly before `period_end`, except on §1's
+> zero-length period where they are equal. It does **not** re-derive §1's
+> boundaries and compare, and that is a decision rather than an omission — the
+> tempting stronger validator would reject a `CALENDAR_DAY` carrying a month's
+> bounds, which this one admits, and it is the producer and not the model that
+> §11's clause below holds to §1's rule.
 
-> **Normative.** The reason is ADR-0016 §2's test for what may carry a semantic in
-> `core/types.py`: intrinsic means "computable from the type's own declaration
-> alone" and "the same answer for every consumer". A boundary re-derived at
-> validation is neither. It is computed from the **installed `tzdata`**, and the
-> frame carries a zone *name*, not the rule-set that named it — so a hub on one
-> revision and a client on another, over a zone whose transitions were revised
-> (`Asia/Gaza` is the live example), disagree about the boundaries of the same
-> civil day, and the client rejects a value its producer computed correctly. That
-> is a wire value whose acceptance depends on the consumer's filesystem, and the
-> prescribed fixtures — one installed `tzdata` per test run — could not catch it.
+> **Normative.** No validator on this model resolves a zone, reads `tzdata` or
+> constructs a `ZoneInfo`, and the suite asserts that by driving the **whole model
+> surface with no zone database reachable at all** — every hostile construction and
+> every accepting one, unchanged. §5 gives the reason the fields are shaped this
+> way; this clause is what stops a later lane reintroducing a lookup, since a
+> validator that consulted one would pass every other fixture here.
 
-> **Normative.** The correspondence is therefore checked where both sides share one
-> `tzdata` by construction: at the **producer**, by the conformance suite and the
-> lane (§11's real-producer clause below), which is also the only place that can
-> compare against §1's rule rather than against a second implementation of it. A
-> consumer that needs more than the intrinsic invariant is asking for a
-> self-contained value — bounds plus the rule-set identity that authored them —
-> which is a `SpendTotal` field this ADR does not add and a later decision may.
+> **Normative.** The correspondence to §1's rule is therefore checked at the
+> **producer**, by the conformance suite and the lane (the real-producer clause
+> below), which is the only place that can compare against §1's rule rather than
+> against a second implementation of it — and where one `tzdata` governs both sides
+> by construction, because there is only one side.
 
 > **Normative.** The **numeric** invariants are driven as hostile constructions
 > too, and they are the ones a validator list is likeliest to omit: a negative
@@ -2292,8 +2370,10 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** The consumer group drives §6's CLI rendering in its **ordinary**
 > states and not only on the clamped bound, because each of them is a way a correct
 > total is shown as a wrong fact. Three fixtures: a client configured in a zone
-> **different** from `SpendTotal.time_zone`, where the bounds render in the value's
-> own zone and the client's is not consulted; `currency=None`, where the command
+> **different** from the one the ledger computed in, where each bound renders from
+> the value's own offset and the client's zone is not consulted — driven with the
+> client's zone database **absent** as well, which the value's offsets make
+> survivable and a zone name would not have; `currency=None`, where the command
 > says no currency is configured and states no total; and `currency` present with
 > `accounted=None` **and a ceiling configured**, where it says the period is
 > indeterminate *and* that no further call in it will be admitted. A renderer
@@ -2324,8 +2404,11 @@ the ADRs it depends on rather than replacing them.
 
 > **Normative.** The lane drives the **producer** obligation §5 declines to put on
 > the model: the `SpendTotal` values `spend_totals` returns are asserted to carry
-> exactly the boundaries §1's rule computes for their own `period` and `time_zone`,
-> on the DST, skipped-date and both-clamp fixtures above. This is the whole of
+> exactly the boundaries §1's rule computes for their own `period` in the ledger's
+> configured zone, **and offsets equal to the ones in force at those two instants
+> in that zone** — asserted to differ from each other on the DST fixture, which is
+> the case a single offset would have misrendered — on the DST, skipped-date and
+> both-clamp fixtures above. This is the whole of
 > where that correspondence is checked, so a lane treating it as belt-and-braces
 > beside a model validator has misread §5: there is no such validator, by decision.
 
