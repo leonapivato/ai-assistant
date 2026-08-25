@@ -640,6 +640,42 @@ async def test_a_version_one_database_is_opened_and_restamped(tmp_path: Path) ->
 
 
 @pytest.mark.integration
+async def test_a_version_one_database_holding_a_foreign_invocations_table_is_refused(
+    tmp_path: Path,
+) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` is not a migration, and this is where that bites.
+
+    A file arriving with an ``invocations`` table of ordinary columns keeps it: the
+    create is a no-op against a table of that name whatever shape it has. Every
+    projection then inserts as ``NULL``, because ``_append`` writes only ``seq``,
+    ``recorded_at_us`` and ``data`` — so the per-decision scan ADR-0192 §1's consume
+    is decided over finds no claims at all, and a spent authorisation admits a second
+    act. That is the failure the ``GENERATED ALWAYS`` columns exist to make
+    impossible, walked around rather than through.
+
+    Refused, and refused **before** the restamp: the marker still reads ``1``, the
+    foreign table is untouched, and no version-2 label is left over a version-1
+    shape.
+    """
+    path = tmp_path / "audit.db"
+    _write_version_one_trail(path, "c-old")
+    foreign = sqlite3.connect(str(path))
+    try:
+        foreign.execute(
+            "CREATE TABLE invocations(seq INTEGER NOT NULL, recorded_at_us INTEGER NOT NULL, "
+            "data TEXT NOT NULL, id TEXT, decision_id TEXT, completes TEXT, outcome TEXT)"
+        )
+        foreign.commit()
+    finally:
+        foreign.close()
+
+    with pytest.raises(AuditError):
+        SqliteAuditTrail(path=path)
+
+    assert _stored_schema_version(path) == "1", "a refused open leaves the marker alone"
+
+
+@pytest.mark.integration
 async def test_a_version_one_database_that_fails_to_migrate_keeps_its_marker(
     tmp_path: Path,
 ) -> None:
