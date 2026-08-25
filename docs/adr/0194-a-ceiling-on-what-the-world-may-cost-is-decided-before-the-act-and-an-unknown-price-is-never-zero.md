@@ -1,6 +1,6 @@
 # 194. A ceiling on what the world may cost is decided before the act, and an unknown price is never zero
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-25
 - **Decides `core` contract surface and implements none of it (golden rule 5).**
   It adds **two** Protocols, three `core/types.py` models and three
