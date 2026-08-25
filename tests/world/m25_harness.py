@@ -59,8 +59,10 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from types import ModuleType
+from functools import partial
+from types import FunctionType, MethodType, ModuleType
 from typing import TYPE_CHECKING, Any, Final, cast, final
 
 from keyring.errors import PasswordDeleteError
@@ -342,6 +344,18 @@ def every_tool_that_can_reach_a_transport(
     It reads objects rather than any source text (ADR-0191 §9's last clause): a
     thing that can open a channel is a thing with an ``open_channel`` to call.
 
+    **It is a net and not a proof, in ADR-0017 §4's exact sense, and the exit does
+    not rest on it.** Reachability over a Python object graph has no complete
+    reading: this one follows attributes, containers, closure cells, bound methods
+    and partials, and something could still hold a route behind a computed
+    property, a C extension or a weak reference. So its finding a route means
+    something strong — a tool that can reach one — and its finding none means
+    something weaker: nothing it can see. ADR-0191 §9's exit rests on the four
+    instruments that ADR enumerates; this is a fifth, kept as defence in depth for
+    the same reason §7 keeps the import contracts, and claimed no more widely.
+    Rounds 8 and 9 each found a traversal shape it missed, which is the evidence
+    for that labelling rather than an argument against the instrument.
+
     Args:
         composition: The built deployment.
 
@@ -351,15 +365,52 @@ def every_tool_that_can_reach_a_transport(
     """
     reachable: dict[str, tuple[OutboundTransport, ...]] = {}
     for tool_id, binding in registry(composition)._live.items():
-        routes: list[OutboundTransport] = []
-        for route in _routes_reachable_from(
-            binding.implementation, depth=_SURVEY_DEPTH, seen=set()
-        ):
-            if not any(found is route for found in routes):
-                routes.append(route)
+        routes = routes_reachable_from(binding.implementation)
         if routes:
-            reachable[tool_id] = tuple(routes)
+            reachable[tool_id] = routes
     return reachable
+
+
+def routes_reachable_from(holder: object) -> tuple[OutboundTransport, ...]:
+    """Every distinct route reachable from one object, which is the survey's walk.
+
+    The survey over the registry is this applied to each binding; exposed on its
+    own so the walk can be controlled directly over the shapes review has found it
+    missing — a container, a closure's cell, a shared object reached down two
+    branches — without registering a tool for each.
+
+    Args:
+        holder: Where to start.
+
+    Returns:
+        The routes, in the order found, folded by identity.
+    """
+    found: list[OutboundTransport] = []
+    for route in _routes_reachable_from(holder, depth=_SURVEY_DEPTH, seen={}):
+        if not any(other is route for other in found):
+            found.append(route)
+    return tuple(found)
+
+
+@final
+class RouteHolder:
+    """Something this world defines that holds one thing, for the walk's controls.
+
+    The walk reads attributes only off types this world defines (see
+    :func:`_attributes_of`), so a control's holder has to be one of them rather
+    than a class the test module keeps to itself.
+
+    Attributes:
+        held: Whatever it holds — another holder, a container of them, or a route.
+    """
+
+    def __init__(self, held: object) -> None:
+        """Hold ``held``.
+
+        Args:
+            held: What this holder holds.
+        """
+        self.held = held
 
 
 #: How many objects deep the survey walks from a registered tool. The longest
@@ -375,21 +426,32 @@ _OPAQUE: Final = (str, bytes, bytearray, memoryview, type, ModuleType)
 
 
 def _routes_reachable_from(
-    holder: object, *, depth: int, seen: set[int]
+    holder: object, *, depth: int, seen: dict[int, tuple[int, object]]
 ) -> Iterator[OutboundTransport]:
     """Every object reachable from ``holder`` that can open a channel.
+
+    **The visited record keeps the budget an object was reached with**, not just
+    that it was reached. A shared object first met down a long branch has little
+    depth left, so its own children go unwalked; met again down a short branch it
+    would have plenty, and a set-shaped guard would suppress that second visit and
+    lose the route under it. Round 9 of review found that ordering dependence. The
+    record also keeps a reference to each visited object, because ``id`` is unique
+    only among *live* objects and a temporary could otherwise be collected and its
+    address reused underneath the record.
 
     Args:
         holder: Where to start, which is a registered tool's callable.
         depth: How many objects deep to walk before giving up.
-        seen: Identities already visited, so a cycle terminates.
+        seen: Identity to the greatest remaining depth it has been visited with,
+            and the object itself.
 
     Yields:
-        Each distinct route, which the caller folds by identity.
+        Each route found, which the caller folds by identity.
     """
-    if depth == 0 or id(holder) in seen or isinstance(holder, _OPAQUE):
+    visited, _ = seen.get(id(holder), (-1, None))
+    if depth == 0 or visited >= depth or isinstance(holder, _OPAQUE):
         return
-    seen.add(id(holder))
+    seen[id(holder)] = (depth, holder)
     if callable(getattr(holder, "open_channel", None)):
         yield cast("OutboundTransport", holder)
         return
@@ -398,13 +460,7 @@ def _routes_reachable_from(
 
 
 def _values_within(holder: object) -> Iterator[object]:
-    """What an object holds: a container's items, or an object's attributes.
-
-    Containers are followed because a route held in one is still a route
-    (round 8). Attributes are read only off this world's own types —
-    ``ai_assistant``'s and this harness's — because those are what a registered
-    tool and its collaborators are, and walking a pydantic model's or a logger's
-    internals would be a graph search rather than a reading.
+    """What an object holds: a container's items, a callable's captures, or attributes.
 
     Args:
         holder: The object to read.
@@ -419,6 +475,58 @@ def _values_within(holder: object) -> Iterator[object]:
     if isinstance(holder, (list, tuple, set, frozenset, deque)):
         yield from holder
         return
+    if isinstance(holder, (FunctionType, MethodType, partial)):
+        yield from _captures_of(holder)
+        return
+    yield from _attributes_of(holder)
+
+
+def _captures_of(holder: FunctionType | MethodType | partial[object]) -> Iterator[object]:
+    """What a callable carries with it, which is where a closure keeps a route.
+
+    A registered tool may be a plain function over a captured transport — the
+    registry takes any callable, structurally — and a capture lives in a cell
+    rather than in an attribute, so a walk that read only attributes reported such
+    a tool route-free. Round 9 of review found that shape.
+
+    Args:
+        holder: A function, a bound method, or a partial.
+
+    Yields:
+        Each object the callable carries: cell contents, default arguments, a
+        bound instance, or a partial's applied arguments.
+    """
+    if isinstance(holder, MethodType):
+        yield holder.__self__
+        yield holder.__func__
+        return
+    if isinstance(holder, partial):
+        yield holder.func
+        yield from holder.args
+        yield from holder.keywords.values()
+        return
+    for cell in holder.__closure__ or ():
+        with suppress(ValueError):  # an unfilled cell holds nothing yet
+            yield cell.cell_contents
+    yield from holder.__defaults__ or ()
+    yield from (holder.__kwdefaults__ or {}).values()
+
+
+def _attributes_of(holder: object) -> Iterator[object]:
+    """The attribute values held by an object this world defines.
+
+    Bounded to this world's own types — ``ai_assistant``'s and this harness's —
+    because those are what a registered tool and its collaborators are, and
+    reading a logger's or a pydantic model's internals would be a graph search
+    rather than a reading.
+
+    Args:
+        holder: The object to read.
+
+    Yields:
+        Each attribute value it holds, whether it keeps them in ``__dict__`` or in
+        ``__slots__``.
+    """
     if type(holder).__module__.split(".")[0] not in {"ai_assistant", "m25_harness"}:
         return
     names: list[str] = list(vars(holder)) if hasattr(holder, "__dict__") else []

@@ -31,9 +31,11 @@ from ai_assistant.testing import FakeOutboundTransport, TransportAttempt
 from ai_assistant.tools.send_email import SEND_EMAIL
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from ai_assistant.core.protocols import OutboundTransport
+    from ai_assistant.core.types import FrozenJson
 
 #: The endpoint the deployment configured, as the capability sees it once the seam
 #: has parsed the text the registration carries.
@@ -274,3 +276,71 @@ def _report(
         "on the fake; must be one\n",
         stacklevel=2,
     )
+
+
+# --- the survey instrument's own controls (ADR-0191 §9's general clause) ------
+
+
+async def test_the_survey_sees_a_route_a_registered_closure_captured(tmp_path: Path) -> None:
+    """A tool may be a function over a captured transport, and that is still a route.
+
+    The registry takes any callable, structurally, and a capture lives in a cell
+    rather than an attribute — so a walk that read attributes only reported such a
+    tool route-free while it could open channels all day. Adversarial review found
+    the shape on round 9. Driven through the composition's own registry rather
+    than over a hand-built holder, because what the survey is asserted over is
+    what a registry binding can be.
+    """
+    capability = FakeOutboundTransport()
+    composition = m25.build(tmp_path, capability=capability)
+    try:
+
+        async def reach_the_world(
+            parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+        ) -> FrozenJson:
+            del parameters, idempotency_key
+            await (await capability.open_channel(m25.PROBE_ENDPOINT)).close()
+            return None
+
+        m25.registry(composition).register(m25.ARMED_PROBE, reach_the_world)
+
+        assert m25.every_tool_that_can_reach_a_transport(composition) == {
+            m25.ARMED_PROBE.id: (capability,)
+        }
+    finally:
+        await composition.engine.aclose()
+
+
+def test_the_survey_revisits_a_shared_holder_reached_with_a_larger_budget() -> None:
+    """Reaching an object twice must not depend on which branch got there first.
+
+    A shared wrapper met at the end of a long branch has no depth left to walk its
+    own children with; met again down a short one it would have plenty, and a
+    visited *set* would suppress that second visit and lose the route beneath it.
+    So the record keeps the budget, and this is the shape that tells the two apart.
+    """
+    capability = FakeOutboundTransport()
+    wrapper = m25.RouteHolder(capability)
+    # The far branch is long enough that the wrapper is reached down it with one
+    # level left, so the route beneath it cannot be walked from there. The same
+    # wrapper sits beside that branch, where the budget is untouched.
+    far: object = wrapper
+    for _ in range(5):
+        far = m25.RouteHolder(far)
+    subject = m25.RouteHolder((far, wrapper))
+
+    found = list(m25.routes_reachable_from(subject))
+
+    assert found == [capability]
+
+
+def test_the_survey_terminates_on_a_cycle() -> None:
+    """A graph that refers to itself is read once, not forever."""
+    capability = FakeOutboundTransport()
+    first = m25.RouteHolder(None)
+    second = m25.RouteHolder(first)
+    first.held = (second, capability)
+
+    found = list(m25.routes_reachable_from(first))
+
+    assert found == [capability]
