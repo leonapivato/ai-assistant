@@ -559,12 +559,41 @@ the two properties it has rather than letting a reader assume the stronger one.
 > ADR-0029 §4's **existing** rule, unchanged and unnarrowed: `FAILED` where the
 > tool is not `side_effecting` or its `idempotency` is `NATURAL`, `INDETERMINATE`
 > otherwise, read off the detached copy §2's step 1 captured. This ADR adds no case
-> and relaxes none — an expiry before the callable was created is one where nothing
-> can have acted, and classifying it `INDETERMINATE` for a side-effecting
-> non-`NATURAL` tool is over-cautious rather than wrong, which is the direction
-> ADR-0014 §4 refuses to guess against. What this ADR does add is that **no
-> reservation survives it**: the expiry reaches the member as a cancellation, and
-> §3's rule below removes a reservation whose handle will never be delivered.
+> and relaxes none. **That classification is not this ADR's choice — it is the one
+> ADR-0034 §1 assigns**, and it is quoted here rather than cited because the result
+> is easy to mistake for a departure from that section:
+>
+> > *"Everything else that happens once `invoke` has been entered is outside this
+> > rule, and that is a limit rather than an oversight. `ToolInvoker` exposes no
+> > 'the callable was reached' fact and this ADR introduces none […]. So a
+> > conforming `invoke` that suspends during its own pre-call work and is cancelled
+> > there yields no fact about how far it got, and the executor must not manufacture
+> > one. That case stays ADR-0029 §4's, with §4's classification:
+> > `interrupted_outcome` on the trusted declaration, which answers `INDETERMINATE`
+> > for a side-effecting non-`NATURAL` tool."*
+>
+> An admission blocked on its store **is** `invoke` suspended in its own pre-call
+> work, and the expiry reaches it there as a cancellation. ADR-0034 §1 qualifies its
+> `RUNNING → FAILED` rule on one of exactly two grounds — `invoke` was never
+> entered, or the contract says the exit precedes the callable — and neither is
+> available here: `invoke` was entered, and the expiry is not an *exit this seam
+> raises* at all, so no contract proves where it landed. What the executor holds is
+> a timed-out `invoke` and nothing about which await it expired in. Reading this
+> ADR's own "the callable had not been created" as that fact would manufacture the
+> reachability fact ADR-0034 §1 declines to introduce, which golden rule 5 makes a
+> `ToolInvoker` change with a contract ADR of its own — a different lane, and the
+> standing ground of **#234**.
+>
+> **This is therefore the case ADR-0034 §1 keeps, and it is not the case §4's
+> refusal takes.** A raised `SpendCeilingError` *is* a pre-callable exit on that
+> section's second ground and commits `RUNNING → FAILED` (§4); an expiry during the
+> admission is not, and `INDETERMINATE` for a side-effecting non-`NATURAL` tool is
+> both the assigned answer and the more pessimistic one, which is the direction
+> ADR-0014 §4 refuses to guess against.
+>
+> What this ADR does add is that **no reservation survives it**: the expiry reaches
+> the member as a cancellation, and §3's rule below removes a reservation whose
+> handle will never be delivered.
 
 > **Normative.** Where **neither ceiling is configured**, `admit_invocation`
 > returns before it reads the clock, reads the store or performs any arithmetic.
@@ -1768,6 +1797,19 @@ the ADRs it depends on rather than replacing them.
 > the later projection counts no reservation. A suite whose gate fake always
 > answers leaves the one window where a new await sits outside the deadline
 > untested.
+
+> **Normative.** The suite drives the deadline as **one** window shared by the
+> admission and the callable, which the blocked-gate clause above does not reach:
+> a gate that consumes more than half the `timeout` and less than the whole of it,
+> and a callable that then does the same — each inside the deadline on its own,
+> together past it. It asserts that `invoke` expires at the **single original
+> deadline**, measured from where the caller's `timeout` began and not restarted
+> when the admission returned, and that the result carries ADR-0029 §4's
+> classification for that expiry. An implementation giving the admission its own
+> fresh window and the callable another passes the never-answering-gate clause
+> above — that gate expires inside the first window — and then returns this call
+> **successfully** at nearly twice the deadline the caller set, which is
+> `invoke(timeout=...)` no longer meaning what §3 says it still means.
 
 > **Normative.** The suite drives the release **race** the exclusion clause exists
 > for, since the concurrency clauses above all hold the releases still: an
