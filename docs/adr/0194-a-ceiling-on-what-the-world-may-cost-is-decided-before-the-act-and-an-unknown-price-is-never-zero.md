@@ -2126,6 +2126,31 @@ the ADRs it depends on rather than replacing them.
 > reaches `tools/` untested, and an implementation that passed the factory's output
 > straight into the model fails here and nowhere else.
 
+> **Normative.** It then drives the collision **between** those two clauses, which
+> neither reaches on its own and which §3's rule covers in as many words — *no
+> value this holder has ever delivered* — because the two sets an implementation
+> keeps are the obvious place for it to lose one. A **stateful** factory: its first
+> candidate is invalid, so the holder generates and delivers a fallback value the
+> suite reads back off the returned handle as `g`; that admission is released; the
+> factory's next candidate is **`g` itself**. The second admission's handle is
+> asserted **not equal** to `g`, the retired `g` is then released a second time as
+> a no-op, the second reservation still stands, and an estimate that fits only
+> without it is refused. An implementation checking a candidate against the values
+> its *factory* has produced, while its own generator's outputs live in a second
+> set nothing checks, passes every clause above and re-delivers `g` here — after
+> which the stale release drops a live reservation and the ceiling admits spend it
+> should have refused, which is exactly the silent damage §3's lifetime clause is
+> written to prevent.
+
+> **Normative.** The mirror ordering — a delivered factory value later re-minted by
+> the holder's **own** generator — is **not** a fixture, and that is a limit of
+> what the Protocol exposes rather than a narrowing of §3's rule, which binds both
+> directions. The generator is the holder's and is not injectable, so no suite can
+> steer it onto a value it has already delivered; a fixture would assert an
+> inequality that holds for reasons it did not create. What §3 requires of that
+> direction is checked where it can be: the delivered set is one set, and the
+> clause above is what proves the implementation keeps it as one.
+
 > **Normative.** It drives the `BaseException` half of that rule in the same place,
 > because a substitution written over `BaseException` passes every case above and
 > is wrong: a factory raising `CancelledError` propagates it **unchanged** out of
