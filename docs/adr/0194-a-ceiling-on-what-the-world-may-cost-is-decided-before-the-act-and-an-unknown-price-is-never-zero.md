@@ -1311,8 +1311,17 @@ whole explanation.
 > normative vectors are `Decimal("1.50")` → `"1.50"`, `Decimal("1E15")` →
 > `"1E+15"`, `Decimal("0")` → `"0"`, `Decimal("-0")` → `"-0"`,
 > `Decimal("1.0000000000")` → `"1.0000000000"`, `Decimal("0.0000000001")` →
-> `"1E-10"`, and `Decimal("0E-999999999999999999")` →
-> `"0E-999999999999999999"`.
+> `"1E-10"`, `Decimal("1.23E+7")` → `"1.23E+7"`, and
+> `Decimal("0E-999999999999999999")` → `"0E-999999999999999999"`.
+>
+> The `1.23E+7` vector carries the exponential branch's **multi-digit** coefficient
+> — "then a point and the remaining digits *only if there are any*" — which every
+> other exponential vector here leaves untested, each having a one-digit
+> coefficient. It is pinned to its **exact bytes** because round-tripping cannot
+> catch the error it exists for: `Decimal("123E+5")` has the same
+> `(sign, digits, exponent)` triple, so an encoder emitting `"123E+5"` reconstructs
+> an indistinguishable value and passes every round-trip assertion while putting
+> two spellings of one number on the wire.
 
 **Verified rather than asserted, in the shape ADR-0087 §2c uses for its float
 grammar.** This grammar reproduces CPython 3.14's `str` on every vector above and
@@ -1867,6 +1876,11 @@ the ADRs it depends on rather than replacing them.
 > allowance with one; an `UNKNOWN` completion making the period indeterminate and
 > the next call refused **where no allowance is configured**, and the same
 > completion leaving the period **determinate** at the allowance where one is; a
+> **reported `FREE` completion**, which contributes **zero** and leaves both totals
+> determinate and unchanged, with the next admission using that zero — an
+> accumulator treating every completion carrying no amount as `UNKNOWN` passes the
+> declared-`FREE` and reported-`UNKNOWN` fixtures beside it, then makes the period
+> indeterminate and blocks a call nothing should have blocked; a
 > completion whose outcome is **`INDETERMINATE`** carrying a countable `PER_CALL`
 > cost, which is **counted** — asserted in `spend_totals` *and* in the next
 > admission, since an accumulator filtering that outcome out reports zero for a
@@ -2072,6 +2086,15 @@ the ADRs it depends on rather than replacing them.
 > above — that gate expires inside the first window — and then returns this call
 > **successfully** at nearly twice the deadline the caller set, which is
 > `invoke(timeout=...)` no longer meaning what §3 says it still means.
+
+> **Normative.** The suite drives outstanding reservations of **unequal** amounts,
+> because every multi-reservation fixture above uses estimates of 10 each and an
+> implementation holding a reservation *count* and reusing one amount passes them
+> all: reservations of 1 and 9 against a ceiling of 15, where a further estimate of
+> 6 projects 16 and is **refused** — the count-and-reuse implementation projects 8
+> and admits. It then releases each handle in turn and asserts that only that
+> handle's own amount leaves the projection, which is the second half of the same
+> property and the one a single release cannot show.
 
 > **Normative.** The suite drives the release **race** §3's take-effect rule exists
 > for: an admission paused after its row snapshot, the outstanding call's
@@ -2368,7 +2391,7 @@ the ADRs it depends on rather than replacing them.
 > which is a worse failure than a wrong number and is why this is a fixture rather
 > than a remark.
 > **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
-> rather than describing it: **each of the seven** vectors §5 states is asserted to
+> rather than describing it: **each of the eight** vectors §5 states is asserted to
 > its exact bytes and round-trips through `wire/codec.py` to a value the type
 > cannot distinguish from the original — the threshold pair matters most, since an
 > encoder emitting `"0.0000000001"` where §5 says `"1E-10"` escapes a suite that
@@ -2380,6 +2403,16 @@ the ADRs it depends on rather than replacing them.
 > `ToolCost` both cross the wire and come back equal, which is #1559's case as a
 > regression rather than as a promise. The vectors are added to ADR-0087 §5's
 > suite, where a vector for a case no existing vector covers belongs (§8).
+
+> **Normative.** The consumer group drives §6's **transport** clause, which this
+> ADR asserts is driven and which nothing else here reaches: through the hub-backed
+> `spend_totals`, a call with **no hub listening** raises `HubUnavailableError` and
+> a call answered with a **malformed or truncated** reply raises `ProtocolError`,
+> each reaching the caller **unchanged** and neither arriving as
+> `SpendUndeterminedError`. A `HubClient.spend_totals` catching `Exception` and
+> translating passes every success and budget-failure fixture in this section and
+> tells a user their spend is indeterminate when the truth is that there is no hub
+> — which is the confusion §4 keeps two classes to prevent, one seam further out.
 
 > **Normative.** The lane asserts `SpendTotal`'s **one** string field, `currency`,
 > is `EncodableText`-based by construction, which
