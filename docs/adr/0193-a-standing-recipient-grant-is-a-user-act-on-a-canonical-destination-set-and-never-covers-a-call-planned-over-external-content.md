@@ -11,13 +11,14 @@
   (ii)'s first clause, in the single respect that a user-established recipient
   grant may now cover an egress call at the designated seam under §§3–8 below.
   Everything else in ADR-0154 stands, its fourteen attestations included (§12).
-- **Partially supersedes ADR-0021** — §3's purity sentence ("a policy that
-  performs I/O on every call is one whose conformance suite has to mock a store"),
-  and only for a policy **constructed with an authorisation source**, which §7
-  requires to await one injected read per ruling. For a policy constructed with
-  none the sentence is unchanged; the removal it was drawn from, §5's
-  monotonicity, the id-resolution hazard and the `AuditTrail`-injection rejection
-  are all untouched (§12).
+- **Partially supersedes ADR-0021** — §3's two purity sentences ("a policy that
+  performs I/O on every call is one whose conformance suite has to mock a store"
+  and "which leaves `decide` a genuine function of its argument"), and only for a
+  policy **constructed with an authorisation source**, which §7 requires to await
+  one injected read per ruling. For a policy constructed with none both sentences
+  are unchanged; the removal the second was drawn from — `decide` mints no `id`
+  and reads no clock — §5's monotonicity, the id-resolution hazard and the
+  `AuditTrail`-injection rejection are all untouched (§12).
 - Requires **new `core` contract surface** and lands none of it (§14). Flagged
   under golden rule 5.
 - Answers, in its own text and by name, the three questions ADR-0148 §3's fifth
@@ -2195,7 +2196,7 @@ are row-derived, the surface reads nothing, and the resolution face (§1) exists
 for §6's write-path check alone — held by the trail, named by no renderer, and
 carrying neither `record` nor `clear` for one to reach.
 
-### 12. Two ratified clauses partially superseded, and precisely which
+### 12. Two ratified ADRs partially superseded, and precisely which clauses
 
 > **Normative.** ADR-0154 §4 item (ii)'s **first** clause — "No standing
 > authorisation … covers any egress call through this seam. Every egress call is
@@ -2244,20 +2245,26 @@ decided, so it takes a new ADR that supersedes — partially, scoped to the one
 clause, with ADR-0154's `Status` line taking the leading `Partially superseded by`
 token and the record living in its appended dated note (ADR-0082 §2).
 
-> **Normative.** ADR-0021 §3's **purity sentence** — "**A pure policy is a
+> **Normative.** ADR-0021 §3's **two purity sentences** — "**A pure policy is a
 > testable policy.** `decide` as a function of its argument is what lets §5's
 > monotonicity obligations be checked at all; a policy that performs I/O on every
 > call is one whose conformance suite has to mock a store to ask a question about
-> ranking" — is **partially superseded** by this ADR, in exactly one condition: a
-> policy **constructed with an authorisation source** performs one durable read
-> per ruling, the read §7 fixes. For a policy constructed with none, the sentence
-> is unchanged and binds as written.
+> ranking", and "`decided_at` and `id` are supplied by the caller that records,
+> which leaves `decide` a **genuine function of its argument** — which is in turn
+> what makes §5's monotonicity obligations checkable at all" — are **partially
+> superseded** by this ADR, in exactly one condition: a policy **constructed with
+> an authorisation source** performs one durable read per ruling, the read §7
+> fixes, so its answer depends on the store as well as on its argument. For a
+> policy constructed with none, both sentences are unchanged and bind as
+> written.
 
-> **Normative.** The scope is that sentence and that condition, and no lane reads
-> it wider. **Not superseded:** the removal the sentence was drawn from — `decide`
-> mints no `id` and reads no clock, and §7 restates both; §5's monotonicity
-> obligations, which §3 keeps checkable with the grants in the store held equal;
-> the **id-resolution hazard**, which stays closed because `RecipientGrants` takes
+> **Normative.** The scope is those two sentences and that condition, and no lane
+> reads it wider. **Not superseded:** the second sentence in the respect it is
+> drawn from — `decide` mints no `id` and reads no clock, and §7 restates both, so
+> what moves is only that a sourced policy's answer depends on the store as well
+> as on its argument; §5's monotonicity obligations, which §3 keeps checkable with
+> the grants in the store held equal; the **id-resolution hazard**, which stays
+> closed because `RecipientGrants` takes
 > the whole request, carries no read-by-id member and §1 forbids adding one; the
 > rejection of injecting an **`AuditTrail`**, because the policy still does not
 > write to the trail and the caller does; and every other clause of ADR-0021 —
@@ -2289,8 +2296,10 @@ The test is not whether the earlier text anticipated the change; it is whether a
 reader **acting** on the earlier text acts differently. A reader implementing a
 `RecipientGrants`-holding policy takes a constructor dependency, awaits a durable
 read inside `decide`, and writes a conformance suite that stands up a fake store —
-which is the shape that sentence names and declines. Anticipation settles the
-*scope*, and it settles it to one sentence and one condition; it does not settle
+which is the shape the I/O sentence names and declines — and their `decide`
+answers from that store as well as from its argument, which is what the second
+sentence denies. Anticipation settles the
+*scope*, and it settles it to two sentences and one condition; it does not settle
 the classification. §5's "without amending this clause" is why nothing in §5
 moves, not why nothing anywhere does.
 
@@ -2815,19 +2824,21 @@ obligation (ADR-0089 §1).
   and not the clause being amended (ADR-0147 §11's precedent, in terms). §3's
   fifth clause is likewise discharged rather than altered: it demanded three
   explicit decisions and §§4–6 make them.
-- **ADR-0021 — partially superseded, in one sentence of §3 and one condition;
-  everything else is satisfied, discharged or stacked.** **Superseded:** §3's
-  purity sentence — "a policy that performs I/O on every call is one whose
-  conformance suite has to mock a store to ask a question about ranking" — stops
-  describing the contract for a policy **constructed with an authorisation
-  source**, which is the policy §7 requires to await `RecipientGrants.covering`
-  once per ruling. ADR-0070 §1's test is whether a reader *acting* on the earlier
-  text acts differently, and this reader does: they take a constructor dependency,
-  perform a durable read inside `decide`, and stand a fake store up in their
-  conformance suite. §12 fixes the scope in marked clauses; ADR-0021's `Status`
-  line takes the leading token and the record lives in its dated note (ADR-0082
+- **ADR-0021 — partially superseded, in two sentences of §3 and one condition;
+  everything else is satisfied, discharged or stacked.** **Superseded:** §3's two
+  purity sentences — "a policy that performs I/O on every call is one whose
+  conformance suite has to mock a store to ask a question about ranking", and
+  "which leaves `decide` a genuine function of its argument" — stop describing the
+  contract for a policy **constructed with an authorisation source**, which is the
+  policy §7 requires to await `RecipientGrants.covering` once per ruling. ADR-0070
+  §1's test is whether a reader *acting* on the earlier text acts differently, and
+  this reader does: they take a constructor dependency, perform a durable read
+  inside `decide`, stand a fake store up in their conformance suite, and answer
+  from that store as well as from the request. §12 fixes the scope in marked
+  clauses; ADR-0021's `Status` line takes the leading token and the record lives
+  in its dated note (ADR-0082
   §2), which is also why the ADR-0148 §6 qualifier moves off that line in this
-  change. **Not superseded** — and it is nearly all of §3: the removal the
+  change. **Not superseded** — and it is nearly all of §3: the removal the second
   sentence was drawn from (`decide` mints no `id` and reads no clock, §7); §5's
   monotonicity, kept checkable with the grants in the store held equal (§3); the
   id-resolution hazard, closed because `covering` takes the whole request, carries
@@ -2869,11 +2880,11 @@ obligation (ADR-0089 §1).
   verify it, and the digest is verified in the same breath, against the same
   record, by the same component.
 
-**Why the supersession is one sentence wide and no wider, and why the earlier
+**Why the supersession is two sentences wide and no wider, and why the earlier
 drafts of this section read it as none.** Review raised the classification at
 rounds 9, 11, 15, 16, 17, 18, 19, 20, 21 and 22 — architecture alone until round
 21, then both lenses on identical grounding — and it is now recorded, scoped by
-§12. The bullets below are why the scope is one sentence and one condition rather
+§12. The bullets below are why the scope is two sentences and one condition rather
 than the section: each is a reading of what ADR-0021 *says*, and each settles what
 does **not** move. What none of them settles is the classification, because
 ADR-0070 §1 asks whether a reader **acting** on the earlier text acts differently,
@@ -2883,8 +2894,8 @@ again should read them for the scope, not as an argument that nothing moved.
 - **ADR-0021's prose binds, all of it, and that is why the scope has to be read
   off the text rather than asserted.** ADR-0021 is unmarked, so under ADR-0089 §4
   its Decision "binds as a reader reads it, and §3 does not narrow it" — round
-  16's point of law, and it is correct. It cuts both ways: the purity sentence
-  binds, which is why §12 supersedes it; and so does every sentence around it,
+  16's point of law, and it is correct. It cuts both ways: both purity sentences
+  bind, which is why §12 supersedes them; and so does every sentence around them,
   which is why §12 supersedes nothing else. The bullets below are that reading.
 - **The `ActionPolicy` contract does not forbid a policy holding this seam, and
   round 17's reading of it is scoped away.** `core/protocols.py` says "no
@@ -2896,18 +2907,24 @@ again should read them for the scope, not as an argument that nothing moved.
   for §7's lookup, and §1 keeps the two apart mechanically: `covering` does not
   read `planned_with_external_content` at all, so the external-content obligation
   is discharged by the policy from the request and never from this seam.
-- **"A genuine function of its argument" has a stated subject, and both of its
-  terms are untouched.** ADR-0021 §3's sentence is drawn from one removal:
-  *"It also removes two things a policy had no business doing: minting an `id`,
-  and reading a clock. `decided_at` and `id` are supplied by the caller that
-  records, which leaves `decide` a genuine function of its argument — which is in
-  turn what makes §5's monotonicity obligations checkable at all."* §7 keeps both
-  removals — `decide` mints no id and reads no clock, and §9 puts the clock in the
-  store on ADR-0007 §2's precedent — and §3's monotonicity clause keeps the
-  consequence the sentence was drawn for, holding requests "equal in every other
-  respect" with the grants in the store held equal, which is checkable against the
-  canonical fake §14 lands. A reader acting on that sentence keeps the clock and
-  the id out of their policy; this reader does.
+- **"A genuine function of its argument" is the second sentence §12 supersedes,
+  and what survives of it is the removal it was drawn from.** ADR-0021 §3 states
+  it inside that removal: *"It also removes two things a policy had no business
+  doing: minting an `id`, and reading a clock. `decided_at` and `id` are supplied
+  by the caller that records, which leaves `decide` a genuine function of its
+  argument — which is in turn what makes §5's monotonicity obligations checkable
+  at all."* For a sourced policy the conclusion no longer holds as written:
+  `decide` awaits `RecipientGrants.covering` (§7), so the same request draws
+  `CONFIRM` against an empty store and `ALLOW` once a covering grant is recorded,
+  and `decide` answers from its argument **and its injected seams**. That is the
+  same respect in which the I/O sentence below moves, which is why §12 names both
+  and why the `Status` line says *clauses*. **What survives** is the removal and
+  the consequence it was drawn for: §7 keeps both removals — `decide` mints no id
+  and reads no clock, and §9 puts the clock in the store on ADR-0007 §2's
+  precedent — and §3's monotonicity clause keeps §5's obligations checkable,
+  holding requests "equal in every other respect" with the grants in the store
+  held equal, against the canonical fake §14 lands. A reader acting on that half
+  keeps the clock and the id out of their policy; this reader does.
 - **The clause carries its own condition.** §3's first bullet is "**`decide` must
   return `authorised_by is None`** from a policy constructed **with no
   authorisation source**. Today that is *every* policy". A policy constructed
@@ -2921,7 +2938,8 @@ again should read them for the scope, not as an argument that nothing moved.
   it, which is what keeps §6's relief valve reachable **without amending this
   clause**", and "the relief valve is deliberately **not** a policy quietly
   deciding on the user's behalf: it is the standing grant (§6)". That is why
-  §5 does not move and why the supersession stops at §3's sentence: an ADR's own
+  §5 does not move and why the supersession stops at §3's two purity sentences:
+  an ADR's own
   anticipation fixes how far a later ADR reaches into it, even where it does not
   save the clause the later ADR actually contradicts.
 - **The purity framing has a named hazard, and §1 closes it rather than reopening
@@ -2940,13 +2958,14 @@ again should read them for the scope, not as an argument that nothing moved.
   It sits inside an argument about injecting an `AuditTrail` — a **write** seam —
   whose conclusion ("the policy does not write to the audit trail, and the caller
   does") is untouched here, and that boundary is what keeps the supersession to
-  the cost sentence and off the conclusion it was offered in support of. The cost
-  itself is now real and is paid rather than denied: a grant-holding policy's
+  this cost sentence itself and off the conclusion it was offered in support of.
+  The cost itself is now real and is paid rather than denied: a grant-holding
+  policy's
   monotonicity suite stands up a fake `RecipientGrants`, and §14's canonical fake
-  is what it stands up. **This is the sentence §12 supersedes**, and the reason it
-  does is that paying a stated cost changes what a reader building such a policy
-  writes — which is ADR-0070 §1's test, and the one an earlier draft of this
-  section answered the other way.
+  is what it stands up. **This is the first of the two sentences §12 supersedes**,
+  and the reason it does is that paying a stated cost changes what a reader
+  building such a policy writes — which is ADR-0070 §1's test, and the one an
+  earlier draft of this section answered the other way.
 - **ADR-0181 — neither amended nor superseded.** §5's second clause is honoured
   by §4's first, and §5's last clause bound this ADR specifically; §6 is extended
   by no clause here — §2's fifth clause applies it to a second surface without
