@@ -17,14 +17,14 @@ issue is newer and wins. History does not live here either: git holds this
 file's, and the tracker and the ADR ledger hold the work's (ADR-0019).
 
 **The narrative is bound by that same rule, not just the milestone entries.**
-No sentence here asserts the current state of the code — what is built, what is
-not, what a subsystem does today. Where a track's motivation needs the state it
-opened against, that is written as **dated** history, so it reads as a snapshot
-someone took rather than a fact to act on. Naming a ratified ADR or a tracker
-issue is not a state claim: those are dated and append-only, which is the
-exemption ADR-0019 §4 rests on. An undated present-tense claim about the
-codebase in this file is a defect, because nothing marks it as perishable and
-the precedence rule above never fires on it (#1568).
+No sentence here asserts the state of the code — what is built, what is not,
+what a subsystem does today, not even dated. A track's motivation is its durable
+*argument*, plus a pointer at whatever holds the state: a ratified ADR, which is
+dated and append-only (ADR-0019 §4), or the track's issue, which is live and
+mutable and governed by the precedence rule above. Neither home is a sentence in
+this file, and that is the whole of it — an observation written here loses the
+date that made it true, and the precedence rule never fires on it because it
+does not read as a pointer that could disagree with anything (#1568).
 
 ## Design stances
 
@@ -169,19 +169,17 @@ Live record: **#1312** — which milestones have closed, and the exit ruling
 that closed each, are recorded there.
 
 **Purpose:** the hub-side conversational engine — the pipeline's terminal step.
-The track opened (2026-08-21) against an engine that listened, remembered and
-planned, but whose plan ending in "compose a reply" halted at "No tool is
-available": replying had been swept up in "tools are deferred to MCP" although
-answering one's own user is not egress — the reply travels back on the wire the
+Answering one's own user is not egress: the reply travels back on the wire the
 `ask` arrived on, the shape ADR-0131 gave notifications ("an answer the device
-asked for"). This track owns making the assistant *speak*: composing answers
-from plan + retrieved memory + context, streaming them, and eventually routing
-intents to typed operations. It is hub-side work with **no dependency on
-`track:web-client`'s gateway**; the CLI exercises every exit.
-`track:web-client` milestone 14 (streaming chat in the browser) consumes this
-track's output. Milestones are ordered by **dependency only**, and each closes
-on a QA-driven exit ruling: a QA run (`.claude/skills/qa-milestone`) recorded
-as a `qa` issue, then the owner's ruling recorded on #1312.
+asked for"), so it does not belong behind "tools are deferred to MCP". This
+track owns making the assistant *speak*: composing answers from plan + retrieved
+memory + context, streaming them, and eventually routing intents to typed
+operations. It is hub-side work with **no dependency on `track:web-client`'s
+gateway**; the CLI exercises every exit. `track:web-client` milestone 14
+(streaming chat in the browser) consumes this track's output. Milestones are
+ordered by **dependency only**, and each closes on a QA-driven exit ruling: a QA
+run (`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's
+ruling recorded on #1312.
 
 - **17 — the assistant answers.** An ADR ruling that a reply is not a tool: the
   pipeline's terminal step composes a natural-language answer (model + memory +
@@ -220,12 +218,12 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised whole, per
-call, with no standing authorisation) — and at the track's opening (2026-08-23)
-the one gap all of them named as unbuilt was **origin**, which is why it takes
-this track's first milestone.
-Milestones are ordered by **dependency only**, and each closes on a QA-driven
-exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318); this track
-starts at 23.
+call, with no standing authorisation) — and each of them turns on a **recorded
+origin** "the authoriser evaluates at the moment it rules" (ADR-0154 §4, item
+(ii)), which is why origin takes this track's first milestone. Milestones are
+ordered by **dependency only**, and each closes on a QA-driven exit ruling
+recorded on #1427. Voice holds milestones 19–22 (#1318); this track starts
+at 23.
 
 - **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
   through proposal, consolidation, facet assembly and tool-argument
