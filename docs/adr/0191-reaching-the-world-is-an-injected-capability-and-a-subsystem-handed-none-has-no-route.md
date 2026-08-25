@@ -1,6 +1,6 @@
 # 191. Reaching the world is an injected capability, and a subsystem handed none has no route
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - **Partially supersedes ADR-0017 §8** — its deferral of the injected transport
   capability, and that scope only. §8's three grounds stay legible as the record of
