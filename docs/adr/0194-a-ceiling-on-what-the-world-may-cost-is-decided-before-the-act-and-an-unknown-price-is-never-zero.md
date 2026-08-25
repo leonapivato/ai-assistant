@@ -331,10 +331,28 @@ trigger rather than pre-deciding it here.
 > `Underflow` and `Subnormal` so that a failure to size it raises rather than
 > answering quietly. Two conforming implementations therefore return the same
 > admission decision for the same inputs; none rounds to a currency's minor unit,
-> and none compares two amounts through `float`. The sizing always succeeds because
-> §1 makes every operand countable, so the traps are a backstop against an
-> implementation that failed to size its context rather than a reachable state on
-> well-formed input.
+> and none compares two amounts through `float`.
+
+> **Normative.** The sizing always succeeds, and **not** because every operand is
+> countable. §1's predicate governs the amounts this mechanism *reads* and
+> explicitly not the totals it computes, and the projection's first operand is the
+> accounted total — which §1 exempts by name and §5 declares deliberately unbounded
+> in magnitude, over rows §11 requires a fixture of above `Decimal("1E19")` for. So
+> the two kinds of operand are sized differently, and an implementation must not
+> confuse them. A **source amount** — a configured ceiling, the allowance, a
+> declared amount, a reported one — is bounded by §1, and fifteen integer digits
+> and nine fractional ones is the whole of what it can need. An **accumulated
+> operand** — the running total part-way through a sum, and the accounted total
+> where it enters the projection — is bounded by nothing this ADR states, so its
+> context is sized from the operand's **own representation**: the digit count and
+> effective scale `as_tuple()` reports for the value in hand (the effective-scale
+> clause below), never from §1's bound. Sized that way the context always
+> succeeds, because every operand is a finite `Decimal` and a finite `Decimal`'s
+> digits are countable before the operation. Sized from §1's bound instead, an
+> implementation rounds, traps or refuses a valid large accumulator rather than
+> returning and comparing it exactly — the failure §11's `1E19` fixture catches.
+> The traps are therefore a backstop against a context that was not sized from its
+> operands rather than a reachable state on well-formed input.
 
 > **Normative.** A computed total has exactly **one** representation, so that two
 > conforming implementations summing the same rows in any order state the same
@@ -342,11 +360,24 @@ trigger rather than pre-deciding it here.
 > ADR-0087 §4 makes two spellings of one number two values). The representation is
 > the exact value at its **minimal non-negative scale**: as many fractional digits
 > as the value needs and no more — none where it is an integer — and never a
-> positive exponent. Rows of `0.1`, `0.9` and `1` total `Decimal("2")`, never
-> `Decimal("2.0")` and never `Decimal("2E+0")`, whatever order they were added in
-> and however an implementation grouped them. This governs a **result** — the
-> accounted total and the projection — and no input: a declared or configured
-> amount keeps the scale whoever wrote it chose.
+> positive exponent; and its **sign is never negative**, so a total whose exact
+> value is zero is `Decimal("0")` and never `Decimal("-0")`. Rows of `0.1`, `0.9`
+> and `1` total `Decimal("2")`, never `Decimal("2.0")` and never `Decimal("2E+0")`,
+> whatever order they were added in and however an implementation grouped them.
+> This governs a **result** — the accounted total and the projection — and no
+> input: a declared or configured amount keeps the scale whoever wrote it chose.
+
+> **Normative.** The sign clause is not decoration, and negative zero is the case
+> it is stated for. `ToolCost` refuses a negative amount with `<`, and
+> `Decimal("-0") < 0` is false, so `Decimal("-0")` is a reported cost a completion
+> row may honestly carry and §1 classifies it as countable. Summing such rows,
+> `Decimal("-0") + Decimal("-0")` is `Decimal("-0")` while
+> `sum(rows, Decimal("0"))` is `Decimal("0")`: one number, two exact results, and
+> §5 encodes them to `"-0"` and `"0"` — two spellings of one total on the wire,
+> which is precisely what this clause forbids. So the total of a period whose
+> rows are all negative zero is `Decimal("0")`, whatever an implementation seeded
+> its accumulator with; §5's model refuses the other spelling at validation, and
+> §11 drives it.
 
 > **Normative.** A context is sized from the operands' **effective** scale, not
 > from their raw exponents. `Decimal("0E-999999999999999999")` is countable under
@@ -471,6 +502,36 @@ the two properties it has rather than letting a reader assume the stronger one.
 > reason: two reservations sharing a handle are one reservation, so the other's
 > amount silently leaves the projection and a later call is admitted against a
 > total that omits an admitted one.
+
+> **Normative.** The holder **mints** the handle; an injected id factory supplies
+> candidate values and nothing more. A candidate `SpendAdmissionHandle` would
+> refuse — a blank or whitespace-only string, a lone surrogate or any other
+> unencodable value, a value of the wrong type — and a factory raising an
+> `Exception` are each replaced by a value the holder generates itself. Neither
+> reaches the caller and neither costs the call: the admission stands, its
+> reservation is held, and a valid handle is delivered. This is the clause above
+> carried from *collision* to *unusability* on the same ground — the factory
+> supplies the opacity and the holder supplies the handle — and it strands no
+> reservation, which the no-stranded-reservation clause below requires anyway.
+
+> **Normative.** §4's `BaseException` exemption binds here as everywhere else, and
+> the substitution above is over `Exception` alone. A `CancelledError` raised by
+> the factory is a cancellation delivered inside `admit_invocation` and nothing
+> else: it propagates unchanged, and the clause below removes any reservation
+> already recorded before it leaves the member. An implementation that caught
+> `BaseException` around the mint would swallow one, which §4 forbids in as many
+> words.
+
+> **Normative.** A factory failure is deliberately **not** a refusal. §4 enumerates
+> `SpendUndeterminedError` over five grounds, each of them a way the period's
+> *spend* could not be reduced to a number, and a handle generator that misbehaved
+> is none of them; raising one would tell the user a fact about their budget that
+> nothing measured, which is the confusion §4 keeps two classes to prevent. Nor may
+> the underlying error escape: §5 closes `admit_invocation`'s `Exception` set at
+> two classes, and a `ValidationError` from constructing the handle, or a factory's
+> own exception, would be a third. `Engine._mint_handle` lets a raising factory
+> propagate one seam over because that member's failure set is open; this one's is
+> closed, which is the whole of the difference.
 
 > **Normative.** A reservation stands **until its handle is released**, and is
 > counted into the projected total of every later admission until then —
@@ -740,7 +801,10 @@ whole explanation.
 > **Normative.** `admit_invocation` raises exactly `SpendCeilingError` and
 > `SpendUndeterminedError` under §4's division and no other `Exception`, subject
 > throughout to §4's `BaseException` exemption — a `CancelledError` delivered from
-> outside propagates unchanged, here as on every member below.
+> outside propagates unchanged, here as on every member below. Minting the handle
+> adds no third class: an id factory that raises an `Exception`, or returns a value
+> `SpendAdmissionHandle` refuses, is replaced by a value the holder generates (§3),
+> so neither a `ValidationError` nor the factory's own exception reaches `tools/`.
 
 > **Normative.** `release_admission` raises **no** `Exception` at all, under §4's
 > same `BaseException` exemption. It is called from a `finally` whose call has
@@ -812,13 +876,22 @@ whole explanation.
 > **not the same one**. A `ceiling`, where present, is exactly what §1 admits as a
 > configured ceiling: finite, greater than or equal to zero, and **countable** —
 > it is the value the user configured and nothing computes it. An `accounted`
-> total, where present, is finite, greater than or equal to zero, and expressible
-> with at most **nine** fractional digits — because every row contributing to it
-> is — and it is deliberately **not** bounded in magnitude: §1's predicate governs
-> inputs and not results, and a total over rows nothing bounds may exceed
-> `Decimal("1E15")` honestly. A model that accepted a negative ceiling, a negative
-> total, a non-countable ceiling or a tenth fractional digit on a total would state
-> a fact this mechanism cannot produce, so each raises at validation.
+> total, where present, is finite and carries §2's **one representation** for a
+> computed total rather than merely a value compatible with it — because it *is* a
+> computed total, and a model that accepted a second spelling of one would accept a
+> value this mechanism cannot produce and would put bytes on the wire that no
+> conforming implementation states. Stated over `as_tuple()`: the sign is 0, the
+> exponent is between `-9` and `0` inclusive, and where the exponent is negative
+> the last digit is non-zero. So `Decimal("2")` constructs while `Decimal("2.0")`,
+> `Decimal("2E+0")` and `Decimal("-0")` each raise, and `Decimal("0")` is the only
+> spelling of a zero total. That subsumes the two invariants a reader would
+> otherwise reach for — non-negativity, and at most **nine** fractional digits,
+> which holds because every row contributing to it carries at most nine — and it is
+> deliberately **not** bounded in magnitude: §1's predicate governs inputs and not
+> results, and a total over rows nothing bounds may exceed `Decimal("1E15")`
+> honestly. A model that accepted a negative ceiling, a non-countable ceiling, or a
+> total in any representation other than the one above would state a fact this
+> mechanism cannot produce, so each raises at validation.
 
 > **Normative.** ADR-0087 §2c's scalar table gains one row, **`Decimal`**, and
 > this ADR is where it is decided because this ADR is what puts one on the promoted
@@ -1366,6 +1439,25 @@ the ADRs it depends on rather than replacing them.
 > comparing raw factory output passes the clause above and fails this one, which is
 > the whole reason it is stated separately.
 
+> **Normative.** It drives §3's minting rule with factories that **fail** rather
+> than collide, because a closed exception set is only closed if the suite tries to
+> open it: a factory returning `"   "`, one returning a lone surrogate, one
+> returning a non-`str`, and one that **raises** an `Exception` of its own. In each
+> case `admit_invocation` returns a valid `SpendAdmissionHandle` — no
+> `ValidationError` and no factory exception escapes, and §5's two classes stay the
+> whole of the member's `Exception` set — and the reservation it stands for is both
+> counted in the next projection and released by that handle. A suite driving only
+> factories whose values validate leaves the one path on which a `ValidationError`
+> reaches `tools/` untested, and an implementation that passed the factory's output
+> straight into the model fails here and nowhere else.
+
+> **Normative.** It drives the `BaseException` half of that rule in the same place,
+> because a substitution written over `BaseException` passes every case above and
+> is wrong: a factory raising `CancelledError` propagates it **unchanged** out of
+> `admit_invocation`, no handle is returned, and the later projection counts no
+> reservation for that call — §3's cancellation rule asserted on the projection and
+> not on the exception alone, at the one boundary the mint adds to it.
+
 > **Normative.** The suite drives a refusal **lifted by a release**, which §4 now
 > names as one of the three ways one clears: an accounted total of 90, a ceiling of
 > 100, an outstanding reservation of 10 and an estimate of 1 refused at 101; the
@@ -1441,7 +1533,13 @@ the ADRs it depends on rather than replacing them.
 > configured, where the projected total exceeds it and the call is refused with
 > `SpendCeilingError`. A conforming implementation sizes its context from the
 > operands (§2) and neither rounds the stated total nor answers the comparison out
-> of a default context.
+> of a default context. This fixture is also what pins §2's second sizing rule: the
+> accounted total here is an **accumulated operand**, above every bound §1 states,
+> and an implementation that sized the projection's context from the fifteen
+> integer and nine fractional digits §1 bounds a *source* amount to, instead of
+> from the accumulator's own `as_tuple()`, rounds or traps on it rather than
+> comparing it exactly. The stated total is asserted digit for digit, so rounding
+> it is a failure rather than a near miss.
 
 > **Normative.** The suite drives `Decimal("0E-999999999999999999")` — countable
 > by §1, numerically zero, and carrying an exponent no context can be sized from —
@@ -1516,6 +1614,27 @@ the ADRs it depends on rather than replacing them.
 > `Decimal("1E15")` **constructs**, because §1's predicate governs inputs and a
 > total is a result; and an `accounted` with a tenth fractional digit raises. A
 > non-finite value raises for either field.
+
+> **Normative.** `accounted`'s **representation** invariant (§5, over §2's one
+> representation) is driven as hostile constructions in its own right, because it
+> is the one a validator list built from "finite, non-negative, nine digits" passes
+> without carrying: `Decimal("2.0")`, `Decimal("2E+0")` and `Decimal("-0")` each
+> raise, while `Decimal("2")`, `Decimal("0")`, `Decimal("0.000000001")` and
+> `Decimal("100")` each construct. `ceiling` is driven with the same values and the
+> **opposite** expectation for the scale ones — a configured `Decimal("2.0")`
+> ceiling constructs, because §2's rule governs results and a ceiling is an input —
+> which is what stops a lane from applying one numeric validator to both fields.
+
+> **Normative.** The same property is driven **end to end** rather than only at the
+> model, since a construction test passes against an implementation that never
+> computes the offending value: over completion rows of `0.1`, `0.9` and `1`, every
+> permutation of the row order yields a `SpendTotal` whose `accounted` is
+> `Decimal("2")` — asserted on `as_tuple()`, not on `==`, which `Decimal("2.0")`
+> satisfies — and encodes to the bytes `"2"` through `wire/codec.py`. It is driven
+> again over rows that are **all** `Decimal("-0")`, where the total is
+> `Decimal("0")` and the bytes are `"0"`: an accumulator seeded from the first row
+> rather than from zero preserves the sign and fails exactly here, and a suite
+> asserting only equality passes it, since `Decimal("-0") == Decimal("0")`.
 
 > **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
 > rather than describing it: **each of the seven** vectors §5 states is asserted to
