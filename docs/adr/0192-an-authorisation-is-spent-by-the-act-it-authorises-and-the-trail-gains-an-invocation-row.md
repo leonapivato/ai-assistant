@@ -750,6 +750,29 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > surfaces, and a surface completes no claim, so an id it holds can misdirect
 > nothing.
 
+> **Normative.** **The reservation is taken inside the same atomic store operation
+> that reads the claim**, never after it, on the same serialisation boundary `clear()`
+> and every append take. `open_invocations` already reads its set from one operation
+> (above) and the reservation joins that operation rather than following it. An
+> implementation that read the set, released the boundary and reserved afterwards
+> satisfies "reserves every claim id it returns" as a sentence and loses the race the
+> clause exists to close: an erasure and a fresh claim can land in the gap, and the id
+> it then reserves and returns names the **new** claim, which is the misdirection
+> unchanged. §9 races it rather than pinning the sequential case alone.
+
+> **Normative.** **The reservation is the reserving process's, and one process is all
+> there is.** Two hub processes over one data directory would each keep their own
+> reservations, so a second live writer could mint a reserved id under a recycled pid
+> and the completion would misdirect exactly as above. ADR-0083 puts **one resident
+> process per data directory** — an exclusive `flock` on `<data_dir>/hub.lock` taken
+> before anything is opened, where "a held lock always means a live holder" — so that
+> second writer does not exist, and this is a scope-out on a ratified bound rather
+> than a hole left open. ADR-0194 §3 scopes its own in-process reservations out the
+> same way and against the same ADR, which is the precedent this follows. **It is
+> reopened by an ADR landing a second writer process over one store**, which would owe
+> this clause and that one together; no lane may read this ADR's silence as admitting
+> one, and §9 writes no second-process case because ADR-0083 admits none.
+
 > **Normative.** The reservation is **not** the erasure residue §6 refuses, on §2's
 > own ground and not on a new one: what is remembered is an **identifier**, not an
 > act — no row, no decision, no outcome, no count of executions the user erased — it
@@ -2658,6 +2681,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > minted that id absent the reservation, since a factory left to its own sequence
 > reproduces the collision only by coincidence and a test resting on one asserts
 > nothing.
+
+> **Normative.** The reservation is **raced**, not only sequenced, because the
+> sequential case cannot see an implementation that reserves outside the store's
+> serialisation boundary. Under a barrier, one coroutine's `open_invocations` runs
+> against another's `clear()` and a fresh claim under a re-recorded decision, and the
+> test asserts that no id the read returns is one a claim appended after it holds —
+> which a read-then-reserve implementation fails and the sequential case above passes.
+> No case constructs a **second writer process** over one store: ADR-0083 admits none
+> and §2 scopes it out rather than testing it.
 
 > **Normative.** It pins the erasure's effect on the consume, because §6 states it
 > as a scope rather than leaving it to be inferred: a decision claimed, completed,
