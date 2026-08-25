@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast, get_args, runtime_checkable
 from uuid import uuid4
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -1401,13 +1401,24 @@ def _revalidated_decision(decision: PermissionDecision) -> PermissionDecision:
     on something that is not a decision raises ``AttributeError`` straight through
     it. The durable store guards the same argument the same way.
 
+
+    **Every ordinary exception the read raises is caught, not only the ones a
+    validator means to raise.** A value that is not a model at all reaches
+    ``model_validate`` untouched (that is the ordering above), and validating a
+    mapping walks it: a ``__getitem__`` that raises leaves as itself through a check
+    that was about to refuse the value anyway. The whole read is a function of the
+    caller's argument, so whatever it raises is a fault of that argument, and
+    ADR-0192 §2's order is exhaustive over the classes a refusal arrives in.
+    ``BaseException`` is deliberately not caught: a cancellation is not a fault of
+    the argument and is never absorbed (ADR-0060 §1).
+
     Raises:
         AuditError: If it is not a valid record, or does not satisfy the model.
     """
     given: object = decision
     try:
         return PermissionDecision.model_validate(_field_state(PermissionDecision, given))
-    except (ValidationError, ValueError) as exc:
+    except Exception as exc:
         # `describe_untrusted` and never `repr`: the id is the caller's, and a
         # `__repr__` that raises would replace this `AuditError` with whatever it
         # threw — from inside the `except` block that exists to report it.
