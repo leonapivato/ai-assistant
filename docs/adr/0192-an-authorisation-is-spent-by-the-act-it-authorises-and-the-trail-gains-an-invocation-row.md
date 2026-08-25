@@ -767,12 +767,21 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > were minted and for nothing else, which is a fact about the id space — and nothing
 > reads it to decide anything. It is
 > consulted at no admission, so a decision re-recorded after an erasure still admits
-> a claim exactly as §6 states. Nor is it **disclosed**: it lives in the process's
-> own memory, no lane persists it, no operation this ADR promotes returns it or any
-> value derived from it, it is on no surface (§4) and in no export (§6), and a
-> counter's value is readable by nothing outside the process holding it. ADR-0004 §7's
-> erasure right is over the **record**, and a value that is never written down, never
-> read back and never shown is not one — which is why the answer here is a scope
+> a claim exactly as §6 states. Nor is it **disclosed**: **the allocator's own state
+> — its pid component, its nonce, its counter — lives in the process's own memory**,
+> no lane persists it, no operation this ADR promotes returns it, it is on no surface
+> (§4) and in no export (§6), and a counter's value is readable by nothing outside
+> the process holding it. **The identifiers it mints are a different thing and are
+> deliberately not covered by that**: an `id` is persisted on its row, returned by
+> the ledger, carried on every `RecordedInvocation` and included in
+> `export_invocations`, because naming a row is what it is for. This ADR states **no
+> opacity property** for it, and the "no ordinal" clause above is over the row's
+> **fields** — no field says how many acts a decision has backed, and a reader counts
+> claims. An encoding that hid allocation order is neither required nor forbidden
+> here: `DurableIdentifier` fixes what an id must be, §2 fixes that the factory
+> repeats none, and how a conforming implementation spells one is its own. ADR-0004
+> §6's erasure right is over the **record**, and allocator state that is never
+> written down, never read back and never shown is not one — which is why the answer here is a scope
 > statement and not a promise that the process forgets. What it bounds is which **row** a pointer names,
 > which is a correctness property of the id space and not a durability of the
 > consume. It is also process-local and survives no restart, which a generation,
@@ -1366,12 +1375,26 @@ the count.
 > message: an injected clock or store can raise
 > `type("recipient@example.com", (RuntimeError,), {})()`, and nothing stops a
 > dynamically built class from carrying Tier 1 content in the one position the
-> clauses above leave open. `fault_class_of` is that hazard already solved, and no
+> clauses above leave open. `fault_class_of` is the corpus's answer to that hazard, and no
 > lane writes a second classifier for it — the conversion is **total**, an
 > unrepresentable name becoming `UNREPRESENTABLE_FAULT_CLASS`; the rejected name is
 > "dropped here and goes nowhere, log included"; and the `__name__` read is itself
 > guarded, so a metaclass raising an `Exception` from it takes down neither the
 > diagnostic nor the call.
+
+> **Normative.** **What that bounds is stated exactly, because it is a bound and not
+> a solution.** `fault_class_of` admits any name matching its own identifier pattern
+> and rejects every other, so a class name a hostile collaborator chooses **within**
+> that pattern is carried into the diagnostic unchanged. That residue is ADR-0119's,
+> decided there for every emitter that classifies a fault, and this ADR neither
+> widens nor narrows it: a closed mapping or a fixed literal for "untrusted"
+> collaborators would be the second classifier the clause above forbids and would
+> need `fault_class_of`'s ratified contract changed, which is that ADR's to do and is
+> filed as **#1569** rather than done here. What this section **does** promise is the three
+> positions it owns — the message, the cause chain, and any identifier — none of
+> which reaches the log, and a class name outside the pattern, which becomes the
+> reserved literal. An implementing lane may not read the residue as licence to log
+> a raw `type(e).__name__` instead (above).
 > This is ADR-0119 §2's rule — no string in the record is derived from data — held
 > at one more emitter, with §3's reserved literal as the escape it already minted.
 
@@ -2171,8 +2194,8 @@ here; they are what the surveyed projects' own code and documentation say, and
 > **Normative.** No generation, epoch, tombstone or high-water mark is minted to
 > narrow that. The clause above already refuses an erasure marker for the race, and
 > it is refused here for the stronger reason: any value that let a post-erasure claim
-> be judged against a pre-erasure one would be exactly the residue ADR-0004 §7's
-> erasure right forbids, held about a Tier 1 act. The honest statement is that
+> be judged against a pre-erasure one would be exactly the residue ADR-0004 §6's
+> deletion right forbids, held about a Tier 1 act. The honest statement is that
 > erasing the record erases what the record enforced, and this ADR makes it rather
 > than implying a durability it does not have.
 
@@ -2532,7 +2555,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > with a Tier 1 sentinel in **four** hostile positions: an exception message, a
 > member of its cause chain, a claim's or decision's **identifier**, and the
 > **class name** of a dynamically built exception — the test failing if the sentinel
-> reaches the log by any route (§3, ADR-0004 §5, ADR-0031 §5).
+> reaches the log by any route (§3, ADR-0004 §5, ADR-0031 §5). **On the first three
+> the assertion is that no such name reaches the log at all; on the fourth it is
+> `fault_class_of`'s own boundary and nothing wider** (§3): a name outside that
+> function's identifier pattern becomes the reserved literal, and a name inside it is
+> carried, so the suite pins the conversion and does not assert a guarantee ADR-0119
+> did not make. A case constructing a pattern-valid sentinel would fail against the
+> ratified classifier rather than against this ADR, which is why the residue is filed
+> against ADR-0119 as **#1569** instead of tested here.
 
 > **Normative.** The class-name position is pinned as three cases, because
 > `fault_class_of`'s totality is what §3 relies on. A collaborator raising
@@ -3318,12 +3348,16 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 The paired lane is sequenced behind the transport-capability lane of this milestone —
 **ADR-0191**, ratified and merged while this ADR was in review, which also touches
-`core/protocols.py` — and ahead of the recipient-policy lane (#68), which writes the
-same audit surface. ADR-0191 is cited by number because its file is now on `main`;
-the recipient-policy lane is still referred to by the issue it answers, and the
-budget lane by what it decides, because a decision citation naming an ADR file that
-does not exist is a Tier 1 failure of the citation check (ADR-0088 §6) and neither
-has merged.
+`core/protocols.py` — and ahead of the recipient-policy lane, **ADR-0193**, which
+writes the same audit surface. All three of this milestone's sibling decisions are
+now cited by number because all three files are on `main`: ADR-0191, ADR-0193, and
+**ADR-0194**, the budget ADR §5's field is written for, each ratified while this one
+was in review. Earlier drafts named the last two by issue (#68) and by what they
+decide, because a citation to an ADR file that does not exist is a Tier 1 failure of
+the citation check (ADR-0088 §6); that reason lapsed when they merged, and the
+sequencing itself is unchanged — merged contract text is each follow-on lane's
+authority (ADR-0137 §4), and those lanes read ADR-0193 and ADR-0194 as ratified
+rather than a brief written before either landed.
 
 **The recipient-policy lane's row is a decision annotation, not an execution row,
 and the two do not collide.** That lane populates `PermissionRuling.authorised_by`
