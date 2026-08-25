@@ -84,6 +84,7 @@ from ai_assistant.core.types import (
     ToolCall,
     ToolCost,
     ToolDefinition,
+    TransportEndpoint,
 )
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
@@ -588,6 +589,28 @@ It is registered into the composition's own registry, so selection, the definiti
 comparison ``invoke`` performs and the execution path are all the production ones.
 """
 
+ARMED_PROBE: Final = PROBE.model_copy(
+    update={
+        "id": "armed_undesignated_probe",
+        "description": "The same probe, handed a route, so the detector is seen to fire.",
+    }
+)
+"""The **positive control** for the probe instrument (ADR-0191 §9's general clause).
+
+A reading of "this tool found no route" is satisfied by a probe that could not have
+found one however it was wired, which is the vacuous zero §9 refuses for every
+other instrument in this arm. So the same callable is registered a second time —
+its own id, because a tool id is a security control and the registry refuses a
+second definition under a used one — holding the fake, and driven in the same
+composition. Adversarial review found the uncontrolled detector on round 6.
+"""
+
+#: Where the armed probe opens its channel, deliberately **not** the configured
+#: endpoint. A tool holding the capability reaches an endpoint of its own choosing,
+#: which is the reach ADR-0191 §3 makes scarce by handing the capability to one
+#: object; a control that reused the seam's endpoint would leave that unsaid.
+PROBE_ENDPOINT: Final = TransportEndpoint(host="probe.example.invalid", port=465, implicit_tls=True)
+
 
 @final
 class UndesignatedProbe:
@@ -606,19 +629,38 @@ class UndesignatedProbe:
     by which a component that was not handed the capability obtains one, so a tool
     that wants one has nowhere to look.
 
+    **What it was handed is a required argument, and the arm passes ``None``
+    explicitly.** A default would be the shape ADR-0191 §3 exists to delete — an
+    object that looks injected and is not — reproduced in the instrument that
+    measures §3. So the negative arm *states* that this tool is handed nothing,
+    and :data:`ARMED_PROBE`'s control states the opposite in the same composition.
+
     Attributes:
         reached_for_a_route: Whether the callable ran as far as the point it would
             have acquired a transport.
-        route: What it found there. Always ``None``; kept as an attribute so the
-            arm reads a record rather than trusting the sentence above.
+        route: What it found there, read off what it was handed rather than
+            asserted. Round 6 of adversarial review found the earlier reading —
+            a ``getattr`` for an attribute ``__slots__`` made unsettable — true by
+            construction, which is a detector that cannot fire.
+        opened: The endpoint it reached with the route it found, or ``None`` where
+            it found none. It is what makes the control a control: the probe not
+            only *sees* a capability, it uses one.
     """
 
-    __slots__ = ("reached_for_a_route", "route")
+    __slots__ = ("_handed", "opened", "reached_for_a_route", "route")
 
-    def __init__(self) -> None:
-        """Start having reached for nothing."""
+    def __init__(self, *, route: OutboundTransport | None) -> None:
+        """Start having reached for nothing, holding whatever the arm handed over.
+
+        Args:
+            route: The capability this tool was handed. ``None`` is the arm's
+                statement that it was handed none, and is required rather than
+                defaulted for the reason in the class docstring.
+        """
+        self._handed = route
         self.reached_for_a_route = False
         self.route: OutboundTransport | None = None
+        self.opened: TransportEndpoint | None = None
 
     async def __call__(
         self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
@@ -633,19 +675,27 @@ class UndesignatedProbe:
             Never; this raises.
 
         Raises:
-            TransportError: Always. Having been handed no capability, there is
-                nothing to open a channel with.
+            TransportError: Where it was handed no capability — there is then
+                nothing to open a channel with, which is the negative arm.
         """
         del parameters, idempotency_key
         self.reached_for_a_route = True
-        self.route = getattr(self, "_transport", None)
+        self.route = self._handed
         if self.route is None:
             msg = "this tool was handed no outbound transport, so it has no route"
             raise TransportError(msg)
-        return None  # pragma: no cover — unreachable while the property holds.
+        # Handed one, it reaches an endpoint of its own choosing and the fake
+        # records the attempt: the control that makes the zero above mean
+        # something (ADR-0191 §9's general clause).
+        channel = await self.route.open_channel(PROBE_ENDPOINT)
+        await channel.close()
+        self.opened = PROBE_ENDPOINT
+        return None
 
 
-def register_probe(composition: Composition, probe: UndesignatedProbe) -> None:
+def register_probe(
+    composition: Composition, probe: UndesignatedProbe, definition: ToolDefinition = PROBE
+) -> None:
     """Register ``probe`` into the composition's own registry.
 
     Into the composition's registry rather than a second one, because ADR-0029 §8
@@ -655,12 +705,17 @@ def register_probe(composition: Composition, probe: UndesignatedProbe) -> None:
 
     Args:
         composition: The built deployment.
-        probe: The callable to bind to :data:`PROBE`.
+        probe: The callable to bind to ``definition``.
+        definition: Which probe this is — :data:`PROBE`, or :data:`ARMED_PROBE`
+            for the control. Two ids because a tool id is a security control and
+            the registry refuses a second definition under a used one.
     """
-    registry(composition).register(PROBE, probe)
+    registry(composition).register(definition, probe)
 
 
-async def drive_the_probe(composition: Composition) -> ToolResult:
+async def drive_the_probe(
+    composition: Composition, definition: ToolDefinition = PROBE
+) -> ToolResult:
     """Invoke the probe through the composition's own invocation seam.
 
     The decision is built here rather than sought from the policy, because what is
@@ -670,15 +725,16 @@ async def drive_the_probe(composition: Composition) -> ToolResult:
 
     Args:
         composition: The built deployment.
+        definition: Which probe to drive; see :func:`register_probe`.
 
     Returns:
         The invocation's result.
     """
-    request = ActionRequest(tool=PROBE, parameters={}, step_id="m25-probe")
+    request = ActionRequest(tool=definition, parameters={}, step_id=f"m25-{definition.id}")
     decision = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="the arm authorised the probe"),
-        id="m25-d-1",
+        id=f"m25-d-{definition.id}",
         decided_at=DECIDED_AT,
     )
     return await registry(composition).invoke(
