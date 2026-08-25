@@ -9,8 +9,10 @@
   contract surface, its required review set is adversarial *and* architecture**,
   even though the PR carrying it is prose only — `CONTRIBUTING.md` → "Stop when
   the required reviews are green" and ADR-0015 §1.
-- Amends: ADR-0021 §6's **Spend accumulation** deferral and ADR-0029 §7's
-  spend-accumulation half; §10 applies ADR-0070 §1 and ADR-0082 §1 to each.
+- Amends: ADR-0021 §6's **Spend accumulation** deferral, ADR-0029 §7's
+  spend-accumulation half, and ADR-0087 §2c's scalar table (one added row,
+  `Decimal`, because §5 promotes a member carrying one and the table is
+  exhaustive by construction); §10 applies ADR-0070 §1 and ADR-0082 §1 to each.
 - **Depends on ADR-0192 by number, and on no field of it.** This ADR cites that
   decision as the thing that records what an invocation cost — a completion row
   carrying a reported figure, and a claim that may stand open — and reshapes
@@ -284,10 +286,11 @@ trigger rather than pre-deciding it here.
 > it would state one nobody reported.
 
 > **Normative.** The **projected total** for a call under admission is the
-> accounted total of the period plus that call's **declared** cost — the
-> `ToolCost` on the `ToolDefinition` the call's recorded decision pins. The
-> declared amount is used **only** for the admission arithmetic in §3; it is never
-> added to the accounted total and never written to any row.
+> accounted total of the period plus the declared amounts of the admissions still
+> outstanding in it (§3's reservations) plus that call's own **declared** cost —
+> the `ToolCost` on the `ToolDefinition` the call's recorded decision pins. Every
+> declared amount here is used **only** for the admission arithmetic in §3; none is
+> added to the accounted total and none is written to any row.
 
 > **Normative.** A `FREE` basis contributes zero, in both totals. A `PER_CALL`
 > basis in the configured currency contributes its `amount`.
@@ -415,6 +418,35 @@ the two properties it has rather than letting a reader assume the stronger one.
 > **strictly greater** than a ceiling. A projected total exactly equal to a ceiling
 > is admitted.
 
+> **Normative.** An admission that is granted **reserves its own declared
+> contribution**, in the same atomic step as the decision. The store read, the
+> comparison and the reservation are one critical section over the holder's state,
+> with no other admission interleaved; `admit_invocation` returns an opaque
+> **admission handle**; and the projected total of every later admission counts
+> the declared amounts of the admissions this holder has granted whose handles are
+> still outstanding. The Nth concurrent invocation therefore sees the N−1
+> reservations already taken and cannot project a total that omits a call already
+> admitted.
+
+> **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
+> ADR-0192's completion has been appended or after the failure that prevented it.
+> A release is **idempotent** and raises no `Exception`: an unknown handle, a
+> handle already released, and a release after the reservation's period ended are
+> each a no-op. A `finally` that raised would replace the call's own outcome with
+> a book-keeping failure, which is the one thing this clause must not do.
+
+> **Normative.** A reservation is **in-memory state of the holder** — never a row,
+> never durable, and never a `PermissionDecision`. It is discarded when its period
+> ends and when the process restarts; §7's accounted total is rebuilt from
+> ADR-0192's rows and loses nothing with it. Between the completion append and the
+> release the same call is counted twice, once accounted and once reserved, and
+> that direction is deliberate: the mechanism over-counts for one operation rather
+> than under-counting for one.
+
+> **Normative.** Where **neither ceiling is configured** no reservation is taken
+> and the handle is a value the release accepts and ignores. The short-circuit
+> above is unconditional and this clause does not qualify it.
+
 > **Normative.** The instant that fixes the period is read from an injected
 > `Clock` wrapped by `checked_clock` (ADR-0026), and no caller supplies it. A
 > clock that raises refuses the call with `SpendUndeterminedError` (§4), as
@@ -468,20 +500,39 @@ check in a caller is a check something else can reach the callable without: ADR-
 the ability to execute" stops being possible, and a ceiling enforced one level
 above the seam inherits none of that.
 
-**The residue this placement leaves, named rather than left to be found.** The
-admission is a read followed by ADR-0192's claim, which is a second operation, so
-two invocations whose admissions both run *before* either claim lands can each
-project a total that does not yet include the other. §2's open-claim rule is what
-keeps that window narrow rather than wide: the moment the first claim is appended
-the period is indeterminate, so a second admission is refused for as long as that
-claim stands open, whatever the allowance is set to. The exposure is therefore the
-interleave between one call's admission read and its own claim append, and not the
-whole duration of a call. It is bounded, and it is **unreachable today**, because
-ADR-0029 §7 rules that "one executor runs at a time". It is not unreachable
-forever. The obligation is stated in §8 and belongs to the ADR that lands parallel
-execution: it either moves the admission into the claim's own atomic operation or
-holds a lease across the pair, and it may not land concurrency and leave this
-clause as it stands.
+**Why the admission reserves, and the premise an earlier draft rested on that the
+tree does not support.** The admission is a read followed by ADR-0192's claim,
+which is a second operation, so two invocations whose admissions both run *before*
+either claim lands could each project a total that does not include the other:
+with an accounted total of 90, a ceiling of 100 and two declared estimates of 10,
+both admissions read 90, both project exactly 100, both are admitted at equality,
+and 110 leaves. An earlier draft of this section deferred that as **unreachable
+today**, on ADR-0029 §7's sentence that "one executor runs at a time". **That
+reading does not survive contact with the tree.** `Engine.converse` takes no lock,
+`Engine._admit_and_reserve` is written for "the **Nth concurrent turn**" in its own
+contract, and separate hub connections dispatch against one engine — so two
+invocations are in flight and their admissions interleave today. What ADR-0029 §7
+and ADR-0014 §7 defer is the *plan executor* — leases, parallel steps, recovery
+across processes — and not the engine's turn concurrency, which arrived later and
+bounds itself. Reading that sentence as a serialisation guarantee is filed as
+**#1561**; a ceiling resting on it would be a ceiling resting on a premise its own
+system contradicts.
+
+**So the reservation is taken here rather than deferred, and it is the shape the
+engine already uses.** `Engine._admit_and_reserve` bounds the confirmation table
+the same way: admit and reserve in one step that cannot be interleaved, hand back
+a handle, release it in a `finally`. This is that pattern one seam over, against a
+number instead of a slot count, and it costs one member and no durable state.
+§2's open-claim rule still does its own work — once a claim is appended the period
+is indeterminate and a second admission is refused whatever the allowance says —
+but the ceiling no longer depends on that rule to be sound.
+
+**What is left is one process wider than a turn.** Reservations live in the holder
+that took them, so two hub *processes* over one data directory would each keep
+their own set. ADR-0083 puts one resident process per data directory, which is why
+that is a scope-out (§8, #1553) rather than the same defect one level up — and it
+is reopened by an ADR landing a second process, not by parallel execution inside a
+turn, which this section now handles.
 
 ### 4. The refusal is a refusal, and it says why without saying what
 
@@ -528,6 +579,15 @@ clause as it stands.
 > **Normative.** Neither class is a `PermissionDeniedError` and no lane makes
 > either one.
 
+> **Normative.** Where the projection crosses **both** configured ceilings, the
+> refusal names **both**, in §5's fixed period order — `CALENDAR_DAY` then
+> `CALENDAR_MONTH` — with each one's ceiling and accounted total. Neither is a
+> precedence over the other, and no implementation picks one: naming only the day
+> would tell a user to wait until tomorrow when their month is spent, and naming
+> only the month would hide the nearer bound. One `SpendCeilingError` is raised
+> whatever the count, and two conforming implementations state the same facts in
+> the same order.
+
 > **Normative.** Both messages are **payload-free**. A `SpendCeilingError` states
 > the ceiling that was crossed, its period, its currency and the accounted total.
 > A `SpendUndeterminedError` names **which of the five grounds above** applied, and
@@ -573,14 +633,22 @@ whole explanation.
 
 ### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, two `core` types, one holder
 
-> **Normative.** `core/protocols.py` gains **two** Protocols, each with exactly
-> one `async` member. `SpendGate` has
-> `admit_invocation(*, estimate: ToolCost) -> None`, which evaluates §3's
-> admission and raises under §4 where it refuses, returning `None` otherwise; it
-> stores nothing and appends nothing. `SpendLedger` has
+> **Normative.** `core/protocols.py` gains **two** Protocols. `SpendGate` has
+> **two** `async` members: `admit_invocation(*, estimate: ToolCost) -> str`, which
+> evaluates §3's admission, raises under §4 where it refuses, and where it admits
+> takes §3's reservation and returns its opaque handle; and
+> `release_admission(handle: str) -> None`, which drops that reservation and is the
+> idempotent no-raising member §3 requires. Neither appends a row and neither
+> writes durable state. `SpendLedger` has one member,
 > `spend_totals() -> tuple[SpendTotal, ...]`, which returns one `SpendTotal` per
 > period this ADR defines, in a fixed order — `CALENDAR_DAY` then
 > `CALENDAR_MONTH` — and returns both entries whatever is configured.
+
+> **Normative.** The handle is **opaque**: a caller neither parses it, orders it,
+> nor derives a period, an amount or a tool from it, and no implementation encodes
+> one in it. It reaches no record, no surface and no wire frame — it lives between
+> the invoker and the gate for the duration of one call — so nothing here promotes
+> a new value onto ADR-0085's surface.
 
 > **Normative.** They are two Protocols because they have two consumers and
 > neither needs the other's face: the invoker holds a `SpendGate` and **never** a
@@ -592,6 +660,12 @@ whole explanation.
 > `SpendUndeterminedError` under §4's division and no other `Exception`, subject
 > throughout to §4's `BaseException` exemption — a `CancelledError` delivered from
 > outside propagates unchanged, here as on every member below.
+
+> **Normative.** `release_admission` raises **no** `Exception` at all, under §4's
+> same `BaseException` exemption. It is called from a `finally` whose call has
+> already succeeded or already failed, and a member that could raise there would
+> substitute a book-keeping failure for the outcome the caller was about to
+> report.
 
 > **Normative.** `spend_totals` **returns** an indeterminate period rather than
 > raising on one — that state is `accounted=None` with `currency` present (below).
@@ -606,9 +680,18 @@ whole explanation.
 > **Normative.** `core/types.py` gains `SpendTotal`, frozen with
 > `extra="forbid"`, carrying exactly: `period: SpendPeriod`;
 > `period_start: UtcInstant` and `period_end: UtcInstant`, `period_end` exclusive;
-> `time_zone: str`, the IANA zone those boundaries were computed in;
-> `ceiling: Decimal | None`; `currency: str | None`; and
+> `time_zone: NonBlankEncodableText`, the IANA zone those boundaries were computed
+> in; `ceiling: Decimal | None`; `currency: EncodableText | None`; and
 > `accounted: Decimal | None`.
+
+> **Normative.** Both string fields are `EncodableText`-based and **not** bare
+> `str`, because ADR-0085 §4c binds every string the promoted surface can carry
+> and `tests/core/test_text_encodability_coverage.py` admits no exemption — it
+> discovers every `str` leaf on every model in `core.types` and fails the gate on
+> one that is not wrapped. The zone and currency validators below layer on that
+> base rather than replacing it, which is what ADR-0085's header means by "the new
+> member's text fields layer on it", and is how `ToolCost.currency` is already
+> typed even though its own rule is the stricter one.
 
 > **Normative.** Both instants are `UtcInstant` and never a bare `datetime`.
 > ADR-0023 §2 makes that the type of every instant-valued field in
@@ -625,6 +708,65 @@ whole explanation.
 > is `None`, no currency is configured and no total was computed; where `currency`
 > is not `None`, the period is **indeterminate** under §2. No third meaning is
 > assigned to the absence.
+
+> **Normative.** The two amounts carry their own numeric invariants, and they are
+> **not the same one**. A `ceiling`, where present, is exactly what §1 admits as a
+> configured ceiling: finite, greater than or equal to zero, and **countable** —
+> it is the value the user configured and nothing computes it. An `accounted`
+> total, where present, is finite, greater than or equal to zero, and expressible
+> with at most **nine** fractional digits — because every row contributing to it
+> is — and it is deliberately **not** bounded in magnitude: §1's predicate governs
+> inputs and not results, and a total over rows nothing bounds may exceed
+> `Decimal("1E15")` honestly. A model that accepted a negative ceiling, a negative
+> total, a non-countable ceiling or a tenth fractional digit on a total would state
+> a fact this mechanism cannot produce, so each raises at validation.
+
+> **Normative.** ADR-0087 §2c's scalar table gains one row, **`Decimal`**, and
+> this ADR is where it is decided because this ADR is what puts one on the promoted
+> surface. The table is exhaustive by construction — `wire/codec.py`'s projection
+> raises `TypeError` for a type it does not list, "a type nobody has spelled a form
+> for has no canonical bytes" — so without the row `spend_totals` cannot cross the
+> wire at all. The gap is **older than this ADR**: `ToolCost.amount` is a `Decimal`
+> today and a `PermissionDecision` carrying a `PER_CALL` cost already cannot be
+> exported (**#1559**), which is the two-implementations-disagree shape #565 closed
+> for a lone surrogate `str`. Nothing in the tree declares a `PER_CALL` cost, which
+> is why it has not bitten.
+
+> **Normative.** The form is a **JSON string**, never a JSON number. A number would
+> be read back by a decoder through a binary float on the far side, which is the
+> one thing §2's exact arithmetic forbids, and ADR-0087 §2c's `float` grammar is
+> about a value that *is* a binary64 — this one is not.
+
+> **Normative.** The encoding of a finite `Decimal` is read from its own
+> `as_tuple()` — `(sign, digits, exponent)` — and is: a `-` where `sign` is 1 and
+> nothing where it is 0; then the `digits` in order as decimal characters, with no
+> digit added and none removed; then `E`; then the exponent's sign, `+` or `-`,
+> always written; then the exponent's magnitude in decimal, with no leading zero.
+> Decoding is the inverse, reading the string back to the same triple. The
+> normative vectors are `Decimal("1.50")` → `"150E-2"`, `Decimal("1E15")` →
+> `"1E+15"`, `Decimal("0")` → `"0E+0"`, `Decimal("-0")` → `"-0E+0"`, and
+> `Decimal("1.0000000000")` → `"10000000000E-10"`.
+
+> **Normative.** The scale is **carried and not normalised**, and that follows from
+> ADR-0087 §4 rather than from taste: §4's relation is indistinguishability, not
+> `==`, and `Decimal("1.0")` and `Decimal("1")` compare equal while `as_tuple()`
+> tells them apart — so they are two values, and a spelling that mapped both onto
+> one would normalise, which §4 forbids in as many words. Neither encoding nor
+> decoding consults `decimal.getcontext()` and neither performs arithmetic, so
+> §1's context-independence rule holds on the wire as it holds in the predicate.
+
+> **Normative.** A **non-finite** `Decimal` — `NaN`, `sNaN`, or an infinity — has
+> **no** encoding and the encoder raises, exactly as ADR-0087 §2c gives a
+> non-finite `float` none and for the same reason. §1's validators and §5's make
+> every `Decimal` this ADR puts on the surface finite already, so the refusal is a
+> backstop rather than a reachable state.
+
+> **Normative.** This is an **addition to §2c and a change to no byte any
+> conforming encoder was emitting**: the projection raised on a `Decimal` before
+> and encodes one after, so no ratified vector's spelling moves. The record it owes
+> ADR-0087 is in §9 and §10. The consumer group already bumps `PROTOCOL_VERSION`
+> under ADR-0124 §9 for the promoted method it adds, and this ADR claims **no
+> second bump** on this ground.
 
 > **Normative.** A `ToolInvoker` implementation holds a `SpendGate`. It acquires
 > no `AuditTrail`, no `SpendLedger` and no additional store handle by this ADR,
@@ -656,19 +798,28 @@ two-field read of the same kind ADR-0016 §2 obliges `permissions` to make of
 a consumer to infer. Both states are computed rather than stored, so nothing can
 leave either one set.
 
-**One member each, and the split is ADR-0029 §1's argument one seam over.** That
-section refused to hand every holder of a lookup the ability to execute, and gave
-as its reason that "a consumer that only reads is one a test can double without
-stubbing execution". The same holds here in both directions: an invoker able to
-read a totals projection has acquired a permissions-owned history it has no use
-for, and an adapter able to call the admission has acquired the ability to spend
-a budget. `admit_invocation` takes the one value the invoker holds that the store
-cannot derive — the declaration on the definition ADR-0029 §2's checks have
-already pinned. `spend_totals` has one caller, the engine operation in §6. There
-is deliberately no member returning "the amount remaining", none that reserves,
-and none that writes: a reservation would be a second two-phase ledger beside
-ADR-0192's, duplicating its claim and its completion for a quantity already
-derivable from them.
+**Two faces rather than one, and the split is ADR-0029 §1's argument one seam
+over.** That section refused to hand every holder of a lookup the ability to
+execute, and gave as its reason that "a consumer that only reads is one a test can
+double without stubbing execution". The same holds here in both directions: an
+invoker able to read a totals projection has acquired a permissions-owned history
+it has no use for, and an adapter able to call the admission has acquired the
+ability to spend a budget. `admit_invocation` takes the one value the invoker
+holds that the store cannot derive — the declaration on the definition ADR-0029
+§2's checks have already pinned. `spend_totals` has one caller, the engine
+operation in §6.
+
+**Why `SpendGate` has a second member and `SpendLedger` does not.** There is
+deliberately no member returning "the amount remaining" and none that writes a
+row. `release_admission` is neither: it retires a reservation §3 requires the
+admission to take, and the pair exists because the alternative to a handle is a
+gate that cannot tell which of several in-flight calls has finished. It is the
+shape `Engine._admit_and_reserve` already uses for the confirmation ceiling —
+admit and reserve atomically, hand back a handle, release it in a `finally` — and
+it is deliberately *not* a durable reservation: nothing is appended, nothing
+survives a restart, and the accounted total stays derivable from ADR-0192's rows
+alone (§7). A second two-phase ledger beside ADR-0192's is the alternative this
+declines, and Consequences records why.
 
 **Two new Protocols, so they are a triad.** Contract, shared conformance suite
 and canonical fake in `ai_assistant.testing`, in one change and never deferred
@@ -807,10 +958,14 @@ Scoping something out is a decision, so each carries the condition that reopens 
   completion with no configured allowance leaves its period indeterminate until
   the period rolls over — which, **while a ceiling is configured**, refuses every
   further call in it; the remedies are the allowance, a changed ceiling, and time.
-- **The concurrency residue of §3's placement** (#1553). Reopened by, and owed by,
-  the ADR that lands parallel execution (ADR-0029 §7, ADR-0014 §7): it moves the
-  admission into the claim's own atomic operation or holds a lease across the
-  pair. It may not land concurrency and leave §3 as written.
+- **Spend reservations across *processes*** (#1553). §3's reservation closes the
+  admission race inside one process, which is where it is reachable (#1561); a
+  second hub process over one data directory would keep its own reservation set
+  and see none of the first's. ADR-0083 puts one resident process per data
+  directory, so this is out of scope while that rule stands, and it is reopened by
+  the ADR that lands a second one — which owes either a durable reservation or an
+  admission folded into ADR-0192's own atomic append. Parallel execution *inside*
+  a turn does not reopen it: §3 already handles that.
 - **Money a tool moves.** ADR-0016 §7's transacted-cost deferral, untouched. The
   price of a flight lives in a call's parameters, and pricing it needs the
   parameter-level policy ADR-0016 §4 declined to invent.
@@ -843,6 +998,23 @@ and stays deferred.
 Consequence.** Both are ADR-0192's to address and neither is addressed here. This
 ADR adds no field to `ToolResult`, changes no sentence of ADR-0016, and edits
 neither document. It consumes what ADR-0192 lands and cites it by number.
+
+**ADR-0087 §2c's scalar table.** §5 adds a `Decimal` row to it and states the
+form, the vectors and the non-finite refusal. A reader holding only ADR-0087 would
+read the table as complete and would refuse to encode a value this ADR's own
+promoted member returns, so a record is owed (§10). ADR-0087 §8 is what says which
+of its three cases this is: not "changing the bytes a ratified vector fixes",
+because no conforming encoder emitted any bytes for a `Decimal` — it raised — and
+so no protocol version bump is owed **on this ground**, though the consumer group
+bumps anyway for its promoted method. §2c's other rows, §2a, §2b, §2d, §2e, §3,
+§4, §5's existing vectors and §7's boundary are untouched.
+
+**ADR-0029 §7's "one executor runs at a time".** Not changed by this ADR and not
+relied on by it. §3 records that the sentence decides the *plan executor* ADR-0014
+§7 defers and does not describe the engine's turn concurrency, which is reachable
+today; the correction is filed as **#1561** and the record it owes ADR-0029 and
+ADR-0014 belongs to whoever takes that issue, not here. What this ADR does is stop
+depending on the reading: the admission reserves rather than assuming it is alone.
 
 **ADR-0016 §7's transacted-cost deferral.** Unaffected and still deferred (§8).
 This ADR bounds the price of invoking a tool, which is what ADR-0016 §4 says
@@ -880,6 +1052,16 @@ defers spend accumulation and gives a precondition ADR-0192 satisfies. Same test
 same answer, same form: a `Status` qualifier and an appended dated note, or the
 note alone where §2 excludes the qualifier.
 
+**ADR-0087 §2c — a record is owed, and it is an amendment.** The table enumerates
+the types the encoding carries, and `wire/codec.py` refuses one it does not list;
+after this ADR it carries one more. A reader holding only ADR-0087 would read the
+enumeration more widely than it now holds, which is ADR-0082 §1's test coming out
+on the record side. It is an **amendment** rather than a supersession because
+nothing §2c decided is reversed: no row changes, no spelling moves, and §4's
+normalises-nothing rule is what *dictates* the new row's shape rather than being
+bent by it. The form is a `Status` qualifier naming this ADR and an appended dated
+note, per ADR-0082 §2.
+
 **Everything else in §9 is a stacked addition and no record is owed.** ADR-0021
 §5, ADR-0016 §§3–4, ADR-0029 §§1–5, ADR-0034 §1, ADR-0177 §1, ADR-0186 §6 and §8:
 for each, every sentence stays true and the obligation this ADR adds is stated
@@ -907,6 +1089,24 @@ replacing them.
 > `AssistantEngine` member and the CLI command are **one consumer group**: each is
 > adaptation to a contract already landed, none carries substantial new machinery,
 > and they draw one class of finding, which is ADR-0137 §4's own grouping test.
+
+> **Normative.** That group **extends `ToolInvoker`'s own triad in the same
+> change**, because it changes what `invoke` observably does: every implementation
+> consults a `SpendGate` before the claim, releases its handle in a `finally`, and
+> newly raises `SpendCeilingError` and `SpendUndeterminedError` out of the
+> pre-callable window. The `ToolInvoker` Protocol's documented failure set, the
+> shared `ToolInvoker` conformance suite, the canonical `FakeToolInvoker` in
+> `ai_assistant.testing` and the concrete implementation move **together**, which
+> is ADR-0137 §3's rule that a triad is never split. A change that taught only the
+> concrete invoker would leave a consumer passing against a fake that admits what
+> production refuses.
+
+> **Normative.** The `ToolInvoker` suite drives, over a gate fake: a refused
+> admission reaching **no** callable, appending no claim and no completion; the
+> handle released on the admitted path after the completion, on the raising path,
+> and under a cancellation delivered inside the callable; and a
+> `release_admission` that is never called twice for one admission by the invoker
+> even though the gate must tolerate it.
 
 > **Normative.** That group carries the **whole** of the promoted surface's
 > topology, because widening `AssistantEngine` breaks every implementation of it at
@@ -971,6 +1171,29 @@ replacing them.
 > configured, a raising clock, a failed store read and an indeterminate period each
 > admit rather than refuse, because `admit_invocation` returned before it consulted
 > any of them.
+
+> **Normative.** The suite drives §3's reservation as a **race**, because that is
+> the property and a sequential case cannot show it: two admissions are driven
+> concurrently against one gate with no claim, completion or release between them —
+> an accounted total of 90, a ceiling of 100 and two declared estimates of 10 — and
+> exactly **one** is admitted, the second refused with `SpendCeilingError`.
+> Releasing the first's handle and driving the second again then admits it. A suite
+> that drives the two admissions in sequence with a release between them passes
+> against an implementation that reserves nothing, and does not discharge this
+> clause.
+
+> **Normative.** The suite drives `release_admission` as the no-raising member §5
+> requires: an unknown handle, a handle already released, a handle whose period has
+> rolled over and a handle taken while no ceiling was configured are each a no-op
+> that raises nothing; a `CancelledError` delivered during it propagates unchanged;
+> and a release does **not** lower any accounted total, which is read from rows.
+
+> **Normative.** The suite drives the double-count window §3 states rather than
+> leaving it to be discovered: with a reservation outstanding **and** its completion
+> already appended, the projected total counts the call twice and the next
+> admission may be refused on that basis; after the release it is counted once. The
+> assertion is that the direction is over-counting, and it is what stops an
+> implementation from "fixing" the window by releasing before the completion lands.
 
 > **Normative.** It drives that same configuration again with each **estimate**
 > state that refuses where a ceiling *is* configured: a declared amount that is not
@@ -1043,6 +1266,13 @@ replacing them.
 > traps armed — asserting the same classifications and no leaked `decimal`
 > exception.
 
+> **Normative.** The suite drives the case where **both** ceilings are crossed by
+> one projection — day 9 of 10 and month 99 of 100 against an estimate of 2 — and
+> asserts one `SpendCeilingError` naming both periods in §5's fixed order with each
+> one's ceiling and total. §4 fixes that there is no precedence, so a suite driving
+> only the single-crossing cases leaves two conforming implementations free to
+> report different periods.
+
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
 > both bounds convert into without overflowing**, so neither a renderer's lookup
@@ -1051,6 +1281,29 @@ replacing them.
 > equal; `ceiling` is non-`None` only where `currency` is; and `accounted` is
 > non-`None` only where `currency` is. A construction violating any of them raises
 > at validation, and the shared contract drives each as a hostile construction.
+
+> **Normative.** The **numeric** invariants are driven as hostile constructions
+> too, and they are the ones a validator list is likeliest to omit: a negative
+> `ceiling`, a negative `accounted`, a `ceiling` of exactly `Decimal("1E15")` and
+> one with a tenth fractional digit each raise; an `accounted` above
+> `Decimal("1E15")` **constructs**, because §1's predicate governs inputs and a
+> total is a result; and an `accounted` with a tenth fractional digit raises. A
+> non-finite value raises for either field.
+
+> **Normative.** The lane drives §5's `Decimal` wire form against the real encoder
+> rather than describing it: each of the five vectors round-trips through
+> `wire/codec.py` to a value the type cannot distinguish from the original —
+> `Decimal("1.0")` and `Decimal("1")` reaching **different** bytes is the assertion
+> that catches a normalising implementation — a non-finite `Decimal` raises at the
+> projection, and a `SpendTotal` and a `PermissionDecision` carrying a `PER_CALL`
+> `ToolCost` both cross the wire and come back equal, which is #1559's case as a
+> regression rather than as a promise. The vectors are added to ADR-0087 §5's
+> suite, where a vector for a case no existing vector covers belongs (§8).
+
+> **Normative.** The lane asserts `SpendTotal`'s two string fields are
+> `EncodableText`-based by construction, which
+> `tests/core/test_text_encodability_coverage.py` already does for every model in
+> `core.types` and this ADR claims no exemption from.
 
 > **Normative.** The lane refuses a zero allowance at load in each of §1's
 > spellings, and asserts the calendar month whose exclusive end is not
@@ -1129,12 +1382,15 @@ replacing them.
   so a reader can disagree with a number rather than with the principle.
 - **`core` grows by seven names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
   `SpendTotal`, `SpendError`, `SpendCeilingError`, `SpendUndeterminedError` — plus
-  one engine member and four settings. That is the
-  breaking-change surface golden rule 5 asks be flagged, and none of it lands
-  here.
-- **Two deferrals close and a third is created.** ADR-0021 §6's and ADR-0029 §7's
-  spend-accumulation halves are discharged; the concurrency residue of §3 is a new,
-  named obligation on the ADR that lands parallel execution.
+  two members on the first, one on the second, one engine member, four settings and
+  one row on ADR-0087 §2c's table. That is the breaking-change surface golden rule 5
+  asks be flagged, and none of it lands here.
+- **Two deferrals close and one scope-out is narrowed.** ADR-0021 §6's and
+  ADR-0029 §7's spend-accumulation halves are discharged. The concurrency residue
+  an earlier draft deferred is **closed here** by §3's reservation, on the finding
+  that it was reachable today rather than unreachable (#1561); what remains named
+  is the cross-process case (#1553), which ADR-0083's one-process rule makes
+  unreachable for a reason that is checkable rather than assumed.
 - **Revisit when** a standing grant makes a call executable with no per-call user
   act (the default becomes a live question), when a second priced integration
   lands (the per-tool deferral gets its first real case), or when a user's tools
@@ -1162,12 +1418,17 @@ replacing them.
   user has already answered about this call; a second question converts a standing
   instruction into a prompt, which is the shape the survey and ADR-0021 §5 both
   warn about.
-- **A reservation ledger — reserve, execute, settle.** Rejected in §5. It closes
-  §3's concurrency residue completely, and it does so by building a second
-  two-phase ledger beside ADR-0192's, with its own open-reservation recovery
-  problem. Under one executor the residue is unreachable, so the cost is certain
-  and the benefit is not yet real; §8 hands the choice to the ADR that makes it
-  real.
+- **A durable reservation ledger — reserve, execute, settle.** Rejected in §3.
+  What it buys over §3's in-memory reservation is survival across a process
+  restart, and it pays for that with a second two-phase ledger beside ADR-0192's
+  and an open-reservation recovery problem of its own. A restart discards the
+  accounted total's *cache* and nothing else — §7 rebuilds it from rows — so the
+  only thing a durable reservation preserves is a claim about calls that were
+  in flight when the process died, which ADR-0192's own open claims already make
+  the period indeterminate for. **An earlier draft rejected the reservation
+  outright**, on the ground that "under one executor the residue is unreachable";
+  that ground was false (#1561) and §3 now takes the in-memory half of this
+  alternative rather than deferring the problem.
 - **Adding the ceiling refusal to ADR-0192's claim, as a fifth entry in its
   refusal order.** Rejected. It is the tightest possible placement — one atomic
   operation, no residue at all — and it puts a budget decision inside a Protocol
