@@ -42,6 +42,7 @@ from permission_builders import AT, action, decision, ruling, tool
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import (
+    AssistantError,
     AuditError,
     AuthorisationSpentError,
     InvalidCompletionError,
@@ -53,6 +54,7 @@ from ai_assistant.core.types import (
     CostBasis,
     EgressBinding,
     Idempotency,
+    PermissionDecision,
     PermissionOutcome,
     RiskLevel,
     ToolCost,
@@ -65,7 +67,7 @@ from ai_assistant.testing.cancellation import settle
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
-    from ai_assistant.core.types import PermissionDecision, RecordedInvocation, ToolDefinition
+    from ai_assistant.core.types import RecordedInvocation, ToolDefinition
     from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
@@ -256,6 +258,14 @@ class LedgerHarness(Protocol):
         """When each armed call was inside ``subject``'s resource (ADR-0060 §3)."""
         ...
 
+    def break_store(self, subject: LedgerSubject) -> bool:
+        """Make ``subject``'s store unreadable and unwritable, or say it cannot be.
+
+        ``False`` where the implementation's store cannot fail at all — a dict has
+        no backend to lose — and the cases then skip with that reason stated.
+        """
+        ...
+
 
 async def _claim(subject: LedgerSubject, authorisation: PermissionDecision) -> ToolInvocation:
     """Record ``authorisation`` if it is not recorded yet, then claim under it."""
@@ -360,6 +370,33 @@ async def export_invocations(subject: LedgerSubject) -> list[RecordedInvocation]
 #: The two joined listings, named so a parametrised case can arm the operation it
 #: is about. Their names are the member names, which is what ``harness.arm`` takes.
 _LISTINGS = (recent_invocations, export_invocations)
+
+
+# The four distinct store paths ADR-0192 §9's translated-failure clause reaches,
+# as named callables so each carries its own parameter id and the `pytest.raises`
+# block stays one statement.
+
+
+async def _bounded_listing(subject: LedgerSubject, claim: ToolInvocation) -> object:
+    """``recent_invocations``, whose ``LIMIT`` is its own statement."""
+    del claim
+    return await subject.recent_invocations()
+
+
+async def _whole_listing(subject: LedgerSubject, claim: ToolInvocation) -> object:
+    """``export_invocations``, the unbounded read."""
+    del claim
+    return await subject.export_invocations()
+
+
+async def _a_claim(subject: LedgerSubject, authorisation: PermissionDecision) -> object:
+    """``claim_invocation``, an append inside a transaction."""
+    return await subject.claim_invocation(decision=authorisation)
+
+
+async def _the_open_set(subject: LedgerSubject, authorisation: PermissionDecision) -> object:
+    """``open_invocations``, the read the recovery scan acts on."""
+    return await subject.open_invocations(decision_id=authorisation.id)
 
 
 def _over_the_same_store(
@@ -571,6 +608,35 @@ class InvocationCompleterContract:
             "an argument fault says nothing about the claim"
         )
         assert await _rows(ledger) == []
+
+    async def test_a_cost_whose_model_dump_lies_records_its_real_field_state(
+        self, ledger: LedgerSubject
+    ) -> None:
+        """``model_dump`` is an ordinary attribute, so it is not what may be trusted.
+
+        A subclass overriding it — or an instance shadowing it through ``__dict__``
+        — hands back a valid-but-false mapping, and an implementation that rebuilds
+        from *that* records a price nobody submitted while every detachment case
+        above still passes. ``orchestration/executor.py`` states the same reasoning
+        for ``ToolResult``: the class serializer reads field values and consults no
+        instance attribute.
+        """
+
+        class _Lying(ToolCost):
+            def model_dump(self, **kwargs: object) -> dict[str, object]:
+                return {"basis": CostBasis.PER_CALL, "amount": Decimal("999.00"), "currency": "USD"}
+
+        claim = await _claim(ledger, allowed())
+        lying = _Lying(basis=CostBasis.PER_CALL, amount=Decimal("1.00"), currency="USD")
+
+        completion = await ledger.complete_invocation(
+            claim_id=claim.id, outcome=ToolOutcome.FAILED, incurred_cost=lying
+        )
+
+        assert completion.incurred_cost is not None
+        assert completion.incurred_cost.amount == Decimal("1.00")
+        stored = [row for row in await _rows(ledger) if row.completes == claim.id]
+        assert stored[0].incurred_cost == completion.incurred_cost
 
     async def test_a_claim_id_is_read_as_the_type_the_signature_names(
         self, ledger: LedgerSubject
@@ -851,6 +917,53 @@ class InvocationCompleterContract:
         held = {row.id: row for row in await _rows(ledger)}
         assert held["claim-1"] == before[0], "the claim already there is not replaced"
         assert set(held) <= {"claim-1", "fresh-1"}, "no row is stored under an id the type refuses"
+
+    # --- what a broken store surfaces as (ADR-0192 §9) ---------------------
+
+    @pytest.mark.optional_obligation
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(_complete, id="the-completion-append"),
+            pytest.param(_bounded_listing, id="the-bounded-listing"),
+            pytest.param(_whole_listing, id="the-whole-listing"),
+        ],
+    )
+    async def test_a_store_that_cannot_be_reached_surfaces_as_this_layers_error(
+        self,
+        harness: LedgerHarness,
+        call: Callable[[LedgerSubject, ToolInvocation], Awaitable[object]],
+    ) -> None:
+        """ADR-0192 §9 pins the translated failures as **classes**.
+
+        "A store that cannot be read and a store that cannot be written each
+        surface as an ``AuditError`` carrying its cause, none escapes as a
+        non-``AssistantError``, and none arrives as one of the three named
+        refusals." All three limbs are asserted: an implementation letting a driver
+        error out gives a consumer catching ``AuditError`` nothing to catch, one
+        that swallows the cause destroys the only account of what went wrong, and
+        one that reports ``InvalidCompletionError`` says the claim was bad when the
+        store was.
+
+        Each *distinct* path is driven, because they are separate call sites that
+        translate separately — an append inside a transaction, a bounded read and an
+        unbounded one.
+        """
+        ledger = harness.open()
+        claim = await _claim(ledger, allowed())
+        if not harness.break_store(ledger):
+            pytest.skip("this store cannot fail, so an unreachable one is unreachable")
+
+        with pytest.raises(AuditError) as raised:
+            await call(ledger, claim)
+
+        assert not isinstance(
+            raised.value, InvalidCompletionError | UnrecordedAuthorisationError
+        ), "a broken store says nothing about the claim or the authorisation"
+        assert raised.value.__cause__ is not None, "the backend's failure is the account"
+        assert not isinstance(raised.value.__cause__, AssistantError), (
+            "the cause is the backend's own failure, not this layer's"
+        )
 
     # --- the redraw, over one id space ------------------------------------
 
@@ -1313,6 +1426,42 @@ class InvocationLedgerContract(InvocationCompleterContract):
             "every claim that landed is one the recovery read can see"
         )
 
+    @pytest.mark.optional_obligation
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(_a_claim, id="the-claim-append"),
+            pytest.param(_the_open_set, id="the-recovery-read"),
+        ],
+    )
+    async def test_a_broken_store_surfaces_as_this_layers_error_on_the_claim_paths(
+        self,
+        harness: LedgerHarness,
+        call: Callable[[LedgerSubject, PermissionDecision], Awaitable[object]],
+    ) -> None:
+        """The same clause on the two members only the wide face has.
+
+        ``open_invocations`` is the sharpest of the four: the recovery scan acts on
+        its answer, and an empty list from a store that could not be read would
+        report "no claim was left open" for a store that cannot say.
+        """
+        ledger = harness.open()
+        authorisation = allowed(definition=natural())
+        await ledger.record(authorisation)
+        if not harness.break_store(ledger):
+            pytest.skip("this store cannot fail, so an unreachable one is unreachable")
+
+        with pytest.raises(AuditError) as raised:
+            await call(ledger, authorisation)
+
+        assert not isinstance(
+            raised.value, UnrecordedAuthorisationError | AuthorisationSpentError
+        ), "a broken store says nothing about the authorisation"
+        assert raised.value.__cause__ is not None, "the backend's failure is the account"
+        assert not isinstance(raised.value.__cause__, AssistantError), (
+            "the cause is the backend's own failure, not this layer's"
+        )
+
     # --- what the store must already hold ---------------------------------
 
     async def test_a_claim_under_an_unrecorded_decision_is_refused(
@@ -1373,6 +1522,34 @@ class InvocationLedgerContract(InvocationCompleterContract):
             await ledger.claim_invocation(decision=None)  # type: ignore[arg-type]  # the fault
 
         assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
+        assert await _rows(ledger) == []
+
+    async def test_a_decision_whose_model_dump_lies_is_judged_on_its_real_field_state(
+        self, ledger: LedgerSubject
+    ) -> None:
+        """§1's equality check is on the value, so it cannot rest on an overridable method.
+
+        The store holds a harmless ``ALLOW``. The caller passes a decision whose
+        *fields* authorise something else under that same id and whose
+        ``model_dump`` returns the harmless one. An implementation rebuilding from
+        the mapping compares the store's row against a decision the caller never
+        held, finds them equal, and admits a claim under an authorisation for a
+        different act — which is exactly the substitution §1's whole-value equality
+        exists to refuse.
+        """
+        harmless = allowed("d-1", definition=natural())
+        await ledger.record(harmless)
+        dangerous = allowed("d-1", definition=spendable(tool_id="wire-transfer"))
+
+        class _Lying(PermissionDecision):
+            def model_dump(self, **kwargs: object) -> dict[str, object]:
+                return harmless.model_dump()
+
+        lying = _Lying.model_construct(**dict(dangerous))
+
+        with pytest.raises(UnrecordedAuthorisationError):
+            await ledger.claim_invocation(decision=lying)
+
         assert await _rows(ledger) == []
 
     async def test_an_argument_fault_is_decided_before_the_authority(

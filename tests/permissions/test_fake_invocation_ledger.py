@@ -65,6 +65,17 @@ class FakeLedgerHarness:
         assert isinstance(trail, FakeAuditTrail)
         return trail.resource_log
 
+    def break_store(self, subject: LedgerSubject) -> bool:
+        """A dict has no backend to lose, so the failure cases skip with that reason.
+
+        ADR-0192 §9's clause is about a store that *can* fail; the class it names is
+        proved on the ``sqlite3`` ledger, which is the implementation that has one.
+        Stated rather than omitted, which is how this corpus records an obligation a
+        subject cannot reach.
+        """
+        del subject
+        return False
+
     def arm(self, subject: LedgerSubject, operation: str) -> SuspendedCall:
         """Suspend the next entry into the one modelled resource.
 

@@ -133,6 +133,18 @@ class SqliteLedgerHarness:
         self._suspensions.append(suspension)
         return suspension
 
+    def break_store(self, subject: LedgerSubject) -> bool:
+        """Close the connection, which is the reachable "store cannot be reached".
+
+        Every later statement then meets ``sqlite3`` and has to be translated —
+        the same lever ``test_resolution_of_reports_an_unreadable_trail_as_an_audit_error``
+        already uses on the decision reads.
+        """
+        trail = subject
+        assert isinstance(trail, SqliteAuditTrail)
+        trail.close()
+        return True
+
     def dispose(self) -> None:
         """Release anything still parked, then close every trail opened."""
         for suspension in self._suspensions:
