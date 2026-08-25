@@ -234,7 +234,7 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 > covered by the digest rather than by a lookup.
 
 > **Normative.** Nothing re-resolves `established_by`, at any later read, in any
-> component. `AuditTrail.record`'s seven checks do not read it; no surface renders
+> component. `AuditTrail.record`'s eight checks do not read it; no surface renders
 > the act it names, resolves it, or states that the decision it names still
 > exists; and no lane adds a read that does. After the user clears the **audit
 > trail** it names nothing, which is the same posture §9 takes when the user
@@ -275,8 +275,8 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 > **Normative.** The rule is stated as **removal from the whole dump** rather than
 > as a list of members, and a lane that implements it as a hand-written list has
 > not implemented this clause. A list goes stale silently the first time a field is
-> added; a removal cannot. §14 pins the roster mechanically, so a seventh field
-> cannot go undigested without a red test.
+> added; a removal cannot. §14 pins the roster mechanically, so a field added
+> later cannot go undigested without a red test.
 
 > **Normative.** `id` is the one removal, and it is removed because the digest
 > exists to be checked **against** an id: a fingerprint that included its own
@@ -529,11 +529,14 @@ is **#1551**'s, answered there for the pair rather than for one of them here.
 > with no way down, which inverts the clause's purpose.
 
 > **Normative.** The ceiling is a non-negative integer, and **zero is meaningful
-> rather than a misconfiguration**: a deployment setting it to zero has turned
-> route (b) off, because no grant can be established and `covering` therefore
-> answers `None` for every request. That is the **only** switch this ADR provides
-> for turning route (b) off — no lane adds a second boolean beside it, and no lane
-> reads a non-zero ceiling as licence to skip any other clause of this ADR. This
+> rather than a misconfiguration**: it is how a deployment declines route (b). In
+> a deployment that has **never established** a grant it turns route (b) off
+> outright — nothing can be established, so `covering` answers `None` for every
+> request — and that is the whole of its reach: over a store that already holds
+> grants it forbids the next one and retracts none, on the admission-only
+> semantics the clause below fixes. It is the **only** switch this ADR provides
+> against route (b) — no lane adds a second boolean beside it, and no lane reads a
+> non-zero ceiling as licence to skip any other clause of this ADR. This
 > ADR fixes **no default**: the number is a deployment shape like every other
 > `_IntegerSetting` in `core.config`, and §13 records it as undecided here. What
 > the clause fixes is that a ceiling exists, that it is read from `Settings`, and
@@ -545,8 +548,8 @@ is **#1551**'s, answered there for the pair rather than for one of them here.
 > It is **admission-only like every other value** and is not a kill switch: a
 > store already holding live grants keeps them, `covering` keeps returning them,
 > and the rows they source keep being written. Zero forbids the *next* grant and
-> retracts none. No lane adds a second switch beside it, and no lane reads a
-> non-zero ceiling as licence to skip any other clause of this ADR.
+> retracts none — it is the clause above read over a populated store, and the two
+> say one thing.
 
 > **Normative.** The way to make an existing grant stop covering is the way it has
 > always been: the user **revokes** it, or clears the store (§9). No lane makes a
@@ -906,6 +909,49 @@ coordinator has not yet decided.
 > established afresh. No surface offers an establishing act attached to an edit of
 > the call it was asked about.
 
+> **Normative.** The act has **one construction path** and this ADR names it:
+> `RecipientGrant.established_from`, a classmethod on the record in
+> `ai_assistant.core.types`, landed by the wave-2 lane (§14). It is a **pure
+> function** — it reads no clock, no store and no seam, and it performs no I/O —
+> taking the recorded `PermissionDecision` the user answered together with the
+> `id`, the `decided_at` and the `expires_at` the recording caller supplies, and
+> returning the `RecipientGrant`. It is the shape `PermissionDecision.from_request`
+> already has for a decision (ADR-0021 §1), for the same reason: the subject is
+> **transcribed by `core`** rather than asserted by whoever collected the act.
+
+> **Normative.** `established_from` transcribes `tool` from the supplied
+> decision's own `tool`, `account` and `destinations` from that decision's
+> `egress_binding` — the binding's `account` and its derived
+> `canonical_destination_set` — all three by value and unchanged, and it sets
+> `established_by` to that decision's own `id`. It **accepts no `tool`, no
+> `account`, no `destinations` and no `established_by` from its caller**, so a
+> surface has no parameter through which to substitute a subject or to stamp an
+> invented act. That removes the capability rather than forbidding it, which is
+> the move ADR-0021 §3 made when it split `PermissionRuling` off
+> `PermissionDecision` — *"Splitting the types removes the capability rather than
+> forbidding it"*.
+
+> **Normative.** `established_from` **refuses**, raising `ValueError`, where the
+> supplied decision's ruling was not a `CONFIRM`; where its `egress_binding` is
+> `None`; where that binding is an `OriginUnrecordedBinding`; and where it is an
+> `EgressBinding` whose `planned_with_external_content` is `True`. Those are this
+> section's own rules — the act rides an answer to a recorded `CONFIRM`, and no
+> grant is established from a confirmation whose recorded origin is external or
+> unrecorded — restated as the function's own preconditions, and a refusal mints
+> **nothing looser** in place of the grant. `RecipientGrant`'s
+> construction validators then apply unchanged — the non-empty, duplicate-free,
+> canonically ordered destination set, the `established_by` pairing (§1), and
+> `expires_at` strictly after `decided_at` (§9).
+
+> **Normative.** Every surface that offers the establishing act obtains its
+> `RecipientGrant` from `established_from` and **mints none of its own**: it
+> builds no `RecipientGrant` field by field and passes no granting record to
+> `RecipientGrantStore.record` that this function did not return. This is
+> ADR-0152 §5's discipline — the seam derives the binding whole and accepts no
+> part of it — read on this act rather than on a binding. Which surfaces offer
+> it, and how they carry it, stays undecided here (§13); what is decided is that
+> there is one door and every one of them goes through it.
+
 **Establishment rides a confirmation because the content floor below cannot be
 met anywhere else, and an earlier draft of this section did not notice.** That
 draft also admitted "a command on the command-line or gateway surface naming the
@@ -967,6 +1013,34 @@ already returns no `ALLOW` on a confirmation that does (ADR-0184 §8). The claus
 is stated because the establishing act is a *second* thing a user does with a
 confirmation, and a rule that held only for the answer would leave the second
 unruled.
+
+**The builder is named here because this section's obligations are otherwise
+untestable until an undated later lane, and adversarial review found that at
+round 16.** §13 defers which surfaces offer the act and the wave-2 roster (§14)
+lands the record, the store, the policy and the audit surfaces — so with no
+production operation, §14's transcription and negative-origin tests could only
+target test-only orchestration, and a real surface could later mint a grant from
+an external-origin confirmation, or stamp an `established_by` naming no act,
+without failing any of them. The review offered two repairs: land a concrete
+establishment operation in wave 2, or assign the obligations to the later surface
+lanes. The first is taken. It decides nothing §13 defers — it is this section's
+first clause written as a function — and it is the difference between a content
+floor stated and a content floor enforced.
+
+**It raises `ValueError` rather than `InvalidRecipientGrantError`, and the reason
+is a boundary rather than a taste.** `core.errors` imports `core.types` at
+module scope, so the type cannot raise the store's error class without a deferred
+import; and every other refusal `RecipientGrant` states is a construction refusal
+of exactly this kind, which is what `core/types.py` raises today in one hundred
+and seventy-odd places. `InvalidRecipientGrantError` stays what §1 says it is:
+the store's refusal at `record`.
+
+**It is a function and not a fourth Protocol, and not a surface.** A Protocol
+would be a seam with one implementation and no second caller (ADR-0045 §1), and
+it could not be pure — the whole property this operation has. A surface would be
+the decision §13 declines to take. What is fixed here is the operation's inputs,
+its transcription and its refusals; where a user meets it is still ADR-0177's,
+ADR-0178's and ADR-0186's to decide.
 
 ### 3. What a grant covers: five comparisons, all over recorded values
 
@@ -1272,10 +1346,10 @@ and the second value would arrive with its own ADR anyway. What was wrong was th
 > **`EgressBinding`** whose `planned_with_external_content` **is `False`**; and
 > the decision's ruling's `authorised_subject` is set and equals that record's
 > `subject_digest`, **recomputed by `record` over the record the store returned**.
-> Six of them are §3's five comparisons, taken over the record the store holds
-> rather than over the policy's account of it — with liveness split in two,
-> because its unrevoked half is a fact about two records and its expiry half is a
-> fact about two instants. The ordering check is stated below; the digest is
+> Seven of them are §3's five comparisons, taken over the record the store holds
+> rather than over the policy's account of it — with liveness split in **three**,
+> because its unrevoked part is a fact about two records and each end of its
+> interval is a fact about two instants. The ordering check is stated below; the digest is
 > stated below that and is the only one of the eight that outlives the write.
 
 > **Normative.** A grant is **live over an interval**, and both of its ends are
@@ -2076,9 +2150,13 @@ token and the record living in its appended dated note (ADR-0082 §2).
 > **Normative.** No lane reads this ADR as deciding **which** surfaces offer the
 > establishing act, what the wire carries for it, or how a browser or
 > command-line surface lays it out. What §2 decides is that the act rides an
-> answer to a recorded `CONFIRM` and what any surface offering it must show; the
-> surfaces themselves, and the revocation surface §9 assumes, are ADR-0177's,
-> ADR-0178's and ADR-0186's to decide.
+> answer to a recorded `CONFIRM`, what any surface offering it must show, and the
+> one **operation** every such surface builds the grant with —
+> `RecipientGrant.established_from`, which is landed in wave 2 and is not itself a
+> surface. The surfaces, and the revocation surface §9 assumes, are ADR-0177's,
+> ADR-0178's and ADR-0186's to decide. No lane reads the builder's existence as
+> having decided any of them, and none reads their deferral as licence to mint a
+> grant beside it.
 
 > **Normative.** No lane reads this ADR as deciding anything about `SourceGrant`,
 > `SourceGrants` or `SourceGrantStore`. ADR-0097 §7 stands verbatim: a source
@@ -2114,7 +2192,8 @@ lane, because both write the audit surface. It is a Protocol triad under ADR-013
 §3 — three Protocols, so **three** conformance suites — and lands
 `RecipientGrant`, `RecipientGrants`, `RecipientGrantResolution`,
 `RecipientGrantStore`, those suites and the canonical fake in
-`ai_assistant.testing`, together with `PermissionRuling.authorised_subject` (§6),
+`ai_assistant.testing`, together with `RecipientGrant.established_from` (§2),
+`PermissionRuling.authorised_subject` (§6),
 `Settings.recipient_grant_max_outstanding` (§1), and the `ActionPolicy` and
 `AuditTrail` obligations §6 and §7 state, in one change. **One** fake serves all three faces,
 as one fake serves `SourceGrants` and `SourceGrantStore` today: the faces are
@@ -2185,6 +2264,20 @@ narrowings of one store, not three implementations.
 > digest test in this section can be satisfied with hand-built rulings that never
 > exercise a policy at all — so the two halves are only joined here.
 
+> **Normative.** The lane ships the **independent-floor** tests, which no other
+> policy test in this section reaches: with a live grant covering every member of
+> the request's canonical destination set in place, a request whose declared cost
+> is `CostBasis.UNKNOWN` still draws `CONFIRM`, and one the policy's own
+> thresholds `DENY` still draws `DENY` (§3's *only-effect* clause — a grant
+> "never converts a `DENY` into anything" and satisfies no floor stated over any
+> fact but recipient authorisation). A policy returning `ALLOW` the moment
+> `covering` succeeds passes the successful-handoff, origin and call-count tests
+> above while converting both, and the `ActionPolicy` suite it also runs does not
+> catch it: `test_an_undeclared_cost_is_never_auto_granted` asserts
+> `not (ALLOW and authorised_by is None)`, and a route-(b) `ALLOW` sets
+> `authorised_by`. ADR-0021 §5's floors are about a policy deciding **by itself**;
+> §3's clause is about what a grant discharges, and only this pair tests it.
+
 > **Normative.** The lane ships a test asserting that an `ActionPolicy` whose
 > `RecipientGrants.covering` raises `RecipientGrantError` returns **no** `ALLOW`
 > on route (b), and does not answer from a cached, earlier or absent result (§1's
@@ -2219,14 +2312,14 @@ narrowings of one store, not three implementations.
 > clause), and every other test in this section can be written with valid
 > fixtures.
 
-> **Normative.** The lane ships a test asserting that a grant transcribed from a
-> confirmed decision's binding under §2 is in canonical order **without the
-> establishing surface sorting anything** — the value comes from
-> `EgressBinding.canonical_destination_set` already ordered — and that a surface
-> which rebuilt the tuple in another order is refused by the same validator. It
-> fails against an implementation that re-canonicalises or re-sorts at the
-> surface, which §2's first clause forbids for a different reason and this one
-> pins mechanically.
+> **Normative.** The lane ships a test asserting that a grant
+> `RecipientGrant.established_from` returns is in canonical order **without
+> anything sorting it** — the value comes from
+> `EgressBinding.canonical_destination_set` already ordered — and that a caller
+> which rebuilt the tuple in another order and constructed a `RecipientGrant`
+> directly is refused by the same validator. It fails against an implementation
+> that re-canonicalises or re-sorts inside the builder, which §2's first clause
+> forbids for a different reason and this one pins mechanically.
 
 > **Normative.** The lane ships an `export` **completeness** test in the shared
 > conformance suite: a store seeded with a live grant, an expired-but-unrevoked
@@ -2251,7 +2344,7 @@ narrowings of one store, not three implementations.
 > `test_the_roster_is_every_calendar_duration_setting` already uses for a field set
 > that must not drift unnoticed: the roster is read off `model_fields` rather than
 > hand-written, and the test asserts that the digest's projection is exactly that
-> set less `id`. An eighth field added later without deciding its place in the
+> set less `id`. A field added later without deciding its place in the
 > digest is then a **red test** rather than a silent exclusion, and an
 > implementation that lists the members by hand fails it.
 
@@ -2381,7 +2474,13 @@ narrowings of one store, not three implementations.
 > normally before it; a **future-dated** grant — one whose `decided_at` is after
 > the instant the query reads — covers nothing and is absent from `standing`,
 > which fails against an implementation that bounded liveness only above and
-> would otherwise hand the policy a grant `AuditTrail.record` must refuse (§1, §6); and a read concurrent with a revocation returns one answer
+> would otherwise hand the policy a grant `AuditTrail.record` must refuse (§1,
+> §6); a grant whose `decided_at` **equals** the instant the query reads covers
+> normally and appears in `standing`, asserted on both queries, because §9 states
+> the interval closed below and an implementation reaching for `decided_at < now`
+> by symmetry with the open upper end passes the future-dated, ordinary-live and
+> expiry cases while excluding a grant established and spent in one coarse-clock
+> instant; and a read concurrent with a revocation returns one answer
 > or the other and never a torn one. Every one of them is a test the policy tests
 > above pass without.
 
@@ -2402,9 +2501,16 @@ narrowings of one store, not three implementations.
 > two sharing a `decided_at`, the lesser `id` wins. A store returning the first
 > match it finds passes every other test in this section.
 
-> **Normative.** The lane ships a test driving a **clock that advances on every
-> read** against two records sharing an `expires_at`, asserting that one query
-> returns both or neither (§9's single-read clause).
+> **Normative.** The lane ships the tests driving a **clock that advances on
+> every read** (§9's single-read clause), on **both** queries that evaluate
+> liveness. Against `standing`, two records sharing an `expires_at`: one query
+> returns both or neither. Against `covering`, two grants covering one request and
+> sharing an `expires_at`, the later-decided one recorded second: the query
+> returns the grant §1's precedence rule names — the greater `decided_at` — and
+> the clock is read once. `standing`'s assertion is list-shaped and cannot reach
+> `covering`, which returns one record, so a per-row clock that saw the older
+> grant before its expiry and the newer one at it would return the older: an
+> answer valid at no instant, passing every other test in this section.
 
 > **Normative.** The lane ships a test asserting that `clear` retains nothing:
 > an id recorded before it is accepted again after it, and again after a restart
@@ -2453,12 +2559,14 @@ narrowings of one store, not three implementations.
 > second clause), and no route by which a grant is created from anything but an
 > answer to a recorded `CONFIRM` (§2's second clause).
 
-> **Normative.** The lane ships the two **negative** establishment tests for §2's
-> third clause, asserting over the **store's contents** that no grant was recorded
-> — not over what the surface returned: no grant is established from a
-> confirmation whose recorded `egress_binding` carries
-> `planned_with_external_content` as `True`, and none from one carrying an
-> `OriginUnrecordedBinding`. Nothing else in this section reaches the clause, and
+> **Normative.** The lane ships the **negative** establishment tests against
+> `RecipientGrant.established_from` (§2), each asserting `ValueError` **by type**:
+> a decision whose recorded `egress_binding` carries
+> `planned_with_external_content` as `True`; one carrying an
+> `OriginUnrecordedBinding`; one whose `egress_binding` is `None`; and one whose
+> ruling was not a `CONFIRM`. Each asserts the refusal **and** that no
+> `RecipientGrant` was returned by any other route — the function raises rather
+> than returning a narrowed grant. Nothing else in this section reaches the clause, and
 > what it guards is a seeding path rather than a tidiness one: a surface that
 > recorded such a grant leaves a live authorisation over recipients an attacker's
 > content chose, which every *later* call carrying `False` then spends — with §4's
@@ -2466,16 +2574,26 @@ narrowings of one store, not three implementations.
 > true. §2's third clause and §4's are both needed and neither implies the other,
 > and this is the test that says so.
 
-> **Normative.** The lane ships a test asserting that an established grant's
-> `tool` equals the confirmed **decision**'s `tool` by value, that its
-> `account` and `destinations` equal that decision's binding's `account` and
-> derived `canonical_destination_set` by value — not merely equivalent, and not
-> re-derived at the establishing surface — and that its `established_by` **equals
-> that decision's own `id`** (§2's first clause). The last is asserted by equality
-> and not by presence, with a failing case in which the surface writes some other
-> id: a surface that copies the three subject values correctly and stamps a fixed
-> or invented `established_by` passes every other assertion here, and the field's
-> whole purpose is that it names *this* act.
+> **Normative.** The lane ships the **transcription** test against
+> `RecipientGrant.established_from`: the grant it returns has a `tool` equal to
+> the supplied **decision**'s `tool` by value, an `account` and `destinations`
+> equal to that decision's binding's `account` and derived
+> `canonical_destination_set` by value — not merely equivalent, and not re-derived
+> — and an `established_by` **equal to that decision's own `id`**, asserted by
+> equality and not by presence (§2). The mutation test rides beside it: mutating
+> the supplied decision after the call changes nothing about the returned grant,
+> which is what "by value" means here as it does at `from_request`.
+
+> **Normative.** The lane ships the **signature** test that makes the clause above
+> unwritable-around, in the shape a roster test takes: read over
+> `inspect.signature(RecipientGrant.established_from)`, the parameter names are
+> exactly the supplied decision, `id`, `decided_at` and `expires_at` — there is no
+> parameter by which a caller supplies `tool`, `account`, `destinations` or
+> `established_by`, and a fifth subject parameter added later is a **red test**
+> rather than a silent widening. A builder that copied the three subject values
+> correctly but also accepted an override would pass every other assertion here,
+> and §2's whole reason for naming a function is that the capability is absent
+> rather than forbidden.
 
 ### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -2532,12 +2650,21 @@ obligation (ADR-0089 §1).
   record, by the same component.
 
 **Why the injected read seam is not a supersession of ADR-0021 §3's purity
-clauses.** Review has raised this at rounds 9, 11 and 15, on two different
-groundings, and it has been ruled **rejected**; the grounds are in ADR-0021's and
-ADR-0097's own text and are recorded here so it does not have to be re-argued at
-every later reading. A reader meeting the question again should read the four
-bullets below before treating it as open.
+clauses.** Review has raised this at rounds 9, 11, 15 and 16, on three different
+groundings, and it has been ruled **rejected** each time; the grounds are in
+ADR-0021's and ADR-0097's own text and are recorded here so it does not have to
+be re-argued at every later reading. A reader meeting the question again should
+read the bullets below before treating it as open.
 
+- **That ADR-0021's prose binds is conceded, and it is not what the bullets below
+  dispute.** ADR-0021 is unmarked, so under ADR-0089 §4 its Decision "binds as a
+  reader reads it, and §3 does not narrow it" — round 16's point of law, and it is
+  correct. Every bullet below is a reading of what that binding prose **says**: a
+  clause that carries its own condition, a section that names this mechanism as
+  its own relief valve, a hazard the read face is built to exclude, and a cost
+  sentence inside a rejected alternative about a **write** seam. None of them
+  argues that unmarked prose obligates nothing, so none of them is reached by
+  that point, and neither is the conclusion.
 - **The clause carries its own condition.** §3's first bullet is "**`decide` must
   return `authorised_by is None`** from a policy constructed **with no
   authorisation source**. Today that is *every* policy". A policy constructed
@@ -2581,32 +2708,33 @@ bullets below before treating it as open.
   exhaustive of every fact a row may carry, and §8's bars all continue to hold
   over the added fact — §11's second clause states one of them explicitly. Under
   ADR-0082 §1 that is a stacked addition and no record is owed on ADR-0186.
-- **ADR-0097 — neither amended nor superseded, and the sentence review keeps
-  finding is unmarked supporting text.** §3's *marked* output is that the source
-  seam is **two Protocols beside `ActionPolicy`**, in `core/protocols.py`, each
-  with its own triad — and this ADR takes that shape exactly: `RecipientGrants`
-  is a Protocol **beside** `ActionPolicy`, not a widening of it, and §7's first
-  clauses state that `ActionPolicy` gains no method, no argument and no widened
-  return. §7 of ADR-0097 — its rule about policies and grant stores that *is*
-  marked — says a source grant may never be an action authorisation and no
-  `ActionPolicy` may consult either source-grant seam; §13 restates it verbatim
-  and this ADR consults neither.
-- **The sentence itself, engaged rather than waved at.** ADR-0097 §3's discussion
-  of "why not one generalised permission surface" says "`ActionPolicy` is a pure
-  function by ratified design, and a grant is a store … A surface that must read
-  durable state to answer cannot be that function." Three things about it. It is
-  **unmarked**, and ADR-0097's own header note already rules on what that means
-  for this ADR: §2's "unmarked supporting text … obligate nothing under ADR-0089
-  §3; they read as evidence of the marked clause's meaning and move with it
-  rather than being separately superseded". It is a ground for **rejecting a
-  merged surface**, and the thing it rejects — one contract answering about
-  sources and actions at once — is not what this ADR builds. And its own citation
-  is ADR-0021 §3, whose reading is settled two bullets up: the purity clause
-  carries its own condition, names the standing grant as the relief valve, and
-  states the I/O as a testability cost. ADR-0070 §1's test asks whether a reader
-  acting on ADR-0097 would act differently, and this reader would not: they would
-  put a second Protocol in `core` beside `ActionPolicy`, ship its triad, and keep
-  the source seams out of `decide` — which is what §1, §7, §13 and §14 do.
+- **ADR-0097 — neither amended nor superseded, and its *marked* output is the
+  shape this ADR takes.** §3's marked clause puts the source seam in
+  `core/protocols.py` as **two Protocols beside `ActionPolicy`**, each with its
+  own triad, and says in the same breath that `ActionPolicy`, `ActionRequest`,
+  `PermissionRuling` and `PermissionDecision` are **untouched** by it. This ADR
+  takes that shape exactly: `RecipientGrants` is a Protocol **beside**
+  `ActionPolicy`, not a widening of it, and §7's first clauses state that
+  `ActionPolicy` gains no method, no argument and no widened return. ADR-0097 §7
+  — its marked rule about policies and grant stores — says a **source** grant may
+  never be an action authorisation and no `ActionPolicy` may consult either
+  source-grant seam; §13 restates it verbatim and this ADR consults neither. No
+  sentence of either clause becomes false or wider here.
+- **The sentence review keeps finding argues *for* this shape and against a
+  different one.** ADR-0097 §3's discussion of "why not one generalised
+  permission surface" says "`ActionPolicy` is a pure function by ratified design,
+  and a grant is a store … A surface that must read durable state to answer
+  cannot be that function." What it rejects is one contract answering about
+  **sources and actions at once**, and its own third ground says so in terms — "a
+  merged contract would carry a conformance suite half of whose clauses are
+  vacuous on half of its implementations". A second Protocol beside
+  `ActionPolicy` is the alternative that discussion reaches for, not the thing it
+  refuses, and it is what §1 and §7 build. Its purity half cites ADR-0021 §3,
+  whose reading is settled in the bullets above. ADR-0070 §1's test asks whether
+  a reader acting on ADR-0097 would act differently, and this reader would not:
+  they would put a second Protocol in `core` beside `ActionPolicy`, ship its
+  triad, and keep the source seams out of `decide` — which is what §1, §7, §13
+  and §14 do.
 - **ADR-0016, ADR-0017, ADR-0146, ADR-0098, ADR-0152, ADR-0150,
   ADR-0155, ADR-0184 — untouched.** Each is cited and none has a clause this ADR
   makes false or wider. ADR-0016 §7 in particular defers invocation, exactly-once
