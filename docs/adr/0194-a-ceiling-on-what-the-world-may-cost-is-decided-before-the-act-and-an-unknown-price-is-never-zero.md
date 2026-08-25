@@ -581,11 +581,16 @@ the two properties it has rather than letting a reader assume the stronger one.
 
 > **Normative.** The admission runs **inside the deadline `invoke` already
 > enforces** — the required `timeout` of ADR-0029 §4, enforced by the seam and not
-> by the caller. A gate blocked on its store therefore cannot outlast it: the seam
-> stops waiting, which is the whole of what §4 promises, and `invoke(timeout=...)`
-> keeps meaning what it meant before this ADR. An implementation that admitted
-> outside the deadline would have moved the one await §4 exists for out of its
-> reach, in the window before the callable is even created.
+> by the caller. What that buys is §4's guarantee and **not a stronger one**: the
+> seam stops waiting, not that the gate stops working. §4 states it in the weaker
+> form deliberately — *"what it buys is that the seam stops waiting, not that the
+> tool stops working. Python has no way to interrupt a coroutine that declines to
+> be cancelled, so any stronger claim would be false"* — and this ADR claims no
+> more for the admission than §4 claims for the callable. What this clause forbids
+> is the thing that *would* be new: an implementation admitting **outside** the
+> deadline has moved the one await §4 exists for out of its reach, in the window
+> before the callable is even created, and `invoke(timeout=...)` then means less
+> than it meant before this ADR.
 
 > **Normative.** A deadline that expires during the admission is classified by
 > ADR-0029 §4's **existing** rule, unchanged and unnarrowed: `FAILED` where the
@@ -752,26 +757,26 @@ the two properties it has rather than letting a reader assume the stronger one.
 > do that, and it makes the no-stranded-reservation rule bounded by construction
 > instead of conditional on another invocation's store. §11 drives both halves.
 
-> **Normative.** What the deadline clause above promises is bounded by the store
-> read's **own** cancellation behaviour, and this ADR states that limit rather than
-> implying a stronger one. `permissions/audit.py`'s `_run_to_completion` — the
-> house pattern for a serialised `sqlite3` connection, and ADR-0054's deliberate
-> choice — absorbs a cancellation until the worker *physically* finishes, because
-> releasing the lock while the worker still holds the connection would let a second
-> caller use it concurrently. A gate reading through that pattern over wedged SQL
-> is therefore not stopped by `invoke`'s `timeout`, and every fixture written
-> against a **cancellable fake** passes while it happens.
+> **Normative.** A store read that **declines to be cancelled** is therefore not
+> an exception to the clause above; it is the case ADR-0029 §4 already excludes,
+> and this ADR neither widens it nor closes it. §4's third bullet decides it in as
+> many words — *"A tool that suppresses its own cancellation can outlive its
+> deadline, and no seam can prevent that … This is a genuine hole and the honest
+> position is that it is unclosable from this side … not a claim that the deadline
+> is a hard bound."* `permissions/audit.py`'s `_run_to_completion` is exactly such
+> a read: ADR-0054 has it absorb a cancellation until the `sqlite3` worker
+> physically finishes, because releasing the lock while the worker still holds the
+> connection would let a second caller use it concurrently. A gate reading through
+> that pattern over wedged SQL outlives the timeout, and §4 says so already.
 
-> **Normative.** That is **not a hazard this ADR introduces**, and it is not this
-> ADR's to close. ADR-0192's completion append already sits inside `invoke` over a
-> store built the same way, so the admission's read is the same limit one seam
-> earlier and not a new class of it; closing it means reading ADR-0054's absorption
-> against ADR-0029 §4's deadline and deciding which yields, which is a change to a
-> rule this ADR does not own. It is filed as **#1563** and scoped out in §8. What
-> this ADR does own it does: §11 requires the lane to drive the **primary** holder
-> through `invoke` and through shutdown rather than only a fake, so whichever
-> strategy the lane takes is a stated and tested one instead of an inherited
-> default nobody looked at.
+> **Normative.** Nothing here is new, and the placement is what makes that
+> checkable. ADR-0192's completion append already sits inside `invoke` over a store
+> built the same way, so the admission's read is §4's third bullet one seam earlier
+> rather than a new class of hazard, and no record is owed against §4 for meeting
+> a case it enumerated. What this ADR does own it does: §11 requires the lane to
+> drive the **primary** holder through `invoke` and through shutdown rather than
+> only a cancellable fake, so which of §4's two sides the lane's read falls on is
+> a stated and tested fact instead of an inherited default nobody looked at.
 
 > **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
 > ADR-0192's completion has been appended or after the failure that prevented it.
@@ -1156,11 +1161,11 @@ whole explanation.
 > `period_start: UtcInstant` and `period_end: UtcInstant`, `period_end` exclusive;
 > `time_zone: NonBlankEncodableText`, the IANA zone those boundaries were computed
 > in; `ceiling: Decimal | None`; `currency: EncodableText | None`; and
-> `accounted: Decimal | None`. The two bounds are not free values beside the other
-> fields: §11's invariant clause binds them to exactly the boundaries §1's rule
-> computes for this value's own `period` in its own `time_zone`, validated on the
-> model, because the value crosses the wire and a consumer has nothing else to
-> check a producer against.
+> `accounted: Decimal | None`. The bounds are the ones §1's rule computed for this
+> value's `period` in its `time_zone`; that correspondence is a **producer**
+> obligation checked by the conformance suite and the lane (§11), and deliberately
+> not a validator on the model — see §11's clause on why re-deriving it at
+> validation would make acceptance depend on the consumer's own `tzdata`.
 
 > **Normative.** Both string fields are `EncodableText`-based and **not** bare
 > `str`, because ADR-0085 §4c binds every string the promoted surface can carry
@@ -1535,16 +1540,6 @@ Scoping something out is a decision, so each carries the condition that reopens 
 > a durable reservation or an admission folded into ADR-0192's own atomic append.
 > Parallel execution *inside* a turn does **not** reopen it: §3 already handles
 > that.
-
-> **Normative.** **Whether a store read inside `invoke` may outlive its deadline**
-> is not decided (**#1563**). ADR-0054's `_run_to_completion` absorbs a cancellation
-> until its worker finishes and ADR-0029 §4 requires `invoke` to enforce a
-> `timeout`; the two have never been read against each other, and ADR-0192's append
-> already sits under both (§3). This ADR neither relaxes §4's deadline nor
-> supersedes ADR-0054's absorption — it states the limit where a reader meets it
-> and requires the lane to test the primary holder against it. Reopened by the
-> decision that reconciles the two, which owes a rule for a store read inside a
-> deadline and a connection-ownership answer at shutdown, and by nothing else.
 
 > **Normative.** **Money a tool moves** is not decided and no ceiling here bounds
 > it. ADR-0016 §7's transacted-cost deferral, untouched: the price of a flight
@@ -1933,7 +1928,11 @@ the ADRs it depends on rather than replacing them.
 > Protocols expose; it is driven below.
 
 > **Normative.** The suite drives a gate that **stays blocked** past the caller's
-> deadline: `admit_invocation` awaiting a store that never answers, `invoke` given
+> deadline, over a fake that is **cancellation-cooperative by construction** —
+> which is what makes the assertion one about the seam rather than about ADR-0029
+> §4's excluded case (§3), and is stated because a fake built on a thread or a
+> shielded wait would make the clause untestable rather than failing it:
+> `admit_invocation` awaiting a store that never answers, `invoke` given
 > a short `timeout`, and the call returning a classified `ToolResult` within it
 > rather than hanging — `FAILED` for a non-`side_effecting` tool and for a
 > `NATURAL` one, `INDETERMINATE` for a side-effecting non-`NATURAL` one, which is
@@ -2142,24 +2141,31 @@ the ADRs it depends on rather than replacing them.
 > non-`None` only where `currency` is. A construction violating any of them raises
 > at validation, and the shared contract drives each as a hostile construction.
 
-> **Normative.** The **bounds must describe the period the value names, in the zone
-> it names**, and `period_start < period_end` is not that invariant. `period_start`
-> and `period_end` are exactly the boundaries §1's rule computes for `period` in
-> `time_zone` — the same rule, including its `fold` selection, its skipped-date
-> handling and both of its representability clamps — so a `CALENDAR_DAY` carrying
-> `2026-01-01` to `2026-02-01` in UTC **raises**, where the ordering invariant
-> alone admits it. This matters because the value crosses the wire (§5): a hub
-> answering with a month's bounds under a daily `period` would otherwise render as
-> a valid daily total, and the renderer has nothing else to check it against.
+> **Normative.** The model's bound invariant is the **intrinsic** one and nothing
+> more: `period_start` is strictly before `period_end`, except on §1's zero-length
+> period where they are equal. It does **not** re-derive §1's boundaries from
+> `period` and `time_zone` and compare, and that is a decision rather than an
+> omission — the tempting stronger validator would reject a `CALENDAR_DAY` carrying
+> a month's bounds, which this one admits.
 
-> **Normative.** Equal bounds are therefore admitted on **one** condition and not
-> as a general exemption: `period` is `CALENDAR_DAY` and that civil date is skipped
-> whole in `time_zone`, which is the only way §1's rule produces a zero-length
-> period. Equal bounds in a zone where that date exists raise, and equal bounds on
-> a `CALENDAR_MONTH` raise unconditionally — no calendar month is skipped whole.
-> A validator written as "start before end, or equal" passes both. Each of the
-> three cases named across these two clauses is driven as a hostile construction
-> beside the invariants above, and each is asserted to raise at validation.
+> **Normative.** The reason is ADR-0016 §2's test for what may carry a semantic in
+> `core/types.py`: intrinsic means "computable from the type's own declaration
+> alone" and "the same answer for every consumer". A boundary re-derived at
+> validation is neither. It is computed from the **installed `tzdata`**, and the
+> frame carries a zone *name*, not the rule-set that named it — so a hub on one
+> revision and a client on another, over a zone whose transitions were revised
+> (`Asia/Gaza` is the live example), disagree about the boundaries of the same
+> civil day, and the client rejects a value its producer computed correctly. That
+> is a wire value whose acceptance depends on the consumer's filesystem, and the
+> prescribed fixtures — one installed `tzdata` per test run — could not catch it.
+
+> **Normative.** The correspondence is therefore checked where both sides share one
+> `tzdata` by construction: at the **producer**, by the conformance suite and the
+> lane (§11's real-producer clause below), which is also the only place that can
+> compare against §1's rule rather than against a second implementation of it. A
+> consumer that needs more than the intrinsic invariant is asking for a
+> self-contained value — bounds plus the rule-set identity that authored them —
+> which is a `SpendTotal` field this ADR does not add and a later decision may.
 
 > **Normative.** The **numeric** invariants are driven as hostile constructions
 > too, and they are the ones a validator list is likeliest to omit: a negative
@@ -2307,19 +2313,21 @@ the ADRs it depends on rather than replacing them.
 > not only against the suite's cancellable fake, which is what §3's limit clause is
 > about: a real gate whose store read is wedged, reached through
 > `ToolInvoker.invoke` with a short `timeout`, and the same holder taken through
-> shutdown while that read is outstanding. What is asserted is whichever answer the
-> lane's own read strategy gives — the call returning at its deadline, or the
-> deadline bounded by the worker (§3, #1563) — **stated in the test** together with
-> what happens to the connection at shutdown. A lane that writes only fake-backed
-> deadline fixtures inherits ADR-0054's absorption without deciding it, and this
-> clause exists so that cannot happen quietly.
+> shutdown while that read is outstanding. What is asserted is which of ADR-0029
+> §4's **two sides** the lane's own read falls on — the seam returning at its
+> deadline where the read is cancellation-cooperative, or the deadline outlived
+> where it is not (§4's third bullet, §3) — **stated in the test**, together with
+> what happens to the connection at shutdown. Either is conforming; what is not
+> conforming is a lane that writes only cooperative-fake fixtures, inherits
+> ADR-0054's absorption without noticing, and leaves a reader of its tests
+> believing the deadline is a hard bound.
 
-> **Normative.** The lane also drives §5's bounds invariant against the **real**
-> producer rather than only as a hostile construction: the `SpendTotal` values
-> `spend_totals` returns are asserted to carry exactly the boundaries §1's rule
-> computes for their own `period` and `time_zone`, on the DST, skipped-date and
-> both-clamp fixtures above. A model validator and a producer can disagree, and the
-> validator is the only thing a wire consumer has.
+> **Normative.** The lane drives the **producer** obligation §5 declines to put on
+> the model: the `SpendTotal` values `spend_totals` returns are asserted to carry
+> exactly the boundaries §1's rule computes for their own `period` and `time_zone`,
+> on the DST, skipped-date and both-clamp fixtures above. This is the whole of
+> where that correspondence is checked, so a lane treating it as belt-and-braces
+> beside a model validator has misread §5: there is no such validator, by decision.
 
 > **Normative.** The lane drives §2's stated overrun end to end: a call whose
 > declaration understates it is **admitted**, its reported cost carries the
