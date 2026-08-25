@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it"; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting", over the two audit writes ADR-0192 adds to `invoke`)
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it"; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes ADR-0192 adds to `invoke`)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -51,10 +51,13 @@
   writes.** §4's deadline over the callable, its `FAILED`/`INDETERMINATE`
   classification of an expiry, its validation of the `timeout` argument and its rule
   that the seam and not the caller enforces it all stand unchanged, and ADR-0192
-  relies on every one of them; the expiry is still computed and returned as a
-  classified `ToolResult`, and what is new is only that a store which has stopped
-  answering can delay that return. This ADR's decision text below is not rewritten
-  (ADR-0070 §1). Refs #1503, #1544.
+  relies on every one of them. **One further sentence of §4 is superseded, over the
+  completion window alone**: §4 promises that a deadline expiry "comes back as a
+  classified `ToolResult`". Under ADR-0192 §3 that result is still computed and
+  classified exactly as §4 rules, but an audit store that never answers the
+  completion append stops it reaching the caller at all — not late, but not at all —
+  so a reader is owed that here rather than being left to infer it. This ADR's
+  decision text below is not rewritten (ADR-0070 §1). Refs #1503, #1544.
 - Partially superseded: 2026-08-24 by ADR-0192 — **§3's cost omission, and cost
   only.** §3 rules "**`ToolResult` carries no cost and no disclosure report**, and
   both omissions are decisions", and gives cost's reason: "invocation cannot —
