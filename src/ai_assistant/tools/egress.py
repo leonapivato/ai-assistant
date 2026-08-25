@@ -491,17 +491,53 @@ class _StreamChannel:
         """
         try:
             self._writer.close()
-            await self._writer.wait_closed()
         except OSError as exc:
-            _log.debug("egress_channel_close_failed", error_type=type(exc).__name__)
-            # **Suppressing the failure is not the same as having released**, and
-            # the holder has already called ``close``: nothing else will try
-            # again. So the harder release follows, on the same reasoning as
-            # :func:`_release` and suppressed on the same ground. Adversarial
-            # review found this half on round 7, having found the opener's on
-            # round 6.
+            self._abort_after(exc)
+            return
+        # **The wait is held in a task of its own, and this awaits a shield of
+        # it.** ``StreamWriter.wait_closed`` awaits the protocol's *shared* close
+        # waiter, so a cancellation delivered while this method awaited it
+        # directly would cancel that shared future — and every later ``close``
+        # awaiting the same future would raise ``CancelledError`` out of a call
+        # nobody cancelled, which is this contract's idempotency broken by the
+        # cleanup path. Adversarial review found it on round 10.
+        waiting = asyncio.ensure_future(self._writer.wait_closed())
+        try:
+            await asyncio.shield(waiting)
+        except asyncio.CancelledError:
+            # **Safe first, then re-raised** (ADR-0191 §1, ADR-0060 §1). The
+            # abort is what makes it prompt: it drops the transport rather than
+            # waiting on a far end that may never read again. Delivery is then
+            # deferred until the wait this method started has finished — the same
+            # order and the same **unbounded, documented** deferral as
+            # ``open_channel``'s, bounded in practice by the abort above and as a
+            # whole by ADR-0029 §4's invocation deadline.
             with suppress(OSError):
                 self._writer.transport.abort()
+            while not waiting.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait((waiting,))
+            if not waiting.cancelled():
+                waiting.exception()  # retrieved, so asyncio does not report it unread
+            raise
+        except OSError as exc:
+            self._abort_after(exc)
+
+    def _abort_after(self, failure: OSError) -> None:
+        """Log a failed release and take the harder one.
+
+        **Suppressing the failure is not the same as having released**, and the
+        holder has already called ``close``: nothing else will try again. So the
+        transport is dropped, on the same reasoning as :func:`_release` and
+        suppressed on the same ground. Adversarial review found this half on
+        round 7, having found the opener's on round 6.
+
+        Args:
+            failure: What the release raised, logged by type alone.
+        """
+        _log.debug("egress_channel_close_failed", error_type=type(failure).__name__)
+        with suppress(OSError):
+            self._writer.transport.abort()
 
 
 def _tls_context() -> ssl.SSLContext:
@@ -760,9 +796,12 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
         msg = "the bound transport endpoint names no host"
         raise TransportPinError(msg)
     port = _port(port_text, scheme)
+    parsed: TransportEndpoint | None = None
     try:
-        return TransportEndpoint(host=host, port=port, implicit_tls=scheme == "smtps")
-    except ValidationError as exc:
+        parsed = TransportEndpoint(host=host, port=port, implicit_tls=scheme == "smtps")
+    except ValidationError:
+        parsed = None
+    if parsed is None:
         # **The type is the pin, and this keeps its refusal in the seam's own
         # taxonomy.** ``TransportEndpoint`` refuses a host carrying a control
         # character — a ``NUL`` truncates at ``getaddrinfo`` — and one with no
@@ -770,13 +809,19 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
         # A ``ValidationError`` escaping here would be the wrong type for a
         # refusal about a *binding* (ADR-0191 §4), and pydantic renders the input
         # it refused, so the endpoint an operator configured would reach whatever
-        # caught it. The message below is written fresh for both reasons.
+        # caught it. The message below is written fresh for both reasons — and it
+        # is raised **outside** the handler, with ``from None``, so the refused
+        # value travels in neither ``__cause__`` nor ``__context__``. Chaining it
+        # put the endpoint back into every formatted traceback, which is where
+        # round 10 of adversarial review found it: a redaction the exception
+        # chain undoes is not one.
         msg = (
             "the bound transport endpoint names a host this seam will not pin; a "
             "host carrying a control character, or text with no UTF-8 encoding, "
             "is refused before anything resolves it"
         )
-        raise TransportPinError(msg) from exc
+        raise TransportPinError(msg) from None
+    return parsed
 
 
 def _port(port_text: str, scheme: str) -> int:

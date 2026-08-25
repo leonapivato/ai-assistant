@@ -17,6 +17,7 @@ case to forget to displace.
 
 from __future__ import annotations
 
+import traceback
 from typing import Final
 
 import pytest
@@ -147,7 +148,16 @@ def test_a_host_the_endpoint_type_refuses_is_refused_in_this_seams_taxonomy(endp
     with pytest.raises(TransportPinError) as refusal:
         parse_smtp_endpoint(endpoint)
 
+    rendered = "".join(traceback.format_exception(refusal.value))
+
     assert "mail.example.invalid" not in str(refusal.value)
+    # **The whole chain, not only the outer message.** Chaining the refusal put
+    # pydantic's rendering of the input back into every formatted traceback and
+    # left it reachable through ``__cause__``; a redaction the exception chain
+    # undoes is not one, which adversarial review found on round 10.
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
+    assert "mail.example.invalid" not in rendered
 
 
 @pytest.mark.parametrize("host", ["mail.example.invalid", "MAIL.example.invalid"])
