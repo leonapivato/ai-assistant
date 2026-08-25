@@ -202,7 +202,8 @@ surface can state an execution at all, because ADR-0186's two operations return
 
 > **Normative.** The append's failure is not lost by that. It is attached to the
 > propagating `CancelledError` as its cause, and it reaches the operator as the
-> Tier 2 diagnostic §3 requires of every audit-write failure. No claim landed, so
+> Tier 2 diagnostic §3 requires of every audit-write failure, under that section's
+> enumerated-fields bound. No claim landed, so
 > the trail records nothing — which is the true thing to record — and this ADR gives
 > the seam no returned reachability fact and the executor no new rule to apply.
 
@@ -634,29 +635,58 @@ the count.
 > by origin**. Every `Exception` raised on the completion path is a completion
 > failure it absorbs — the ledger's own refusals, the `AuditError` it translated,
 > and an exception the **clock callable** raised on its own account and the ledger
-> propagated unwrapped (§2). Each is surfaced as the diagnostic below carrying its
-> own type and cause; none of them changes what `invoke` returns.
+> propagated unwrapped (§2). Each is surfaced through the diagnostic below, which
+> names its class; none of them changes what `invoke` returns.
 
-> **Normative.** A **`BaseException` that is not a cancellation** is not absorbed,
-> wherever on the completion path it arose. It propagates unchanged, the
-> `ToolResult` does not reach the caller, and no diagnostic stands in for it — a
+> **Normative.** A **`BaseException`** raised on the completion path while no
+> external cancellation is propagating is not absorbed, whatever its class and
+> wherever it arose — a `KeyboardInterrupt`, a `SystemExit`, and a `CancelledError`
+> a collaborator raised on its own account alike. It propagates unchanged, the
+> `ToolResult` does not reach the caller, and no diagnostic stands in for it: a
 > process being torn down is not a refusal, and converting a `KeyboardInterrupt`
 > into a returned result is the conversion ADR-0029 §3 forbids. The claim is left
 > open by that exit as by any other.
+
+> **Normative.** A `CancelledError` **a collaborator raised** — the ledger's clock,
+> its store — is not an external cancellation of this call and is never read as one.
+> `invoke` does not classify it through `ToolDefinition.interrupted_outcome`, does
+> not treat it as a new cancellation exit, and **attempts no second completion**:
+> §3's obligation is to call `complete_invocation` once per claim, and a completion
+> path that failed has discharged it. ADR-0060 §1's "*from outside* is load-bearing"
+> is the distinction being drawn, applied one collaborator down.
+
+> **Normative.** No exit ever attempts a second completion for one claim. That is
+> stated on its own because three of the arms above are reached *from inside* the
+> completion attempt, and a rule phrased as "complete on every exit" could be read
+> as re-entering itself.
 
 > **Normative.** Where an **external cancellation is already propagating** and the
 > completion path then raises — an `Exception` or a `BaseException` alike — the
 > cancellation is what leaves `invoke`. ADR-0060 §1's propagation clause and
 > ADR-0034 §1's precedence for an absorbed cancellation decide this and are not
-> superseded here. The completion-path exception is attached to it as a cause and
-> reaches the operator as the diagnostic below; it does not stand in the
-> cancellation's place, and the claim is left open as in every other completion
-> failure.
+> superseded here. The completion-path exception is attached to it as a cause on the
+> exception, and its class reaches the operator through the diagnostic below; it
+> does not stand in the cancellation's place, and the claim is left open as in every
+> other completion failure.
 
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
-> to the operator as a Tier 2 diagnostic carrying the cause, and it is a diagnostic
-> and never a row. `core/logging.py`'s redaction rules and ADR-0004 §5 bind it as
-> they bind every operator-facing message.
+> to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
+
+> **Normative.** That diagnostic carries **enumerated fields and no exception
+> content**: the exception's **class**, the ledger operation attempted, the claim's
+> id and its decision's id, and the outcome that was being written. It carries no
+> exception instance, no exception message, no `str()` of one, and no member of a
+> cause chain — not the ledger's own, and not one an injected callable raised. The
+> exception object still preserves its cause (§2); what is bounded here is the
+> **log line**.
+
+> **Normative.** The bound is ADR-0004 §5's and this ADR does not relax it. A clock
+> or a store this system did not write can raise
+> `RuntimeError("recipient@example.com")`, and `core/logging.py` redacts by field
+> and cannot reach Tier 1 text embedded in a message under an innocuous one. So the
+> operator gets the class and the operation — which is what names the fault — and
+> the content stays out of the log rather than being trusted to a redactor that
+> cannot see it.
 
 > **Normative.** The result of those clauses is a claim left **open**, which is the
 > state the clause above governs and which no reader resolves. That is the honest
@@ -802,7 +832,8 @@ the tool said so, and the only thing that failed is the bookkeeping. ADR-0026 §
 rule binds the **guard**, which must not relabel a callable's failure and destroy
 its type; it says nothing about whether a consumer may act on one, and ADR-0034 §2
 is the precedent for a consumer that does. So the type survives intact — in the
-diagnostic, with its cause — and `invoke` returns the result the call produced. The
+diagnostic's class field, and on the exception's own cause chain — and `invoke`
+returns the result the call produced. The
 clause is written by **class** rather than by origin for the same reason the
 refusal orders are exhaustive over classes: an implementation cannot reliably tell
 which side of the guard an `Exception` came from, and a rule it cannot apply is not
@@ -1307,6 +1338,13 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > that advances on every call and a test that fails if the append reads it twice,
 > and asserts that the instant the admission was decided on is the instant stored on
 > the row.
+
+> **Normative.** The suite proves the diagnostic bound rather than asserting it: a
+> collaborator raising an exception whose message carries a Tier 1 sentinel, with
+> the test failing if that sentinel reaches the log through the message, the
+> `str()`, or any member of the cause chain (§3, ADR-0004 §5). A **completion clock
+> raising `CancelledError` directly**, with no external cancellation pending,
+> propagates it unchanged and attempts no second completion (§3).
 
 > **Normative.** Four further failure paths are pinned. A **`clear()` landing
 > between a claim and its completion** leaves the call's result standing, emits the
