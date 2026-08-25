@@ -1982,13 +1982,34 @@ the ADRs it depends on rather than replacing them.
 > it would be violating; an
 > **open claim** making the period indeterminate whatever the allowance is
 > set to and whatever its decision declared, including the case where the
-> completion append itself failed; a foreign-currency cost taking the `UNKNOWN`
-> path; a period rollover clearing an indeterminate total; both ceilings configured
+> completion append itself failed; a period rollover clearing an indeterminate total; both ceilings configured
 > with **only the day ceiling** crossed, and again with **only the month ceiling**
 > crossed while the day total stays under its own — the second is what catches an
 > implementation that checks one ceiling and stops; a reporting currency configured with no
 > ceiling, where a total is stated and **nothing is refused even while the period
 > is indeterminate**; and no currency configured at all, where no total is stated.
+
+> **Normative.** A foreign-currency cost is driven on **both** sides separately —
+> declared and reported — and not as one item, because §2 gives it one rule and the
+> two sides discharge it in different code. The declared cases are the ones the
+> ground and order clauses below carry. The **reported** cases are these, mirroring
+> the `UNKNOWN` completion above exactly: with `world_spend_currency="USD"`, a
+> ceiling of 100 and **no allowance**, a completion reporting `EUR 90` makes the
+> period's `accounted` **`None`** and the next call — a countable USD estimate of
+> 10 — is refused with `SpendUndeterminedError`; with an allowance configured, the
+> same completion leaves the period **determinate** and contributes the
+> **allowance**, asserted as the allowance's own value and not as `90`.
+
+> **Normative.** That is stated as its own clause because the sides are
+> independently gettable-wrong and one of them fails silently. An implementation
+> refusing a declared `EUR` estimate correctly can still add an `EUR 90`
+> completion straight into a USD total: it would state `accounted=90`, admit that
+> USD estimate of 10 at equality, and have converted at a rate of 1.0 — which §2
+> forbids in as many words, having no exchange rate to read. Nothing above catches
+> it, because every reported-side fixture there is same-currency and the
+> declared-side fixtures never touch a row. A number that is wrong because two
+> currencies were added is worse than an indeterminate total, since the first is
+> stated with confidence and the second says what it does not know.
 
 > **Normative.** The suite drives a **zero-contribution estimate against a ledger
 > that already refuses**, in both of the ways it can, because every zero-estimate
