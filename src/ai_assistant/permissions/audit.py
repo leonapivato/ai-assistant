@@ -1711,15 +1711,26 @@ def _field_state(kind: type[BaseModel], given: object) -> Any:
     """
     if not isinstance(given, kind):
         return given
-    undeclared = set(given.__dict__) - set(kind.model_fields)
+    # **Nothing here hashes or compares a key the caller controls.** A model's
+    # ``__dict__`` is annotated ``dict[str, Any]`` and nothing enforces it at
+    # runtime, so a key can be any hashable object at all — including one whose
+    # ``__hash__`` collides with a field name and whose ``__eq__`` raises on the
+    # comparison that collision provokes. Building a ``set`` of the keys, or asking
+    # ``key in declared`` of a non-``str``, walks straight into it and this refusal
+    # leaves as whatever that ``__eq__`` threw. So: iterate (which hashes nothing),
+    # classify anything that is not *exactly* ``str`` as undeclared without
+    # touching it, and only then ask a real ``str`` — whose hash and equality are
+    # the interpreter's — whether it names a field.
+    declared = set(kind.model_fields)
+    undeclared = [key for key in given.__dict__ if type(key) is not str or key not in declared]
     if undeclared:
         # Described *before* sorting, and described by
-        # :func:`~ai_assistant.core.types.describe_untrusted`. The keys are the
-        # caller's: sorting them directly raises ``TypeError`` the moment two of
-        # them are of different types, and ``repr`` on one of them can raise
-        # anything at all — either way the diagnostic would destroy the diagnosis
-        # and this refusal would leave as some class ADR-0192 §2's order does not
-        # admit. Sorting the *descriptions* keeps the message deterministic.
+        # :func:`~ai_assistant.core.types.describe_untrusted`. Sorting the keys
+        # directly raises ``TypeError`` the moment two of them are of different
+        # types, and ``repr`` on one can raise anything at all — either way the
+        # diagnostic would destroy the diagnosis and this refusal would leave as a
+        # class ADR-0192 §2's order does not admit. Sorting the *descriptions*
+        # keeps the message deterministic and cannot raise.
         named = sorted(describe_untrusted(key) for key in undeclared)
         msg = f"the value carries state {kind.__name__} has no field for: {named}"
         raise ValueError(msg)
