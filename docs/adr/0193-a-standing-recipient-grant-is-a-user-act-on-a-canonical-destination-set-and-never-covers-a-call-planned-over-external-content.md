@@ -399,8 +399,11 @@ than promising more.**
 
 > **Normative.** The surface is exactly the following, and a contract that adds a
 > member, widens an argument or changes a return is changing this decision rather
-> than implementing it. The block is display, not a mark (ADR-0089 §2); the
-> clauses below it are the obligations.
+> than implementing it. `subject_digest` and `established_from` are the record's
+> **two** non-field members and a lane adds no third — the first derived (§1), the
+> second the establishing act's one construction path (§2), both shown here so the
+> surface is exact rather than exact-except-one. The block is display, not a mark
+> (ADR-0089 §2); the clauses below it are the obligations.
 
 ```python
 class RecipientGrant(BaseModel):                       # core/types.py
@@ -416,6 +419,16 @@ class RecipientGrant(BaseModel):                       # core/types.py
 
     @property
     def subject_digest(self) -> Sha256Hex: ...       # derived, never stored (§1)
+
+    @classmethod
+    def established_from(                            # the one construction path (§2)
+        cls,
+        confirmed: PermissionDecision,
+        *,
+        id: DurableIdentifier,                       # minted by the caller that records
+        decided_at: UtcInstant,
+        expires_at: UtcInstant,
+    ) -> RecipientGrant: ...
 
 
 class RecipientGrants(Protocol):                       # core/protocols.py
@@ -952,6 +965,16 @@ coordinator has not yet decided.
 > it, and how they carry it, stays undecided here (§13); what is decided is that
 > there is one door and every one of them goes through it.
 
+> **Normative.** `established_from` lives on `RecipientGrant` in
+> `ai_assistant.core.types` and **nowhere else**. It is a constructor of a shared
+> record and not a subsystem operation: it holds no store, is given no seam, reads
+> no `Settings` and no clock, decides no threshold and rules on no call — the
+> policy has already ruled, and this function turns the ruled act into the record
+> that names it. No lane moves it into `permissions/`, `orchestration/` or
+> `interfaces/`, and none adds a second construction path beside it anywhere.
+> What stays in `permissions/` is what was always there: the store, the policy,
+> and every implementation of the three faces (§1).
+
 **Establishment rides a confirmation because the content floor below cannot be
 met anywhere else, and an earlier draft of this section did not notice.** That
 draft also admitted "a command on the command-line or gateway surface naming the
@@ -1034,6 +1057,46 @@ import; and every other refusal `RecipientGrant` states is a construction refusa
 of exactly this kind, which is what `core/types.py` raises today in one hundred
 and seventy-odd places. `InvalidRecipientGrantError` stays what §1 says it is:
 the store's refusal at `record`.
+
+**Where it lives was round 17's third blocker, and the answer is the one
+ADR-0021 §1 already gave for the neighbouring record.** Architecture review read
+the four refusals as permissions workflow and directed them into `permissions/`.
+Three grounds keep them in `core`.
+
+*`PermissionDecision.from_request` is the precedent, and it is exact.* It is a
+transcribing construction path for a permission record, in `core/types.py`, whose
+whole purpose is that every field describing what was ruled on "is copied from the
+request by `core`, so a decision naming a different tool … than the one the policy
+saw cannot be produced by following the contract". The reviewer's own ground —
+that direct construction can still produce the same record — is stated by that
+ADR in terms, as the residue it accepts: *"What remains open is a caller
+hand-constructing a decision field by field — that is a caller falsifying its own
+audit trail rather than a policy subverting a gate, and no producer can prevent
+it."* It therefore does not distinguish this function from the ratified one.
+
+*The refusals are conditions under which the record would misdescribe itself,
+which is what a constructor is for.* One is structural — a decision with no
+`egress_binding` has no `account` and no destination set to transcribe, so there
+is no grant to build rather than a grant that may not be built. One is the
+field's own meaning: `established_by` is "the `id` of the answered `CONFIRM`'s
+recorded decision" (§1), so a record naming a decision that was not a `CONFIRM`
+is a record whose field is false. The remaining two are §2's content floor, and
+they are the pair the charge actually reaches — but `core` already states this
+class of rule about this pair of arms: `PermissionDecision.authorises` answers
+`False` for an `OriginUnrecordedBinding` against every request (ADR-0184 §6), and
+`ConfirmationEgress` requires `planned_with_external_content` with no default
+rather than admit a fabricated one (ADR-0184 §8). Refusing to let those two arms
+establish a *standing* authorisation is the same rule, one record over, and it is
+decidable from the decision alone with no store, no setting and no seam.
+
+*And `permissions/` is the one place a later surface cannot reach.* The
+`interface adapters do not import subsystems directly` contract forbids
+`interfaces → permissions` mechanically, and golden rule 1 keeps a concrete
+`permissions` module out of `orchestration`, so a builder there is reachable only
+through a fourth Protocol or an engine member — both of which §13 defers, which
+is the gap this clause was opened to close. `RecipientGrantStore.record` cannot
+carry the checks either: it is never given the decision (§1), which is the same
+reason it cannot validate `established_by`.
 
 **It is a function and not a fourth Protocol, and not a surface.** A Protocol
 would be a seam with one implementation and no second caller (ADR-0045 §1), and
@@ -2536,6 +2599,16 @@ narrowings of one store, not three implementations.
 > which is the one failure the bounded read exists to prevent, and no other test
 > in this section reaches it.
 
+> **Normative.** The lane ships `recent`'s **ordering** test in the same suite,
+> over records recorded in an order that is not the answer's: an older
+> `decided_at` recorded **after** a newer one, and two sharing a `decided_at`
+> whose ids are recorded in **descending** code-point order. The answer is ordered
+> by `decided_at` descending, ties broken by `id` ascending (§1). A store
+> returning insertion order passes the limit, wide-limit, detachment and
+> lowered-ceiling tests and returns the wrong sequence on both halves; nothing
+> else in this section reaches the clause, and the tie-break in particular is the
+> half a single-record fixture can never fail.
+
 > **Normative.** The lane ships the **wide positive limit** in the same suite:
 > `recent(limit=2**63)` returns every record available and raises nothing. The
 > contract admits every strictly positive integer, and a store passing the value
@@ -2650,8 +2723,8 @@ obligation (ADR-0089 §1).
   record, by the same component.
 
 **Why the injected read seam is not a supersession of ADR-0021 §3's purity
-clauses.** Review has raised this at rounds 9, 11, 15 and 16, on three different
-groundings, and it has been ruled **rejected** each time; the grounds are in
+clauses.** Review has raised this at rounds 9, 11, 15, 16 and 17, on four
+different groundings, and it has been ruled **rejected** each time; the grounds are in
 ADR-0021's and ADR-0097's own text and are recorded here so it does not have to
 be re-argued at every later reading. A reader meeting the question again should
 read the bullets below before treating it as open.
@@ -2665,6 +2738,16 @@ read the bullets below before treating it as open.
   sentence inside a rejected alternative about a **write** seam. None of them
   argues that unmarked prose obligates nothing, so none of them is reached by
   that point, and neither is the conclusion.
+- **The `ActionPolicy` contract does not forbid a policy holding this seam, and
+  round 17's reading of it is scoped away.** `core/protocols.py` says "no
+  implementation acquires a trail read, a store handle or a grant seam **in order
+  to discharge it**", where *it* is the external-content obligation stated two
+  paragraphs above the sentence — and it adds "ADR-0097 §7 forbids the last of
+  those outright", which is that section's ban on consulting either
+  **source**-grant seam, restated at §13. Neither reaches a `RecipientGrants` held
+  for §7's lookup, and §1 keeps the two apart mechanically: `covering` does not
+  read `planned_with_external_content` at all, so the external-content obligation
+  is discharged by the policy from the request and never from this seam.
 - **The clause carries its own condition.** §3's first bullet is "**`decide` must
   return `authorised_by is None`** from a policy constructed **with no
   authorisation source**. Today that is *every* policy". A policy constructed
