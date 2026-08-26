@@ -324,7 +324,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
       (for retrieval) and into the :class:`MemoryIngestor` writer (for
       persistence), so the closed learning loop is not silently open (ADR-0028 §4);
     * one :class:`InMemoryToolRegistry` object is injected as both the selecting
-      ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8);
+      ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8), and is handed
+      the ``InvocationLedger`` face of the one :class:`SqliteAuditTrail` — never
+      the trail itself (ADR-0192 §9);
     * the deferred-question queue (ADR-0078) is opened here, under the same data
       directory and owner-only file mode as the other Tier 1 stores, and joined to
       the façade's ordered shutdown — with its claim-token source left at its
@@ -916,7 +918,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
         # memory-backed `recall_memory` reads the *same* store the loop retrieves
         # from, so a recall sees what the user's memory holds.
-        tools = build_default_registry(memory=memory, egress=egress)
+        #
+        # **The invoker is handed the ledger face of `trail`, and never the trail**
+        # (ADR-0192 §9's wiring clause). One object satisfies `AuditTrail`,
+        # `InvocationLedger` and `InvocationCompleter` over one store, and each
+        # consumer is handed the face its job needs: the seam claims and completes,
+        # so it gets the ledger; it can neither record a `PermissionDecision`, nor
+        # read one, nor export, nor `clear` through it, so no decision write, no
+        # history read and no erasure reaches `tools/` (ADR-0192 §2). The
+        # narrowing is the parameter's annotation, which is what makes it a **type**
+        # rather than a prohibition an implementation is trusted to keep.
+        #
+        # **The same object as the trail the runner records decisions into**, not a
+        # second one over the same file. The ledger requires the decision it is
+        # passed to be equal to the decision the store holds under that id
+        # (ADR-0192 §1), so a second handle would refuse every claim under a ruling
+        # the runner had just recorded — and two tables keyed by one decision could
+        # diverge, which is the split ADR-0029 §8 refuses one seam over.
+        tools = build_default_registry(memory=memory, egress=egress, ledger=trail)
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read

@@ -23,7 +23,7 @@ other, and it refuses both mismatches before the deadline opens.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
@@ -127,10 +127,24 @@ class EgressToolImplementation(Protocol):
 BoundImplementation = ToolImplementation | EgressToolImplementation
 
 
-def _awaited(
-    implementation: BoundImplementation, call: ToolCall
-) -> Coroutine[Any, Any, FrozenJson]:
-    """Pair the call with the callable shape it needs, or refuse before the deadline.
+def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None:
+    """Refuse a callable whose shape and the call's egress binding disagree.
+
+    **The check, separated from creating the coroutine, because ADR-0192 §1 puts
+    the ledger claim between them.** "After ADR-0029 §2's three checks" is that
+    section's floor and not the whole ordering: the claim is appended after
+    *every* check that can raise a seam fault, and this pairing check is one of
+    them — it reads the registry's callable and not the call alone, so those three
+    do not subsume it. Claiming first would owe ADR-0192 §3 a completion carrying
+    an outcome ADR-0029 computes for no ``ToolBindingError``: that error is given
+    no ``ToolResult`` at all, only the executor's ``FAILED`` step. Performing the
+    check without creating the coroutine is what lets the claim sit between the
+    two without a never-awaited coroutine left behind on a refused claim.
+
+    The cost is nothing — this enters no callable, performs no I/O and opens no
+    deadline — and the gain is that a ``ToolBindingError`` stays exactly where
+    ADR-0029 and ADR-0034 §1 already put it: a pre-callable exit with no claim
+    appended and no row written.
 
     **Both mismatches are seam faults and both fail closed**, which is why they are
     checked here rather than left to whichever side would notice first:
@@ -155,10 +169,6 @@ def _awaited(
         implementation: The registry's callable for the call's tool.
         call: The revalidated, detached call.
 
-    Returns:
-        The unawaited coroutine, created outside the deadline so that
-        :func:`run_bound_call` starts the clock and the call together.
-
     Raises:
         ToolBindingError: If the callable's shape and the call's binding disagree.
     """
@@ -171,11 +181,7 @@ def _awaited(
                 f"destination set for it to transmit under (ADR-0148 §4, ADR-0152 §8)"
             )
             raise ToolBindingError(msg)
-        return implementation.invoke_bound(
-            call.request.parameters,
-            idempotency_key=call.idempotency_key,
-            egress_binding=binding,
-        )
+        return
     if binding is not None:
         msg = (
             f"tool {call.request.tool.id!r} was authorised as an egress call and is bound to a "
@@ -183,6 +189,33 @@ def _awaited(
             f"was authorised (ADR-0148 §4)"
         )
         raise ToolBindingError(msg)
+
+
+def _awaited(
+    implementation: BoundImplementation, call: ToolCall
+) -> Coroutine[Any, Any, FrozenJson]:
+    """Return the unawaited coroutine for ``call``, having checked the pairing.
+
+    Created outside the deadline so that :func:`run_bound_call` starts the clock
+    and the call together.
+
+    Raises:
+        ToolBindingError: If the callable's shape and the call's binding disagree
+            (:func:`checked_pairing`). Re-checked here rather than assumed, so
+            this function is safe to call on its own; the check is pure, so a
+            caller that already ran it pays nothing.
+    """
+    checked_pairing(implementation, call)
+    if isinstance(implementation, EgressToolImplementation):
+        return implementation.invoke_bound(
+            call.request.parameters,
+            idempotency_key=call.idempotency_key,
+            # `checked_pairing` refused this call unless the binding is present,
+            # and it is a pure check with no suspension point, so nothing can have
+            # removed it between there and here. A second `is None` branch would
+            # be code no input reaches.
+            egress_binding=cast("EgressBinding", call.request.egress_binding),
+        )
     return implementation(call.request.parameters, idempotency_key=call.idempotency_key)
 
 
@@ -382,6 +415,7 @@ __all__ = [
     "BoundImplementation",
     "EgressToolImplementation",
     "ToolImplementation",
+    "checked_pairing",
     "internal_failure",
     "run_bound_call",
 ]

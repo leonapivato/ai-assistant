@@ -33,11 +33,13 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import ToolCall, ToolDefinition
-from ai_assistant.tools.invocation import BoundImplementation, run_bound_call
+from ai_assistant.tools.consume import consumed_call
+from ai_assistant.tools.invocation import BoundImplementation, checked_pairing, run_bound_call
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import ToolResult
 
 
@@ -172,7 +174,12 @@ class InMemoryToolRegistry:
     it, and a lock here would otherwise be cost with no reader.
     """
 
-    def __init__(self, tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = ()) -> None:
+    def __init__(
+        self,
+        tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = (),
+        *,
+        ledger: InvocationLedger | None = None,
+    ) -> None:
         """Create a registry, optionally registering ``tools`` in order.
 
         Args:
@@ -180,6 +187,23 @@ class InMemoryToolRegistry:
                 a convenience for composition roots that know the full set up
                 front. A pair rather than a definition alone because ADR-0029
                 §1's biconditional has no room for a declared-but-unrunnable id.
+            ledger: The :class:`~ai_assistant.core.protocols.InvocationLedger`
+                :meth:`invoke` claims and completes through (ADR-0192 §1, §3), and
+                **never** an ``AuditTrail``: the narrow face can neither record a
+                ``PermissionDecision``, nor read one, nor export, nor ``clear``,
+                so no decision write, no history read and no erasure reaches
+                `tools/` through this seam (ADR-0192 §2).
+
+                **Keyword-only and defaulted, and the default is not the wiring.**
+                The composition root always supplies one and a wiring test pins
+                that (ADR-0192 §9), so no deployed invoker is ever without it.
+                What the default buys is an arrangement for a test about
+                something else — a fixture driving the binding checks, the
+                deadline or the classification has no authorisation to record and
+                no consume to observe, and requiring it to open a trail would put
+                the whole of ADR-0192 into every such fixture in the tree. An
+                invoker holding none appends nothing and refuses nothing on the
+                ground that an authorisation is spent.
 
         Raises:
             ToolRegistrationError: If ``tools`` contains two definitions sharing
@@ -187,6 +211,7 @@ class InMemoryToolRegistry:
         """
         self._live: dict[str, _Binding] = {}
         self._spent: dict[str, _Binding] = {}
+        self._ledger = ledger
         for tool, implementation in tools:
             self.register(tool, implementation)
 
@@ -313,16 +338,36 @@ class InMemoryToolRegistry:
         """Run ``call`` against this registry's own binding for it (ADR-0029 §1, §2).
 
         Three checks, in this order, before the callable is reached; each reads
-        the revalidated copy and never the argument.
+        the revalidated copy and never the argument. A **fourth** follows them —
+        the callable-shape pairing check — and then, where this registry holds a
+        ledger, the claim (ADR-0192 §1).
+
+        **After the claim, this method performs no check that can raise a seam
+        fault.** That is stated as a property rather than as a list, and it is
+        what makes ADR-0192 §3's completion obligation total: every exit reached
+        past the claim has an outcome ADR-0029 §§3-4 compute, so none of them
+        needs an outcome invented for it. A lane adding a check moves it above the
+        claim rather than teaching §3 a new outcome.
 
         See :meth:`~ai_assistant.core.protocols.ToolInvoker.invoke` for the
-        contract this satisfies.
+        contract this satisfies, and ADR-0192 §1 and §3 for the consume.
 
         Raises:
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
             ToolBindingError: If the call does not survive revalidation, names
                 an unbound id, carries a definition unequal to this registry's
-                own, or is not authorised by its decision.
+                own, is not authorised by its decision, or pairs a callable shape
+                with an egress binding that disagrees with it. **No claim is
+                appended for any of them.**
+            AuthorisationSpentError: If the ledger refuses the claim because the
+                authorisation is spent (ADR-0192 §1).
+            UnrecordedAuthorisationError: If the trail holds no decision equal to
+                this call's under its id, or holds one that is not an ``ALLOW``.
+            AuditError: If the claim append failed with anything that is not an
+                ``AssistantError``. A failure of the **completion** append is
+                absorbed instead and reaches the operator as a diagnostic: the
+                obligation is to make the call, and a completion that failed does
+                not change what the act produced (ADR-0192 §3).
             CancelledError: If the invoking task is cancelled from outside.
         """
         checked_timeout(timeout)
@@ -354,9 +399,25 @@ class InMemoryToolRegistry:
             )
             raise ToolBindingError(msg)
 
-        return await run_bound_call(
-            binding.implementation,
+        # The fourth check, and the last thing before the claim: it reads the
+        # registry's callable rather than the call, so ADR-0029 §2's three do not
+        # subsume it, and a `ToolBindingError` from it must stay where ADR-0034 §1
+        # already puts it — a pre-callable exit with no row written (ADR-0192 §1).
+        checked_pairing(binding.implementation, checked)
+
+        async def act() -> ToolResult:
+            return await run_bound_call(
+                binding.implementation,
+                definition=binding.definition,
+                call=checked,
+                timeout=timeout,
+            )
+
+        if self._ledger is None:
+            return await act()
+        return await consumed_call(
+            ledger=self._ledger,
             definition=binding.definition,
-            call=checked,
-            timeout=timeout,
+            decision=checked.decision,
+            act=act,
         )
