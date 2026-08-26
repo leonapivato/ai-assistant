@@ -31,6 +31,7 @@ no drain hook and no lifecycle obligation to ``ToolInvoker``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -164,9 +165,7 @@ async def _driven(
     return task.result(), absorbed
 
 
-def _diagnose(
-    operation: str, error: BaseException, outcome: ToolOutcome | None = None
-) -> BaseException | None:
+def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None = None) -> None:
     """Report an append failure to the operator, in enumerated fields only.
 
     **Three fields exhaust it** (ADR-0192 §3): the ledger operation, always; the
@@ -183,63 +182,49 @@ def _diagnose(
     because ``DurableIdentifier`` is a non-blank string a caller minted and
     ADR-0031 §5 records that such a value is not contractually log-safe.
 
-    **This never raises, and that is load-bearing rather than defensive.**
-    ``fault_class_of`` guards its ``__name__`` read against ``Exception`` and
-    deliberately not ``BaseException``, "so a ``CancelledError`` raised *by the
-    name read* is delivered onward as ADR-0060 §1 requires" — so a hostile
-    metaclass can raise one out of the classifier. Letting it leave *this* frame
-    would carry it past the disposition below and decide the call's exit: on the
-    claim path a failure whose count was unmoved would leave as a
-    ``CancelledError`` instead of the ``AuditError`` ADR-0192 §1 requires, so the
-    executor would record a call that provably never ran as interrupted; on the
-    completion path it would discard a ``ToolResult`` the tool had already
-    produced, which §3 calls the one outcome worse than an incomplete record. So
-    the field is **omitted** — which is §3's own shape for an exception no class
-    can be read from, not a literal invented for the position — and the
-    classifier's own failure is handed back to the path's rules.
+    **The classifier is not guarded here, and that is the clause rather than an
+    omission.** ``fault_class_of`` guards its ``__name__`` read against
+    ``Exception`` and deliberately not ``BaseException``, "so a ``CancelledError``
+    raised *by the name read* is delivered onward as ADR-0060 §1 requires" — so a
+    hostile metaclass can raise one out of the classifier. ADR-0192 §3 says of
+    that exception that "it leaves the emitting frame", and that everything not a
+    ``CancelledError`` propagates "with **no diagnostic standing in for it**". So
+    it leaves *before* the emission below is reached: no diagnostic is written at
+    all, and the call site disposes of the exception by this path's own rules,
+    which is where the ``Task.cancelling()`` count that classifies a
+    ``CancelledError`` can be read. An earlier draft caught it here, omitted the
+    field and emitted the diagnostic anyway; both halves are what §3 forbids.
 
-    Returns:
-        The ``BaseException`` the class read raised, where one did, for the caller
-        to attach as context. ``None`` otherwise.
+    **The emission is guarded, and that is a different subject.** §3 governs the
+    *classifier* — what may be read off an exception and rendered. It says nothing
+    about the logging pipeline, and ADR-0004 §5 and ADR-0119 govern what a
+    diagnostic may carry rather than what happens when the emitter itself is
+    broken. A configured structlog processor that raises would otherwise leave
+    this frame ahead of the absorption below and hand the caller its own failure
+    in place of a ``ToolResult`` the tool had already produced — a ``SUCCEEDED``
+    side effect reported as failed because a log sink was, which is the fail-open
+    ADR-0034 §1 exists to prevent and the one outcome §3 calls worse than an
+    incomplete record. So a broken emitter costs the **diagnostic** and never the
+    result. Only an ``Exception`` is dropped: a ``BaseException`` from the emitter
+    leaves this frame exactly as the classifier's does, and the call site disposes
+    of it the same way.
+
+    Raises:
+        BaseException: Whatever the class read raised, where one did, and whatever
+            the emitter raised that is not an ``Exception``. Neither is inspected,
+            annotated or chained on the way out — the object came from a
+            collaborator this seam did not write, so ``__setattr__`` is that
+            collaborator's code, and one that rejects the assignment would replace
+            the exception §3 requires unchanged with the failure of the attempt to
+            annotate it.
     """
     fields: dict[str, object] = {"operation": operation}
-    unclassifiable: BaseException | None = None
     if isinstance(error, Exception):
-        try:
-            fields["fault_class"] = fault_class_of(error)
-        except BaseException as exc:
-            unclassifiable = exc
+        fields["fault_class"] = fault_class_of(error)
     if outcome is not None:
         fields["outcome"] = outcome
-    _log.warning(APPEND_FAILED, **fields)
-    return unclassifiable
-
-
-def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
-    """Return the exception this path must now dispose of.
-
-    :func:`_diagnose` hands back the ``BaseException`` its class read raised, where
-    one did — ``fault_class_of`` guards that read against ``Exception`` and
-    deliberately not ``BaseException``, so a hostile metaclass can raise one out of
-    the classifier. ADR-0192 §3 gives it no exemption: it "is governed by this
-    section's own clauses on a ``BaseException`` raised there — the
-    ``CancelledError`` branches by the ``Task.cancelling()`` count, everything else
-    propagating unchanged with no diagnostic standing in for it".
-
-    So it **becomes** what the caller disposes of, rather than escaping past the
-    disposition entirely — which would leave a failed claim with an unmoved count
-    as a ``CancelledError`` instead of the ``AuditError`` §1 requires.
-
-    **It is returned untouched: not inspected, not annotated, not chained.** An
-    earlier version attached the append's own failure as its ``__context__``, which
-    reads as free bookkeeping and is not: the object came from a collaborator this
-    seam did not write, so ``__setattr__`` is that collaborator's code. One that
-    rejects the assignment raises *its own* exception from this frame, and the
-    thing ADR-0192 §3 requires to propagate unchanged is replaced by the failure of
-    the attempt to annotate it. The append's failure is not lost by declining to
-    attach it — it is what the diagnostic above was just emitted for.
-    """
-    return error if unclassifiable is None else unclassifiable
+    with contextlib.suppress(Exception):
+        _log.warning(APPEND_FAILED, **fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +314,16 @@ async def _complete(
         return _Appended(None, cancelled)
     error = appended
 
-    error = _disposed(error, _diagnose(COMPLETION, error, completion.outcome))
+    try:
+        _diagnose(COMPLETION, error, completion.outcome)
+    except BaseException as exc:
+        # ADR-0192 §3 gives the classifier's own failure no exemption: it "is
+        # governed by this section's own clauses on a ``BaseException`` raised
+        # there — the ``CancelledError`` branches by the ``Task.cancelling()``
+        # count, everything else propagating unchanged". So it *becomes* what
+        # this path disposes of, rather than escaping past the disposition and
+        # deciding the call's exit on its own. Rebound, never annotated.
+        error = exc
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -406,7 +400,14 @@ async def _claimed(
         )
 
     error = appended
-    error = _disposed(error, _diagnose(CLAIM, error))
+    try:
+        _diagnose(CLAIM, error)
+    except BaseException as exc:
+        # As on the completion path (ADR-0192 §3). Letting it escape here would
+        # leave a failed claim whose count never moved as a ``CancelledError``
+        # instead of the ``AuditError`` §1 requires, so the executor would record
+        # a call that provably never ran as interrupted.
+        error = exc
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error

@@ -28,6 +28,7 @@ same observable behaviour.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol
@@ -404,52 +405,6 @@ def _internal(definition: ToolDefinition, exc: BaseException) -> ToolResult:
     )
 
 
-class AdmittingLedger:
-    """An ``InvocationLedger`` that records an authorisation it has not seen before.
-
-    **For a consumer's test that drives the seam without the runner in front of
-    it.** ADR-0192 §1 has ``claim_invocation`` require the decision it is passed to
-    equal the one the store holds under that id, and it is ``StepRunner`` that puts
-    it there — recording the ruling immediately before executing under it. A test
-    about the *executor* has no runner, so every call would be refused
-    ``UnrecordedAuthorisationError`` for a reason that has nothing to do with what
-    it is testing.
-
-    So this stands in for that one act and for nothing else: it records a decision
-    on first sight, then delegates to the real :class:`FakeAuditTrail` behind it.
-    **Every rule of the consume is still the real one** — a second act under one
-    spendable authorisation is still refused ``AuthorisationSpentError``, an open
-    claim still refuses the next, and the append order is still the store's. A test
-    that wants the unrecorded refusal itself passes a plain trail instead.
-    """
-
-    def __init__(self, trail: FakeAuditTrail | None = None) -> None:
-        """Admit authorisations into ``trail``, or into a fresh one."""
-        self.trail = FakeAuditTrail() if trail is None else trail
-
-    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
-        """Record ``decision`` if the trail has not got it, then claim under it."""
-        if await self.trail.get(decision.id) is None:
-            await self.trail.record(decision)
-        return await self.trail.claim_invocation(decision=decision)
-
-    async def complete_invocation(
-        self,
-        *,
-        claim_id: str,
-        outcome: ToolOutcome,
-        incurred_cost: ToolCost,
-        failure_kind: ToolFailureKind | None = None,
-    ) -> ToolInvocation:
-        """Complete ``claim_id``, exactly as the trail behind this would."""
-        return await self.trail.complete_invocation(
-            claim_id=claim_id,
-            outcome=outcome,
-            incurred_cost=incurred_cost,
-            failure_kind=failure_kind,
-        )
-
-
 def invoker_over(
     tools: Iterable[tuple[ToolDefinition, FakeToolImplementation]] = (),
     *,
@@ -603,49 +558,33 @@ async def _driven(
     return task.result(), absorbed
 
 
-def _diagnose(
-    operation: str, error: BaseException, outcome: ToolOutcome | None = None
-) -> BaseException | None:
+def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None = None) -> None:
     """Report an append failure in enumerated fields only (ADR-0192 §3).
 
     Three fields exhaust it: the operation, always; the fault class, where the
     exception is an ``Exception``; and the outcome, where the operation is a
     completion. No instance, no message, no cause chain and no identifier.
 
-    **It never raises**, for the reason `ai_assistant.tools.consume` states at
-    length: ``fault_class_of`` guards the ``__name__`` read against ``Exception``
-    and deliberately not ``BaseException``, so a hostile metaclass can raise one
-    out of the classifier — and one escaping here would carry past the disposition
-    below and decide the call's exit. The field is **omitted**, which is §3's own
-    shape for an exception no class can be read from, and the classifier's failure
-    is handed back to the path's rules.
+    **The classifier is unguarded and the emitter is guarded**, for the reason
+    `ai_assistant.tools.consume` states at length. ``fault_class_of`` lets a
+    ``BaseException`` from the ``__name__`` read propagate by design, and ADR-0192
+    §3 has it "leave the emitting frame" with no diagnostic standing in for it, so
+    it leaves before the emission is reached and the call site disposes of it. A
+    broken *emitter* is a different subject §3 does not discuss: an ``Exception``
+    from the logging pipeline costs the diagnostic and never the ``ToolResult``.
 
-    Returns:
-        The ``BaseException`` the class read raised, where one did.
+    Raises:
+        BaseException: Whatever the class read raised, and whatever the emitter
+            raised that is not an ``Exception`` — neither inspected, annotated nor
+            chained on the way out.
     """
     fields: dict[str, object] = {"operation": operation}
-    unclassifiable: BaseException | None = None
     if isinstance(error, Exception):
-        try:
-            fields["fault_class"] = fault_class_of(error)
-        except BaseException as exc:
-            unclassifiable = exc
+        fields["fault_class"] = fault_class_of(error)
     if outcome is not None:
         fields["outcome"] = outcome
-    _log.warning(APPEND_FAILED, **fields)
-    return unclassifiable
-
-
-def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
-    """Return the exception this path must dispose of, untouched.
-
-    See `ai_assistant.tools.consume` for the reasoning: a ``BaseException`` the
-    class read raised is governed by ADR-0192 §3's own clauses on one raised on
-    that path, and it is neither inspected nor annotated on the way — a hostile
-    ``__setattr__`` would otherwise replace the exception §3 requires unchanged
-    with the failure of the attempt to annotate it.
-    """
-    return error if unclassifiable is None else unclassifiable
+    with contextlib.suppress(Exception):
+        _log.warning(APPEND_FAILED, **fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -697,7 +636,12 @@ async def _complete(
         return _Appended(None, cancelled)
     error = appended
 
-    error = _disposed(error, _diagnose(COMPLETION, error, completion.outcome))
+    try:
+        _diagnose(COMPLETION, error, completion.outcome)
+    except BaseException as exc:
+        # The classifier's own failure becomes what this path disposes of, rather
+        # than escaping past the disposition (ADR-0192 §3). Rebound, not annotated.
+        error = exc
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -747,7 +691,11 @@ async def _claimed(
         )
 
     error = appended
-    error = _disposed(error, _diagnose(CLAIM, error))
+    try:
+        _diagnose(CLAIM, error)
+    except BaseException as exc:
+        # As on the completion path (ADR-0192 §3).
+        error = exc
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error
@@ -822,7 +770,6 @@ __all__ = [
     "APPEND_FAILED",
     "CLAIM",
     "COMPLETION",
-    "AdmittingLedger",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "authorised",
