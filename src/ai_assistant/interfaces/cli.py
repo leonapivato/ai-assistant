@@ -2274,7 +2274,7 @@ def invocations(
     happens to be on screen. Raise ``--limit`` to look further back.
 
     **What an outbound call did at the other end is not here and is not knowable
-    to me.** A row says whether the ruling it ran under was for an outbound call
+    to me.** A row says whether the ruling it **names** was for an outbound call
     and never who or where — that is on the ruling, in ``assistant decisions``. And
     when such a call finishes successfully, what that states is that I attempted it
     and the tool reported success, which is the most the record holds.
@@ -8506,7 +8506,7 @@ def _render_invocation(recorded: RecordedInvocation) -> None:
     )
     console.print(
         f"  [bold]Outbound call:[/] {'yes' if recorded.egress_call else 'no'} "
-        "[dim](whether the ruling this ran under carried an outbound binding; "
+        "[dim](whether the ruling this row names carried an outbound binding; "
         "who or where is not on this row)[/]"
     )
     console.print(
@@ -8545,7 +8545,7 @@ def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int)
     authorisation it names still stands, that the tool is still registered under
     the identifier printed, or that anything is still running.
 
-    **An empty page is not a claim that nothing ever ran.** ADR-0192 §1's
+    **An empty page is not a claim that nothing was ever attempted.** ADR-0192 §1's
     cancellation clause and §3's commit-state clause both admit paths where an
     attempt leaves fewer rows than a reader expects, so the one thing this surface
     must not do is turn an empty page into a statement the record declines to make.
@@ -8557,8 +8557,9 @@ def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int)
     if not recorded:
         console.print("[yellow]Nothing recorded.[/] No act on an authorisation is in this record.")
         console.print(
-            "[dim]That is not a claim that nothing ever ran: this record states what "
-            "it holds, and a fault can leave an act with fewer rows than it made.[/]"
+            "[dim]That is not a claim that nothing was ever attempted: this record "
+            "states what it holds, and a fault can leave an act with fewer rows than "
+            "it made.[/]"
         )
         return
     console.print(f"[bold]{len(recorded)}[/] row(s), newest recorded first:\n")
