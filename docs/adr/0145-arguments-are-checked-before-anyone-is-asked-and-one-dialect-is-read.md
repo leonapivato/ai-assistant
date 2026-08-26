@@ -1,7 +1,23 @@
 # 145. Arguments are checked against the declared schema before anyone is asked, and one dialect is read
 
-- Status: Accepted
+- Status: Accepted, §6's instance-half and residual-window paragraphs amended by
+  ADR-0196
 - Date: 2026-08-13
+- **Amended: 2026-08-26 by
+  [ADR-0196](0196-a-frozen-json-value-is-refused-past-a-fixed-depth-ceiling-measured-before-it-is-walked.md).**
+  Two passages of §6's argument are false about the system and were false when
+  they were written; ADR-0196 §7 names them and carries the measurements. §6's
+  instance-half paragraph says "a payload deep enough to matter exhausts the stack
+  on the way in, today" — no construction path reaches `_deep_freeze` with such a
+  payload, because pydantic-core validates the recursive `FrozenJson` alias first
+  and refuses well below the depth the walk survives. §6's "What that leaves,
+  stated exactly" paragraph says "there is a window: an instance deep enough that
+  the freeze survives and the evaluation does not" — the window is empty, because
+  evaluation cannot descend past the schema and §6 bounds the schema. No marked
+  clause of this ADR changes, and no implementation of it is wrong: §6's
+  `parameters_schema` depth bound stands exactly as ratified, and ADR-0196 §4
+  keeps its refusal reachable by placing the frozen-JSON ceiling strictly above
+  it.
 - Decides: what ADR-0016 §7 defers — "parameter validation against
   `parameters_schema`" — restated and re-deferred by ADR-0029 §7 and declined in
   passing by ADR-0037 §1. It settles the runtime dependency both deferrals name
