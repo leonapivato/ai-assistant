@@ -220,6 +220,29 @@ class ReportedOutput(BaseModel):
 > `dict` with an `incurred_cost` key, or for any other structural signal: a tool
 > returning JSON that happens to carry that key returns JSON.
 
+> **Normative.** `isinstance` admits a **subclass**, so **both** of the envelope's
+> fields are tool-authored reads and neither is read bare. The seam reads `output`
+> and `incurred_cost` **once each, under the guard §4 puts on a cost read**, into
+> local values, and reads neither off the envelope again. A subclass overriding
+> `__getattribute__`, or a field shadowed by a property, is therefore a defect the
+> seam absorbs rather than an exception escaping after ADR-0192 §1's claim has been
+> appended — which would leave a claim with no completion, exactly as §4 says of the
+> cost read and for the same reason.
+
+> **Normative.** The two reads' defects resolve **differently**, on §4's own subject
+> test rather than on their shared mechanism. A read of `incurred_cost` that raises
+> yields `UNKNOWN` and costs nothing else. A read of `output` that raises leaves the
+> seam with nothing to record as the call's result, so it takes the `INTERNAL` path
+> an unrepresentable output already takes (ADR-0029 §3) — **and the reported cost is
+> discarded with it**, because the two came off one object and a seam that kept half
+> of a misbehaving carrier would be arbitrating between two accounts a tool gave of
+> its own call, which ADR-0032 §6 declines to do.
+
+> **Normative.** Both reads precede §4's interruption re-read. That is what the
+> order there is for: an accessor that delivers a cancellation or lets the deadline
+> expire is seen by the check that follows **every** read of tool-authored state, and
+> the result is then discarded with its figure.
+
 > **Normative.** The envelope is **unwrapped at the seam and travels no further**.
 > `ToolResult.output` receives `envelope.output`; `ToolResult.incurred_cost`
 > receives the validated cost (§4). No `ReportedOutput` reaches a `ToolResult`, a
@@ -314,8 +337,9 @@ class ReportedOutput(BaseModel):
 > the read. An implementation that checked interruption before the read would build a
 > result carrying a figure obtained after the seam had stopped waiting; one that
 > never re-read it would let the discard rule below silently not fire. So the
-> sequence at each exit is: read the cost under the guard, then evaluate
-> interruption, then build the result — and where interruption answers, the cost is
+> sequence at each exit is: read every tool-authored value under the guard — the
+> envelope's two fields at the success exit (§2), the carrier's three attributes at
+> the classified-failure exit — then evaluate interruption, then build the result — and where interruption answers, the cost is
 > discarded with the classification it accompanied.
 
 > **Normative.** A cost that does **not** survive the round-trip **or whose read
@@ -765,6 +789,12 @@ forbids.
 > - a deadline expiry and a delivered cancellation each discard a reported cost with
 >   the classification they pre-empt, and the row records `UNKNOWN`;
 > - a returned JSON mapping carrying an `incurred_cost` key is output, not a report;
+> - a `ReportedOutput` **subclass** whose `output` accessor raises takes the
+>   `INTERNAL` path with its reported cost discarded, the completion written and the
+>   claim closed;
+> - a `ReportedOutput` subclass whose `output` accessor **cancels the invoking task**
+>   has its result and its figure discarded: the cancellation propagates unchanged
+>   and the interruption re-read is what sees it;
 > - a `ToolCost` subclass whose `model_dump()` **raises** yields `UNKNOWN` with the
 >   outcome and output intact, the completion written and the claim closed — nothing
 >   escapes `invoke` and no claim is left open;
