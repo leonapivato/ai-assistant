@@ -205,9 +205,17 @@ def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None 
     side effect reported as failed because a log sink was, which is the fail-open
     ADR-0034 §1 exists to prevent and the one outcome §3 calls worse than an
     incomplete record. So a broken emitter costs the **diagnostic** and never the
-    result. Only an ``Exception`` is dropped: a ``BaseException`` from the emitter
-    leaves this frame exactly as the classifier's does, and the call site disposes
-    of it the same way.
+    result — and never the reported cause either, since anything leaving this
+    frame stands in for the append failure the call site is about to dispose of.
+
+    **A ``CancelledError`` from the emitter is dropped with the rest**, and that
+    is not the classifier's rule being widened. Both call sites read the
+    ``Task.cancelling()`` count *before* calling this, and the emission is
+    synchronous, so one raised by a processor is invented with nothing cancelled
+    — ADR-0031 §2's case, which ADR-0029 §4 makes a fault rather than a
+    cancellation. Every other ``BaseException`` from the emitter still leaves this
+    frame exactly as the classifier's does, and the call site disposes of it the
+    same way.
 
     Raises:
         BaseException: Whatever the class read raised, where one did, and whatever
@@ -223,7 +231,7 @@ def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None 
         fields["fault_class"] = fault_class_of(error)
     if outcome is not None:
         fields["outcome"] = outcome
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception, asyncio.CancelledError):
         _log.warning(APPEND_FAILED, **fields)
 
 

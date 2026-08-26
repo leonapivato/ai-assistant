@@ -609,7 +609,10 @@ def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None 
     §3 has it "leave the emitting frame" with no diagnostic standing in for it, so
     it leaves before the emission is reached and the call site disposes of it. A
     broken *emitter* is a different subject §3 does not discuss: an ``Exception``
-    from the logging pipeline costs the diagnostic and never the ``ToolResult``.
+    from the logging pipeline costs the diagnostic and never the ``ToolResult``,
+    and so does a ``CancelledError`` — both call sites read the cancellation count
+    before this, and the emission is synchronous, so one raised by a processor is
+    invented with nothing cancelled (ADR-0031 §2).
 
     Raises:
         BaseException: Whatever the class read raised, and whatever the emitter
@@ -621,7 +624,7 @@ def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None 
         fields["fault_class"] = fault_class_of(error)
     if outcome is not None:
         fields["outcome"] = outcome
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception, asyncio.CancelledError):
         _log.warning(APPEND_FAILED, **fields)
 
 
