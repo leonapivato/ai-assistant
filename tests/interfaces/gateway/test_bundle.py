@@ -4485,42 +4485,58 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     assert 'const named = typeof body.fault === "string";' in functions[_ACT_SITE]
 
 
-def test_a_read_reply_carrying_no_outcome_resolves_nothing() -> None:
-    """Round 9's blocker: round 8's, one step in.
+def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
+    """Rounds 9 and 10, which are round 8's blocker one and two steps in.
 
     ``asObject`` answers ``{}`` for a ``2xx`` body that parsed to something that is not
-    an object, and a well-formed object may still be missing ``outcome`` — a
+    an object; a well-formed object may still be missing ``outcome``; and an ``outcome``
+    that *is* an object may still not carry what ``renderOutcome`` reads. A
     proxy-substituted or reassembled ``200`` is the reachable case, the same one round 6
-    admitted for a refusal. ``renderOutcome(undefined, …)`` then throws on
-    ``outcome.capture_degraded``, **outside** this function's ``try``: the token stayed
-    ``spent`` and never ``unresolved``, the row's ``finally`` cleared ``answering``, and
-    every row of the park read "That park has been answered from this page" for an
-    outcome nothing had read.
+    admitted for a refusal. ``renderOutcome`` was called **outside** this function's
+    ``try``, so any of those threw there: the token stayed ``spent`` and never
+    ``unresolved``, the row's ``finally`` cleared ``answering``, and every row of the
+    park read "That park has been answered from this page" for an outcome nothing had
+    read.
+
+    **The render is the test, and not a shape check.** Round 9 checked that the outcome
+    was an object and round 10 walked ``{}`` straight past it — any enumeration of
+    members needs re-deriving every time ``renderOutcome`` reads a new one, and getting
+    it wrong reinstates the same false resolution silently. What the page needs to know
+    is whether it can put the answer on screen, and running the render is what answers
+    that. A defect in ``renderOutcome`` itself lands here too, reported as not known:
+    the conservative direction, and the right one for a consent surface, because the
+    alternative is not a truthful crash but a park announced as answered on the strength
+    of an exception.
 
     A read response is not by itself a landed one. ADR-0177 §7's third clause sorts a
-    *refusal* into landed or not-known and says nothing that turns an unreadable success
-    into a resolution, so ADR-0139 §4's third outcome is what this is — and the ending
-    is the one every other not-known arm takes: the token is recorded unresolved, the
-    listing is re-read without being waited on, and the fault slot names the cause.
+    *refusal* into landed or not-known and says nothing that turns an unrenderable
+    success into a resolution, so ADR-0139 §4's third outcome is what this is — and the
+    ending is the one every other not-known arm takes.
     """
     script = _code("app.js")
     answering = _functions(script)["answerConfirmation"]
 
-    guard = 'if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome)) {'
-    assert guard in answering
-    # It stands between the refusal branch and the render, so nothing reaches
-    # ``renderOutcome`` without having been checked.
-    assert answering.index(guard) < answering.index("renderOutcome(outcome, chosenAt);")
-    assert "renderOutcome(body.outcome" not in answering
-    # And the ending is the not-known one, in the order every other arm uses.
-    taken = answering[answering.index(guard) :]
-    for step in ("unresolved.add(token);", "readPending(false);", "PARK_REPLY_UNREADABLE"):
-        assert step in taken.split("renderOutcome(outcome")[0], step
+    assert "try {\n    renderOutcome(body.outcome, chosenAt);\n  } catch (_) {" in answering
+    # No shape check stands in front of it: enumerating members is the thing round 10
+    # refuted, so a re-introduced list would be the same defect wearing a guard.
+    assert "Array.isArray(outcome)" not in answering
+    # The ending is the not-known one, in the order every other arm uses, and it clears
+    # whatever the throw left half-rendered rather than leaving it beside the sentence.
+    caught = answering[answering.index("renderOutcome(body.outcome, chosenAt);") :]
+    caught = caught[: caught.index("readPending(true)")]
+    for step in (
+        'show("answer", false);',
+        "unresolved.add(token);",
+        "readPending(false);",
+        'fault(PARK_REPLY_UNREADABLE, "confirmations");',
+    ):
+        assert step in caught, step
+    assert "spent.delete" not in caught
 
-    # Its own sentence, because the cause is its own: the gateway answered, and what it
-    # answered with carried nothing this page could read.
+    # Its own sentence, because the cause is its own: the gateway answered, and the
+    # answer is what could not be read.
     said = _constant(script, "PARK_REPLY_UNREADABLE")
-    assert "carried no outcome this browser" in said
+    assert "could not read an outcome from" in said
     assert "not known" in said
     assert "Nothing was re-sent and nothing was cancelled." in said
     assert said.rstrip().endswith("PARK_ROUTE_BACK")

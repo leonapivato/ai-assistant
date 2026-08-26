@@ -1304,19 +1304,24 @@ const PARK_REFUSAL_NOT_KNOWN =
   "Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
 
-// **A reply that was read and carries no outcome** (round 9), which is round 8's
-// blocker one step in: `asObject` answers `{}` for a `2xx` body that parsed to
-// something that is not an object, and a well-formed object may still be missing
-// `outcome` — a proxy-substituted or truncated-then-reassembled `200` is the reachable
-// case, the same one round 6 admitted for a refusal.
+// **A reply that was read and cannot be made into an answer** (rounds 9 and 10), which
+// is round 8's blocker one step in: `asObject` answers `{}` for a `2xx` body that
+// parsed to something that is not an object, a well-formed object may still be missing
+// `outcome`, and an `outcome` that is present may still not carry what `renderOutcome`
+// reads. A proxy-substituted or truncated-then-reassembled `200` is the reachable case,
+// the same one round 6 admitted for a refusal.
 //
 // A read response is not by itself a landed one, and this is the arm where the page
 // read a response and still cannot say what happened: ADR-0177 §7's third clause sorts
 // a *refusal* into landed or not-known, and says nothing that turns an unreadable
 // success into a resolution. ADR-0139 §4's third outcome is what this is.
+//
+// **Cause-neutral about which of the three shapes it was**, for `PARK_NOT_KNOWN`'s
+// reason: the owner's position is the same in all of them, and naming the one that
+// happened would be a distinction drawn from a body this page could not read.
 const PARK_REPLY_UNREADABLE =
-  "The gateway answered that request and the answer carried no outcome this browser " +
-  "could read. So what became of the park is not known: the action may have been " +
+  "The gateway answered that request and this browser could not read an outcome from " +
+  "the answer. So what became of the park is not known: the action may have been " +
   "carried out, with only the account of it lost. " +
   "Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
@@ -1745,28 +1750,44 @@ async function answerConfirmation(token, approved, stopping) {
     spent.delete(token);
     return;
   }
-  // **What was read has to be an outcome before it is rendered as one** (round 9).
-  // `renderOutcome(undefined, …)` throws on `outcome.capture_degraded`, and it throws
-  // *outside* the `try` above: the token stayed `spent` and never `unresolved`, the
-  // row's `finally` cleared `answering`, and every row of the park then read "That park
-  // has been answered from this page" for an outcome nothing had read. That is the
-  // resolution ADR-0139 §4 forbids, reached through the last door in this function.
+  // **An answer this page cannot put on screen is not one it has read** (rounds 9 and
+  // 10). `renderOutcome` reads the outcome's members from its first lines —
+  // `capture_degraded`, then `reply`, then `steps.length` — and it was called *outside*
+  // the `try` above. A `2xx` carrying no outcome, or one whose members are not the ones
+  // this page renders, threw there: the token stayed `spent` and never `unresolved`,
+  // the row's `finally` cleared `answering`, and every row of the park then read "That
+  // park has been answered from this page" for an outcome nothing had read. That is
+  // exactly the resolution ADR-0139 §4 forbids, reached through the last door in this
+  // function.
   //
-  // The check is the shape and not the members, because a body carrying an outcome this
-  // page renders badly is a different failure from one carrying no outcome at all.
+  // **The render is the test, rather than a shape check that has to enumerate what
+  // renders.** Round 9 checked that the outcome was an object and round 10 walked `{}`
+  // straight past it: any list of members would need re-deriving every time
+  // `renderOutcome` reads a new one, and getting it wrong reinstates the same false
+  // resolution silently. What this page actually needs to know is whether it can put
+  // the answer on screen, and running the render is the only thing that answers that.
+  //
+  // A defect in `renderOutcome` itself therefore also lands here, reported as an
+  // outcome that is not known. That is the conservative direction and the right one for
+  // a consent surface: the alternative on offer is not a truthful crash, it is a park
+  // announced as answered on the strength of an exception.
   //
   // `ask` and `askStreaming` reach `renderOutcome` the same unchecked way and are left
   // alone here: neither spends a consent token, so a throw there is a console error and
   // a panel that does not update rather than a park falsely reported as resolved. Still
   // wrong, and filed as #1622 rather than absorbed.
-  const outcome = body.outcome;
-  if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome)) {
+  try {
+    renderOutcome(body.outcome, chosenAt);
+  } catch (_) {
+    // Whatever reached the screen before the throw is not an answer, so it does not
+    // stay beside a line saying the outcome is not known — `ask`'s own move where what
+    // came back was not an answer.
+    show("answer", false);
     unresolved.add(token);
     readPending(false);
     fault(PARK_REPLY_UNREADABLE, "confirmations");
     return;
   }
-  renderOutcome(outcome, chosenAt);
   // Read again, and **after** the guard on this token has done its work rather than
   // inside it: this is the best-effort tidy-up of what is left on screen, and no other
   // park's answer waits on it.
