@@ -216,7 +216,7 @@ def _diagnose(
 
 
 def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
-    """Return the exception this path must now dispose of, and keep the other.
+    """Return the exception this path must now dispose of.
 
     :func:`_diagnose` hands back the ``BaseException`` its class read raised, where
     one did — ``fault_class_of`` guards that read against ``Exception`` and
@@ -226,18 +226,20 @@ def _disposed(error: BaseException, unclassifiable: BaseException | None) -> Bas
     ``CancelledError`` branches by the ``Task.cancelling()`` count, everything else
     propagating unchanged with no diagnostic standing in for it".
 
-    So it **becomes** what the caller disposes of, rather than being swallowed
-    behind the append's own failure. Both survive: the append's failure is attached
-    as its context, so nothing is lost from the chain a caller can walk. What is
-    ruled out is the classifier deciding the exit *by escaping* — which would carry
-    it past the disposition entirely, leaving a failed claim with an unmoved count
+    So it **becomes** what the caller disposes of, rather than escaping past the
+    disposition entirely — which would leave a failed claim with an unmoved count
     as a ``CancelledError`` instead of the ``AuditError`` §1 requires.
+
+    **It is returned untouched: not inspected, not annotated, not chained.** An
+    earlier version attached the append's own failure as its ``__context__``, which
+    reads as free bookkeeping and is not: the object came from a collaborator this
+    seam did not write, so ``__setattr__`` is that collaborator's code. One that
+    rejects the assignment raises *its own* exception from this frame, and the
+    thing ADR-0192 §3 requires to propagate unchanged is replaced by the failure of
+    the attempt to annotate it. The append's failure is not lost by declining to
+    attach it — it is what the diagnostic above was just emitted for.
     """
-    if unclassifiable is None:
-        return error
-    if unclassifiable.__context__ is None:
-        unclassifiable.__context__ = error
-    return unclassifiable
+    return error if unclassifiable is None else unclassifiable
 
 
 @dataclass(frozen=True, slots=True)

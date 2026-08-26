@@ -1790,12 +1790,19 @@ class ToolInvokerContract:
         inside a retained append, which is the one thing §3 declines to state.
         """
 
+        # A single instance, so the case can assert **identity** rather than class:
+        # ADR-0192 §3 requires this exception to propagate *unchanged*, and an
+        # implementation that annotates it on the way — attaching the append's
+        # failure as its context, say — hands the caller whatever a hostile
+        # ``__setattr__`` raises instead of the exception itself.
+        interrupt = KeyboardInterrupt("the metaclass refuses to be named")
+
         class Unnameable(type):
             """Refuses to be named, with a ``BaseException`` the guard lets pass."""
 
             def __getattribute__(cls, name: str) -> object:
                 if name == "__name__":
-                    raise KeyboardInterrupt
+                    raise interrupt
                 return super().__getattribute__(name)
 
         trail = FakeAuditTrail()
@@ -1814,8 +1821,10 @@ class ToolInvokerContract:
             except BaseException as exc:
                 raised = exc
 
-        assert raised is not None, "the classifier's own failure is not absorbed"
-        assert not isinstance(raised, AuditError), "and is not translated into one"
+        assert raised is interrupt, (
+            "the classifier's own failure propagates unchanged — neither absorbed, "
+            "nor translated, nor replaced by the failure of annotating it"
+        )
         assert returned is None
         assert appended(captured) == [
             {"operation": CLAIM}
