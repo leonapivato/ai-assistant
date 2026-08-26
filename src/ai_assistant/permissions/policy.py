@@ -330,18 +330,29 @@ class ThresholdActionPolicy:
         without a store at all — the fail-closed direction, and the reason the
         user sees is unchanged: a store fault is an operator's fact and not
         something to put in front of someone deciding about a call.
+
+        **The traceback is deliberately not logged, and the class name is.**
+        ``core.logging`` renders through ``structlog.dev.ConsoleRenderer``, whose
+        default exception formatter is ``rich``'s with ``show_locals=True`` — so
+        ``exc_info=True`` here would write this frame's locals into the log, and
+        ``request`` carries the recipient addresses, the account identity and the
+        payload description. ``redact_sensitive`` cannot reach it either: it runs
+        **before** the renderer and over the event dict's keys, and a rendered
+        traceback is neither. What an operator needs from this line is that the
+        seam could not be read and what refused; ``tool_id`` is Tier 2 and the
+        class name names no value (ADR-0004 §5).
         """
         if self._grants is None:  # pragma: no cover — the caller has already checked
             return None
         try:
             return await self._grants.covering(request)
-        except RecipientGrantError:
+        except RecipientGrantError as exc:
             _log.warning(
                 "recipient_grant_seam_unreadable",
                 tool_id=request.tool.id,
                 outcome="confirm",
+                refused_by=type(exc).__name__,
                 reason="a policy that cannot check a standing grant asks the user instead",
-                exc_info=True,
             )
             return None
 
