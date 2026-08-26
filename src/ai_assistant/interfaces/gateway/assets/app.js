@@ -1214,27 +1214,40 @@ const PARK_UNRESOLVED =
   "answer at all. Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
 
-// **A refusal the gateway answered, that is nonetheless not known** (round 5's
-// blocker). ADR-0177 §7's third clause is read from ADR-0168 §9's distinction "and from
-// nothing else": "a request the hub received and declined is **known not to have
-// landed**; a transport failure between the gateway and the hub is **not known**". A
-// `502 hub-unreachable` is the second, and `_relay_fault` raises it from a
-// `TransportError` the wire client can raise *after* the call was delivered — so the
-// hub may have run the action with only the reply lost. Releasing the continuation on
-// it is the inference ADR-0139 §4 forbids, and `UNKNOWN_FAULTS` is the page's own
-// existing record of which conditions this covers.
+// **A refusal the gateway answered, that is nonetheless not known** (rounds 5 and 6).
+// ADR-0177 §7's third clause is read from ADR-0168 §9's distinction "and from nothing
+// else": "a request the hub received and declined is **known not to have landed**; a
+// transport failure between the gateway and the hub is **not known**".
 //
-// **It states the condition rather than restating `FAULTS`'s sentence for it.** That
-// entry reads "so nothing was asked … nothing was queued", which is a claim about
+// **Two refusals reach it and `act` already sorts both, in these words.** One is named:
+// a `502 hub-unreachable`, which `_relay_fault` raises from a `TransportError` the wire
+// client can raise *after* the call was delivered, so the hub may have run the action
+// with only the reply lost — `UNKNOWN_FAULTS` is this page's own record of which
+// conditions those are. The other names nothing: `readBody` normalises a truncated,
+// malformed or proxy-substituted body to `{}`, and "a refusal whose condition this page
+// cannot read is a refusal it cannot classify, and ADR-0139 §4's third outcome is what
+// an unclassifiable one is" — `act`'s own sentence, whose reachable case is "a response
+// cut after its headers: the status may be the `502` the gateway writes for a hub it
+// could not reach". Reading either as known-not-landed releases a continuation the hub
+// may already have resolved, which is the inference ADR-0139 §4 forbids.
+//
+// **One sentence for both, and it names what is common rather than picking one.** What
+// the owner needs is that the refusal does not establish the answer never arrived; which
+// of the two ways it fails to establish it is said in the clause, so neither state
+// borrows the other's explanation.
+//
+// **It states that rather than restating `FAULTS`'s sentence for `hub-unreachable`.**
+// That entry reads "so nothing was asked … nothing was queued", which is a claim about
 // whether the hub *received* the request — true enough of a read, and exactly what §7's
 // third clause forbids asserting of a mutating act. It is shared by every `relay`
 // caller, several of which mutate, so correcting it is #1619's and not this lane's;
 // what this does is not put the contradiction on one screen.
-const PARK_HUB_UNREAD =
-  "The gateway reported a failure between itself and the hub, so this browser never " +
-  "read what became of that answer. It is not known: the gateway may have delivered it " +
-  "and the hub may have carried the action out, with only the reply lost on the way " +
-  "back. Nothing was re-sent and nothing was cancelled. " +
+const PARK_REFUSAL_NOT_KNOWN =
+  "The gateway refused that answer, and what it refused with does not establish that " +
+  "the answer never reached the assistant — either the failure was between the gateway " +
+  "and the hub, or this browser could not read the condition at all. So what became of " +
+  "it is not known: the action may have been carried out, with only the reply lost. " +
+  "Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
 
 // **The same ending, reached without the owner asking for it**, which is round 4's
@@ -1583,8 +1596,8 @@ async function answerConfirmation(token, approved, stopping) {
   // condition and returns a bare `null`, and this is the one caller for which the
   // difference between two refusals decides whether a consent token comes back.
   let refusal = null;
-  const noticed = (named, status) => {
-    refusal = { named, status };
+  const noticed = (named) => {
+    refusal = named;
   };
   try {
     body = await relay(
@@ -1636,18 +1649,22 @@ async function answerConfirmation(token, approved, stopping) {
     // so this is not the clause above — but a read response is not by itself a landed
     // or a not-landed one, and ADR-0177 §7's third clause is what sorts them.
     //
-    // **The conditions that are not known keep the continuation**, `UNKNOWN_FAULTS`
-    // being the page's own record of which those are. The sentence beside them is this
-    // surface's rather than `FAULTS`'s, for the reason `PARK_HUB_UNREAD` carries.
-    if (refusal !== null && UNKNOWN_FAULTS.has(refusal.named.fault)) {
+    // **The test is `act`'s, copied rather than re-derived**: a condition this page
+    // reads as unknown, *or* a refusal carrying no condition it can read at all. The
+    // second is the arm round 6 found missing — `readBody` answers `{}` for a body that
+    // was truncated, malformed or replaced by a proxy, and an absent `fault` is not
+    // evidence that the request never landed. `refusal` being null is the same nothing
+    // and takes the same branch, which is why the guard is written this way round.
+    const named = refusal !== null && typeof refusal.fault === "string";
+    if (!named || UNKNOWN_FAULTS.has(refusal.fault)) {
       unresolved.add(token);
       readPending(false);
-      fault(PARK_HUB_UNREAD, "confirmations");
+      fault(PARK_REFUSAL_NOT_KNOWN, "confirmations");
       return;
     }
-    // Everything else the gateway named is a request it received and declined, which is
-    // known **not** to have landed — so the park was not resolved and the row stays
-    // answerable.
+    // A condition the gateway named and this page reads as a request the hub received
+    // and declined, which is known **not** to have landed — so the park was not
+    // resolved and the row stays answerable.
     spent.delete(token);
     return;
   }
@@ -2846,6 +2863,13 @@ async function readDeliveries(half) {
 // gateway-to-hub transport failure **not known** while an ordinary decline is known not
 // to have landed, and only the first of those may keep its continuation. So it is
 // handed the body this function already read, and every other caller is untouched.
+//
+// **The body and not the status**, which is a rule this file already keeps: a status is
+// in `SESSION_LOST_STATUS` only where it names one condition, because `403` "says the
+// gateway refused and does not say why" and mapping it would be the flattening
+// ADR-0168 §6 forbids. The `fault` name is where ADR-0168 §9's distinction actually
+// lives, so that is what a caller classifying an outcome is given — and handing the
+// status beside it would invite reading the condition off the wrong half.
 async function relay(half, path, payload, panelId, stopping, noticed) {
   const response = await fetch(path, {
     method: "POST",
@@ -2862,7 +2886,7 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   conversationLost(body, payload.conversation_id);
   refused(panelId, body, response.status);
   if (noticed !== undefined) {
-    noticed(body, response.status);
+    noticed(body);
   }
   return null;
 }

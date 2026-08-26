@@ -4383,7 +4383,7 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # Told only where the caller asked to be, and only for a refusal — a successful
     # response returns above this.
     assert "if (noticed !== undefined) {" in relay
-    assert "noticed(body, response.status);" in relay
+    assert "noticed(body);" in relay
     assert relay.index("refused(panelId, body, response.status);") < relay.index("noticed(")
     # And exactly one caller asks. Every other entry point reaching `relay` is unchanged
     # by this, which is the whole reason it is a callback.
@@ -4393,14 +4393,23 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # Two: ``relay``'s own trailing parameter, and the single call site that fills it.
     assert len(re.findall(r"\bnoticed\b\s*\)", script)) == 2
     assert "async function relay(half, path, payload, panelId, stopping, noticed) {" in script
-    assert "const noticed = (named, status) => {" in answering
-    # The conditions the page already records as unknown are the ones that keep it.
-    assert "if (refusal !== null && UNKNOWN_FAULTS.has(refusal.named.fault)) {" in answering
-    kept = answering[answering.index("if (refusal !== null") :]
+    assert "const noticed = (named) => {" in answering
+    # **`act`'s own test, copied rather than re-derived**: a condition this page reads as
+    # unknown, *or* a refusal carrying no readable condition at all. ``readBody``
+    # normalises a truncated, malformed or proxy-substituted body to ``{}``, and an
+    # absent ``fault`` is not evidence the request never landed — "a refusal whose
+    # condition this page cannot read is a refusal it cannot classify, and ADR-0139 §4's
+    # third outcome is what an unclassifiable one is".
+    assert 'const named = refusal !== null && typeof refusal.fault === "string";' in answering
+    assert "if (!named || UNKNOWN_FAULTS.has(refusal.fault)) {" in answering
+    kept = answering[answering.index("if (!named ||") :]
     unknown = kept[: kept.index("\n    }\n")]
     assert "unresolved.add(token);" in unknown
     assert "spent.delete(token);" not in unknown
     assert answering.index("UNKNOWN_FAULTS.has(") < answering.index("spent.delete(token);")
+    # The same two-armed shape the grant surface already carries, so neither can be
+    # loosened without the other looking wrong beside it.
+    assert 'const named = typeof body.fault === "string";' in functions[_ACT_SITE]
 
 
 def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
@@ -4425,10 +4434,10 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
     assert "not known" in neutral
     assert neutral.rstrip().endswith("PARK_ROUTE_BACK")
     # Cause-neutral: none of the three endings' own openings appears in it.
-    for attributed in ("You stopped waiting", "connection carrying", "between itself and"):
+    for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
         assert attributed not in neutral, attributed
     # And the three that *do* name a cause reach the owner through the fault slot only,
     # never through a row that outlives the ending.
-    for named in ("PARK_UNRESOLVED", "PARK_LOST", "PARK_HUB_UNREAD"):
+    for named in ("PARK_UNRESOLVED", "PARK_LOST", "PARK_REFUSAL_NOT_KNOWN"):
         assert named not in words, named
         assert named in _functions(script)["answerConfirmation"], named
