@@ -294,6 +294,7 @@ from ai_assistant.core.types import (
     ReadOutcome,
     ReplyChunk,
     SecretScope,
+    SpendPeriod,
     StepStatus,
     ToolOutcome,
     encodable_text,
@@ -316,7 +317,7 @@ from ai_assistant.wire import (
 from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
@@ -348,6 +349,7 @@ if TYPE_CHECKING:
         RecordedInvocation,
         SourceGrant,
         SourceReadRecord,
+        SpendTotal,
         StepOutcome,
         ToolCost,
         ToolInvocation,
@@ -2287,6 +2289,37 @@ def invocations(
     raise typer.Exit(code)
 
 
+@app.command()
+def spend() -> None:
+    """Show what the world has cost you today and this month.
+
+    A single noun, taking no argument and no option: ADR-0194 §6 decides the token
+    here rather than leaving it to a lane, because a user's script binds to it.
+
+    **Both periods are always shown**, whatever you have configured. Where you have
+    set a currency I state what each period has cost; where you have also set a
+    ceiling I state that too, and a call whose price would carry the period past it
+    is refused before anything runs.
+
+    **What I show is what my own tools reported, not a bill.** It is not an amount
+    owed, charged or invoiced by anyone, and I have no way to check it against a
+    provider's statement.
+
+    **"Not measurable" is a real answer and not a zero.** A period I cannot measure
+    — a call still in flight, or one whose price nobody reported — is stated as
+    such rather than summed to a number I would be making up. Where that period has
+    a ceiling, nothing further in it will run until the period rolls over or the
+    price becomes known.
+
+    **The dates are mine, not yours.** Each period boundary is shown in the zone the
+    figures were computed in, labelled with its offset, because that is the zone the
+    day and the month were divided by. If your own clock is set elsewhere, that is
+    the difference you are seeing rather than an error.
+    """
+    code = asyncio.run(_show_spend())
+    raise typer.Exit(code)
+
+
 @app.command("export-invocations")
 def export_invocations() -> None:
     """Write every act I recorded on an authorisation to standard output, as JSON.
@@ -3562,6 +3595,22 @@ async def _list_invocations(*, limit: int) -> int:
     return await _drive_invocations(engine, limit=limit)
 
 
+async def _show_spend() -> int:
+    """Obtain a client, read the two totals, and render them (ADR-0194 §6).
+
+    :func:`_list_invocations`' shape over a different read on the same store, and
+    deliberately the same shape: a door that differed here would be a difference
+    the contract does not have.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_spend(engine)
+
+
 async def _export_invocations() -> int:
     """Obtain a client, read every invocation row, and write the artifact (ADR-0192 §4).
 
@@ -4631,6 +4680,29 @@ async def _drive_invocations(engine: AssistantEngine, *, limit: int) -> int:
         _render_error(exc)
         return _EXIT_ERROR
     _render_invocations(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_spend(engine: AssistantEngine) -> int:
+    """Read both period totals and render them in the operation's order (ADR-0194 §6).
+
+    The order is the **ledger's** guarantee — ``CALENDAR_DAY`` then
+    ``CALENDAR_MONTH`` — so nothing here sorts, filters or looks an entry up by its
+    period. Nothing here computes either, and nothing here reads a clock or a zone:
+    every figure and every boundary arrived on the value, which is golden rule 3 and
+    ADR-0194 §5's reason for carrying resolved offsets rather than a zone name.
+
+    A transport failure renders as itself. ``HubUnavailableError`` and
+    ``ProtocolError`` reach this frame unwrapped (ADR-0194 §6), and rendering one as
+    an indeterminate budget would tell a user a fact about their spend that nothing
+    measured.
+    """
+    try:
+        totals = await engine.spend_totals()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_spend(totals)
     return _EXIT_OK
 
 
@@ -8523,6 +8595,112 @@ def _render_invocation(recorded: RecordedInvocation) -> None:
         if row.incurred_cost is not None:
             console.print(f"  [bold]Cost:[/] {_incurred_cost(row.incurred_cost)}")
     console.print()
+
+
+#: How each :class:`~ai_assistant.core.types.SpendPeriod` is named on the page. A
+#: table rather than a ``.replace("_", " ").title()``, so a member added later is a
+#: ``KeyError`` at the one place that has to choose a word rather than a machine
+#: spelling silently reaching a user.
+_PERIOD_NAMES: Final[Mapping[SpendPeriod, str]] = {
+    SpendPeriod.CALENDAR_DAY: "Today",
+    SpendPeriod.CALENDAR_MONTH: "This month",
+}
+
+
+def _offset_label(offset: timedelta) -> str:
+    """Spell a UTC offset as ``+HH:MM``, or ``+HH:MM:SS`` where seconds are in force.
+
+    **Seconds are shown when the zone database carries them and not otherwise**
+    (ADR-0194 §5). ``Asia/Manila``'s ``-15:56:08`` and ``America/Metlakatla``'s
+    ``+15:13:42`` are real historical offsets a ``SpendTotal`` may carry, and a
+    renderer rounding to the minute would print an offset the clock contract says
+    was never in force. A whole-minute offset — every modern one — keeps the short
+    form, because a trailing ``:00`` on every line teaches a reader nothing.
+    """
+    total = int(offset.total_seconds())
+    sign = "-" if total < 0 else "+"
+    hours, rest = divmod(abs(total), 3600)
+    minutes, seconds = divmod(rest, 60)
+    stem = f"{sign}{hours:02d}:{minutes:02d}"
+    return stem if not seconds else f"{stem}:{seconds:02d}"
+
+
+def _bound(instant: datetime, offset: timedelta) -> str:
+    """Render one period boundary from **its own** offset (ADR-0194 §5, §6).
+
+    The value carries the offsets its producer resolved as in force at its two
+    instants, so this adds one to the other and labels the result. It resolves no
+    zone, reads no ``tzdata``, consults no configuration of this process's and reads
+    no clock — which is what lets a client on a different zone database render a
+    figure a hub computed correctly, and is golden rule 3 besides.
+
+    **Both offsets are carried and both are used**, because a period containing a
+    transition has different offsets at its two ends — the case ADR-0194 §1's
+    boundary rule exists for, and the one a single offset would misrender.
+    """
+    return (instant.replace(tzinfo=None) + offset).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _render_spend(totals: tuple[SpendTotal, ...]) -> None:
+    """Both period totals, in the ledger's order, and the four sentences §6 owes.
+
+    **An absence is stated as the state it is**, and ``currency`` is what tells the
+    two apart (ADR-0194 §5, §6). ``currency=None`` means no currency is configured
+    and no total was computed; a present ``currency`` beside ``accounted=None``
+    means the period could not be measured. A renderer collapsing them into one
+    message tells a user "no total" while their calls are being refused.
+
+    **The consequence line is printed from that period's own ceiling and never from
+    the absence of a total.** ADR-0194 §2 refuses nothing on an indeterminate period
+    the user set no ceiling for, so a renderer keying on ``accounted is None`` alone
+    tells a user their calls are blocked when they are not.
+
+    **Nothing here reads falsiness of a ceiling.** A configured ceiling of zero is
+    the configuration that refuses the most, so it is exactly the one where "no
+    ceiling" would be furthest from the truth.
+
+    **No total is presented as an amount billed, owed or charged** (ADR-0194 §6). It
+    is the sum of what this system's own tools reported, and the footer says so.
+    """
+    for total in totals:
+        name = _PERIOD_NAMES[total.period]
+        opened = (
+            f"{_bound(total.period_start, total.start_offset)} {_offset_label(total.start_offset)}"
+        )
+        closed = f"{_bound(total.period_end, total.end_offset)} {_offset_label(total.end_offset)}"
+        console.print(f"[bold]{name}[/]")
+        console.print(f"  [dim]from {opened}[/]")
+        console.print(f"  [dim]up to (not including) {closed}[/]")
+        if total.currency is None:
+            console.print("  [dim]No spend currency is configured, so I am not keeping a total.[/]")
+        elif total.accounted is None:
+            console.print(
+                f"  [yellow]Not measurable.[/] Something in this period has no price I may "
+                f"add — a call still in flight, or one whose cost nobody reported — so I "
+                f"will not state a {total.currency} figure I would be inventing."
+            )
+            if total.ceiling is not None:
+                console.print(
+                    f"  [red]Nothing further will run in this period[/] while that is so: "
+                    f"there is a ceiling of {total.ceiling} {total.currency} here and I "
+                    f"cannot tell whether a call would cross it."
+                )
+            else:
+                console.print(
+                    "  [dim]Nothing is being refused on that account: you have set no "
+                    "ceiling for this period.[/]"
+                )
+        else:
+            stated = f"  [bold]{total.accounted} {total.currency}[/]"
+            if total.ceiling is None:
+                console.print(f"{stated} [dim]— no ceiling set for this period.[/]")
+            else:
+                console.print(f"{stated} [dim]of a ceiling of[/] {total.ceiling} {total.currency}")
+        console.print()
+    console.print(
+        "[dim]These are the prices my own tools reported for the calls I made. They are "
+        "not a bill, not an amount owed, and not checked against anyone's statement.[/]"
+    )
 
 
 def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int) -> None:

@@ -43,6 +43,7 @@ import asyncio
 import contextlib
 import sys
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 
@@ -58,19 +59,23 @@ from assistant_engine_contract import (
     _OVERFULL_GRANTS,
     _OVERFULL_READS,
     _SOURCE,
+    _SPEND_LIMIT,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
     seeded_invocation_trail,
     seeded_read_trail,
+    seeded_spend_ledger,
     seeded_trail,
 )
 
@@ -89,6 +94,7 @@ from ai_assistant.wire import (
     HubEngineClient,
     serve_connection,
 )
+from ai_assistant.wire.envelope import MIN_FRAME_BYTES
 from ai_assistant.wire.server import ConnectionLimits
 
 if TYPE_CHECKING:
@@ -446,6 +452,64 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing.trail = trail
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield InvocationSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def spending(self, tmp_path: Path) -> AsyncIterator[SpendSubject]:
+        """A client of a hub whose engine reads a ledger with a zero ceiling.
+
+        Arranged entirely hub-side on :attr:`invocations`' terms, and for a reason
+        of ADR-0194's own: a client has no way to configure a ceiling or append a
+        row either, the settings being the composition root's and both appends
+        sitting behind the tool seam. The zero ceiling makes the wire the thing
+        under test — ADR-0194 §11 requires that value to survive the round trip as
+        the bytes ``"0"``, and a codec normalising it would be invisible at every
+        other value.
+        """
+        ledger = await seeded_spend_ledger(
+            day_ceiling=SPEND_ZERO_CEILING, month_ceiling=SPEND_ZERO_CEILING
+        )
+        backing = FakeAssistantEngine()
+        backing.trail = ledger
+        backing.spend = ledger
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SpendSubject(engine=client, ledger=ledger)
+
+    @pytest.fixture
+    async def unconfigured_spending(self, tmp_path: Path) -> AsyncIterator[SpendSubject]:
+        """A client of a hub whose engine reads a ledger with no currency configured."""
+        ledger = await seeded_spend_ledger(currency=None)
+        backing = FakeAssistantEngine()
+        backing.trail = ledger
+        backing.spend = ledger
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SpendSubject(engine=client, ledger=ledger)
+
+    @pytest.fixture
+    async def indeterminate_spending(self, tmp_path: Path) -> AsyncIterator[SpendSubject]:
+        """A client of a hub whose ledger holds an open claim, day ceiling only."""
+        ledger = await seeded_spend_ledger(day_ceiling=Decimal("10"), open_claim=True)
+        backing = FakeAssistantEngine()
+        backing.trail = ledger
+        backing.spend = ledger
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SpendSubject(engine=client, ledger=ledger)
+
+    @pytest.fixture
+    async def overfull_spending(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose published limit the pair of totals exceeds."""
+        ledger = await seeded_spend_ledger()
+        backing = FakeAssistantEngine(max_payload_bytes=_SPEND_LIMIT)
+        backing.trail = ledger
+        backing.spend = ledger
+        # The **hub's** frame limit stays legal while the backing engine's payload
+        # limit is the small one: ADR-0085 §8c's refusal is measured where the value
+        # is produced, and it arrives here as a typed error frame. A frame size below
+        # ADR-0085 §8d's floor is refused at the handshake, so it could not be the
+        # instrument even if it were the tidier one.
+        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=MIN_FRAME_BYTES) as (
+            client
+        ):
+            yield client
 
     @pytest.fixture
     async def overfull_invocations(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

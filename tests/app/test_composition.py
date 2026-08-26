@@ -14,6 +14,7 @@ import os
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from email.utils import format_datetime
 from enum import StrEnum
 from pathlib import Path
@@ -51,7 +52,12 @@ from ai_assistant.core.errors import (
     SourceNotGrantedError,
     TraceStoreError,
 )
-from ai_assistant.core.protocols import ConnectionPurger, InvocationLedger
+from ai_assistant.core.protocols import (
+    ConnectionPurger,
+    InvocationLedger,
+    SpendGate,
+    SpendLedger,
+)
 from ai_assistant.core.types import (
     BeliefBand,
     ClassReach,
@@ -506,6 +512,80 @@ async def test_build_engine_hands_the_invoker_the_ledger_face_of_the_one_trail(
             "the invoker claims through the same object the runner records decisions into"
         )
         assert isinstance(ledger, InvocationLedger)
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_hands_the_invoker_the_gate_face_of_the_one_trail(
+    tmp_path: Path,
+) -> None:
+    """ADR-0194 §5's wiring clause, one face further on.
+
+    One object satisfies ``SpendGate``, ``SpendLedger`` and ADR-0192's ledger seam
+    because all three read the same rows: two holders keyed by them could disagree
+    about a total, which is the failure ADR-0016 §7 named for two registries one
+    seam over. So the gate the invoker admits through is the trail the runner
+    records into, by identity and not merely by type.
+
+    The **engine** is handed the ledger face and never the gate, and the invoker the
+    gate and never the ledger. Neither half is checkable by a Protocol — both are
+    satisfied by the one object — so the split is the annotation's, and this asserts
+    the identity the annotation cannot.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        tools = engine._runner._registry
+        assert isinstance(tools, InMemoryToolRegistry)
+        gate: object = tools.gate
+        assert gate is engine._runner._trail, (
+            "the invoker admits through the same object the runner records decisions into"
+        )
+        assert isinstance(gate, SpendGate)
+        ledger: object = engine._spend
+        assert ledger is engine._runner._trail, (
+            "the spend read states totals over the rows the seam wrote"
+        )
+        assert isinstance(ledger, SpendLedger)
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_reads_the_four_spend_settings_and_the_zone(
+    tmp_path: Path,
+) -> None:
+    """ADR-0194 §5, §11: the composition root is the **sole reader** of the five.
+
+    The store takes explicit constructor values and never a ``Settings`` read, so
+    this is the one place the two meet — and ``timezone`` is read *with* the four
+    because it selects the calendar period every total and every admission is
+    decided over. A reader counting only four cannot implement the period rule, and
+    a composition dropping the zone would divide the user's days by UTC while every
+    other dated surface used their own.
+    """
+    engine = build_engine(
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            timezone="Pacific/Kiritimati",
+            world_spend_currency="USD",
+            world_spend_day_ceiling=Decimal("0"),
+            world_spend_month_ceiling=Decimal("100.00"),
+            world_spend_unknown_allowance=Decimal("0.01"),
+        ),
+        data_dir=tmp_path,
+    )
+    try:
+        day, month = await engine.spend_totals()
+        assert day.currency == "USD"
+        # `as_tuple()` and never truthiness: a zero ceiling is the configuration
+        # that refuses the most, so it is exactly where a falsiness test is
+        # furthest from the truth (ADR-0194 §11).
+        assert day.ceiling is not None
+        assert day.ceiling.as_tuple() == Decimal("0").as_tuple()
+        assert month.ceiling == Decimal("100.00")
+        # The zone reached the ledger: Kiritimati is UTC+14, so its civil day opens
+        # fourteen hours before the UTC one and the offsets say so.
+        assert day.start_offset == timedelta(hours=14)
+        assert month.start_offset == timedelta(hours=14)
     finally:
         await engine.aclose()
 

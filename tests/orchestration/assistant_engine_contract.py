@@ -64,6 +64,7 @@ import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import count
 from typing import TYPE_CHECKING, Final
 
@@ -114,6 +115,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SourceReadRecord,
+    SpendPeriod,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -360,12 +362,17 @@ class SeededAuditTrail(FakeAuditTrail):
     relaying implementation fails every run rather than most of them.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per ADR-0194 §1 setting, injected explicitly
         self,
         *,
         ordered_export: bool = True,
         now: Callable[[], datetime] | None = None,
         identifiers: MintsIdentifiers | None = None,
+        currency: str | None = None,
+        day_ceiling: Decimal | None = None,
+        month_ceiling: Decimal | None = None,
+        allowance: Decimal | None = None,
+        timezone: str = "UTC",
     ) -> None:
         """Create an empty trail.
 
@@ -380,6 +387,15 @@ class SeededAuditTrail(FakeAuditTrail):
             identifiers: The factory each invocation row's ``id`` is minted from,
                 passed through for the same reason: the tie-break is on that id,
                 so a suite that cannot name it cannot exercise the tie.
+            currency: ADR-0194 §1's reporting currency, or ``None``. Passed through
+                because the states ADR-0194 §5 asks a *reader* to tell apart are all
+                facts about the **producer's** configuration: with no currency both
+                totals carry ``accounted=None`` for one reason and with a currency
+                and an unmeasurable row for a different one.
+            day_ceiling: The ``CALENDAR_DAY`` ceiling, or ``None``.
+            month_ceiling: The ``CALENDAR_MONTH`` ceiling, or ``None``.
+            allowance: What an unpriced call is accounted at, or ``None``.
+            timezone: The zone the calendar periods are computed in.
         """
         # The wall clock spelled out rather than reached for through the fake's
         # private default: every case but the invocation ones injects nothing and
@@ -389,6 +405,11 @@ class SeededAuditTrail(FakeAuditTrail):
         super().__init__(
             now=now if now is not None else (lambda: datetime.now(UTC)),
             identifiers=identifiers,
+            currency=currency,
+            day_ceiling=day_ceiling,
+            month_ceiling=month_ceiling,
+            allowance=allowance,
+            timezone=timezone,
         )
         #: Which reads reached the store, in the order they arrived.
         self.reads: list[str] = []
@@ -704,6 +725,87 @@ class InvocationSubject:
 
     engine: AssistantEngine
     trail: SeededAuditTrail
+
+
+@dataclass(frozen=True, slots=True)
+class SpendSubject:
+    """An engine on ADR-0194 §6's read, and the ledger standing behind it.
+
+    :class:`InvocationSubject`'s shape over a third face of the same store, and a
+    separate class for the same reason: what a case reaches for on the ledger is
+    not what an invocation case reaches for, and a shared subject would let a case
+    about the period order be written against the wrong read and pass.
+
+    Attributes:
+        engine: The subject under test.
+        ledger: The seeded holder the engine ultimately reads, reached from the test
+            process rather than through the surface — there being no producer for a
+            row on this surface at all, since the two appends live on
+            ``InvocationLedger`` behind the tool seam and the admission on
+            ``SpendGate`` behind it.
+    """
+
+    engine: AssistantEngine
+    ledger: SeededAuditTrail
+
+
+#: A payload limit two ``SpendTotal`` values cannot fit inside, for ADR-0194 §6's
+#: ``OversizedValueError``. Small rather than realistic: §6 declares the class
+#: without claiming the state is remote, and what a suite can arrange cheaply is
+#: the limit rather than the ten thousand rows a genuinely large total needs.
+_SPEND_LIMIT: Final = 64
+
+#: The reporting currency every spend fixture here is configured in.
+SPEND_CURRENCY: Final = "USD"
+
+#: A **zero** ceiling, which ADR-0194 §11 makes the consumer group carry through
+#: every seam: the relay, the wire, and §6's rendering. It is the configuration
+#: that refuses the most, so a producer or a renderer reading falsiness of a
+#: ceiling is furthest from the truth exactly here — and invisible at every other
+#: ceiling value.
+SPEND_ZERO_CEILING: Final = Decimal("0")
+
+
+async def seeded_spend_ledger(  # noqa: PLR0913 — one keyword per ADR-0194 §1 setting, plus the open claim
+    *,
+    currency: str | None = SPEND_CURRENCY,
+    day_ceiling: Decimal | None = None,
+    month_ceiling: Decimal | None = None,
+    allowance: Decimal | None = None,
+    timezone: str = "UTC",
+    open_claim: bool = False,
+) -> SeededAuditTrail:
+    """A ledger configured as ADR-0194 §1 admits, optionally holding an open claim.
+
+    Shared so the three bindings cannot arrange three different premises for one
+    clause, exactly as :func:`seeded_invocation_trail` is. The claim is appended
+    **through the ledger** rather than written into the store, because the id and
+    the instant are the store's to mint and stamp (ADR-0192 §2).
+
+    Args:
+        currency: The reporting currency, or ``None`` for the other absence.
+        day_ceiling: The ``CALENDAR_DAY`` ceiling, or ``None``.
+        month_ceiling: The ``CALENDAR_MONTH`` ceiling, or ``None``.
+        allowance: What an unpriced call is accounted at, or ``None``.
+        timezone: The zone the calendar periods are computed in.
+        open_claim: Whether to leave one claim standing with no completion, which
+            ADR-0194 §2 makes its period's accounted total **indeterminate**.
+
+    Returns:
+        The configured ledger, with :attr:`SeededAuditTrail.reads` cleared.
+    """
+    ledger = SeededAuditTrail(
+        currency=currency,
+        day_ceiling=day_ceiling,
+        month_ceiling=month_ceiling,
+        allowance=allowance,
+        timezone=timezone,
+    )
+    if open_claim:
+        await ledger.record(_ruling("spend-open", at=_RULED_AT))
+        await ledger.claim_invocation(decision=await _recorded(ledger, "spend-open"))
+    ledger.reads.clear()
+    return ledger
 
 
 #: When the seeded read trail's first grant check resolved. Fixed, for
@@ -3757,6 +3859,164 @@ class AssistantEngineContract(ABC):
             await overfull_invocations.export_invocations()
 
         assert await overfull_invocations.recent_invocations(limit=1) != ()
+
+    # --- ADR-0194 §6: what the world has cost ---------------------------
+
+    @pytest.fixture
+    @abstractmethod
+    def spending(self) -> SpendSubject:
+        """A subject over a ledger configured with a **zero** ceiling on both periods.
+
+        A fixture because nothing on this surface writes a row either, on
+        :attr:`invocations`' reason and a sharper version of it: ADR-0194 §5 promotes
+        exactly one operation and it is a read, the admission lives on ``SpendGate``
+        behind the tool seam, and the appends live on ``InvocationLedger`` behind it.
+        So the only route to a configured ledger is to be handed one.
+
+        **Zero rather than a comfortable number**, because ADR-0194 §11 makes the
+        consumer group carry that value through every seam it owns and it is the one
+        a producer or a renderer testing falsiness gets wrong invisibly.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def unconfigured_spending(self) -> SpendSubject:
+        """A subject over a ledger with **no currency configured at all**.
+
+        The other of ADR-0194 §5's two absences, and it needs its own subject
+        because ``currency`` is what discriminates them: a case driven only against
+        the configured one cannot tell "no total was computed" from "the period
+        could not be measured".
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def indeterminate_spending(self) -> SpendSubject:
+        """A subject whose current day holds an **open claim**, with only a day ceiling.
+
+        ADR-0194 §2 makes such a period's accounted total indeterminate, and §11
+        drives the periods **disagreeing**: the month carries no ceiling of its own,
+        so §6's "no further call will be admitted" line is absent there and present
+        on the day. A renderer printing it from the absence of a total alone tells a
+        user their calls are blocked when they are not.
+        """
+
+    async def test_both_periods_come_back_in_the_ledgers_fixed_order(
+        self, spending: SpendSubject
+    ) -> None:
+        """ADR-0194 §5: ``CALENDAR_DAY`` then ``CALENDAR_MONTH``, always both.
+
+        Asserted as the **exact sequence** of ``period`` values rather than by
+        looking each entry up, which is §11's own instruction: a producer returning
+        the month first satisfies every totals and error-ordering clause here and
+        changes what every reader of the surface sees.
+        """
+        totals = await spending.engine.spend_totals()
+
+        assert tuple(total.period for total in totals) == (
+            SpendPeriod.CALENDAR_DAY,
+            SpendPeriod.CALENDAR_MONTH,
+        )
+
+    async def test_a_configured_ceiling_of_zero_survives_the_relay(
+        self, spending: SpendSubject
+    ) -> None:
+        """ADR-0194 §11: the zero ceiling carried the rest of the way, seam by seam.
+
+        Asserted on ``as_tuple()`` and never on truthiness or on the field's mere
+        presence. A ``configured_ceiling or None`` anywhere between the store and
+        here passes every admission clause — the gate still refuses correctly — and
+        then tells a user their period has no ceiling while every priced call they
+        make is being refused.
+        """
+        totals = await spending.engine.spend_totals()
+
+        for total in totals:
+            assert total.currency == SPEND_CURRENCY
+            assert total.ceiling is not None
+            assert total.ceiling.as_tuple() == SPEND_ZERO_CEILING.as_tuple()
+            assert total.accounted is not None
+            assert total.accounted.as_tuple() == Decimal("0").as_tuple()
+
+    async def test_no_currency_configured_states_no_total_and_no_ceiling(
+        self, unconfigured_spending: SpendSubject
+    ) -> None:
+        """ADR-0194 §5's *other* absence, and the discriminator that names it.
+
+        Both entries still come back — "both entries whatever is configured" — and
+        each carries ``currency=None``, which is what a reader reads to know that no
+        sum was attempted rather than that one could not be completed.
+        """
+        totals = await unconfigured_spending.engine.spend_totals()
+
+        assert len(totals) == 2
+        for total in totals:
+            assert total.currency is None
+            assert total.ceiling is None
+            assert total.accounted is None
+
+    async def test_an_indeterminate_period_is_returned_and_not_raised(
+        self, indeterminate_spending: SpendSubject
+    ) -> None:
+        """ADR-0194 §5: ``accounted=None`` beside a present ``currency``.
+
+        An open claim states that an act may have happened and does not state what
+        it cost, so the period cannot be measured — and the operation **returns**
+        that rather than raising, because the value is still producible. §5 permits
+        this member exactly one raised class and only where it cannot produce the
+        values at all.
+
+        The two periods are asserted to **disagree about the ceiling**, which is
+        what §11 drives them for: the claim is in the day and therefore in the
+        month, so both are indeterminate, but only the day carries a ceiling of its
+        own — and §2 refuses on no other.
+        """
+        day, month = await indeterminate_spending.engine.spend_totals()
+
+        assert day.currency == SPEND_CURRENCY
+        assert day.accounted is None
+        assert day.ceiling is not None
+        assert month.currency == SPEND_CURRENCY
+        assert month.accounted is None
+        assert month.ceiling is None
+
+    async def test_the_period_bounds_are_half_open_and_carry_their_own_offsets(
+        self, spending: SpendSubject
+    ) -> None:
+        """ADR-0194 §1, §5: ``[start, end)``, with the offsets the producer resolved.
+
+        The day sits inside the month, and each entry carries an offset for **each**
+        end — a period containing a transition has different offsets at its two ends,
+        which is the case a single offset would misrender and the reason two are
+        carried rather than one.
+        """
+        day, month = await spending.engine.spend_totals()
+
+        assert day.period_start < day.period_end
+        assert month.period_start <= day.period_start
+        assert day.period_end <= month.period_end
+        for total in (day, month):
+            assert abs(total.start_offset) < timedelta(hours=24)
+            assert abs(total.end_offset) < timedelta(hours=24)
+
+    async def test_a_spend_read_too_large_for_the_frame_is_refused_whole(
+        self, overfull_spending: AssistantEngine
+    ) -> None:
+        """ADR-0194 §6: ``OversizedValueError``, declared and not disclaimed.
+
+        §6 says the declaration is a real one rather than a formality: ADR-0194 §1
+        bounds each contributing amount and nothing bounds the number of rows, so an
+        accounted total is unbounded and a pair of them can outgrow the frame. The
+        limit is what this fixture makes small; the reachability is what §6 declines
+        to claim is remote.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_spending.spend_totals()
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_spending(self) -> AssistantEngine:
+        """A subject whose contract limit the two totals exceed."""
 
 
 def backwards_clock() -> Callable[[], datetime]:
