@@ -512,6 +512,12 @@ def appended(captured: Sequence[Mapping[str, Any]]) -> list[dict[str, object]]:
     ]
 
 
+#: ``BaseException``'s own ``__cause__`` descriptor — the slot the seam writes
+#: through, and the one these tests read and arrange, so that neither half of a
+#: check is answered by a ``__cause__`` the subclass under test declares.
+CAUSE_SLOT: GetSetDescriptorType = BaseException.__dict__["__cause__"]
+
+
 def cause_of(exception: BaseException) -> BaseException | None:
     """Read ``exception``'s cause out of the slot, past any ``__cause__`` it declares.
 
@@ -521,8 +527,7 @@ def cause_of(exception: BaseException) -> BaseException | None:
     property the write went around, so the check reads the same slot the write
     landed in.
     """
-    descriptor: GetSetDescriptorType = BaseException.__dict__["__cause__"]
-    return cast("BaseException | None", descriptor.__get__(exception))
+    return cast("BaseException | None", CAUSE_SLOT.__get__(exception))
 
 
 class NameRaises(type):
@@ -2269,6 +2274,107 @@ class ToolInvokerContract:
         assert cause_of(caught.value) is refused, (
             "the append's own failure travels with the cancellation, and no "
             "refusal to be annotated keeps it off"
+        )
+
+    async def test_a_cause_reclaimed_by_its_own_finaliser_costs_identity_not_the_failure(
+        self,
+        consuming: Callable[[InvocationLedger], InvocableToolRegistry],
+    ) -> None:
+        """The one write the seam cannot make stick, and what it does instead.
+
+        Writing through ``BaseException``'s descriptor enters none of the
+        collaborator's code, but it can *release* some. The slot held a reference,
+        and ``PyException_SetCause`` stores the new value before dropping the old
+        one — so a cause the tool put there first, whose last reference this was,
+        is finalised **after** the seam's write has landed. A ``__del__`` that
+        writes the slot again from there leaves the caller holding the tool's value
+        in place of the ledger's failure, and silently: the assignment did exactly
+        what it was asked.
+
+        So the seam reads the slot back through the same descriptor, and where the
+        write did not survive it stops trying — a second write would displace a
+        value that can carry a finaliser of its own. What leaves is a cancellation
+        the seam owns, whose slot no collaborator has ever held, carrying the
+        append's failure. Identity is what is given up, and only here: ADR-0060 §1
+        requires that *a* cancellation reach the caller, and §3 that it carry the
+        failure. Both hold.
+        """
+
+        class ReclaimingCauseError(Exception):
+            """A cause whose finaliser writes the slot it was displaced from."""
+
+            def __init__(self, target: BaseException, replacement: BaseException) -> None:
+                super().__init__("the cause the tool put there first")
+                self.target = target
+                self.replacement = replacement
+
+            def __del__(self) -> None:
+                CAUSE_SLOT.__set__(self.target, self.replacement)
+
+        class Reclaiming:
+            """Raises a cancellation whose existing cause will take its slot back."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.raised: asyncio.CancelledError | None = None
+                self.replacement = RuntimeError("the value the finaliser puts back")
+
+            async def __call__(
+                self,
+                parameters: Mapping[str, FrozenJson],
+                *,
+                idempotency_key: str | None,
+            ) -> FrozenJson:
+                self.entered.set()
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    self.raised = asyncio.CancelledError("raised by the tool")
+                    # The only reference to it is the slot, so displacing it is
+                    # what finalises it — which is the whole of the hazard.
+                    CAUSE_SLOT.__set__(
+                        self.raised,
+                        ReclaimingCauseError(self.raised, self.replacement),
+                    )
+                    # Not `from None`: that would write the slot again and
+                    # finalise the cause this case exists to displace.
+                    raise self.raised  # noqa: B904
+                return None
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        refused = RuntimeError("the store would not write the completion")
+        ledger.completion.error = refused
+        invoker = consuming(ledger)
+        tool_under_test = Reclaiming()
+        invoker.register(read_only("inbox"), tool_under_test)
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        running = asyncio.ensure_future(invoker.invoke(call, timeout=PATIENT))
+        await tool_under_test.entered.wait()
+        running.cancel()
+
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await running
+
+        assert tool_under_test.raised is not None
+        assert cause_of(tool_under_test.raised) is tool_under_test.replacement, (
+            "the finaliser really did reclaim the slot — without this the case "
+            "would pass against a seam that never checked"
+        )
+        assert caught.value is not tool_under_test.raised, (
+            "an exception whose cause the seam cannot make stick is not the one "
+            "the caller is handed"
+        )
+        assert type(caught.value) is asyncio.CancelledError
+        assert cause_of(caught.value) is refused, (
+            "the append's failure reaches the caller either way — that is what "
+            "ADR-0192 §3 puts the rule on"
+        )
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1, (
+            "the completion was refused, so the claim is left open as on every "
+            "other completion failure"
         )
 
     async def test_a_log_processor_that_cancels_this_task_is_not_answered_with_a_result(
