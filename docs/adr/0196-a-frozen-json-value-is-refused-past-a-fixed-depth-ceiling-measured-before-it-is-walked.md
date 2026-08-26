@@ -6,12 +6,14 @@
 ## Context
 
 `FrozenJson` is the widest shared type in `core`. Every subsystem that carries
-structured data across a boundary holds one: `PlanStep.parameters`,
-`StepExecution.output`, `ActionRequest.parameters`, `ToolResult.output` and
-`ToolDefinition.parameters_schema` are its declared holders, and three
-`core/protocols.py` methods take a `FrozenJsonMapping` parameter, so
-`orchestration`, `tools`, `permissions` and `testing` all construct one. What
-that type accepts is what every one of them accepts.
+structured data across a boundary holds one. Nine fields across `core/types.py`
+declare it — `PlanStep.parameters`, `StepExecution.output`,
+`StepTransition.output`, `ActionRequest.parameters`, `BoundEgressCall.parameters`,
+`Confirmation.parameters`, `ToolResult.output`, `ToolDefinition.parameters_schema`
+and `ParameterViolation.schema_value` — and three `core/protocols.py` methods take
+a `FrozenJsonMapping` parameter, so `orchestration`, `tools`, `permissions` and
+`testing` all construct one. What that type accepts is what every one of them
+accepts.
 
 Two functions implement it. `_deep_freeze` walks the value recursively, turning
 mappings into `FrozenDict` and sequences into tuples; `_freeze_json` calls it and
@@ -102,12 +104,14 @@ dependency's, and what it says when it refuses.
 
 ## Decision
 
-### 1. A frozen JSON value nested past a fixed ceiling is refused where it is frozen
+### 1. A frozen JSON value nested past a fixed ceiling is refused at the front of its own validation
 
 > **Normative.** A value validated as `FrozenJsonValue` or `FrozenJsonMapping`
-> whose container nesting exceeds the ceiling of §3 is refused during that
-> validation, by raising `ValueError` with a message naming depth and the ceiling
-> as the reason.
+> whose container nesting exceeds the ceiling of §3 is refused by raising
+> `ValueError` with a message naming depth and the ceiling as the reason, and
+> that refusal is reached **before any other validation of the value has run** —
+> including the recursive `FrozenJson` alias's own — so that it holds whatever
+> `sys.getrecursionlimit()` is set to.
 
 > **Normative.** That refusal introduces no new exception type: it reaches a
 > caller as the holder's ordinary construction refusal, exactly as the
@@ -118,8 +122,24 @@ The placement is the whole point of putting it here rather than on a holder. The
 property being enforced — "this value can be walked, encoded, stored, dumped and
 revalidated" — is intrinsic to the value and not to who holds it, which is
 ADR-0016 §2's test and the reason `_freeze_json`'s existing refusals sit where
-they do. A per-holder bound would be the same rule written five times, free to
+they do. A per-holder bound would be the same rule written nine times, free to
 disagree, with nothing that fails when it does.
+
+**At the front of the validation and not after it**, which is what the first
+clause's ordering requirement is for. `_freeze_json` is an `AfterValidator`, and
+pydantic-core validates the recursive `FrozenJson` alias *before* an
+`AfterValidator` runs — a walk that costs Python stack per level, and therefore
+one that can refuse first, with its own `recursion_loop` diagnostic, whenever the
+recursion limit is low enough to bring its threshold under the ceiling. A check
+placed after it would then hold only for a range of `sys.getrecursionlimit()`,
+which is the property §3 refuses. The mechanism that satisfies the ordering is a
+`BeforeValidator` position on the same annotated alias: it sees the raw input,
+which is exactly what `_json_depth` already takes (`object`), and it runs ahead
+of everything else. Measured 2026-08-26 with that placement: at
+`sys.setrecursionlimit(120)` — below the ceiling — a value of 129, 300 or 5000
+containers is still refused with the single `ValueError` naming depth and the
+ceiling, where the unguarded alias gives 1276 errors headed "Input should be a
+valid string".
 
 A plain `ValueError` and not a named error, for the same reason: the two refusals
 already at this site are plain `ValueError`s, pydantic turns them into a
@@ -222,17 +242,38 @@ than the value that is merely *frozen*.
 > **Normative.** The implementation of this decision lands with tests that pin,
 > each verified to fail when the change it covers is reverted: (a) a value at the
 > ceiling freezes and a value one container past it is refused with §1's reason;
-> (b) each of `PlanStep.parameters`, `ActionRequest.parameters`,
-> `ToolResult.output` and `ToolDefinition.parameters_schema` refuses the same
-> over-deep input the same way; (c) `_MAX_SCHEMA_DEPTH` is strictly less than the
-> ceiling, and a schema between them is refused with ADR-0145 §6's reason and not
-> with §1's; (d) the refusal is reached without a `RecursionError` being raised
-> anywhere, at the interpreter's default recursion limit.
+> (b) **every** field of `core/types.py` whose annotation is `FrozenJsonValue` or
+> `FrozenJsonMapping` refuses the same over-deep input the same way, enumerated
+> from the models' `model_fields` rather than listed by hand; (c)
+> `_MAX_SCHEMA_DEPTH` is strictly less than the ceiling, and a schema between them
+> is refused with ADR-0145 §6's reason and not with §1's; (d) with
+> `sys.setrecursionlimit` set **below** the ceiling, a value past the ceiling is
+> still refused with §1's reason and no `RecursionError` is raised.
 
-Each of these is a claim this ADR makes that would otherwise decay silently. (c)
-is the one worth naming a reason for: it is the only guard against a later lane
-raising `_MAX_SCHEMA_DEPTH` past the ceiling and quietly killing ADR-0145 §6's
-refusal, which is a change no reader of either file would see.
+Each of these is a claim this ADR makes that would otherwise decay silently, and
+two of them are the only mechanical guard on a clause above.
+
+**(b) is enumerated and not listed**, because a hand-written list is a list that
+goes stale. Nine fields declare the type as this is written, and the roster the
+test builds is what makes a tenth arrive already pinned rather than silently
+outside the contract §3 states over "every `FrozenJson` value alike". The
+repository has the shape already, in the `model_fields` roster guard #1287 landed
+so that a seventh duration field could not go unpinned.
+
+**(c)** is the only guard against a later lane raising `_MAX_SCHEMA_DEPTH` past
+the ceiling and quietly killing ADR-0145 §6's refusal, which is a change no reader
+of either file would see.
+
+**(d) is what tests §1's ordering and §2's iterativeness at once**, and it is
+written with the recursion limit *below* the ceiling for that reason. At the
+default limit an implementation that counted depth recursively, or that ran the
+check after the recursive alias, would pass every other pin here — the depth
+`ValueError` arrives, no `RecursionError` is raised, and nothing distinguishes it
+from a conforming implementation. Lower the limit under the ceiling and both
+non-conforming placements fail: a recursive counter exhausts the stack, and a
+check sitting after the alias never runs because the alias refuses first with its
+own diagnostic. This pin is the reason §1 can promise a refusal that does not
+depend on `sys.getrecursionlimit()`.
 
 The pins deliberately do **not** assert the upstream numbers in the Context
 table. Those are measurements of a dependency at a version, they are what this
@@ -246,12 +287,16 @@ for having changed something we have just declared we do not rely on.
   and `_thaw_json` would still recurse over it on dump. That is the general
   property of `model_construct` in this codebase rather than anything about
   depth, and no holder uses it.
-- **A recursion limit lowered below the ceiling.** If a process sets
-  `sys.setrecursionlimit` low enough, pydantic-core's guard refuses before the
-  ceiling is reached and the illegible refusal returns. Nothing in this
-  repository lowers it, and a fixed ceiling cannot defend against a limit chosen
-  beneath it. Stated so that "acceptance no longer varies with a process-global"
-  is read as the claim it is: true at and above the interpreter's default.
+- **Validating a value *within* the ceiling under a recursion limit set below
+  it.** §1's refusal holds at any recursion limit, because the check runs before
+  anything that consumes stack. What a limit set beneath the ceiling breaks is the
+  other direction: an *acceptable* value nested near the ceiling cannot be
+  validated at all, because pydantic-core's recursive alias walk needs stack in
+  proportion to depth and will raise `RecursionError` before reaching
+  `_freeze_json`. No ceiling of ours can defend against a limit chosen beneath
+  itself, nothing in this repository lowers the limit, and the decision is stated
+  in terms of what is refused rather than what is accepted for exactly that
+  reason.
 - **Breadth, size and cost.** A value 10 containers deep and a gigabyte wide
   passes this ceiling. A budget for that is #1108's, unchanged: it needs a unit
   and a constant neither of which is calibratable yet.
@@ -302,13 +347,14 @@ own decision, and this is it.
 asserted by a test in this repository, and identical in every process — instead
 of a constant in a dependency's Rust that no file here mentions. A payload
 refused for depth says so, in one error, naming the ceiling, at every one of the
-five holders. The two bad refusals in Context — 1276 errors headed "Input should
-be a valid string", and a depth failure reported as "tool has no JSON encoding" —
-become unreachable through construction, because both live above 128 and the
-ceiling refuses first — as does the one-container band in which a `PlanStep` is
-accepted and cannot be dumped, which is a correctness hole rather than a
-cosmetic one. And #1107 closes on a full answer rather than on the
-partial one it asked for: the bound is at the ingress, it reaches every holder,
+nine holders — and, because §1 puts the check ahead of everything that consumes
+stack, at every recursion limit rather than only at the default. The two bad
+refusals in Context — 1276 errors headed "Input should be a valid string", and a
+depth failure reported as "tool has no JSON encoding" — become unreachable
+through construction, because both live above 128 and the ceiling refuses first,
+as does the one-container band in which a `PlanStep` is accepted and cannot be
+dumped, which is a correctness hole rather than a cosmetic one (#1610). And #1107
+closes on a full answer rather than on the partial one it asked for: the bound is at the ingress, it reaches every holder,
 and the residual it named is shown not to exist.
 
 **Harder.** A shared `core` type's acceptance set narrows, which is the cost
@@ -321,14 +367,22 @@ here, so the exposure is theoretical rather than observed — and a deployment t
 finds one is the revisit trigger below, not a case to widen the ceiling for
 quietly.
 
+Every construction of a `FrozenJson` value also gains one more pass over it: a
+bounded breadth-first walk that stops as soon as the ceiling is exceeded, on the
+hottest ingress in `core`, ahead of the two passes (`_deep_freeze` and the
+encoder) that already run there. It is bounded where they are not, so it costs
+less than either, but it is not free.
+
 `core` also gains a second depth constant next to `_MAX_SCHEMA_DEPTH`, and §5(c)
 exists because two constants whose ordering matters are two constants somebody
 can invert.
 
 **Revisit if** a tool worth having produces or accepts a payload within a factor
 of a few of 128 containers; if a persisted record is found above the ceiling; or
-if pydantic-core's guard moves *below* it, at which point the ceiling stops being
-what decides and §3's claim needs re-measuring rather than re-arguing.
+if pydantic-core's recursive-alias walk stops admitting values at the ceiling —
+which would not reopen the refusal contract, since §1 runs ahead of it, but would
+mean an *acceptable* value could no longer be validated, and the ceiling would
+need lowering rather than the argument reworking.
 
 ### The strongest case against this decision
 
