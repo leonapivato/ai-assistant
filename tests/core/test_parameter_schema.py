@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from ai_assistant.core import types as core_types
 from ai_assistant.core.logging import redact_sensitive
 from ai_assistant.core.types import (
+    _MAX_JSON_DEPTH,
     _MAX_REPORTED_VIOLATIONS,
     _MAX_SCHEMA_DEPTH,
     ActionRequest,
@@ -316,6 +317,48 @@ def test_a_schema_at_the_depth_bound_constructs_and_one_level_deeper_is_refused(
     assert _json_depth(too_deep) == _MAX_SCHEMA_DEPTH + 2
     with pytest.raises(ValidationError, match="nests deeper than"):
         _definition(parameters_schema=too_deep)
+
+
+def test_the_schema_bound_sits_strictly_inside_the_frozen_json_ceiling() -> None:
+    """Two constants whose ordering matters are two constants somebody can invert.
+
+    ``parameters_schema`` is itself a ``FrozenJsonMapping``, so ADR-0196 §1's
+    ingress check runs on it as a field validator — before the model validator
+    that reads it as a schema. If the two bounds were equal, or if a later lane
+    raised this one past the ceiling, the ingress would refuse every schema §6
+    means to refuse, §6's message would become unreachable, its check would be
+    dead code, and a tool author would be told about the wrong bound. This is the
+    only mechanical guard on that (ADR-0196 §4 and §5(c)); no reader of either
+    file would see the change otherwise.
+
+    Ordering the two — tighter bound inside looser — is what keeps each refusal
+    saying the thing it knows: evaluation spends more stack per level than
+    freezing does, so the document that is *evaluated* is bounded more tightly
+    than the value that is merely *frozen*.
+    """
+    assert _MAX_SCHEMA_DEPTH < _MAX_JSON_DEPTH
+
+    between = _nested_schema(_MAX_SCHEMA_DEPTH + 2)
+    assert _MAX_SCHEMA_DEPTH < _json_depth(between) <= _MAX_JSON_DEPTH
+    with pytest.raises(ValidationError) as refusal:
+        _definition(parameters_schema=between)
+    assert "nests deeper than" in str(refusal.value)
+    assert "nests containers deeper than" not in str(refusal.value)
+
+
+def test_a_schema_past_the_frozen_json_ceiling_is_refused_by_the_ingress() -> None:
+    """Past the looser bound the ingress answers first, and says so (ADR-0196 §1).
+
+    The schema check never sees it: the field validator runs before the model
+    validator. That is the right way round — a schema that deep is refused as a
+    *value* before anything tries to read it as a document — and it is why §4
+    only requires the band between the two bounds to reach §6.
+    """
+    past: dict[str, Any] = {"type": "object"}
+    for _ in range(_MAX_JSON_DEPTH):
+        past = {"properties": {"a": past}}
+    with pytest.raises(ValidationError, match="nests containers deeper than"):
+        _definition(parameters_schema=past)
 
 
 def test_a_schema_at_the_depth_bound_evaluates_within_the_recursion_limit() -> None:
