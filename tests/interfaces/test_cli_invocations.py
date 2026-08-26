@@ -83,6 +83,19 @@ _AT = datetime(2026, 3, 3, 11, 0, tzinfo=UTC)
 #: module authors rather than the substring search §9 calls wrong.
 _BARRED_CLAIMS: Final = ("sent", "read", "received", "delivered", "seen", "acted on")
 
+#: The words in which a surface would assert that the call **ran** — the claim
+#: ADR-0192 §4 bars alongside its six, and the one this renderer came closest to
+#: making: "A row saying 'this ran' would be asserting a fact no row carries, which
+#: is the same fact ADR-0034 §1 declines to mint and #234 owns."
+#:
+#: **Bare rather than phrase-matched**, on ``_BARRED_CLAIMS``' terms: the fixtures
+#: carry inert values, so a word left on screen is one this module's renderer chose,
+#: and this renderer has no legitimate use for either — it states the *opposite* in
+#: words, and the positive half of that is asserted beside the negative below. A
+#: later lane wanting one of these words in a disclaimer will meet this constant and
+#: have to say why, which is the right cost for a sentence in this neighbourhood.
+_EXECUTION_CLAIMS: Final = ("ran", "executed")
+
 #: What the opener writes to standard output when a case asks it to. Recognisable
 #: rather than plausible, so an assertion that it reached standard error is about
 #: this line and not about something the command legitimately printed.
@@ -524,6 +537,81 @@ def test_no_shape_names_a_recipient_an_account_an_endpoint_or_a_destination(
         )
 
 
+@pytest.mark.parametrize(("shape", "row"), _EVERY_SHAPE, ids=[s for s, _ in _EVERY_SHAPE])
+def test_no_shape_asserts_that_the_call_ran(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, shape: str, row: RecordedInvocation
+) -> None:
+    """ADR-0192 §4: a row is an act **begun**, never a statement that the callable ran.
+
+    "A surface renders an invocation row as an act the system began on that
+    authorisation — a call it claimed and then attempted — and **not** as a
+    statement that the tool callable was entered", because the claim is written
+    *before* the callable and §1's cancellation clause has a path where the claim
+    lands, its completion is written, and the callable is provably never entered.
+
+    **The claim row is the sharp case and the completion rows are not exempt.** Even
+    on ``SUCCEEDED``, where entry *is* established, §4 bounds what may be said to
+    *attempted and reported success* — so no row here says the call ran, and the
+    renderer has no wording that would.
+
+    **The positive half is asserted beside the negative**, because a surface can
+    avoid a word and still leave the inference standing: the claim row states in
+    terms that it does not say the tool was entered, which is what makes the silence
+    a statement rather than an omission (ADR-0184's positively-read absence).
+    """
+    rendered = _listing(output, monkeypatch, row)
+
+    for asserted in _EXECUTION_CLAIMS:
+        assert not re.search(rf"\b{asserted}\b", rendered, flags=re.IGNORECASE), (
+            f"{shape} asserted that the call {asserted}"
+        )
+    if row.invocation.completes is None:
+        assert "It does not say the tool itself was entered" in rendered
+
+
+#: One ANSI SGR sequence. ``tests/interfaces/test_cli.py``'s pattern, for its
+#: reason: Typer renders ``--help`` through a Rich console this module does not own,
+#: and that console decides its own colour and width from the environment.
+_SGR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _help_text(rendered: str) -> str:
+    """Help output as flowing words: no colour, no borders, no wrapping.
+
+    Lifted from ``tests/interfaces/test_cli_reads.py``'s helper of the same name.
+    Rich pads every line of a description with SGR codes, so a paragraph that wraps
+    puts ``\x1b[0m`` between two words of one sentence — and a phrase asserted
+    across that break is absent from the string while plainly present on the
+    screen. Normalising rather than pinning ``COLUMNS`` makes the assertion true at
+    every width instead of at one agreed width.
+    """
+    return " ".join(_SGR.sub("", rendered).replace("│", " ").split())
+
+
+@pytest.mark.parametrize("command", ["invocations", "export-invocations"], ids=str)
+def test_neither_command_s_own_words_assert_that_a_call_ran(command: str) -> None:
+    """ADR-0192 §4's bars reach the help text, not only the rows.
+
+    **The help is adapter-authored prose about this row kind**, and a user reads it
+    before they read a row — so a command whose description said a row records what
+    "ran under" a ruling would teach the inference §4 forbids and then render rows
+    that carefully avoid it. The two sites are one claim, and only one of them was
+    caught by a case over the rendering.
+
+    Both barred vocabularies are asserted here: §4's six, and the execution claim of
+    :data:`_EXECUTION_CLAIMS`. The help is entirely this module's own words — no row
+    value reaches it — so the scan needs no inert-fixture argument to be a claim
+    test.
+    """
+    rendered = _help_text(CliRunner().invoke(cli.app, [command, "--help"]).stdout)
+
+    assert list(_claims(rendered)) == []
+    for asserted in _EXECUTION_CLAIMS:
+        assert not re.search(rf"\b{asserted}\b", rendered, flags=re.IGNORECASE), (
+            f"'{command} --help' asserted that a call {asserted}"
+        )
+
+
 def test_a_barred_word_inside_a_value_the_row_carries_is_not_a_barred_claim(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -601,11 +689,15 @@ def test_an_empty_page_is_not_a_claim_that_nothing_ever_ran(
     surface must not do is turn an empty page into the statement the record declines
     to make. ``test_cli_reads.py`` holds the same line one store over, for
     ADR-0185 §7's version of the reason.
+
+    The sentence says *attempted* rather than *ran*, which is not a nicety: an
+    attempt is what the record holds, and the disclaimer would otherwise be denying
+    a fact no row asserts in the first place — see :data:`_EXECUTION_CLAIMS`.
     """
     rendered = _listing(output, monkeypatch)
 
     assert "Nothing recorded." in rendered
-    assert "not a claim that nothing ever ran" in rendered
+    assert "not a claim that nothing was ever attempted" in rendered
 
 
 def test_a_full_page_says_it_is_one_and_derives_no_count(
