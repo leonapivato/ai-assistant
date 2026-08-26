@@ -3117,6 +3117,51 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The standing recipient grant (ADR-0193 §1) -----------------------
+    # The one figure the recipient-grant store takes, supplied to the concrete
+    # store at construction. It bounds how many **outstanding granting records**
+    # the store holds, and ``record`` refuses a granting record that would take
+    # the count above it rather than truncating, evicting or expiring anything to
+    # make room.
+    #
+    # **Counted over *outstanding* rather than over *live*, and the substitution
+    # is in the tighter direction** (§1). Live is outstanding plus the clock, and
+    # ``record`` reads no clock; outstanding is a fact about two records, so a
+    # ceiling counted over it is at least as tight as one counted over live and
+    # never looser. What it costs is that an expired grant occupies its slot until
+    # it is revoked — the same shape the duplicate rule already has — and the
+    # recourse is the revocation §9 gives the user.
+    #
+    # **Zero is meaningful rather than a misconfiguration**: it is how a deployment
+    # declines route (b). It is **admission-only like every other value** and is
+    # not a kill switch — a store already holding live grants keeps them,
+    # ``covering`` keeps returning them, and the rows they source keep being
+    # written. What may not be created by configuration may not be destroyed by it
+    # either (ADR-0097 §8 read in the other direction); the way to make an existing
+    # grant stop covering is that the user revokes it, or clears the store.
+    #
+    # ``ge=0`` rather than ``ge=1``, and a negative is refused at load: an
+    # implementation special-casing only zero would accept ``-1``, which would
+    # refuse every granting write for a reason no message explains.
+    #
+    # **Sixty-four is ADR-0193 §1's own default** and is not a recommendation to a
+    # deployment (§13): high enough that ordinary use never reaches it, low enough
+    # that this store's ``standing()`` stays small in practice while #1551 answers
+    # the unbounded-read question for this store and ``SourceGrantStore`` together.
+    # A ``_IntegerSetting`` without a default would leave a fresh ``Settings()``
+    # undefined, and a lane free to pick would be picking whether route (b) is
+    # reachable at all.
+    recipient_grant_max_outstanding: _IntegerSetting = Field(
+        default=64,
+        ge=0,
+        lt=2**63,
+        description=(
+            "How many outstanding standing recipient grants the store admits "
+            "(ADR-0193 §1). Zero declines route (b) for a deployment that has "
+            "never established one; it retracts nothing from a store that has."
+        ),
+    )
+
     # --- The source-read trail (ADR-0185 §6) ------------------------------
     # The one figure this store takes, and the **only** bound it has: a row cap,
     # deliberately not a duration. Every other retention figure here is a duration,

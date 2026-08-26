@@ -781,6 +781,41 @@ class InvalidResolutionError(AuditError):
     """
 
 
+class InvalidAuthorisationError(AuditError):
+    """A decision's standing authorisation was not validated (ADR-0193 §6).
+
+    Raised by :meth:`~ai_assistant.core.protocols.AuditTrail.record` on a
+    **route-(b) egress decision** — a non-resolving ``ALLOW`` whose
+    ``egress_binding`` is not ``None`` and whose ``authorised_by`` is set — where
+    any of ADR-0193 §6's eight checks fails: the pointer named no outstanding
+    grant; the grant it named does not cover the decision (a different
+    ``ToolDefinition``, a different ``BoundAccount``, a destination set that does
+    not contain every member of the decision's); the grant was not live as of the
+    decision's own ``decided_at``; the binding is an ``OriginUnrecordedBinding``
+    or carries ``planned_with_external_content``; the ruling's
+    ``authorised_subject`` is unset or does not equal the digest ``record``
+    recomputes from the record the store returned; or the seam could not be read.
+    It is also raised on a **resolving** ``ALLOW`` carrying an
+    ``authorised_subject`` at all, which is a decision claiming an authorisation
+    of a kind it does not have.
+
+    **Its own class beside** :class:`DuplicateDecisionError` **and**
+    :class:`InvalidResolutionError`, for their reason: a replayed write, a
+    substituted resolution subject and an unvalidated standing pointer are three
+    facts an operator must be able to tell apart, and no lane widens
+    :class:`InvalidResolutionError`'s stated subject to cover this one
+    (ADR-0193 §6).
+
+    **A store fault from the resolution seam arrives here too, chained.** Where
+    :meth:`~ai_assistant.core.protocols.RecipientGrantResolution.outstanding`
+    raises :class:`RecipientGrantError`, ``record`` refuses with this error raised
+    ``from`` it — so a caller keeps the one :class:`AuditError` handler while an
+    operator keeps the two facts apart, "the pointer named no outstanding grant"
+    and "the seam could not be read", in the message and in ``__cause__``
+    (ADR-0193 §6).
+    """
+
+
 class AuthorisationSpentError(AuditError):
     """A claim was refused because the authorisation it names is spent (ADR-0192 §1).
 
@@ -994,6 +1029,57 @@ class InvalidGrantError(GrantError):
     store reads no clock, so a host clock corrected backwards would otherwise make
     a grant permanently unrevokable — the one property this contract exists to
     deliver, defeated by an invariant that was protecting nothing (ADR-0097 §4).
+    """
+
+
+class RecipientGrantError(AssistantError):
+    """A recipient-grant store could not be read or written (ADR-0193 §1).
+
+    The store fault, and the base for the refusal below, so a caller that only
+    wants "the recipient-grant store could not answer" gets one handler.
+
+    **A component that cannot get an answer from this seam fails closed**
+    (ADR-0193 §1's last clause). A
+    :meth:`~ai_assistant.core.protocols.RecipientGrants.covering` that raises this
+    is **not** a grant: no policy proceeds on a stale answer, on an earlier lookup
+    or on an absent one, and none reaches a route-(b) ``ALLOW``. That is
+    :class:`GrantError`'s own clause read one store over, and the direction is the
+    same one ADR-0016 §4's ``UNKNOWN`` cost already rules for the neighbouring
+    case.
+
+    **Deliberately not** :class:`GrantError`, whose stated subject is the
+    *source*-grant store (ADR-0193 §1). One handler catching both would join the
+    two seams ADR-0097 §7 keeps apart — a source grant may never authorise a send
+    and a recipient grant may never authorise a read — and the two fail closed
+    onto different things: a source fault stops a read of the user's files, and
+    this one stops a send.
+    """
+
+
+class InvalidRecipientGrantError(RecipientGrantError):
+    """A recipient-grant store refused the record it was handed (ADR-0193 §1).
+
+    Raised by :meth:`~ai_assistant.core.protocols.RecipientGrantStore.record`: a
+    duplicate id (the store is write-once), a **granting** record duplicating an
+    outstanding grant's ``tool``, ``account`` and ``destinations``, a granting
+    record that would take the count of outstanding granting records above
+    ``Settings.recipient_grant_max_outstanding``, a record that does not satisfy
+    its own model, or a revocation naming a grant that is absent, is itself a
+    revoking record, is already revoked, or transcribes a different field.
+
+    **One class rather than several**, on :class:`InvalidGrantError`'s reasoning
+    and for its reason: the caller's recourse is identical in every refusing case
+    — read the store and construct a different record — so a family would be
+    several names for one response (ADR-0193 §1).
+
+    **The count ceiling refuses rather than truncating**, and a **revoking** record
+    is never refused on that ground whatever the count: a ceiling that could block
+    a revocation would trap a user above it with no way down (ADR-0193 §1).
+
+    A **timestamp is never a ground for this refusal on a revocation**, including
+    one that predates the grant it revokes: ``decided_at`` is caller-supplied and
+    this store reads no clock on the write path, so a host clock corrected
+    backwards would otherwise make a grant permanently unrevokable (ADR-0193 §1).
     """
 
 
