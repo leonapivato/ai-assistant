@@ -1189,11 +1189,52 @@ const PARK_ROUTE_BACK =
   "no longer offers is one this browser cannot answer — the listing says which parks " +
   "are answerable and not why one is missing, so nothing here calls it resolved.";
 
+// **What a row carries while its token is claimed and its answer went unread.**
+//
+// Cause-neutral, deliberately, and that is adversarial review's round-5 finding: a row
+// is re-rendered by every later transition — the park's other row answering, a listing
+// read, the registry refreshing — and the sentence it takes is chosen then, long after
+// the ending. A row that said "You stopped waiting" after a *connection* failed would
+// attribute to the owner an act they did not take, which is the same class of wrong
+// explanation `abandonAsk` keeps three sentences apart for the ask.
+//
+// So the division is: **what happened** is said once, at the ending, in the fault line
+// beside the row — one of the three below, each naming its own cause — and **what is
+// still true** is what the row carries, which is this. Neither restates the other.
+const PARK_NOT_KNOWN =
+  "This browser sent an answer for this park and never read a reply, so what became of " +
+  "it is not known: the assistant may have carried the action out and may never have " +
+  "received the answer at all. Nothing was re-sent and nothing was cancelled. " +
+  PARK_ROUTE_BACK;
+
 const PARK_UNRESOLVED =
   "You stopped waiting for that answer, so this browser is no longer listening for it. " +
   "What became of it is not known: the answer was sent and nothing here read a reply, " +
   "so the assistant may have carried the action out and may never have received the " +
   "answer at all. Nothing was re-sent and nothing was cancelled. " +
+  PARK_ROUTE_BACK;
+
+// **A refusal the gateway answered, that is nonetheless not known** (round 5's
+// blocker). ADR-0177 §7's third clause is read from ADR-0168 §9's distinction "and from
+// nothing else": "a request the hub received and declined is **known not to have
+// landed**; a transport failure between the gateway and the hub is **not known**". A
+// `502 hub-unreachable` is the second, and `_relay_fault` raises it from a
+// `TransportError` the wire client can raise *after* the call was delivered — so the
+// hub may have run the action with only the reply lost. Releasing the continuation on
+// it is the inference ADR-0139 §4 forbids, and `UNKNOWN_FAULTS` is the page's own
+// existing record of which conditions this covers.
+//
+// **It states the condition rather than restating `FAULTS`'s sentence for it.** That
+// entry reads "so nothing was asked … nothing was queued", which is a claim about
+// whether the hub *received* the request — true enough of a read, and exactly what §7's
+// third clause forbids asserting of a mutating act. It is shared by every `relay`
+// caller, several of which mutate, so correcting it is #1619's and not this lane's;
+// what this does is not put the contradiction on one screen.
+const PARK_HUB_UNREAD =
+  "The gateway reported a failure between itself and the hub, so this browser never " +
+  "read what became of that answer. It is not known: the gateway may have delivered it " +
+  "and the hub may have carried the action out, with only the reply lost on the way " +
+  "back. Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
 
 // **The same ending, reached without the owner asking for it**, which is round 4's
@@ -1255,7 +1296,7 @@ function parkWords(mine, out, answered, stranded) {
   if (!answered) {
     return "";
   }
-  return stranded ? PARK_UNRESOLVED : PARK_ANSWERED;
+  return stranded ? PARK_NOT_KNOWN : PARK_ANSWERED;
 }
 
 function offerApproval(item, token) {
@@ -1538,8 +1579,22 @@ async function answerConfirmation(token, approved, stopping) {
   // the same count for the same reason.
   const chosenAt = chose;
   let body = null;
+  // What the gateway refused with, where it refused — kept because `relay` displays the
+  // condition and returns a bare `null`, and this is the one caller for which the
+  // difference between two refusals decides whether a consent token comes back.
+  let refusal = null;
+  const noticed = (named, status) => {
+    refusal = { named, status };
+  };
   try {
-    body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations", stopping);
+    body = await relay(
+      half,
+      "/confirmation/resume",
+      { token, approved },
+      "confirmations",
+      stopping,
+      noticed
+    );
   } catch (_) {
     // **No response was read, and that is the whole of what decides this** (#1536, and
     // adversarial review's round-4 blocker). Two things reach here — the owner ending
@@ -1577,16 +1632,22 @@ async function answerConfirmation(token, approved, stopping) {
     return;
   }
   if (body === null) {
-    // A refusal the gateway named and `relay` already displayed — a full hub, a
-    // declined request. A response *was* read, so this is not the clause above: the
-    // gateway answered, and what it answered is on screen.
+    // A refusal the gateway named and `relay` already displayed. A response *was* read,
+    // so this is not the clause above — but a read response is not by itself a landed
+    // or a not-landed one, and ADR-0177 §7's third clause is what sorts them.
     //
-    // **One condition here is still `not known` and this page cannot tell** — a `502`
-    // `hub-unreachable` is a gateway-to-hub transport failure, which ADR-0177 §7's
-    // third clause makes not known, and `relay` hands its caller a bare `null` rather
-    // than the condition it displayed. Separating them means widening `relay`'s return
-    // for all nineteen of its callers, which is its own change: filed as its own issue
-    // rather than grown into this one.
+    // **The conditions that are not known keep the continuation**, `UNKNOWN_FAULTS`
+    // being the page's own record of which those are. The sentence beside them is this
+    // surface's rather than `FAULTS`'s, for the reason `PARK_HUB_UNREAD` carries.
+    if (refusal !== null && UNKNOWN_FAULTS.has(refusal.named.fault)) {
+      unresolved.add(token);
+      readPending(false);
+      fault(PARK_HUB_UNREAD, "confirmations");
+      return;
+    }
+    // Everything else the gateway named is a request it received and declined, which is
+    // known **not** to have landed — so the park was not resolved and the row stays
+    // answerable.
     spent.delete(token);
     return;
   }
@@ -2775,7 +2836,17 @@ async function readDeliveries(half) {
 // `resume` rides the gateway's turn budget (ADR-0177 §9) and that figure reaches the
 // browser in nothing, so a page-side one would be a second number able to disagree with
 // it. The page keeps one clock and it is the delivery stream's.
-async function relay(half, path, payload, panelId, stopping) {
+//
+// **`noticed` is that same caller being told *which* refusal it got**, and it is a
+// callback rather than a wider return for the reason a wider return would be a
+// different change: `null` means "refused, and the condition is already on screen" at
+// nineteen call sites, several of which branch on it, and re-reading all nineteen
+// against ADR-0139 §4's three outcomes is its own lane (#1619). One caller needs more
+// than `null` — a park's answer, because ADR-0177 §7's third clause makes a
+// gateway-to-hub transport failure **not known** while an ordinary decline is known not
+// to have landed, and only the first of those may keep its continuation. So it is
+// handed the body this function already read, and every other caller is untouched.
+async function relay(half, path, payload, panelId, stopping, noticed) {
   const response = await fetch(path, {
     method: "POST",
     headers: admitted(half, true),
@@ -2790,6 +2861,9 @@ async function relay(half, path, payload, panelId, stopping) {
   // forget, and `observe`, which sends this view's selection exactly as `ask` does.
   conversationLost(body, payload.conversation_id);
   refused(panelId, body, response.status);
+  if (noticed !== undefined) {
+    noticed(body, response.status);
+  }
   return null;
 }
 
