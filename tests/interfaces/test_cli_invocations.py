@@ -83,18 +83,28 @@ _AT = datetime(2026, 3, 3, 11, 0, tzinfo=UTC)
 #: module authors rather than the substring search §9 calls wrong.
 _BARRED_CLAIMS: Final = ("sent", "read", "received", "delivered", "seen", "acted on")
 
-#: The words in which a surface would assert that the call **ran** — the claim
-#: ADR-0192 §4 bars alongside its six, and the one this renderer came closest to
-#: making: "A row saying 'this ran' would be asserting a fact no row carries, which
-#: is the same fact ADR-0034 §1 declines to mint and #234 owns."
+#: The verbs in which a **row** would assert that the call executed — the claim
+#: ADR-0192 §4 bars alongside its six: "A row saying 'this ran' would be asserting a
+#: fact no row carries, which is the same fact ADR-0034 §1 declines to mint and #234
+#: owns."
+#:
+#: **A row's vocabulary and not the whole surface's**, which is the distinction an
+#: earlier version of this constant lost. §4 licenses one execution statement — a
+#: ``SUCCEEDED`` completion "is the tool reporting an outcome back through the seam,
+#: which is unreachable without the callable" — and ``assistant invocations --help``
+#: makes exactly that statement, scoped to that case, in the words "which it could
+#: not do without having run". So the bar belongs on the rows, where no such scoping
+#: is available and every kind shares one renderer; the help is held to a
+#: **contextual** assertion instead, in
+#: :func:`test_the_help_describes_the_ruling_a_row_names`.
 #:
 #: **Bare rather than phrase-matched**, on ``_BARRED_CLAIMS``' terms: the fixtures
 #: carry inert values, so a word left on screen is one this module's renderer chose,
-#: and this renderer has no legitimate use for either — it states the *opposite* in
-#: words, and the positive half of that is asserted beside the negative below. A
-#: later lane wanting one of these words in a disclaimer will meet this constant and
-#: have to say why, which is the right cost for a sentence in this neighbourhood.
-_EXECUTION_CLAIMS: Final = ("ran", "executed")
+#: and the renderer has no legitimate use for any of them — it states the *opposite*
+#: in words, and the positive half of that is asserted beside the negative below.
+#: ``running`` is deliberately out of reach: the footer's "anything is still
+#: running" is a liveness disclaimer, and ``\brun\b`` does not match inside it.
+_EXECUTION_CLAIMS: Final = ("ran", "run", "executed")
 
 #: What the opener writes to standard output when a case asks it to. Recognisable
 #: rather than plausible, so an assertion that it reached standard error is about
@@ -588,8 +598,15 @@ def _help_text(rendered: str) -> str:
     return " ".join(_SGR.sub("", rendered).replace("│", " ").split())
 
 
-@pytest.mark.parametrize("command", ["invocations", "export-invocations"], ids=str)
-def test_neither_command_s_own_words_assert_that_a_call_ran(command: str) -> None:
+@pytest.mark.parametrize(
+    ("command", "anchor"),
+    [
+        ("invocations", "Show what I did on the authorisations you gave me"),
+        ("export-invocations", "Write every act I recorded on an authorisation"),
+    ],
+    ids=str,
+)
+def test_the_help_describes_the_ruling_a_row_names(command: str, anchor: str) -> None:
     """ADR-0192 §4's bars reach the help text, not only the rows.
 
     **The help is adapter-authored prose about this row kind**, and a user reads it
@@ -598,18 +615,44 @@ def test_neither_command_s_own_words_assert_that_a_call_ran(command: str) -> Non
     that carefully avoid it. The two sites are one claim, and only one of them was
     caught by a case over the rendering.
 
-    Both barred vocabularies are asserted here: §4's six, and the execution claim of
-    :data:`_EXECUTION_CLAIMS`. The help is entirely this module's own words — no row
-    value reaches it — so the scan needs no inert-fixture argument to be a claim
-    test.
+    **Contextual rather than a verb scan, and a verb scan is the wrong instrument
+    here.** §4 licenses exactly one execution statement — a ``SUCCEEDED`` completion
+    is the tool reporting an outcome back through the seam, "which is unreachable
+    without the callable" — and this help makes it, scoped to that case. A scan
+    barring the verb outright would forbid conforming prose while proving nothing
+    about the sentence that actually went wrong, which is ADR-0192 §9's own
+    objection to substring tests one register up. So what is asserted is the
+    **claim**: the barred phrasing is absent and the correct one is present, in the
+    one place the two compete.
+
+    **The positive anchor is not decoration.** Typer renders help through its own
+    console, and a failure there yields an empty page on which every negative
+    assertion above passes vacuously. The exit code and a stable sentence from each
+    page are what make the negatives mean anything at all.
     """
-    rendered = _help_text(CliRunner().invoke(cli.app, [command, "--help"]).stdout)
+    result = CliRunner().invoke(cli.app, [command, "--help"])
+    rendered = _help_text(result.stdout)
+
+    assert result.exit_code == 0
+    assert anchor in rendered, "the help did not render, so the negatives below are vacuous"
 
     assert list(_claims(rendered)) == []
-    for asserted in _EXECUTION_CLAIMS:
-        assert not re.search(rf"\b{asserted}\b", rendered, flags=re.IGNORECASE), (
-            f"'{command} --help' asserted that a call {asserted}"
-        )
+    assert "ran under" not in rendered
+    assert "runs under" not in rendered
+
+
+def test_the_listing_help_names_the_ruling_rather_than_asserting_execution() -> None:
+    """The positive half of the clause above, on the one command that states it.
+
+    ``export-invocations`` describes an artifact and has no occasion to mention the
+    ruling at all, so asserting the phrase over both would pin a sentence one of
+    them has no reason to carry. This is the page where the wording was wrong.
+    """
+    rendered = _help_text(CliRunner().invoke(cli.app, ["invocations", "--help"]).stdout)
+
+    # Typer renders the docstring verbatim rather than as markup, so the emphasis
+    # markers are part of the page a user sees and part of the string asserted here.
+    assert "A row says whether the ruling it **names** was for an outbound call" in rendered
 
 
 def test_a_barred_word_inside_a_value_the_row_carries_is_not_a_barred_claim(
