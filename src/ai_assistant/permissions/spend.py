@@ -74,8 +74,18 @@ _DECEMBER: Final = 12
 #: apart from an unreachable one at the other end.
 _FIRST_YEAR: Final = 1
 
-#: How many times a bound is nudged inward before its rendering is given up on.
+#: How many times a bound is nudged inward before the margin below is taken.
 _RENDERABLE_ATTEMPTS: Final = 4
+
+#: The window a boundary is searched in. Wider than any offset the tz database
+#: carries, so the instant sought is always inside it wherever the range allows.
+_SEARCH_MARGIN: Final = timedelta(hours=48)
+
+#: ADR-0026 §3's own localization margin. An instant this far inside ``datetime``'s
+#: range survives being localized to *any* zone, so it is what makes the rendering
+#: clamp below **total**: whatever the offset in force there turns out to be, the
+#: sum lands inside the range.
+_LOCALIZATION_MARGIN: Final = timedelta(days=1)
 
 
 class SpendArithmeticError(Exception):
@@ -609,18 +619,102 @@ def _following_date(first: date, period: SpendPeriod) -> date | None:
         return None
 
 
-def _boundary(day: date, zone: ZoneInfo) -> datetime | None:
-    """Return ADR-0194 §1's boundary instant for ``day``, or ``None`` if unreachable."""
+def _offset_at(instant: datetime, zone: ZoneInfo) -> timedelta:
+    """Return the UTC offset in force at ``instant`` in ``zone``."""
+    return instant.astimezone(zone).utcoffset() or timedelta(0)
+
+
+def _breakpoints(low: datetime, high: datetime, zone: ZoneInfo, found: list[datetime]) -> None:
+    """Collect, to the second, every instant in ``[low, high]`` at which the offset changes.
+
+    A recursive bisection on the offset function, which is piecewise constant with
+    finitely many jumps. Two transitions that cancel each other exactly within one
+    half would be missed, which no zone in the database carries.
+    """
+    if _offset_at(low, zone) == _offset_at(high, zone):
+        return
+    gap = int((high - low).total_seconds())
+    if gap <= 1:
+        found.append(high)
+        return
+    # Halved in whole **seconds**, which is the resolution the zone database
+    # records a transition at. Halving the ``timedelta`` itself lands the search on
+    # fractional instants and returns a boundary carrying microseconds no
+    # transition has, which then shows up in every bound stated from it.
+    middle = low + timedelta(seconds=gap // 2)
+    _breakpoints(low, middle, zone, found)
+    _breakpoints(middle, high, zone, found)
+
+
+def _shifted(instant: datetime, by: timedelta, limit: datetime, on_overflow: datetime) -> datetime:
+    """Return ``instant + by`` clamped to ``limit``, or ``limit`` where it overflows.
+
+    Near either end of ``datetime``'s range the shift itself raises, and the answer
+    there is the limit rather than a refusal — which is the same direction §1's
+    clamps take. Whole seconds, because that is the resolution transitions are
+    recorded at and the one the search below halves in.
+    """
     try:
-        civil = datetime(day.year, day.month, day.day, tzinfo=zone, fold=0)
-        return civil.astimezone(UTC)
-    except OverflowError, ValueError, OSError:
+        shifted = instant + by
+    except OverflowError, ValueError:
+        return on_overflow.replace(microsecond=0)
+    ordered = min(shifted, limit) if by > timedelta(0) else max(shifted, limit)
+    return ordered.replace(microsecond=0)
+
+
+def _boundary(day: date, zone: ZoneInfo, span: tuple[datetime, datetime]) -> datetime | None:
+    """Return ADR-0194 §1's boundary instant for ``day``, or ``None`` if unreachable.
+
+    **The earliest instant whose local civil date is at least ``day``**, computed
+    from the rule rather than by naming a wall-clock midnight and taking whatever
+    ``fold`` resolves it to. That shortcut is right only where a gap *begins* at
+    midnight: ``America/Toronto`` jumped from 23:29:59 on 1919-03-30 straight to
+    00:30 on the 31st, so midnight sits inside the gap rather than at its start,
+    ``fold=0`` resolves to 05:00 UTC, and the half hour from 04:30 — already the
+    31st locally — falls in the wrong day. §1's rule has no cases; this is it.
+
+    The window is split at every offset change it carries, and the offset is
+    constant on each piece — so on each piece the local clock is monotone and the
+    earliest satisfying instant is either where that piece's own reading of civil
+    midnight lands or the piece's own start, whichever is later. The answer is the
+    least of those across the pieces, which is what makes the three cases §1
+    enumerates fall out rather than be enumerated: a repeated midnight is answered
+    by the earlier piece, a missing one by the later piece's start — the transition
+    instant — and a civil date skipped whole by the same instant its successor
+    resolves to, which is what makes that date's period zero-length.
+    """
+    try:
+        midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    except OverflowError, ValueError:  # pragma: no cover - `date` refuses first
         return None
+    low = _shifted(midnight, -_SEARCH_MARGIN, span[0], span[0])
+    high = _shifted(midnight, _SEARCH_MARGIN, span[1], span[1])
+    if low > high:
+        return None
+    found: list[datetime] = []
+    _breakpoints(low, high, zone, found)
+    starts = [low, *sorted(found)]
+    # ``None`` closes the last piece rather than ``high`` plus a second, which
+    # overflows where ``high`` is the end of the representable range itself.
+    ends: list[datetime | None] = [*starts[1:], None]
+    earliest: datetime | None = None
+    for piece, closes in zip(starts, ends, strict=True):
+        try:
+            wanted = midnight - _offset_at(piece, zone)
+        except OverflowError, ValueError, OSError:
+            continue
+        candidate = max(piece, wanted)
+        if closes is not None and candidate >= closes:
+            continue
+        if candidate > high or candidate.astimezone(zone).date() < day:
+            continue
+        earliest = candidate if earliest is None else min(earliest, candidate)
+    return earliest
 
 
 def _clamped_boundary(day: date, zone: ZoneInfo, earliest: datetime, latest: datetime) -> datetime:
     """Return ``day``'s boundary, clamped into the representable range."""
-    raw = _boundary(day, zone)
+    raw = _boundary(day, zone, (earliest, latest))
     if raw is None:
         return earliest if day.year <= _FIRST_YEAR else latest
     return min(max(raw, earliest), latest)
@@ -638,8 +732,8 @@ def _representable_range(zone: ZoneInfo) -> tuple[datetime, datetime]:
     """
     floor = datetime.min.replace(tzinfo=UTC)
     peak = datetime.max.replace(tzinfo=UTC)
-    low_offset = (floor + timedelta(days=2)).astimezone(zone).utcoffset() or timedelta(0)
-    high_offset = (peak - timedelta(days=2)).astimezone(zone).utcoffset() or timedelta(0)
+    low_offset = _offset_at(floor + timedelta(days=2), zone)
+    high_offset = _offset_at(peak - timedelta(days=2), zone)
     earliest = floor + max(timedelta(0), -low_offset)
     latest = peak - max(timedelta(0), high_offset)
     return earliest, latest
@@ -665,8 +759,15 @@ def _renderable(
             bound = min(max(bound - offset, earliest), latest)
             continue
         return bound, offset
-    msg = f"no representable rendering for a period boundary in {zone.key!r}"
-    raise SpendArithmeticError(msg)
+    # **Total by construction**, never a refusal. ADR-0194 §4 enumerates six
+    # grounds and "the period could not be rendered" is none of them, so a raise
+    # here would have to be reported under a ground that did not apply. The
+    # fallback is ADR-0026 §3's own margin, inside which a bound plus *any* offset
+    # the database carries is representable — so the pair below always is. It costs
+    # at most a day of membership at one end of a range no clock this system
+    # accepts can reach, and it is not reachable on any input the loop above meets.
+    bound = min(max(bound, earliest + _LOCALIZATION_MARGIN), latest - _LOCALIZATION_MARGIN)
+    return bound, _offset_at(bound, zone)
 
 
 # --- reservations --------------------------------------------------------------

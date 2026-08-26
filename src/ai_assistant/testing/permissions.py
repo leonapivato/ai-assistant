@@ -1090,8 +1090,10 @@ class FakeAuditTrail:
         Structurally implements
         :meth:`~ai_assistant.core.protocols.SpendLedger.spend_totals`. One clock
         reading and one row snapshot, so the pair is always one a snapshot could
-        have produced; and no lock, since it reads no reservation and a totals read
-        must never queue behind a wedged admission.
+        have produced; and no **admission** lock, since it reads no
+        reservation and a totals read must never queue behind a wedged admission.
+        It does enter the modelled resource a durable holder's connection lock
+        stands for, for the length of the snapshot alone.
 
         Raises:
             SpendUndeterminedError: Only where an injected clock raised. A trapped
@@ -1119,7 +1121,11 @@ class FakeAuditTrail:
         try:
             return self._books.periods(instant)
         except (SpendTrapError, OverflowError, ValueError, OSError) as exc:
-            raise SpendUndeterminedError(_unmeasured(_CLOCK_RAISED)) from exc
+            # Not the clock ground: the clock already answered. ADR-0194 §1's
+            # rule is total for every reading ``checked_clock`` accepts, so this is
+            # unreachable and keeps §5's set closed against a defect in this
+            # implementation's own arithmetic — §4's sixth ground.
+            raise SpendUndeterminedError(_unmeasured(_ARITHMETIC_TRAPPED)) from exc
 
     async def _spend_read(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:
         """Take the snapshot, translating whatever it failed with.
