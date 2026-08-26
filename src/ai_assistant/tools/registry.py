@@ -34,7 +34,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import ToolCall, ToolDefinition
 from ai_assistant.tools.consume import consumed_call
-from ai_assistant.tools.invocation import BoundImplementation, checked_pairing, run_bound_call
+from ai_assistant.tools.invocation import BoundImplementation, prepared_call, run_prepared_call
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -403,21 +403,34 @@ class InMemoryToolRegistry:
         # registry's callable rather than the call, so ADR-0029 §2's three do not
         # subsume it, and a `ToolBindingError` from it must stay where ADR-0034 §1
         # already puts it — a pre-callable exit with no row written (ADR-0192 §1).
-        checked_pairing(binding.implementation, checked)
+        #
+        # **Resolved once, here, and never read again.** The coroutine is built
+        # now rather than after the claim so that no reading of the callable's
+        # shape survives the claim append: an implementation that acquired or shed
+        # `invoke_bound` while that append was in flight would otherwise raise a
+        # `ToolBindingError` *after* the claim, and §3 would owe a completion
+        # carrying an outcome ADR-0029 computes for no such error. Creating a
+        # coroutine executes none of it, so nothing is entered by doing this early.
+        running = prepared_call(binding.implementation, checked)
+        entered = False
 
         async def act() -> ToolResult:
-            return await run_bound_call(
-                binding.implementation,
-                definition=binding.definition,
-                call=checked,
-                timeout=timeout,
-            )
+            nonlocal entered
+            entered = True
+            return await run_prepared_call(running, definition=binding.definition, timeout=timeout)
 
-        if self._ledger is None:
-            return await act()
-        return await consumed_call(
-            ledger=self._ledger,
-            definition=binding.definition,
-            decision=checked.decision,
-            act=act,
-        )
+        try:
+            if self._ledger is None:
+                return await act()
+            return await consumed_call(
+                ledger=self._ledger,
+                definition=binding.definition,
+                decision=checked.decision,
+                act=act,
+            )
+        finally:
+            if not entered:
+                # A refused claim never reaches the callable, so the coroutine
+                # built above is closed rather than left for the collector to
+                # complain about. Closing an unstarted coroutine runs none of it.
+                running.close()

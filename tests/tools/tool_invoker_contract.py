@@ -1652,6 +1652,83 @@ class ToolInvokerContract:
         assert await trail.open_invocations(decision_id=call.decision.id) == []
         assert ledger.completion.calls == 1, "no compensating append and no second completion"
 
+    @pytest.mark.parametrize("timing", ["before-the-commit", "after-the-commit"])
+    @pytest.mark.parametrize(
+        "branch",
+        ["absorbed-exception", "invented-cancellation", "torn-down", "external-cancellation"],
+    )
+    async def test_the_commit_state_split_holds_on_every_completion_failure_branch(
+        self,
+        consuming: Callable[[InvocationLedger], InvocableToolRegistry],
+        branch: str,
+        timing: str,
+    ) -> None:
+        """What the store already committed, stands — on **every** failure branch.
+
+        An implementation may honour the commit-state rule on one path and repair
+        the others, so each branch is driven with the append failing **before** it
+        commits, where the claim is left open, and again with the row durable
+        before the failure reaches the frame, where the completion stands and the
+        claim it names is closed. Nothing is deleted, rewritten or compensated to
+        make the two look alike: ADR-0192 §6 offers no selective delete, and
+        ADR-0060 §1 already rules that an abandoned append may have committed.
+
+        **What ``invoke`` returns or raises is decided independently of which side
+        of the commit the failure landed on**, and the test asserts that too —
+        which is exactly what a repairing implementation gets wrong.
+        """
+        errors: dict[str, BaseException] = {
+            "absorbed-exception": RuntimeError("the store would not write"),
+            "invented-cancellation": asyncio.CancelledError("the ledger invented one"),
+            "torn-down": KeyboardInterrupt(),
+            "external-cancellation": RuntimeError("the store would not write"),
+        }
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = errors[branch]
+        ledger.completion.commits = timing == "after-the-commit"
+        invoker = consuming(ledger)
+        cancelled = branch == "external-cancellation"
+        implementation = Slow() if cancelled else Spy(output={"unread": 1})
+        invoker.register(read_only("inbox"), implementation)
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        returned: ToolResult | None = None
+        raised: BaseException | None = None
+        try:
+            if cancelled:
+                # A task only where one is needed: a `BaseException` propagating
+                # out of a task is re-raised into the event loop (ADR-0031 §4), so
+                # the torn-down branch is awaited in this frame instead.
+                task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+                await implementation.entered.wait()  # type: ignore[union-attr]  # `Slow` here
+                task.cancel()
+                returned = await task
+            else:
+                returned = await invoker.invoke(call, timeout=PATIENT)
+        except BaseException as exc:
+            # Every class: which one leaves is the branch's own subject, asserted
+            # below rather than narrowed by the `raises` that catches it.
+            raised = exc
+
+        if branch in {"absorbed-exception", "invented-cancellation"}:
+            assert returned is not None
+            assert returned.output == {"unread": 1}, "the act's own result stands"
+        elif branch == "torn-down":
+            assert returned is None, "no result is manufactured for a torn-down process"
+        else:
+            assert isinstance(raised, asyncio.CancelledError)
+            assert raised.__cause__ is errors[branch]
+
+        assert ledger.completion.calls == 1, "no second completion is attempted for one claim"
+        if timing == "after-the-commit":
+            assert len(await completions(trail)) == 1, "the committed row stands"
+            assert await trail.open_invocations(decision_id=call.decision.id) == []
+        else:
+            assert await completions(trail) == []
+            assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
     async def test_an_erasure_between_the_claim_and_its_completion_leaves_no_claim(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
     ) -> None:

@@ -191,19 +191,26 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None
         raise ToolBindingError(msg)
 
 
-def _awaited(
+def prepared_call(
     implementation: BoundImplementation, call: ToolCall
 ) -> Coroutine[Any, Any, FrozenJson]:
-    """Return the unawaited coroutine for ``call``, having checked the pairing.
+    """Check the pairing and return the unawaited coroutine, in **one** resolution.
 
-    Created outside the deadline so that :func:`run_bound_call` starts the clock
-    and the call together.
+    Created outside the deadline so that :func:`run_prepared_call` starts the
+    clock and the call together — and, since ADR-0192 §1, resolved **before** the
+    ledger claim so that nothing about the callable's shape is read again
+    afterwards. Reading it twice would let an implementation that acquired or
+    shed ``invoke_bound`` while the claim append was in flight raise a
+    ``ToolBindingError`` **after** the claim, which is the one thing §1 states as
+    a property rather than as a list: after the claim, ``invoke`` performs no
+    check that can raise a seam fault.
+
+    A caller that ends up not awaiting the returned coroutine — because the claim
+    was refused — closes it, which is why this is separate from awaiting it.
 
     Raises:
         ToolBindingError: If the callable's shape and the call's binding disagree
-            (:func:`checked_pairing`). Re-checked here rather than assumed, so
-            this function is safe to call on its own; the check is pure, so a
-            caller that already ran it pays nothing.
+            (:func:`checked_pairing`).
     """
     checked_pairing(implementation, call)
     if isinstance(implementation, EgressToolImplementation):
@@ -332,7 +339,33 @@ async def run_bound_call(
     call: ToolCall,
     timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
 ) -> ToolResult:
-    """Await ``implementation`` under this seam's deadline and classify the result.
+    """Pair ``call`` with ``implementation`` and run it, in one step.
+
+    The convenience composition of :func:`prepared_call` and
+    :func:`run_prepared_call`, for a caller with no ledger claim to place between
+    them. A caller that has one **must** use the two halves: resolving the shape
+    twice would put a check that can raise a seam fault *after* the claim, which
+    ADR-0192 §1 forbids as a property rather than as a list of inputs.
+
+    Raises:
+        ToolBindingError: If the callable's shape and the call's egress binding
+            disagree (:func:`checked_pairing`). Raised **before** the deadline
+            opens, so it is a seam fault like the three ``invoke`` performs and
+            never a classified tool failure.
+        CancelledError: If the invoking task was cancelled from outside.
+    """
+    return await run_prepared_call(
+        prepared_call(implementation, call), definition=definition, timeout=timeout
+    )
+
+
+async def run_prepared_call(
+    running: Coroutine[Any, Any, FrozenJson],
+    *,
+    definition: ToolDefinition,
+    timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+) -> ToolResult:
+    """Await ``running`` under this seam's deadline and classify the result.
 
     Every classification here keys on something the seam itself established,
     never on an exception's type alone:
@@ -361,26 +394,17 @@ async def run_bound_call(
     bypass the failure path it specifies is enforcing nothing.
 
     Args:
-        implementation: The registry's callable for ``definition``, of either
-            shape :data:`BoundImplementation` admits.
+        running: The unawaited coroutine :func:`prepared_call` built, whose
+            callable shape was resolved and checked **once**, before any claim.
         definition: The registry's own declaration, used for classification.
-        call: The revalidated, detached call.
         timeout: How long to wait; already checked by the caller.
 
     Returns:
         The classified outcome.
 
     Raises:
-        ToolBindingError: If the callable's shape and the call's egress binding
-            disagree (:func:`_awaited`). Raised **before** the deadline opens, so
-            it is a seam fault like the three ``invoke`` performs and never a
-            classified tool failure.
         CancelledError: If the invoking task was cancelled from outside.
     """
-    # Created before the deadline opens, so a pairing fault is a raise out of the
-    # seam rather than an `INTERNAL` result: nothing ran, and reporting that a tool
-    # failed would be a falsehood about a call that was never made.
-    running = _awaited(implementation, call)
     entered_with = _pending_cancellations()
     deadline = asyncio.timeout(timeout.total_seconds())
     try:
@@ -417,5 +441,7 @@ __all__ = [
     "ToolImplementation",
     "checked_pairing",
     "internal_failure",
+    "prepared_call",
     "run_bound_call",
+    "run_prepared_call",
 ]
