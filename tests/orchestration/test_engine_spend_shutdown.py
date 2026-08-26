@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from test_engine_contract import _wire
 
-from ai_assistant.core.types import Disposition
+from ai_assistant.core.types import Disposition, StepStatus
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.spend import SpendConfiguration
 from ai_assistant.testing.cancellation import ThreadSuspension
@@ -54,6 +54,9 @@ _SETTLE: Final = 0.2
 
 #: A budget no case here waits on: the wait under test is the drain's.
 _PATIENT: Final = timedelta(seconds=30)
+
+#: The one step the parking fixture's plan carries.
+STEP_ID: Final = "step-1"
 
 
 def _park_the_worker(trail: SqliteAuditTrail) -> ThreadSuspension:
@@ -104,7 +107,14 @@ async def test_shutdown_drains_a_wedged_invocation_before_it_closes_the_holder(
         spend=SpendConfiguration(currency="USD", day_ceiling=Decimal("100")),
     )
 
+    entered_close: list[str] = []
+
     async def _close() -> None:
+        # Recorded rather than inferred from ``aclose()`` still being pending: a
+        # shutdown that closed the connection *first* and only then drained would
+        # leave the task pending too, so "not done" is not evidence of the ordering
+        # on its own. This is.
+        entered_close.append("close")
         trail.close()
 
     engine = _wire(parks=True, trail=trail, real_invoker=True, closers=(_close,))
@@ -132,6 +142,10 @@ async def test_shutdown_drains_a_wedged_invocation_before_it_closes_the_holder(
                 "connection an in-flight admission was still reading"
             )
             assert not resuming.done()
+            assert entered_close == [], (
+                "the closer was entered while an admission was still reading the "
+                "connection it closes — the ordering ADR-0042 §2 fixes, inverted"
+            )
         finally:
             # Released whatever the assertions above did, so a failure is a failed
             # test rather than a parked worker occupying the default executor until
@@ -139,13 +153,24 @@ async def test_shutdown_drains_a_wedged_invocation_before_it_closes_the_holder(
             parked.release()
 
         await asyncio.wait_for(closing, _WAITING)
-        await asyncio.wait_for(resuming, _WAITING)
+        resumed = await asyncio.wait_for(resuming, _WAITING)
+        assert entered_close == ["close"], "and it was entered once the drain finished"
     finally:
         if parked is not None:
             parked.release()
         await engine.aclose()
 
-    # The close the drain preceded really happened, which is the other half of the
-    # ordering: waiting is worth nothing if nothing is closed afterwards.
+    # **The invocation finished its work**, which is the other half of the same
+    # ordering read from the call's side: had the connection closed underneath it,
+    # the admission would have come back `SpendUndeterminedError` and the executor
+    # would have committed the step `FAILED` — a value this case would still have
+    # awaited without noticing.
+    assert resumed.step is not None
+    executed = resumed.step.state.step(STEP_ID)
+    assert executed is not None
+    assert executed.status is StepStatus.SUCCEEDED, executed.failure
+
+    # And the close the drain preceded really happened: waiting is worth nothing if
+    # nothing is closed afterwards.
     with pytest.raises(sqlite3.ProgrammingError):
         trail._conn.execute("SELECT 1")
