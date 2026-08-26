@@ -581,7 +581,7 @@ def build_world(
     # wiring clause) and so needs it before the registry is built.
     trail = FakeAuditTrail()
     registry = build_default_registry(
-        memory=store, now=lambda: NOW, egress=integration, ledger=trail
+        memory=store, now=lambda: NOW, egress=integration, ledger=trail, gate=trail
     )
     binder = EgressBindingSeam(
         definitions=registry,

@@ -1278,6 +1278,7 @@ allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.tools",
     "ai_assistant.tools._transactions",
+    "ai_assistant.tools.admission",
     "ai_assistant.tools.builtin",
     "ai_assistant.tools.connection_store",
     "ai_assistant.tools.consume",

@@ -25,7 +25,7 @@ from ai_assistant.tools.registry import InMemoryToolRegistry, checked_timeout
 
 def test_one_object_presents_both_faces() -> None:
     """ADR-0029 §1: not two objects that happen to agree."""
-    registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
+    registry = InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
     assert isinstance(registry, ToolRegistry)
     assert isinstance(registry, ToolInvoker)
@@ -36,7 +36,9 @@ def test_one_object_presents_both_faces() -> None:
 
 async def test_re_registering_the_same_definition_and_callable_is_idempotent() -> None:
     """So a composition root may run twice without special-casing."""
-    registry = InMemoryToolRegistry([(tool(), succeeds)], ledger=FakeAuditTrail())
+    registry = InMemoryToolRegistry(
+        [(tool(), succeeds)], ledger=FakeAuditTrail(), gate=FakeAuditTrail()
+    )
 
     registry.register(tool(), succeeds)
 
@@ -50,7 +52,7 @@ async def test_rebinding_a_different_callable_under_a_bound_id_is_refused() -> N
     """
     original = Spy()
     trail = FakeAuditTrail()
-    registry = InMemoryToolRegistry([(tool(), original)], ledger=trail)
+    registry = InMemoryToolRegistry([(tool(), original)], ledger=trail, gate=trail)
 
     with pytest.raises(ToolRegistrationError, match="implementation"):
         registry.register(tool(), Spy())
@@ -61,7 +63,9 @@ async def test_rebinding_a_different_callable_under_a_bound_id_is_refused() -> N
 
 async def test_a_deregistered_tool_is_no_longer_invocable() -> None:
     """The biconditional holds in both directions across revocation."""
-    registry = InMemoryToolRegistry([(tool(), Spy())], ledger=FakeAuditTrail())
+    registry = InMemoryToolRegistry(
+        [(tool(), Spy())], ledger=FakeAuditTrail(), gate=FakeAuditTrail()
+    )
 
     registry.deregister("smtp")
 
@@ -80,7 +84,9 @@ async def test_the_seams_log_carries_no_content_the_seam_did_not_author() -> Non
     """
     trail = FakeAuditTrail()
     registry = InMemoryToolRegistry(
-        [(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))], ledger=trail
+        [(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))],
+        ledger=trail,
+        gate=trail,
     )
 
     with structlog.testing.capture_logs() as logs:

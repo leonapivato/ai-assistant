@@ -265,7 +265,7 @@ async def _engine(now: Clock) -> None:
     plans = FakePlanStore(now=lambda: _AWARE)
     # No call in this arm reaches the seam; the ledger is the collaborator
     # ADR-0192 §1 makes unconditional, and nothing here reads it.
-    invoker = FakeToolInvoker([], ledger=FakeAuditTrail())
+    invoker = FakeToolInvoker([], ledger=FakeAuditTrail(), gate=FakeAuditTrail())
     await Engine(
         composing=_composing(),
         loop=LearningLoop(

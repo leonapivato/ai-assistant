@@ -33,6 +33,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import ToolCall, ToolDefinition
+from ai_assistant.tools.admission import admitted_call
 from ai_assistant.tools.consume import consumed_call
 from ai_assistant.tools.invocation import (
     BoundImplementation,
@@ -45,7 +46,7 @@ from ai_assistant.tools.invocation import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.protocols import InvocationLedger, SpendGate
     from ai_assistant.core.types import ToolResult
 
 
@@ -215,6 +216,7 @@ class InMemoryToolRegistry:
         tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = (),
         *,
         ledger: InvocationLedger,
+        gate: SpendGate,
     ) -> None:
         """Create a registry, optionally registering ``tools`` in order.
 
@@ -240,6 +242,21 @@ class InMemoryToolRegistry:
                 the consume; a test arranges a ledger with the decision its call
                 carries, exactly as the runner records one before every
                 execution.
+            gate: The :class:`~ai_assistant.core.protocols.SpendGate` every
+                invocation is admitted by, before the claim (ADR-0194 §3), and
+                **never** a ``SpendLedger``: an invoker able to read a totals
+                projection has acquired a permissions-owned history it has no use
+                for (ADR-0194 §5).
+
+                **Keyword-only and required, with no default**, for the reason
+                ``ledger`` is. An invoker that could be built without a gate would
+                be a structurally valid ``ToolInvoker`` that reaches the world
+                without consulting the ceiling — a fail-open configuration
+                reachable by omitting an argument, which is the one failure
+                ADR-0194 §11 puts the four settings in this same change to prevent.
+                A gate handed no ceiling admits everything unconditionally
+                (ADR-0194 §1, §3), so "no ceiling configured" is a *configuration*
+                a fixture states rather than an argument it omits.
 
         Raises:
             ToolRegistrationError: If ``tools`` contains two definitions sharing
@@ -248,6 +265,7 @@ class InMemoryToolRegistry:
         self._live: dict[str, _Binding] = {}
         self._spent: dict[str, _Binding] = {}
         self._ledger = ledger
+        self._gate = gate
         for tool, implementation in tools:
             self.register(tool, implementation)
 
@@ -268,6 +286,17 @@ class InMemoryToolRegistry:
         (ADR-0192 §2).
         """
         return self._ledger
+
+    @property
+    def gate(self) -> SpendGate:
+        """The ``SpendGate`` this seam admits through.
+
+        Read-only, and public for the reason :attr:`ledger` is: ADR-0194 §5 makes
+        the composition root the sole wirer, and its test asserts the invoker was
+        handed the **gate** face of the one audit store rather than a second holder
+        over the same rows — two of which could disagree about a total.
+        """
+        return self._gate
 
     def register(self, tool: ToolDefinition, implementation: BoundImplementation, /) -> None:
         """Bind ``tool`` and the callable that satisfies it to its id, permanently.
@@ -402,8 +431,12 @@ class InMemoryToolRegistry:
 
         Three checks, in this order, before the callable is reached; each reads
         the revalidated copy and never the argument. A **fourth** follows them —
-        the callable-shape pairing check — and then, where this registry holds a
-        ledger, the claim (ADR-0192 §1).
+        the callable-shape pairing check — then the spend admission (ADR-0194 §3),
+        and then the claim (ADR-0192 §1). The admission is last of the four
+        because a ``ToolBindingError`` pre-empts every spend refusal: a call
+        mutated after construction could carry an ``UNKNOWN`` cost the user never
+        authorised, and reaching the gate first would send the operator to a budget
+        setting to repair a binding failure.
 
         **After the claim, this method performs no check that can raise a seam
         fault.** That is stated as a property rather than as a list, and it is
@@ -431,6 +464,11 @@ class InMemoryToolRegistry:
                 absorbed instead and reaches the operator as a diagnostic: the
                 obligation is to make the call, and a completion that failed does
                 not change what the act produced (ADR-0192 §3).
+            SpendCeilingError: If the gate refuses because a configured ceiling
+                would be crossed (ADR-0194 §4). The gate's own instance, unchanged:
+                no callable, no claim, no completion.
+            SpendUndeterminedError: If the gate refuses because the spend could not
+                be reduced to a number. Likewise.
             CancelledError: If the invoking task is cancelled from outside.
         """
         duration = checked_timeout(timeout)
@@ -478,17 +516,33 @@ class InMemoryToolRegistry:
         # plain function's body would have run before the claim was appended.
         entering = checked_pairing(binding.resolved, checked)
 
-        async def act() -> ToolResult:
-            # `duration`, not the caller's object: the deadline is opened after
+        async def act(remaining: timedelta) -> ToolResult:
+            # `remaining`, not the caller's object: the deadline is opened after
             # the claim, and reading a hostile subclass's duration there would
-            # leave a claim open with no completion (ADR-0192 §1, §3).
+            # leave a claim open with no completion (ADR-0192 §1, §3). It is what
+            # is *left* of `duration` after the admission, because ADR-0194 §3
+            # makes the two one window; `stated` keeps the expiry message naming
+            # the budget the caller actually set.
             return await run_prepared_call(
-                entering, definition=binding.definition, timeout=duration
+                entering, definition=binding.definition, timeout=remaining, stated=duration
             )
 
-        return await consumed_call(
-            ledger=self._ledger,
+        async def consume(remaining: timedelta) -> ToolResult:
+            return await consumed_call(
+                ledger=self._ledger,
+                definition=binding.definition,
+                decision=checked.decision,
+                act=lambda: act(remaining),
+            )
+
+        # **The gate, and then the claim** (ADR-0194 §3, ADR-0192 §1). The estimate
+        # is read off the revalidated, detached copy the checks above produced and
+        # never off the argument, and check 2 has already established that copy's
+        # definition equals this registry's own original.
+        return await admitted_call(
+            gate=self._gate,
+            estimate=checked.request.tool.cost,
             definition=binding.definition,
-            decision=checked.decision,
-            act=act,
+            timeout=duration,
+            act=consume,
         )

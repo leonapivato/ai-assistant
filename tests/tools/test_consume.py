@@ -129,7 +129,11 @@ async def test_the_pairing_check_refuses_before_any_claim_is_appended(shape: str
     else:
         implementation = Spy()
         call = call_carrying(tool(), binding())
-    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=ledger)  # type: ignore[list-item]  # the doubles' own shapes
+    registry = InMemoryToolRegistry(
+        [(tool(), implementation)],  # type: ignore[list-item]  # the doubles' own shapes
+        ledger=ledger,
+        gate=FakeAuditTrail(),
+    )
     await trail.record(call.decision)
 
     with pytest.raises(ToolBindingError):
@@ -239,7 +243,7 @@ async def test_a_refused_claim_reaches_no_code_the_implementation_owns() -> None
     trail = FakeAuditTrail()
     watchful = Watchful()
     call = call_carrying(tool(), binding())
-    registry = InMemoryToolRegistry([(tool(), watchful)], ledger=trail)
+    registry = InMemoryToolRegistry([(tool(), watchful)], ledger=trail, gate=trail)
 
     at_registration = _reads(watchful)
     assert at_registration == 1, "the shape is decided once, when the callable is registered"
@@ -295,7 +299,9 @@ def test_an_identical_re_registration_resolves_nothing_a_second_time() -> None:
     anything is read.
     """
     implementation = OneRead()
-    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=FakeAuditTrail())
+    registry = InMemoryToolRegistry(
+        [(tool(), implementation)], ledger=FakeAuditTrail(), gate=FakeAuditTrail()
+    )
     assert object.__getattribute__(implementation, "reads") == 1
 
     registry.register(tool(), implementation)
@@ -347,7 +353,7 @@ async def test_a_presence_only_egress_shape_is_bound_as_the_ordinary_callable() 
     """
     trail = FakeAuditTrail()
     implementation = NotQuiteEgress()
-    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=trail)
+    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=trail, gate=trail)
     call = call_for(tool())
     await trail.record(call.decision)
 
@@ -366,7 +372,7 @@ def test_an_object_satisfying_neither_shape_is_refused_at_registration() -> None
     question answered where it belongs.
     """
     with pytest.raises(ToolRegistrationError, match="neither tool shape"):
-        InMemoryToolRegistry([(tool(), object())], ledger=FakeAuditTrail())  # type: ignore[list-item]  # the refusal is the subject
+        InMemoryToolRegistry([(tool(), object())], ledger=FakeAuditTrail(), gate=FakeAuditTrail())  # type: ignore[list-item]  # the refusal is the subject
 
 
 class Shifty:
@@ -411,7 +417,7 @@ async def test_the_callables_shape_is_resolved_once_and_never_read_after_the_cla
     ledger = DrivenLedger(trail)
     ledger.claim.hold = asyncio.Event()
     shifty = Shifty()
-    registry = InMemoryToolRegistry([(tool(), shifty)], ledger=ledger)
+    registry = InMemoryToolRegistry([(tool(), shifty)], ledger=ledger, gate=FakeAuditTrail())
     call = call_for(tool())
     await trail.record(call.decision)
 

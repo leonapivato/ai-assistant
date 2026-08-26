@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from tool_invoker_contract import InvocableToolRegistry
 
-    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.protocols import InvocationLedger, SpendGate
 
 
 class TestFakeToolInvokerContract(ToolInvokerContract):
@@ -37,11 +37,15 @@ class TestFakeToolInvokerContract(ToolInvokerContract):
 
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
-        return FakeToolInvoker(ledger=FakeAuditTrail())
+        return FakeToolInvoker(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
     @pytest.fixture
     def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
-        return lambda ledger: FakeToolInvoker(ledger=ledger)
+        return lambda ledger: FakeToolInvoker(ledger=ledger, gate=FakeAuditTrail())
+
+    @pytest.fixture
+    def admitting(self) -> Callable[[SpendGate], InvocableToolRegistry]:
+        return lambda gate: FakeToolInvoker(ledger=FakeAuditTrail(), gate=gate)
 
 
 async def test_fake_records_the_calls_it_accepted() -> None:
@@ -78,7 +82,7 @@ async def test_the_fake_records_no_call_the_ledger_refused() -> None:
     a call refused by the three checks would be (ADR-0192 §1).
     """
     trail = FakeAuditTrail()
-    invoker = FakeToolInvoker([(tool(), Spy())], ledger=trail)
+    invoker = FakeToolInvoker([(tool(), Spy())], ledger=trail, gate=trail)
 
     with pytest.raises(UnrecordedAuthorisationError):
         await invoker.invoke(call_for(tool()), timeout=PATIENT)

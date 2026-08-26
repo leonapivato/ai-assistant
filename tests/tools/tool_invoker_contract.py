@@ -41,6 +41,8 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import (
     AuditError,
     AuthorisationSpentError,
+    SpendCeilingError,
+    SpendUndeterminedError,
     ToolBindingError,
     UnrecordedAuthorisationError,
 )
@@ -55,6 +57,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpendAdmissionHandle,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -74,7 +77,7 @@ if TYPE_CHECKING:
     )
     from types import GetSetDescriptorType
 
-    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.protocols import InvocationLedger, SpendGate
     from ai_assistant.core.types import FrozenJson, ToolInvocation, ToolResult
     from ai_assistant.testing import FakeToolImplementation
 
@@ -609,6 +612,171 @@ class SynchronousFactory:
             return recorded.get("to")
 
         return _acting()
+
+
+#: Sentinel argument values, appearing nowhere else in this module, so that a
+#: refusal's user-facing channels can be checked for them (ADR-0194 §11).
+SENTINEL_RECIPIENT = "zzq-recipient-sentinel@example.invalid"
+SENTINEL_SUBJECT = "zzq-subject-sentinel"
+
+#: The two refusals ADR-0194 §4 gives ``admit_invocation``, driven as one
+#: parameterisation everywhere the clause binds both.
+REFUSALS = [
+    SpendCeilingError("the projected total 101 crosses the CALENDAR_DAY ceiling of 100"),
+    SpendUndeterminedError("the CALENDAR_DAY period could not be measured"),
+]
+
+
+def user_facing_channels(exception: BaseException) -> list[str]:
+    """Render every channel ADR-0029 §3's message rule encloses, as text.
+
+    ``str()``, ``repr()``, ``args``, ``__notes__``, ``__cause__``,
+    ``__context__``, and any field the class itself declares. Stated as a
+    **closed** set because a check for "no attribute anywhere" would be
+    unsatisfiable: ``__traceback__`` is the interpreter's, and a propagating
+    exception necessarily carries frames whose locals include the ``ToolCall``.
+    """
+    declared = [
+        f"{name}={value!r}" for name, value in vars(exception).items() if not name.startswith("__")
+    ]
+    return [
+        str(exception),
+        repr(exception),
+        repr(exception.args),
+        repr(getattr(exception, "__notes__", ())),
+        repr(exception.__cause__),
+        repr(exception.__context__),
+        *declared,
+    ]
+
+
+def trail_of(invoker: InvocableToolRegistry) -> FakeAuditTrail:
+    """Read back the trail an ``admitting``-built subject claims through."""
+    ledger = invoker.ledger
+    assert isinstance(ledger, FakeAuditTrail), (
+        "this suite arranges authorisations through the trail the subject holds"
+    )
+    return ledger
+
+
+# --- ADR-0194 §3: the gate doubles this suite admits through -----------------
+
+#: What a gate fake returns where the suite does not care which value it is.
+_HANDLE = "spend-handle"
+
+
+class RecordingGate:
+    """A ``SpendGate`` that records what it was asked and what was released.
+
+    ADR-0194 §11 requires the invoker suite to drive over a gate fake that
+    **records its arguments**: without it, an invoker passing ``FREE`` for a
+    registered ``PER_CALL`` cost of 20 lets the callable begin at an accounted
+    total of 90 against a ceiling of 100 and still passes every refusal, release
+    and no-row clause beside it, because none of those looks at what was handed
+    over.
+
+    It also tracks which handles are still outstanding, so a test can assert the
+    projection a *later* admission would see rather than only that a release was
+    called — the assertion ADR-0194 §3's cancellation and blocked-gate clauses
+    are actually about.
+    """
+
+    def __init__(self, *, refusal: BaseException | None = None) -> None:
+        """Admit everything, or refuse every call with ``refusal``."""
+        self.estimates: list[ToolCost] = []
+        self.released: list[SpendAdmissionHandle] = []
+        self.outstanding: list[SpendAdmissionHandle] = []
+        self._refusal = refusal
+        self._minted = 0
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Record ``estimate``, then admit or refuse."""
+        self.estimates.append(estimate)
+        if self._refusal is not None:
+            raise self._refusal
+        self._minted += 1
+        handle = SpendAdmissionHandle(handle=f"{_HANDLE}-{self._minted}")
+        self.outstanding.append(handle)
+        return handle
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Retire ``handle``, tolerating one that names no live reservation."""
+        self.released.append(handle)
+        if handle in self.outstanding:
+            self.outstanding.remove(handle)
+
+
+class BlockingGate:
+    """A gate whose admission never answers, and which cooperates with cancellation.
+
+    Cancellation-cooperative **by construction**, which is what makes the
+    deadline assertion one about the seam rather than about ADR-0029 §4's
+    excluded case (ADR-0194 §3): a fake built on a thread or a shielded wait
+    would make the clause untestable rather than failing it.
+    """
+
+    def __init__(self) -> None:
+        """Answer nothing; record whether the admission was entered and cancelled."""
+        self.entered = 0
+        self.cancelled = 0
+        self.outstanding: list[SpendAdmissionHandle] = []
+        self.released: list[SpendAdmissionHandle] = []
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Wait forever, and leave no reservation behind when cancelled."""
+        del estimate
+        self.entered += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # ADR-0194 §3: a reservation whose handle will never be delivered is
+            # removed before the exception leaves the member. This fake records
+            # none in the first place, and asserting on `outstanding` is what
+            # makes the invoker's side of that checkable.
+            self.cancelled += 1
+            raise
+        raise AssertionError  # pragma: no cover — the wait never returns
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Retire ``handle``; nothing here ever delivered one."""
+        self.released.append(handle)
+
+
+class SlowGate:
+    """A gate that consumes a fixed slice of the caller's deadline and then admits."""
+
+    def __init__(self, spends: float) -> None:
+        """Take ``spends`` seconds over the admission."""
+        self._spends = spends
+        self.released: list[SpendAdmissionHandle] = []
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Sleep, then admit."""
+        del estimate
+        await asyncio.sleep(self._spends)
+        return SpendAdmissionHandle(handle=_HANDLE)
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Retire ``handle``."""
+        self.released.append(handle)
+
+
+class Sleeper:
+    """A tool implementation that sleeps for a fixed duration and then succeeds."""
+
+    def __init__(self, seconds: float) -> None:
+        """Sleep ``seconds`` on every call."""
+        self._seconds = seconds
+        self.calls = 0
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> FrozenJson:
+        """Sleep, then return nothing."""
+        del parameters, idempotency_key
+        self.calls += 1
+        await asyncio.sleep(self._seconds)
+        return None
 
 
 class ToolInvokerContract:
@@ -2920,3 +3088,321 @@ class ToolInvokerContract:
             }
         ]
         assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    # --- ADR-0194 §3, §11: the spend admission at this seam ---------------
+
+    @pytest.fixture
+    def admitting(self) -> Callable[[SpendGate], InvocableToolRegistry]:
+        """Return a factory building an empty invoker over ``gate``.
+
+        A factory rather than a built subject for ``consuming``'s reason: every
+        case here needs the *gate* arranged — refusing, blocked, slow, recording —
+        and an invoker is handed its gate at construction. The ledger it claims
+        through is a fresh ``FakeAuditTrail``, read back off the subject, so a case
+        can assert that a refused call left no claim and no completion.
+        """
+        raise NotImplementedError
+
+    @pytest.fixture(params=REFUSALS, ids=["ceiling", "undetermined"])
+    def refusal(self, request: pytest.FixtureRequest) -> BaseException:
+        """Each of ADR-0194 §4's two refusal classes, driven wherever both bind.
+
+        A fresh instance per case: the identity assertion below is what proves the
+        invoker propagated the gate's own object rather than an equivalent, so a
+        shared one reused across cases would let a stale ``__notes__`` from an
+        earlier test answer a later one.
+        """
+        return cast("BaseException", type(request.param)(*request.param.args))
+
+    async def test_a_refused_admission_reaches_no_callable_and_writes_no_row(
+        self,
+        admitting: Callable[[SpendGate], InvocableToolRegistry],
+        refusal: BaseException,
+    ) -> None:
+        """ADR-0194 §3: refused before the claim, so there is nothing to complete.
+
+        The two halves are separable and both are asserted. An implementation
+        consulting the gate *after* the claim leaves a row for an act that never
+        happened; one consulting it after the callable has already reached the
+        world.
+        """
+        gate = RecordingGate(refusal=refusal)
+        invoker = admitting(gate)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        trail = trail_of(invoker)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with pytest.raises(type(refusal)):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert spy.calls == []
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+        assert await trail.export_invocations() == []
+
+    async def test_the_refusal_the_caller_catches_is_the_gate_s_own_instance(
+        self,
+        admitting: Callable[[SpendGate], InvocableToolRegistry],
+        refusal: BaseException,
+    ) -> None:
+        """ADR-0194 §4's payload-free rule, driven at the seam that can undo it.
+
+        §4 makes both messages payload-free where they are **raised**; the seam
+        between the gate and the caller is the only place that could put the
+        recipient back. An invoker catching the refusal and re-raising the same
+        class with the call appended passes every other clause here — they assert
+        the class, the untouched callable, the unwritten rows and the released
+        handle, and none of them reads the message.
+
+        The six channels are the closed set ADR-0029 §3's message rule uses.
+        ``__traceback__`` is deliberately absent: a propagating exception
+        necessarily carries frames whose locals include the ``ToolCall``, so
+        requiring the sentinel's absence from them would forbid the propagation
+        this same test requires.
+        """
+        gate = RecordingGate(refusal=refusal)
+        invoker = admitting(gate)
+        invoker.register(tool(), Spy())
+        trail = trail_of(invoker)
+        call = call_for(tool(), parameters={"to": SENTINEL_RECIPIENT, "subject": SENTINEL_SUBJECT})
+        await trail.record(call.decision)
+
+        with pytest.raises(type(refusal)) as caught:
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert caught.value is refusal
+        for channel in user_facing_channels(caught.value):
+            assert SENTINEL_RECIPIENT not in channel, channel
+            assert SENTINEL_SUBJECT not in channel, channel
+
+    @pytest.mark.parametrize(
+        "cost",
+        [
+            ToolCost(basis=CostBasis.FREE),
+            ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("20"), currency="USD"),
+            ToolCost(basis=CostBasis.UNKNOWN),
+        ],
+        ids=["free", "per-call", "unknown"],
+    )
+    async def test_the_pinned_definitions_own_cost_is_what_reaches_the_gate(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry], cost: ToolCost
+    ) -> None:
+        """ADR-0194 §3, §11: the estimate is the pinned declaration, unchanged.
+
+        Without this an invoker passing ``FREE`` for a registered ``PER_CALL`` cost
+        of 20 lets the callable begin at an accounted total of 90 against a ceiling
+        of 100 and passes every refusal and release clause beside it.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        definition = tool(cost=cost)
+        invoker.register(definition, Spy())
+        trail = trail_of(invoker)
+
+        result = await invoked(invoker, trail, call_for(definition), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert gate.estimates == [cost]
+
+    async def test_the_estimate_is_not_read_from_the_callers_argument(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """A call mutated after construction fails ADR-0029's way, and never reaches the gate.
+
+        ADR-0194 §3 marks the order fail-closed in one direction: a ``__dict__``
+        write could carry an ``UNKNOWN`` cost the user never authorised, and an
+        invoker reaching the gate first would refuse it as a *spend* fault when it
+        is a binding failure — sending the operator to a budget setting to repair
+        a tampered call.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        registered = tool(cost=ToolCost(basis=CostBasis.FREE))
+        spy = Spy()
+        invoker.register(registered, spy)
+        trail = trail_of(invoker)
+        call = call_for(registered)
+        await trail.record(call.decision)
+        object.__setattr__(call.request.tool, "cost", ToolCost(basis=CostBasis.UNKNOWN))
+
+        with pytest.raises(ToolBindingError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert gate.estimates == []
+        assert spy.calls == []
+
+    async def test_the_handle_is_released_after_the_completion_on_the_admitted_path(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0194 §3: released in a ``finally``, once, and not before the row lands.
+
+        Releasing *before* the completion would close ADR-0194 §3's stated
+        double-count window in the wrong direction — the mechanism is required to
+        over-count for one operation rather than under-count for one.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        invoker.register(tool(), Spy())
+        trail = trail_of(invoker)
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert len(gate.released) == 1
+        assert gate.outstanding == []
+        # The claim and its completion, so the release did not run ahead of the row.
+        assert len(await trail.export_invocations()) == 2
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_the_handle_is_released_when_the_tool_raises(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """The raising path, which the succeeding one does not reach."""
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        invoker.register(tool(), Raiser(RuntimeError("boom")))
+        trail = trail_of(invoker)
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        # An exception escaping the tool is data, not a raise (ADR-0029 §3), so the
+        # `finally` unwinds through a *returned* failure rather than a propagating
+        # one — which is the path a release placed after the return would miss.
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert len(gate.released) == 1
+        assert gate.outstanding == []
+
+    async def test_the_handle_is_released_under_a_cancellation_inside_the_callable(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0194 §5's synchronous release doing the work it exists for.
+
+        The ``finally`` runs while the task is being torn down. A release carrying
+        a suspension point could be cancelled there and leave the reservation
+        standing; this one cannot, because there is no ``await`` in it.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        entered = asyncio.Event()
+
+        async def waits(
+            parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+        ) -> FrozenJson:
+            del parameters, idempotency_key
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError  # pragma: no cover — the wait never returns
+
+        invoker.register(tool(), waits)
+        trail = trail_of(invoker)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert len(gate.released) == 1
+        assert gate.outstanding == []
+
+    async def test_the_invoker_releases_one_admission_exactly_once(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """The gate must tolerate a second release; the invoker must not make one.
+
+        A double release is a no-op against a conforming gate, so an invoker making
+        one passes every other clause here — and against a *hostile* reading of
+        ADR-0194 §3's lifetime rule it is exactly the shape that drops a live
+        reservation.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        invoker.register(tool(), Spy())
+        trail = trail_of(invoker)
+
+        await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert len(gate.released) == 1
+
+    @pytest.mark.parametrize(
+        ("definition", "expected"),
+        [
+            (tool(), ToolOutcome.INDETERMINATE),
+            (read_only(), ToolOutcome.FAILED),
+            (tool(idempotency=Idempotency.NATURAL), ToolOutcome.FAILED),
+        ],
+        ids=["side-effecting", "read-only", "natural"],
+    )
+    async def test_a_gate_that_never_answers_expires_at_the_callers_deadline(
+        self,
+        admitting: Callable[[SpendGate], InvocableToolRegistry],
+        definition: ToolDefinition,
+        expected: ToolOutcome,
+    ) -> None:
+        """ADR-0194 §3: the admission runs **inside** the deadline ``invoke`` enforces.
+
+        A suite whose gate fake always answers leaves the one window where a new
+        await sits outside the deadline untested — and an implementation admitting
+        outside it has moved the one await ADR-0029 §4 exists for out of that
+        section's reach, in the window before the callable is even created.
+
+        The classification is ADR-0029 §4's existing rule, unchanged and
+        unnarrowed: this is ``invoke`` suspended in its own pre-call work, and
+        nothing states which await the expiry landed in (ADR-0034 §1).
+        """
+        gate = BlockingGate()
+        invoker = admitting(gate)
+        spy = Spy()
+        invoker.register(definition, spy)
+        trail = trail_of(invoker)
+        call = call_for(definition)
+
+        result = await invoked(invoker, trail, call, timeout=BRIEF)
+
+        assert result.outcome is expected
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.TIMED_OUT
+        assert spy.calls == [], "the callable was never created"
+        assert gate.entered == 1
+        assert gate.cancelled == 1
+        assert gate.outstanding == [], "no reservation nobody holds a handle for"
+        assert await trail.export_invocations() == []
+
+    async def test_the_admission_and_the_callable_share_one_deadline(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0194 §3, §11: one window, not one each.
+
+        The gate takes more than half the budget and the callable then does the
+        same — each inside the deadline on its own, together past it. An
+        implementation giving the admission a fresh window and the callable another
+        passes the never-answering-gate case above (that gate expires inside the
+        first window) and then returns this call **successfully** at nearly twice
+        the deadline the caller set.
+        """
+        budget = 0.3
+        gate = SlowGate(budget * 0.6)
+        invoker = admitting(gate)
+        sleeper = Sleeper(budget * 0.6)
+        invoker.register(tool(), sleeper)
+        trail = trail_of(invoker)
+        call = call_for(tool())
+
+        started = asyncio.get_running_loop().time()
+        result = await invoked(invoker, trail, call, timeout=timedelta(seconds=budget))
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.TIMED_OUT
+        assert elapsed < budget * 1.8, (
+            f"expired at {elapsed:.3f}s, which is a second window rather than the caller's one"
+        )
+        assert sleeper.calls == 1, "the callable was entered; it simply did not finish"
+        assert len(gate.released) == 1

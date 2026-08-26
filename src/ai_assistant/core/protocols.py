@@ -2680,6 +2680,47 @@ class ToolInvoker(Protocol):
         `tools/`-internal and is contracted nowhere (ADR-0152 §10); *that it
         precedes the claim* is contracted here.
 
+        **The spend admission runs after all four and before the claim**
+        (ADR-0194 §3). ``invoke`` consults the :class:`SpendGate` it holds, handing
+        it the ``ToolCost`` on the **revalidated, detached copy** the checks above
+        produced and never the argument the caller passed. A refused call reaches
+        no callable, appends no claim and appends no completion. The admission is
+        **not** a fifth member of ADR-0029 §2's enumeration, which stays exhaustive
+        at three: those three establish that the call is the one the user
+        authorised and each raises ``ToolBindingError``; this establishes something
+        else entirely and is ordered after them the way any later obligation on
+        ``invoke`` is. A ``ToolBindingError`` therefore **pre-empts** every spend
+        refusal, and no implementation moves the admission earlier to save a store
+        read: a call mutated after construction could carry an ``UNKNOWN`` cost the
+        user never authorised, and reaching the gate first would send the operator
+        to a budget setting to repair a binding failure.
+
+        **The gate's own exception is what leaves.** An implementation propagates
+        the instance the gate raised rather than re-raising an equivalent, and adds
+        nothing to it — no note, no appended message, no wrapped cause — because
+        ADR-0194 §4 makes both messages payload-free where they are *raised* and
+        this seam is the one that can undo it. A refusal states the numbers and
+        never a recipient, an argument or a digest of one.
+
+        **The handle is released in a ``finally``**, after the completion has been
+        appended or after the failure that prevented it, on the admitted, raising
+        and cancelled paths alike (ADR-0194 §3). The release is synchronous,
+        idempotent and raises nothing, so unwinding cannot lose it and a
+        book-keeping failure can never replace the call's own outcome. ``invoke``
+        calls it **once** per admission even though the gate must tolerate more.
+
+        **The admission runs inside the deadline, sharing the caller's one
+        window.** ``timeout`` is not restarted when the admission returns: an
+        implementation giving the admission its own fresh window and the callable
+        another returns successfully at nearly twice the deadline the caller set. A
+        deadline that expires during the admission is classified by ADR-0029 §4's
+        existing rule, unchanged and unnarrowed — ``FAILED`` where the tool is not
+        ``side_effecting`` or its ``idempotency`` is ``NATURAL``, ``INDETERMINATE``
+        otherwise — because ``invoke`` was entered and nothing states which await it
+        expired in (ADR-0034 §1). It is **not** the pre-callable exit a spend
+        refusal is; that one qualifies on ADR-0034 §1's second ground and commits
+        ``RUNNING → FAILED``.
+
         **The claim is the consume, and it sits immediately before the callable.**
         ``invoke`` appends it through the :class:`InvocationLedger` it holds,
         passing the whole ``PermissionDecision`` the call carries and not its id
@@ -2787,6 +2828,23 @@ class ToolInvoker(Protocol):
             ToolBindingError: If any of the checks above fails — the three, and
                 the callable-shape pairing where an implementation has one.
                 **No claim is appended for any of them** (ADR-0192 §1).
+            SpendCeilingError: If the :class:`SpendGate` refuses the call because
+                a configured ceiling would be crossed (ADR-0194 §4). A
+                **pre-callable** exit: no callable is created, no claim and no
+                completion are appended, and it qualifies on ADR-0034 §1's second
+                ground, so the executor commits ``RUNNING → FAILED`` and never
+                retries. Propagated as the **instance** the gate raised, unchanged
+                and unannotated, and never translated to ``PermissionDeniedError``
+                — the recorded ruling *is* an ``ALLOW``, and what refused is
+                arithmetic over a period.
+            SpendUndeterminedError: If the spend the admission needed could not be
+                reduced to a number (ADR-0194 §4) — the declared amount is not
+                countable, the declared cost has no number at all, the clock
+                raised, the store read failed, the period is indeterminate, or the
+                arithmetic trapped. The same pre-callable exit and the same
+                propagation rule as above. It is a separate class because a call
+                that could not be measured crossed no ceiling, and reporting it as
+                one would state a number about a budget that nothing measured.
             AuthorisationSpentError: If the ledger refuses the claim because the
                 authorisation is spent (ADR-0192 §1). Propagated unchanged rather
                 than translated, and never auto-retried.

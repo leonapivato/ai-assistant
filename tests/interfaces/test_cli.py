@@ -305,7 +305,9 @@ def _engine(
     trail = FakeAuditTrail()
     # The seam claims through the **same** trail the runner records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools], ledger=trail)
+    invoker = FakeToolInvoker(
+        [(definition, _succeeds) for definition in tools], ledger=trail, gate=trail
+    )
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
@@ -2507,7 +2509,7 @@ def _conversation_engine(
     trail = FakeAuditTrail()
     # The seam claims through the **same** trail the runner records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker([], ledger=trail)
+    invoker = FakeToolInvoker([], ledger=trail, gate=trail)
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)

@@ -290,7 +290,7 @@ class _Harness:
         self.trail = trail if trail is not None else FakeAuditTrail()
         # The seam claims through the **same** trail the runner records rulings
         # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-        self.invoker = FakeToolInvoker([(tool, _succeeds)], ledger=self.trail)
+        self.invoker = FakeToolInvoker([(tool, _succeeds)], ledger=self.trail, gate=self.trail)
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.runner = StepRunner(
             plans=self.plans,

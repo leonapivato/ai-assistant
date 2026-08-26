@@ -77,7 +77,7 @@ def test_the_two_declarations_are_well_formed_and_local() -> None:
 async def test_build_default_registry_advertises_both_capabilities() -> None:
     """Selection can find each tool by the capability it advertises."""
     registry = build_default_registry(
-        memory=FakeMemoryStore(now=_at), now=_at, ledger=FakeAuditTrail()
+        memory=FakeMemoryStore(now=_at), now=_at, ledger=FakeAuditTrail(), gate=FakeAuditTrail()
     )
 
     assert await registry.capabilities() == ("recall_memory", "report_current_time")
@@ -288,7 +288,9 @@ async def _execution_for(plans: FakePlanStore, step: PlanStep) -> ExecutionState
 async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     """The capability the tool advertises drives selection -> execute (ADR-0048)."""
     trail = FakeAuditTrail()
-    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at, ledger=trail)
+    registry = build_default_registry(
+        memory=FakeMemoryStore(now=_at), now=_at, ledger=trail, gate=trail
+    )
     runner, plans = _runner(registry, trail)  # LOW risk: the default policy allows it
     step = PlanStep(id="step-1", intent="what time is it", capability="report_current_time")
     state = await _execution_for(plans, step)
@@ -343,7 +345,7 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     """
     spy = _CountingCurrentTime()
     trail = FakeAuditTrail()
-    registry = InMemoryToolRegistry([(CURRENT_TIME, spy)], ledger=trail)
+    registry = InMemoryToolRegistry([(CURRENT_TIME, spy)], ledger=trail, gate=trail)
     runner, plans = _runner(registry, trail)
     step = PlanStep(
         id="step-1",
@@ -382,7 +384,7 @@ async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
         )
     )
     trail = FakeAuditTrail()
-    registry = build_default_registry(memory=store, now=_at, ledger=trail)
+    registry = build_default_registry(memory=store, now=_at, ledger=trail, gate=trail)
     # MEDIUM risk, so the default fake would confirm; allow it to prove execution.
     runner, plans = _runner(registry, trail, allow_everything=True)
     step = PlanStep(
