@@ -7959,6 +7959,95 @@ def _render_recorded_egress(binding: EgressBinding | OriginUnrecordedBinding) ->
         console.print(f"    {_egress_span_line(span)}")
 
 
+def _authorisation_line(decision: PermissionDecision) -> str:
+    """What authorised an ``ALLOW``, in exactly three states (ADR-0193 §11).
+
+    §11 extends ADR-0186 §7 by **one** fact and changes none of its others, so this
+    line is appended to the row rather than displacing anything: nothing above it is
+    suppressed, reordered or de-emphasised on the strength of what it says (§11's
+    last clause).
+
+    **The three states, and the discriminator each is read off.** A decision of the
+    user about *that* call is ``resolves`` set with ``authorised_by`` equal to it; a
+    standing authorisation this row names is ``authorised_by`` set with ``resolves``
+    unset; the policy's own rules, resting on no decision of the user, is
+    ``authorised_by`` unset. That is ADR-0193 §6's discriminator — the route is told
+    apart by whether ``resolves`` is set, with no field added to carry the basis
+    itself — read at the surface.
+
+    **Derived from the row alone.** Nothing here reads the grant store, holds a
+    ``RecipientGrants`` or a ``RecipientGrantStore``, or resolves an
+    ``authorised_by`` (§11's second clause). That is golden rule 3 and ADR-0186 §1's
+    own limit at once: a renderer given the store face would hold ``record`` and
+    ``clear``, and a remote client could not perform the read at all without a
+    second contract.
+
+    **The second state says exactly what the row says and nothing more** (§11's
+    third clause): that this decision *names* a standing authorisation. It does not
+    state or imply that the named grant exists, is held by the store, is live, is
+    unrevoked, has not expired, was validated, or covers anything now — ADR-0186
+    §8's first clause, which names a grant in terms, read on this fact. The bar on
+    "was validated" does not contradict ADR-0193 §6, which requires ``record`` to
+    validate every route-(b) row it writes: a surface cannot tell a row written
+    before that implementation from one written after, the row carries no mark
+    saying which it is, and no surface has a read with which to find out. So what §6
+    makes true of the system is not a claim this renderer is entitled to make about
+    the row in front of it.
+
+    **The third state is a positive fact and never an absence** (§11's eighth
+    clause). It is not rendered as a blank, an omission or a failure to record:
+    ADR-0021 §5's floor bars an auto-granted ``ALLOW`` only for a **non-empty**
+    ``discloses``, so a non-disclosing, known-cost action reaching ``ALLOW`` with
+    ``authorised_by`` unset is conforming and ordinary. Forcing such a row into
+    either other state would assert a user decision that was never taken. This is
+    ADR-0186 §7's three-origin-state discipline, read on a second three-state fact.
+
+    **``authorised_subject`` is rendered not at all**, which §11's fifth clause
+    permits beside rendering it opaque. Nothing here presents it as a verification,
+    a match, a badge, an assurance or a difference from another row; the comparison
+    ADR-0193 §6's digest makes possible is an out-of-band one over two exports, and
+    this is not the render path for it.
+
+    **Total in code, because the type admits a combination the trail cannot hold.**
+    ``PermissionRuling`` refuses ``authorised_by`` on a non-``ALLOW`` and
+    ``AuditTrail.record`` refuses a *resolving* ``ALLOW`` whose ``authorised_by`` is
+    not its own ``resolves``, which together make §11's three states total over every
+    row a trail can return. The types alone do not: a row carrying ``resolves`` and a
+    *different* ``authorised_by`` validates, and this surface reads whatever the
+    operation hands it — over the wire, from a hub this adapter does not own. Such a
+    row is rendered by its own letter and lands in the second state, which is the
+    only one of the three whose claim stays true of it: ``authorised_by`` is set and
+    is demonstrably not the confirmation about this call, so what the row names is
+    not a decision about that call. A row carrying ``resolves`` with ``authorised_by``
+    unset is the third state by §11's own condition, which is stated over
+    ``authorised_by`` alone.
+
+    Args:
+        decision: The recorded ruling, whose outcome the caller has already
+            established is ``ALLOW``.
+
+    Returns:
+        The line's markup, with every value from the row neutralised for this
+        terminal (ADR-0186 §7's last clause, ADR-0042 §4) — an ``authorised_by`` is
+        a :data:`~ai_assistant.core.types.DurableIdentifier` and not a string a
+        policy is free to shape, but it is interpolated into adapter-authored text
+        exactly as ``reason`` is, and the neutralisation is what makes that safe
+        without depending on another type's invariant.
+    """
+    authorised_by = decision.ruling.authorised_by
+    if authorised_by is None:
+        return "[bold]Authorised by:[/] the policy's own rules, resting on no decision of yours"
+    if authorised_by == decision.resolves:
+        return (
+            "[bold]Authorised by:[/] a decision you took about this call, "
+            f"recorded as {_safe(authorised_by)}"
+        )
+    return (
+        "[bold]Authorised by:[/] a standing authorisation this ruling names, "
+        f"recorded as {_safe(authorised_by)} [dim](what the row names, and no more)[/]"
+    )
+
+
 def _render_decision(decision: PermissionDecision) -> None:
     """One recorded ruling, whole (ADR-0186 §7).
 
@@ -7993,6 +8082,12 @@ def _render_decision(decision: PermissionDecision) -> None:
     account and no origin is rendered, and none is denied: ``None`` means the
     request was not an egress call (ADR-0150 §1) and continues to mean exactly that.
 
+    **An ``ALLOW`` also says what authorised it, in three states** (ADR-0193 §11) —
+    :func:`_authorisation_line`, appended after §7's own fields and displacing none
+    of them. The line is rendered for an ``ALLOW`` and for no other outcome, which
+    is §11's scope and also ``PermissionRuling``'s own rule that a refusal and a
+    question rest on no authorisation.
+
     Every value is inserted as data and neutralised for this terminal (§7's last
     clause, ADR-0042 §4). Being read from an append-only store relaxes nothing:
     ``reason`` is policy-authored text, a ``supplied`` destination form is a string
@@ -8013,6 +8108,8 @@ def _render_decision(decision: PermissionDecision) -> None:
     )
     if decision.resolves is not None:
         console.print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
+    if decision.ruling.outcome is PermissionOutcome.ALLOW:
+        console.print(f"  {_authorisation_line(decision)}")
     if decision.egress_binding is not None:
         _render_recorded_egress(decision.egress_binding)
     console.print()

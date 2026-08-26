@@ -168,6 +168,7 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
     at: datetime | None = None,
     binding: EgressBinding | OriginUnrecordedBinding | None = None,
     resolves: str | None = None,
+    authorised_by: str | None = None,
 ) -> PermissionDecision:
     """One recorded ruling, built field by field.
 
@@ -176,10 +177,17 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
     for cannot be produced through the factory at all (ADR-0184 §4) and building the
     other rows two different ways would make the comparison between them a
     comparison of two builders.
+
+    ``authorised_by`` is a plain keyword here for the same reason, and it is what
+    lets ADR-0193 §11's cases seed each of the three states *and* the combination
+    ``AuditTrail.record`` refuses but the type still validates. Constructing that
+    one through the store is impossible by design; constructing it here is the whole
+    point, because this module's subject is a renderer handed rows over the wire by
+    a hub it does not own.
     """
     return PermissionDecision(
         id=decision_id,
-        ruling=PermissionRuling(outcome=outcome, reason=reason),
+        ruling=PermissionRuling(outcome=outcome, reason=reason, authorised_by=authorised_by),
         tool=tool if tool is not None else _tool(),
         parameters_digest=_DIGEST,
         decided_at=at if at is not None else _AT,
@@ -1003,6 +1011,278 @@ def test_a_row_carries_no_answer_control_and_composes_no_confirmation(
     assert "[y/N]" not in rendered
     assert "assistant resume" not in rendered
     assert [call[0] for call in engine.calls] == ["recent_decisions"]
+
+
+# --- ADR-0193 §11: what authorised an ALLOW, in three states ------------------
+
+#: Every claim ADR-0193 §11's third clause bars the second state from making about
+#: the grant it names — that it exists, is held by the store, is live, is unrevoked,
+#: has not expired, was validated, or covers anything now — plus the near-synonyms a
+#: renderer reaches for first. Matched on word boundaries, and asserted over the
+#: **line** rather than the screen: the listing's footer legitimately says a row does
+#: not claim "that a grant is current", so a screen-wide search would be answered by
+#: the disclaimer and would stop testing the assertion.
+_BARRED_OF_A_NAMED_GRANT: Final = (
+    "exists",
+    "existing",
+    "held",
+    "holds",
+    "live",
+    "unrevoked",
+    "revoked",
+    "expired",
+    "expires",
+    "validated",
+    "valid",
+    "verified",
+    "checked",
+    "covers",
+    "covering",
+    "current",
+    "active",
+    "still",
+    "in force",
+)
+
+
+def _basis_lines(output: StringIO) -> list[str]:
+    """Every ``Authorised by:`` line on screen, unwrapped, in the order rendered.
+
+    The line rather than the screen is what §11's clauses are stated over, and the
+    ``output`` fixture is 400 columns wide precisely so that one rendered line is one
+    line of text.
+    """
+    return [_flat(line) for line in output.getvalue().splitlines() if "Authorised by:" in line]
+
+
+def _basis_line(output: StringIO) -> str:
+    """The one ``Authorised by:`` line on a single-row screen."""
+    lines = _basis_lines(output)
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def test_an_allow_resting_on_the_users_own_answer_names_that_decision(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's first state: a decision of the user about *that* call.
+
+    ``resolves`` set with ``authorised_by`` equal to it is ADR-0193 §6's route (a),
+    "which keeps its existing shape exactly", and the row is entitled to say the
+    user decided this call — because the confirmation it names *is* about this call
+    (``AuditTrail.record`` compares the tool, the digest and the step before it will
+    hold the pair).
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-answer", resolves="d-ask", authorised_by="d-ask"),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    assert "Authorised by: a decision you took about this call, recorded as d-ask" in rendered
+    assert "standing authorisation" not in rendered
+    assert "the policy's own rules" not in rendered
+
+
+def test_an_allow_naming_a_standing_authorisation_says_that_and_nothing_more(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's second state, asserted as an equality because the clause is about *more*.
+
+    "The second state asserts exactly what the row says and nothing more: that this
+    decision names a standing authorisation." A containment assertion would pass on
+    a line that said this **and** something further, which is the only failure the
+    clause is about, so the whole line is pinned.
+    """
+    _listing(
+        output, monkeypatch, _decision("d-1", authorised_by="g-1", binding=_binding(planned=False))
+    )
+    assert _basis_line(output) == (
+        "Authorised by: a standing authorisation this ruling names, recorded as g-1 "
+        "(what the row names, and no more)"
+    )
+
+
+def test_the_second_state_claims_nothing_about_the_grant_it_names(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's third clause, one assertion per barred claim.
+
+    No surface states or implies that the named grant exists, is held by the store,
+    is live, is unrevoked, has not expired, was validated, or covers anything now —
+    ADR-0186 §8's first clause, which names a grant in terms, read on this fact. The
+    bar on "was validated" holds even though ADR-0193 §6 makes ``record`` validate
+    every route-(b) row it writes: a surface cannot tell a row written before that
+    implementation from one written after, and what §6 makes true of the system is
+    not a claim a renderer may make about the row in front of it.
+    """
+    _listing(
+        output, monkeypatch, _decision("d-1", authorised_by="g-1", binding=_binding(planned=False))
+    )
+    line = _basis_line(output)
+    for claim in _BARRED_OF_A_NAMED_GRANT:
+        assert re.search(rf"\b{claim}\b", line, flags=re.IGNORECASE) is None, claim
+
+
+def test_a_policy_granted_allow_states_the_policys_own_rules(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's third state: the policy's own rules, resting on no user decision.
+
+    ADR-0021 §5's floor bars an auto-granted ``ALLOW`` only for a **non-empty**
+    ``discloses``, so this row — a non-disclosing, known-cost action — is conforming
+    and ordinary rather than a residual or an error, and forcing it into either
+    other state would assert a user decision that was never taken.
+    """
+    _listing(output, monkeypatch, _decision("d-1", binding=_binding(planned=False)))
+    assert _basis_line(output) == (
+        "Authorised by: the policy's own rules, resting on no decision of yours"
+    )
+
+
+def test_the_third_state_is_rendered_as_a_fact_and_never_as_an_absence(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's eighth clause: never an omission, a blank, or a failure to record.
+
+    ADR-0186 §7's three-origin-state discipline read on a second three-state fact,
+    and the failure it names is a rendering a reader could mistake for either of the
+    first two — a dash, an empty value, or a line saying nothing was written down.
+    The row *was* recorded; what it records is that no decision of the user is what
+    authorised the call.
+    """
+    _listing(output, monkeypatch, _decision("d-1", binding=_binding(planned=False)))
+    line = _basis_line(output).lower()
+    for absence in (
+        "(none)",
+        "(unknown)",
+        "n/a",
+        "\u2014",
+        "not recorded",
+        "no record",
+        "unrecorded",
+        "missing",
+        "unset",
+        "blank",
+    ):
+        assert absence not in line, absence
+
+
+def test_a_refusal_and_a_question_say_nothing_about_what_authorised_them(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11 is scoped to an ``ALLOW``, and every other row renders exactly as before.
+
+    That scope is also ``PermissionRuling``'s own rule: "a refusal rests on no
+    authorisation, and a ``DENY`` — or a ``CONFIRM``, which is a question rather than
+    an answer — citing one is incoherent". A basis line on either would be answering
+    a question the row does not pose.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-deny", outcome=PermissionOutcome.DENY, reason="outside policy"),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    assert "Authorised by:" not in rendered
+    assert _basis_lines(output) == []
+    assert "refused" in rendered
+    assert "asked" in rendered
+
+
+def test_the_three_states_are_distinct_and_none_is_rendered_as_another(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's first clause: "each distinct from the other two and none rendered as any other".
+
+    Asserted over one screen holding all three, because that is where the failure
+    lives: two states that read alike are a distinction a reader cannot make, and a
+    per-state case would pass on a pair of lines differing only in an id.
+    """
+    _listing(
+        output,
+        monkeypatch,
+        _decision("d-answer", resolves="d-ask", authorised_by="d-ask"),
+        _decision("d-standing", authorised_by="g-1", binding=_binding(planned=False)),
+        _decision("d-policy", binding=_binding(planned=False)),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    lines = _basis_lines(output)
+    assert len(lines) == 3
+    assert len(set(lines)) == 3
+    prose = [line.split(", recorded as ")[0] for line in lines]
+    assert len(set(prose)) == 3, prose
+
+
+def test_a_row_naming_an_authorisation_other_than_its_own_question_is_the_second_state(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one combination the type admits and no trail can hold, rendered by its letter.
+
+    ``AuditTrail.record`` refuses a *resolving* ``ALLOW`` whose ``authorised_by`` is
+    not its own ``resolves``, which is what makes §11's three states total over every
+    row a trail can return. The types alone do not: this row validates, and this
+    surface renders whatever the operation hands it — over the wire, from a hub the
+    adapter does not own. It lands in the second state because that is the only one
+    of the three whose claim stays true of it: ``authorised_by`` is set, and it is
+    demonstrably **not** the confirmation about this call, so what the row names is
+    not a decision about that call.
+    """
+    _listing(
+        output,
+        monkeypatch,
+        _decision("d-odd", resolves="d-ask", authorised_by="g-1"),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    assert _basis_line(output) == (
+        "Authorised by: a standing authorisation this ruling names, recorded as g-1 "
+        "(what the row names, and no more)"
+    )
+
+
+def test_a_resolving_row_carrying_no_authorisation_is_the_third_state(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11's third state is stated over ``authorised_by`` alone, and so is this row.
+
+    The other combination ``AuditTrail.record`` refuses and the type admits. §11
+    conditions the third state on "``authorised_by`` unset" and on nothing else, so
+    the row's own letter puts it here — and the resolution relation it *does* carry
+    is still rendered, by ADR-0186 §7's fifth clause, on its own line.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-answer", resolves="d-ask"),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    assert "Answers the question: d-ask" in rendered
+    assert _basis_line(output) == (
+        "Authorised by: the policy's own rules, resting on no decision of yours"
+    )
+
+
+def test_the_named_authorisation_is_neutralised_for_this_terminal(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0186 §7's last clause over the one value this line interpolates.
+
+    A :data:`~ai_assistant.core.types.DurableIdentifier` is non-blank, stripped and
+    encodable and is constrained no further — issue #62 still holds the canonical
+    syntax question — so an id reaching this adapter may carry Rich markup and
+    control characters, and the line it lands in is adapter-authored text with a
+    label sharing it. Escaping the markup and replacing the control character is
+    what keeps the row a rendering of the record rather than a second line the
+    record forged.
+    """
+    _listing(output, monkeypatch, _decision("d-1", authorised_by="g-1[red]\x1b[2Jwiped"))
+    raw = output.getvalue()
+    assert "\x1b" not in raw
+    line = _basis_line(output)
+    assert "g-1[red]" in line, (
+        "unescaped markup is a style Rich consumes, leaving nothing on screen"
+    )
+    assert "\ufffd" in line
 
 
 # --- the error boundary on the listing ---------------------------------------
