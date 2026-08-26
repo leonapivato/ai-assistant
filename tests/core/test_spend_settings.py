@@ -296,3 +296,133 @@ def test_the_environment_spells_the_whole_configuration(monkeypatch: pytest.Monk
     assert settings.world_spend_month_ceiling.as_tuple() == Decimal("100.00").as_tuple()
     assert settings.world_spend_day_ceiling == Decimal("10")
     assert settings.world_spend_unknown_allowance == Decimal("0.01")
+
+
+# --- the same rules at the door an operator actually walks through -----------
+#
+# **The cases above construct ``Settings`` directly; these go through the
+# environment and :func:`load_settings`.** ADR-0194 §11 says "at load" and
+# "``ConfigurationError`` naming the field", and the two halves are separable: a
+# ``ValidationError`` raised by a validator is not what an operator meets, and a
+# wrapper that summarised rather than quoted pydantic's report would leave every
+# case above green while the message a user reads named no field at all.
+#
+# The direct constructions are kept beside them rather than replaced, because the
+# environment cannot spell every value the rules govern — a ``Decimal`` object with
+# a tenth fractional digit arrives as a string either way, but the point of a
+# ``Decimal`` fixture is that it is already the type the validator sees.
+
+#: The environment variable each setting is read from, so a case names the field
+#: once and the assertion and the arrangement cannot drift apart.
+_ENV: Final = {
+    "world_spend_currency": "ASSISTANT_WORLD_SPEND_CURRENCY",
+    "world_spend_month_ceiling": "ASSISTANT_WORLD_SPEND_MONTH_CEILING",
+    "world_spend_day_ceiling": "ASSISTANT_WORLD_SPEND_DAY_CEILING",
+    "world_spend_unknown_allowance": "ASSISTANT_WORLD_SPEND_UNKNOWN_ALLOWANCE",
+}
+
+
+def _refused_at_load(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str, *, currency: str | None = "USD"
+) -> str:
+    """Set ``field`` to ``value`` in the environment and return the refusal's message."""
+    if currency is not None:
+        monkeypatch.setenv(_ENV["world_spend_currency"], currency)
+    monkeypatch.setenv(_ENV[field], value)
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings()
+    return str(caught.value)
+
+
+@pytest.mark.parametrize("field", _AMOUNTS)
+def test_an_amount_with_no_currency_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """§11's dependency clause, at the door: a ceiling that does not bind."""
+    assert field in _refused_at_load(monkeypatch, field, "10", currency=None)
+
+
+@pytest.mark.parametrize("value", ["NaN", "sNaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("field", _AMOUNTS)
+def test_a_non_finite_amount_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    """§11 enumerates all four spellings on each ceiling and on the allowance."""
+    assert field in _refused_at_load(monkeypatch, field, value)
+
+
+@pytest.mark.parametrize("field", _CEILINGS)
+def test_a_negative_ceiling_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    message = _refused_at_load(monkeypatch, field, "-1")
+    assert field in message
+    assert "must not be negative" in message
+
+
+def test_a_negative_allowance_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one §11 calls out by name: it would *lower* a projection.
+
+    "A validator checking only the zero spellings and countability accepts an
+    allowance of ``Decimal("-1")``, which would let an ``UNKNOWN`` estimate *lower*
+    a projection and admit a call already at its ceiling — the one direction this
+    mechanism must never move in."
+    """
+    message = _refused_at_load(monkeypatch, "world_spend_unknown_allowance", "-1")
+    assert "world_spend_unknown_allowance" in message
+    assert "must be greater than zero" in message
+
+
+@pytest.mark.parametrize("spelling", ["0", "-0", "0.00", "0E-9"])
+def test_a_zero_allowance_is_refused_at_load_in_each_spelling(
+    monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """§11 puts this fixture on this group by name: "that being a ``Settings`` fixture"."""
+    assert "world_spend_unknown_allowance" in _refused_at_load(
+        monkeypatch, "world_spend_unknown_allowance", spelling
+    )
+
+
+@pytest.mark.parametrize("value", ["", "usd", "US", "USDD", "ÜSD"])
+def test_a_malformed_currency_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """§5's hostile constructions test ``SpendTotal``; this tests ``Settings``."""
+    assert "world_spend_currency" in _refused_at_load(
+        monkeypatch, "world_spend_currency", value, currency=None
+    )
+
+
+@pytest.mark.parametrize("field", _AMOUNTS)
+def test_a_non_countable_amount_is_refused_at_load_naming_the_field(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """Both halves of §1's predicate, at the door, on each of the three amounts."""
+    for value in ("1E15", "0.0000000001"):
+        with monkeypatch.context() as scoped:
+            message = _refused_at_load(scoped, field, value)
+        assert field in message
+        assert "must be countable" in message
+
+
+def test_a_currency_set_alone_loads_and_a_day_above_the_month_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two configurations §1 explicitly admits, at the door rather than in-process.
+
+    A currency alone configures a reporting currency that refuses nothing; and
+    ``day=100`` beside ``month=10`` is accepted, the month simply being the binding
+    one. A settings validator quietly imposing ``day <= month`` passes every
+    dependency and crossing fixture here and rejects a configuration this ADR calls
+    valid.
+    """
+    monkeypatch.setenv(_ENV["world_spend_currency"], "USD")
+    assert load_settings().world_spend_currency == "USD"
+
+    monkeypatch.setenv(_ENV["world_spend_day_ceiling"], "100")
+    monkeypatch.setenv(_ENV["world_spend_month_ceiling"], "10")
+    loaded = load_settings()
+    assert loaded.world_spend_day_ceiling == Decimal("100")
+    assert loaded.world_spend_month_ceiling == Decimal("10")
