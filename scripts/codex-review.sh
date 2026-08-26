@@ -14,13 +14,87 @@
 #   review covers HEAD's *committed* changes vs base-ref — commit a fix (even
 #   a small follow-up you'll squash later) before re-running, or the diff
 #   Codex sees will not reflect it.
+#
+#        scripts/codex-review.sh --start <persona> [base-ref]
+#        scripts/codex-review.sh --wait  <persona> [base-ref] [--timeout N]
+#   The same round, launched detached and then polled in bounded calls, for a
+#   caller that cannot hold one process open for the minutes a round takes
+#   (issue #1594). `--start` runs the round below in a detached copy of THIS
+#   script — same locks, same artifact, same acceptance — and returns as soon as
+#   that round has claimed its loop; `--wait` blocks on the in-flight lock for
+#   HEAD's tree and then reports the artifact and its verdict. Neither changes
+#   what a round is or what it records: the foreground form is the round, and
+#   these two are how it is started and observed.
 set -euo pipefail
 
-persona="${1:-}"
-base="${2:-}"
+# --- Modes (issue #1594) -----------------------------------------------------
+#
+# The mode is a leading flag rather than a subcommand word, so the positional
+# grammar every existing caller uses — `<persona> [base-ref]`, and an EMPTY
+# second positional standing for "resolve the base yourself", which the
+# `review-codex` recipe passes literally — keeps its exact meaning in all three
+# modes. A subcommand word would have made `codex-review.sh adversarial` and
+# `codex-review.sh run adversarial` two grammars to keep in step.
+mode=run
+timeout_arg=""
+positional=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --start | --wait)
+        if [[ "$mode" != "run" ]]; then
+            echo "scripts/codex-review.sh: --start and --wait are alternatives;" \
+                "pass at most one" >&2
+            exit 2
+        fi
+        mode="${1#--}"
+        shift
+        ;;
+    --timeout)
+        if [[ $# -lt 2 ]]; then
+            echo "scripts/codex-review.sh: --timeout needs a value in seconds" >&2
+            exit 2
+        fi
+        timeout_arg="$2"
+        shift 2
+        ;;
+    --timeout=*)
+        timeout_arg="${1#--timeout=}"
+        shift
+        ;;
+    --)
+        shift
+        while [[ $# -gt 0 ]]; do
+            positional+=("$1")
+            shift
+        done
+        ;;
+    -*)
+        echo "scripts/codex-review.sh: unknown option '$1'" >&2
+        exit 2
+        ;;
+    *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+done
 
-if [[ -z "$persona" ]]; then
+_usage() {
     echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]" >&2
+    echo "       scripts/codex-review.sh --start <persona> [base-ref]" >&2
+    echo "       scripts/codex-review.sh --wait <persona> [base-ref] [--timeout N]" >&2
+}
+
+persona="${positional[0]:-}"
+base="${positional[1]:-}"
+
+if [[ -z "$persona" || ${#positional[@]} -gt 2 ]]; then
+    _usage
+    exit 2
+fi
+
+if [[ -n "$timeout_arg" && "$mode" != "wait" ]]; then
+    echo "scripts/codex-review.sh: --timeout applies to --wait only" >&2
     exit 2
 fi
 
@@ -46,7 +120,11 @@ if [[ ! -f "$rubric" ]]; then
     exit 2
 fi
 
-if ! command -v codex >/dev/null 2>&1; then
+# `--wait` reads `.review/` and a lock file and calls nothing; requiring the CLI
+# it never invokes would make the one mode whose job is to REPORT on a round fail
+# on a host that cannot start one — including the case where the round it is
+# reporting on was started elsewhere.
+if [[ "$mode" != "wait" ]] && ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not found on PATH; install it to run reviews" >&2
     exit 127
 fi
@@ -64,7 +142,22 @@ fi
 # the review" from "the virtualenv", so the check would either never pass or
 # depend on a hand-maintained exemption list that silently rots. Waived
 # deliberately; the tracked+untracked check is what is enforceable here.
-if [[ -n "$(git status --porcelain)" ]]; then
+#
+# `--wait` WARNS where the other two modes refuse, because its answer is about a
+# round that is already running and its inputs are HEAD's tree and a lock file,
+# neither of which a dirty working tree changes. Refusing there would withhold
+# the diagnosis in the one case it is most wanted — a round in flight while the
+# tree has drifted under it — and that round is going to refuse to record itself
+# anyway (the settled-tree check at the end of a round), which is precisely what
+# the operator needs to be told rather than shielded from.
+_dirty="$(git status --porcelain)"
+if [[ "$mode" == "wait" ]]; then
+    if [[ -n "$_dirty" ]]; then
+        echo "warning: the working tree is dirty (tracked or untracked), so HEAD's" >&2
+        echo "  tree is not what is on disk, and a round in flight will refuse to" >&2
+        echo "  record itself when it finishes. Reporting on HEAD's tree anyway." >&2
+    fi
+elif [[ -n "$_dirty" ]]; then
     echo "working tree is dirty (tracked or untracked); commit or stash first" >&2
     echo "the review would reason about files that are not in the reviewed commit" >&2
     exit 1
@@ -104,6 +197,386 @@ if [[ "$branch" == "HEAD" ]]; then
     # review cannot be shipped at all, since ship refuses a detached HEAD.
     branch="detached-${sha}"
 fi
+
+# --- Where this loop's state lives -------------------------------------------
+#
+# Hoisted above the mode dispatch below so `--start` and `--wait` resolve the
+# loop's paths from the same four inputs a round does — the branch, the pinned
+# base, the persona and the tree — rather than re-deriving them. A second
+# spelling of the loop key is the failure this avoids: it would not fail loudly,
+# it would wait on a lock no round holds and report "no round in flight" while
+# one runs, which is the very confusion issue #1594 is about.
+review_dir="${repo_root}/.review"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+session_dir="${review_dir}/session"
+disposition_dir="${review_dir}/dispositions"
+branch_key="$(printf '%s' "$branch" | sha1sum | awk '{print $1}')"
+base_key="$(printf '%s' "$base_sha" | sha1sum | awk '{print $1}')"
+loop_key="${branch_key}-${base_key}"
+meta_file="${session_dir}/${loop_key}.meta"
+thread_file="${session_dir}/${loop_key}.${persona}.thread"
+lock_file="${session_dir}/${loop_key}.lock"
+inflight_file="${session_dir}/${loop_key}.${persona}.inflight"
+
+# The in-flight lock is keyed by (loop, persona) and says only THAT a round of
+# this persona is running — never WHICH CONTENT it is reviewing, because the tree
+# is not in its key and cannot be: the lock is claimed before the round has done
+# anything, and one branch reviews many trees under one key. `--wait` is asked
+# about a tree, so the running round publishes the one it pinned. `round_file` is
+# that marker, and `log_file` is where a detached round's output goes. Both sit
+# beside the lock under `.review/`, which is already git-ignored.
+round_file="${session_dir}/${loop_key}.${persona}.round"
+log_file="${session_dir}/${loop_key}.${persona}.log"
+
+# The bypass path (no sandbox, or CI) keeps no Codex session (see the invocation
+# far below). Resolved here rather than there because all three modes need it:
+# `--start` and `--wait` both reason about the in-flight lock, which the bypass
+# path does not take. GITHUB_ACTIONS is matched exactly against "true", so an
+# inherited GITHUB_ACTIONS=false cannot enable it; CODEX_REVIEW_NO_SANDBOX=1
+# forces it.
+bypass=0
+if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    bypass=1
+fi
+
+# Whether the loop phases can be serialized at all. `flock` is util-linux, so it
+# is present wherever `sha1sum` (already required above, for the loop key) is.
+# Where it is somehow absent, the loop degrades to the unserialized behaviour it
+# had before #142 and says so, rather than refusing to review: the race needs two
+# concurrent invocations, which the one-agent-per-clone workflow (ADR-0015) does
+# not produce, so bricking the tool would be the worse failure.
+serialized=1
+if ! command -v flock >/dev/null 2>&1; then
+    serialized=0
+    if [[ "$bypass" -eq 0 && "$mode" != "wait" ]]; then
+        echo "warning: flock not found; the review loop's init/update cannot be" >&2
+        echo "  serialized. Run one codex-review at a time (issue #142)." >&2
+    fi
+fi
+
+# One field of a recorded provenance LINE (the artifact's first line). The
+# greedy prefix means the last occurrence wins, which is what the recorded format
+# guarantees is the only one: every field name appears once per line.
+_provenance_field() {
+    sed -n "s/.*[[:space:]]${2}=\([^[:space:]]*\).*/\1/p" <<<"$1"
+}
+
+# The review's closing verdict line, normalised: last non-blank line, markdown
+# emphasis stripped, trimmed. Used by the round below to VALIDATE that Codex
+# produced a verdict at all (the guard documented at length at its call site) and
+# by `--wait` to REPORT the verdict of an artifact that already passed it. One
+# spelling, because two would let `--wait` report a verdict line the round would
+# not have accepted.
+_last_verdict_line() {
+    grep -v '^[[:space:]]*$' "$1" | tail -n 1 |
+        tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# One field of the round marker (`key=value` per line), first occurrence.
+_round_field() {
+    [[ -f "$round_file" ]] || return 0
+    sed -n "s/^${1}=//p" "$round_file" | head -n 1
+}
+
+# Whether a round of this (loop, persona) holds the in-flight lock right now.
+#
+# Probed by trying to take it, which is the only way to ask: an flock lives on an
+# open descriptor and leaves nothing on disk to inspect, which is exactly the
+# property that makes a crashed round unable to wedge the loop. The file is not
+# CREATED to ask the question — a probe that had to create the lock file would
+# answer "free" by construction on the first call — so a missing file is "no
+# round", which it is.
+#
+# Any other failure of `flock` (an unreadable file, a descriptor limit) answers
+# "held", the safe direction: a false "held" costs `--wait` one more call, where a
+# false "free" reports no round in flight while one runs.
+_lock_held() {
+    [[ "$serialized" -eq 1 && -e "$inflight_file" ]] || return 1
+    ! flock -n "$inflight_file" true 2>/dev/null
+}
+
+# The artifact recorded for (this persona, HEAD's tree), or nothing.
+#
+# Selected by the RECORDED PROVENANCE, never by parsing the filename — the same
+# discipline `ship` follows and for the same reason (ADR-0027 §6): the name is an
+# identity, and the fields are what selection is defined over. Where two
+# artifacts match one persona and one tree — issue #149's shape, two runs against
+# different bases — the one recorded against the base THIS invocation resolved
+# wins, because that is the one `ship` can use; failing that, the most recently
+# written, so the answer is never silently the older of two.
+# A detached round's output, indented and clipped to its tail. The tail is what
+# carries the failure; the head is the aggregate, which is long, always present,
+# and never the reason a round stopped.
+_echo_log() {
+    if [[ -s "$log_file" ]]; then
+        tail -n 25 "$log_file" | sed 's/^/  | /' >&2
+    else
+        echo "  | (no log: this round was not started with --start)" >&2
+    fi
+}
+
+_artifact_for_tree() {
+    local f line best=""
+    shopt -s nullglob
+    for f in "${review_dir}"/*.md; do
+        line="$(head -n 1 "$f")"
+        [[ "$(_provenance_field "$line" persona)" == "$persona" ]] || continue
+        [[ "$(_provenance_field "$line" tree)" == "$tree" ]] || continue
+        if [[ "$(_provenance_field "$line" base_sha)" == "$base_sha" ]]; then
+            shopt -u nullglob
+            printf '%s' "$f"
+            return 0
+        fi
+        if [[ -z "$best" || "$f" -nt "$best" ]]; then
+            best="$f"
+        fi
+    done
+    shopt -u nullglob
+    if [[ -n "$best" ]]; then
+        printf '%s' "$best"
+    fi
+    return 0
+}
+
+# --- `--start`: this same round, detached (issue #1594) ----------------------
+#
+# The round is not reimplemented here. `--start` re-executes THIS script in its
+# ordinary foreground form, so the detached round takes the same locks, resolves
+# the same loop, writes the same artifact and is subject to every check above and
+# below — there is no second code path whose behaviour could drift from the
+# reviewed one. What `--start` adds is detachment and a bounded confirmation that
+# the round is really running before it hands the terminal back.
+#
+# The base is passed on as the ref THIS invocation resolved rather than as the
+# empty string the caller may have given, so the child cannot resolve a different
+# `origin/main` from a fetch that lands between the two. Resolving a ref to the
+# same ref is what the child's own defaulting would have produced anyway; what is
+# removed is the window in which it would not have.
+_mode_start() {
+    local start_grace="${CODEX_REVIEW_START_GRACE:-30}"
+    if [[ ! "$start_grace" =~ ^(0|[1-9][0-9]{0,3})$ ]]; then
+        echo "CODEX_REVIEW_START_GRACE must be a non-negative decimal integer of at" \
+            "most 4 digits with no leading zero (a shell reads a leading zero as" \
+            "octal), not '${start_grace}' — it bounds the seconds --start waits for" \
+            "the detached round to claim its loop" >&2
+        exit 2
+    fi
+
+    mkdir -p "$session_dir"
+
+    # Refused here as well as in the round, so the caller reads the reason on its
+    # own terminal instead of having to go and find it in a log. This is a probe,
+    # not a claim: the round below takes the lock for itself, and two `--start`s
+    # racing past this probe still end with exactly one round, because the loser
+    # hits the round's own refusal.
+    if _lock_held; then
+        echo "another '${persona}' review of this loop is already running in this" >&2
+        echo "clone; refusing to start a second one. Two rounds of one persona share" >&2
+        echo "an artifact, a thread and a disposition snapshot, so they cannot both" >&2
+        echo "be recorded (ADR-0015, issue #142)." >&2
+        echo "wait on the one that is running:" >&2
+        echo "  scripts/codex-review.sh --wait ${persona}" >&2
+        exit 1
+    fi
+
+    local self="$0"
+    case "$self" in
+    /*) ;;
+    *) self="${PWD}/${self}" ;;
+    esac
+
+    local launched_at
+    launched_at="$(date +%s)"
+    : >"$log_file"
+
+    # Detached, deliberately, and not merely backgrounded. The caller of `--start`
+    # is by construction about to exit — that is the entire reason this mode
+    # exists — and a bare `&` leaves the round in the caller's process group and
+    # session, where the caller's own teardown takes the round down with it. A
+    # round killed at minute eight is the same lost round `--start` exists to
+    # prevent, only harder to notice. `setsid --fork` gives it a session of its
+    # own; `nohup` is the fallback where util-linux is absent and closes the
+    # SIGHUP half of the same problem.
+    if command -v setsid >/dev/null 2>&1; then
+        CODEX_REVIEW_DETACHED_LOG="$log_file" setsid --fork \
+            "${BASH:-bash}" "$self" "$persona" "$base" \
+            >"$log_file" 2>&1 </dev/null &
+    else
+        CODEX_REVIEW_DETACHED_LOG="$log_file" nohup \
+            "${BASH:-bash}" "$self" "$persona" "$base" \
+            >"$log_file" 2>&1 </dev/null &
+    fi
+
+    # Hand back only once the round has published the tree it pinned. Returning
+    # any earlier would let `--start` succeed on a round that died in its first
+    # second — a dirty tree, a missing rubric, a Codex that is not there — and the
+    # caller would then poll for an artifact nothing is producing until it gave
+    # up. `started_at` must be at or after the launch, so a marker left by an
+    # earlier round of this same loop is never mistaken for this one's.
+    local deadline=$((launched_at + start_grace)) r_tree r_started
+    while :; do
+        r_tree="$(_round_field tree)"
+        r_started="$(_round_field started_at)"
+        if [[ "$r_tree" == "$tree" && "$r_started" =~ ^[0-9]+$ &&
+            "$r_started" -ge "$launched_at" ]]; then
+            break
+        fi
+        if [[ "$(date +%s)" -ge "$deadline" ]]; then
+            echo "the detached '${persona}' round did not claim this loop within" >&2
+            echo "  ${start_grace}s, so it is not running. Its output follows" >&2
+            echo "  (${log_file#"${repo_root}/"}):" >&2
+            _echo_log
+            exit 1
+        fi
+        sleep 1
+    done
+
+    local r_loop r_pid
+    r_loop="$(_round_field loop_id)"
+    r_pid="$(_round_field pid)"
+    printf 'persona=%s\n' "$persona"
+    printf 'loop_id=%s\n' "${r_loop:-noloop}"
+    printf 'tree=%s\n' "$tree"
+    printf 'sha=%s\n' "$sha"
+    printf 'base_sha=%s\n' "$base_sha"
+    printf 'pid=%s\n' "$r_pid"
+    printf 'log=%s\n' "${log_file#"${repo_root}/"}"
+    {
+        echo
+        echo "===== ${persona} review started, detached ====="
+        echo "  loop     ${r_loop:-noloop}"
+        echo "  tree     ${tree:0:12}  (HEAD ${sha:0:12} vs ${base})"
+        echo "  pid      ${r_pid}"
+        echo "  log      ${log_file#"${repo_root}/"}"
+        echo "  wait     scripts/codex-review.sh --wait ${persona}"
+        echo
+    } >&2
+    return 0
+}
+
+# --- `--wait`: block on the round for HEAD's tree, then report it ------------
+#
+# Answers one question — "is there a review of the content HEAD carries yet?" —
+# and answers it in a bounded call, so a caller that cannot hold a process open
+# for the minutes a round takes can ask it repeatedly instead of once (#1594).
+#
+# Three outcomes, three exit statuses, because the caller's next move differs for
+# each: 0 with the artifact (read it), 3 `still running` (call again), 4 with no
+# round in flight for this tree (start one, or look at what went wrong). Only 3
+# means "ask again"; treating a 4 as a 3 is the poll that never terminates, and
+# treating a 3 as a 4 is the relaunch that throws away a round mid-flight.
+_mode_wait() {
+    local timeout="${timeout_arg:-540}"
+    if [[ ! "$timeout" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+        echo "--timeout must be a non-negative decimal integer of at most 9 digits" \
+            "with no leading zero (a shell reads a leading zero as octal), not" \
+            "'${timeout}' — it bounds the seconds --wait blocks before reporting" \
+            "'still running'" >&2
+        exit 2
+    fi
+    local interval="${CODEX_REVIEW_WAIT_INTERVAL:-5}"
+    if [[ ! "$interval" =~ ^[1-9][0-9]{0,3}$ ]]; then
+        echo "CODEX_REVIEW_WAIT_INTERVAL must be a decimal integer from 1 to 9999" \
+            "with no leading zero, not '${interval}' — it is the seconds between" \
+            "polls, and zero would spin" >&2
+        exit 2
+    fi
+
+    local deadline=$(($(date +%s) + timeout))
+    local artifact line verdict r_tree r_pid live now remaining
+    while :; do
+        artifact="$(_artifact_for_tree)"
+        if [[ -n "$artifact" ]]; then
+            line="$(head -n 1 "$artifact")"
+            # The artifact only exists because the round's own verdict guard
+            # accepted its last line, so what is left is stripping the optional
+            # label the guard permits. `LC_ALL=C` for the reason that guard states
+            # at length: `[^[:alnum:]]` is locale-dependent, and in a single-byte
+            # non-ASCII locale an em dash's leading byte reads as a letter.
+            verdict="$(_last_verdict_line "$artifact")"
+            verdict="$(LC_ALL=C sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt][^[:alnum:]]*//; s/\.$//' \
+                <<<"$verdict" | tr '[:lower:]' '[:upper:]')"
+            printf 'artifact=%s\n' "${artifact#"${repo_root}/"}"
+            printf 'persona=%s\n' "$persona"
+            printf 'tree=%s\n' "$tree"
+            printf 'round=%s\n' "$(_provenance_field "$line" round)"
+            printf 'verdict=%s\n' "$verdict"
+            {
+                echo
+                echo "===== ${persona} review of tree ${tree:0:12} is recorded ====="
+                echo "  artifact  ${artifact#"${repo_root}/"}"
+                echo "  verdict   ${verdict}"
+                echo "  round     $(_provenance_field "$line" round)"
+                echo "  churn     $(_provenance_field "$line" churn_ratio)"
+                echo
+            } >&2
+            return 0
+        fi
+
+        r_tree="$(_round_field tree)"
+        r_pid="$(_round_field pid)"
+        live=0
+        if _lock_held; then
+            live=1
+        elif [[ ("$serialized" -eq 0 || "$bypass" -eq 1) && -n "$r_pid" ]] &&
+            kill -0 "$r_pid" 2>/dev/null; then
+            # No lock to read: the unserialized fallback (#142) takes none, and
+            # neither does the bypass path. The marker's own pid is then the
+            # liveness signal. It is NOT consulted where the lock is available,
+            # because a recycled pid would report a finished round as running
+            # forever, and the lock cannot be wrong that way.
+            live=1
+        fi
+
+        if [[ "$live" -eq 1 && -n "$r_tree" && "$r_tree" != "$tree" ]]; then
+            echo "the '${persona}' round running in this clone is reviewing tree" >&2
+            echo "  ${r_tree:0:12}, not HEAD's ${tree:0:12}. Nothing will record an" >&2
+            echo "  artifact for HEAD's tree until a round is started on it — most" >&2
+            echo "  often because a commit landed after that round was started." >&2
+            exit 4
+        fi
+
+        if [[ "$live" -eq 0 ]]; then
+            if [[ "$r_tree" == "$tree" ]]; then
+                echo "the '${persona}' round for HEAD's tree ${tree:0:12} is no longer" >&2
+                echo "  running and recorded no artifact — it failed rather than" >&2
+                echo "  finished. Its output follows, where it was detached" >&2
+                echo "  (${log_file#"${repo_root}/"}):" >&2
+                _echo_log
+                exit 4
+            fi
+            echo "no '${persona}' round is in flight for HEAD's tree ${tree:0:12}, and" >&2
+            echo "  no artifact covers it." >&2
+            echo "  start one:  scripts/codex-review.sh --start ${persona}" >&2
+            exit 4
+        fi
+
+        now="$(date +%s)"
+        if [[ "$now" -ge "$deadline" ]]; then
+            echo "still running: the '${persona}' round for HEAD's tree ${tree:0:12}" >&2
+            echo "  has not finished within ${timeout}s. Nothing is wrong and nothing" >&2
+            echo "  is lost — call --wait again to keep waiting (issue #1594)." >&2
+            exit 3
+        fi
+        remaining=$((deadline - now))
+        if [[ "$remaining" -lt "$interval" ]]; then
+            sleep "$remaining"
+        else
+            sleep "$interval"
+        fi
+    done
+}
+
+case "$mode" in
+start)
+    _mode_start
+    exit 0
+    ;;
+wait)
+    _mode_wait
+    exit 0
+    ;;
+esac
 
 # One limit is left standing, deliberately, and it cuts both ways. The name is
 # all that identifies the loop, so reusing a name inherits the old branch's
@@ -274,8 +747,6 @@ fi
 # rather than accepted.
 patch_id="$(patch_identity "$base_sha" "$sha")"
 
-review_dir="${repo_root}/.review"
-
 # --- Aggregate (ADR-0020 §2) -------------------------------------------------
 #
 # Printed on every run, unasked, and recorded in the provenance line so `just
@@ -323,8 +794,8 @@ declare -A reviewed_trees=()
 shopt -s nullglob
 for artifact_file in "${review_dir}"/*.md; do
     artifact_line="$(head -n 1 "$artifact_file")"
-    artifact_branch="$(sed -n 's/.*[[:space:]]branch=\([^[:space:]]*\).*/\1/p' <<<"$artifact_line")"
-    artifact_tree="$(sed -n 's/.*[[:space:]]tree=\([^[:space:]]*\).*/\1/p' <<<"$artifact_line")"
+    artifact_branch="$(_provenance_field "$artifact_line" branch)"
+    artifact_tree="$(_provenance_field "$artifact_line" tree)"
     # No recorded tree or branch means the artifact predates this and says
     # nothing usable. HEAD's own tree is this round, not a previous one — which
     # is what keeps a second persona, or a re-run, from inflating the count.
@@ -509,23 +980,9 @@ trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_
 # The bypass path (no sandbox, or CI) is not the persistent path (see the
 # invocation below):
 # a cold one-shot that keeps no session and runs no read-only proof, today's
-# behaviour preserved. Detected here so no session state is created on that path.
-# GITHUB_ACTIONS is matched exactly against "true", so an inherited
-# GITHUB_ACTIONS=false cannot enable it; CODEX_REVIEW_NO_SANDBOX=1 forces it.
-bypass=0
-if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
-    bypass=1
-fi
-
-codex_home="${CODEX_HOME:-$HOME/.codex}"
-session_dir="${review_dir}/session"
-disposition_dir="${review_dir}/dispositions"
-branch_key="$(printf '%s' "$branch" | sha1sum | awk '{print $1}')"
-base_key="$(printf '%s' "$base_sha" | sha1sum | awk '{print $1}')"
-loop_key="${branch_key}-${base_key}"
-meta_file="${session_dir}/${loop_key}.meta"
-thread_file="${session_dir}/${loop_key}.${persona}.thread"
-lock_file="${session_dir}/${loop_key}.lock"
+# behaviour preserved. `bypass` is resolved with the loop's paths near the top,
+# so the mode dispatch can read it; nothing here creates session state on it.
+#
 # The disposition record is a per-reviewed-state SNAPSHOT (ADR-0025 §4), named by
 # the full anchor `<loop_id>-<persona>-<tree>.md`, so `ship` selects the one
 # belonging to the terminal artifact's tree and fails closed if two loops claim
@@ -628,7 +1085,7 @@ _claim_persona() {
         return 0
     fi
     mkdir -p "$session_dir"
-    exec {inflight_fd}<>"${session_dir}/${loop_key}.${persona}.inflight"
+    exec {inflight_fd}<>"$inflight_file"
     if ! flock -n "$inflight_fd"; then
         echo "another '${persona}' review of this loop is already running in this" >&2
         echo "clone; refusing to start a second one. Two rounds of one persona share" >&2
@@ -636,23 +1093,21 @@ _claim_persona() {
         echo "be recorded. Run personas one at a time (ADR-0015, issue #142)." >&2
         exit 1
     fi
+    # The round marker (`--wait`'s answer to "which tree is in flight?") belongs
+    # to the round holding this lock, so the previous round's is dropped the
+    # moment this one owns it and republished once this round's identity is
+    # settled. Dropping it here rather than overwriting it later is what keeps
+    # the two from ever being confused: between the two points there is no
+    # marker, which `--wait` reads as "in flight, tree not yet published" and
+    # waits on — where a stale marker would have read as a different tree and
+    # sent the caller away.
+    rm -f "$round_file"
     return 0
 }
 
-# Whether the loop phases can be serialized at all. `flock` is util-linux, so it
-# is present wherever `sha1sum` (already required above, for the loop key) is.
-# Where it is somehow absent, the loop degrades to the unserialized behaviour it
-# had before #142 and says so, rather than refusing to review: the race needs two
-# concurrent invocations, which the one-agent-per-clone workflow (ADR-0015) does
-# not produce, so bricking the tool would be the worse failure.
-serialized=1
-if ! command -v flock >/dev/null 2>&1; then
-    serialized=0
-    if [[ "$bypass" -eq 0 ]]; then
-        echo "warning: flock not found; the review loop's init/update cannot be" >&2
-        echo "  serialized. Run one codex-review at a time (issue #142)." >&2
-    fi
-fi
+# `serialized` — whether the loop phases can be serialized at all — is resolved
+# with the loop's paths near the top, for the same reason `bypass` is: `--wait`
+# reasons about the in-flight lock and has to know whether one is taken.
 
 # The loop meta, written atomically. `last_sha` is the ancestry anchor the next
 # round continues from, so it is passed explicitly: init publishes the identity
@@ -726,6 +1181,29 @@ if [[ "$bypass" -eq 0 ]]; then
     _write_meta "$recorded_last_sha"
     _unlock_session
 fi
+
+# Publish WHICH CONTENT this round is reviewing (issue #1594). The in-flight lock
+# says only that a round of this persona is running — the tree is not in its key
+# and cannot be, since the lock is claimed before the round has resolved anything
+# — so `--wait`, which is always asked about a tree, has nothing to match on
+# without this. Written once the identity is settled, so it carries the loop id
+# `--start` reports; written atomically, because a poller can arrive between any
+# two lines of it; and never removed on exit, because a marker whose round is
+# gone is exactly what tells `--wait` the round died rather than finished.
+#
+# Written on the bypass path too, where `_claim_persona` did not run and so did
+# not drop an earlier round's marker: this write replaces it whole, and
+# `started_at` is what identifies the round it describes.
+_write_round_marker() {
+    local tmp="${round_file}.partial.$$"
+    mkdir -p "$session_dir"
+    printf 'pid=%s\npersona=%s\nbranch=%s\nbase_sha=%s\nsha=%s\ntree=%s\n' \
+        "$$" "$persona" "$branch" "$base_sha" "$sha" "$tree" >"$tmp"
+    printf 'loop_id=%s\nstarted_at=%s\nlog=%s\n' \
+        "$loop_id" "$(date +%s)" "${CODEX_REVIEW_DETACHED_LOG:-}" >>"$tmp"
+    mv "$tmp" "$round_file"
+}
+_write_round_marker
 
 # The disposition snapshot for this reviewed state, and the most recent snapshot
 # from an earlier round of this same loop+persona. The prior snapshot is what a
@@ -1240,8 +1718,7 @@ fi
 # no ambient locale, so the match pins its own. Matching bytes is the right
 # choice here: the verdict words are ASCII, and the separator is only ever
 # skipped over, never interpreted.
-last_line="$(grep -v '^[[:space:]]*$' "$out" | tail -n 1 |
-    tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+last_line="$(_last_verdict_line "$out")"
 if ! LC_ALL=C grep -qiE '^(verdict[^[:alnum:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
     echo "codex output does not end in a verdict; not recording it as a review" >&2
     echo "this is usually a refusal or a timeout rather than a review" >&2
