@@ -55,13 +55,19 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
-from ai_assistant.core.types import RecipientGrant, describe_untrusted
+from ai_assistant.core.types import (
+    BoundAccount,
+    CanonicalDestination,
+    RecipientGrant,
+    ToolDefinition,
+    describe_untrusted,
+)
 from ai_assistant.permissions._detachment import field_state
 from ai_assistant.permissions._transactions import transaction
 
@@ -814,25 +820,27 @@ class SqliteRecipientGrantStore:
         :data:`_CREATE_TABLE`). The clock is read **once**, and every record the
         loop considers is measured against that one instant.
 
+        **Every value the comparison is decided over is read before the first
+        await** (:func:`_coverage_subject`), and the lookup consults the request no
+        further. This method suspends twice before it compares anything — for the
+        lock, and for the read behind it — and a lookup that captured the
+        destination set on the way in and re-read the declaration on the way out
+        would answer about neither request: ADR-0065's rule, on the argument this
+        seam rules over.
+
         Raises:
             RecipientGrantError: If the store cannot be read, or holds a record
                 that no longer validates.
         """
-        binding = request.egress_binding
-        if binding is None:
+        subject = _coverage_subject(request)
+        if subject is None:
             return None
-        wanted = binding.canonical_destination_set
         async with self._lock:
             rows = await _run_to_completion(self._outstanding_sync)
         reading = self._clock()
         for row in rows:
             grant = _decode(row)
-            if (
-                _is_live(grant, reading)
-                and grant.tool == request.tool
-                and grant.account == binding.account
-                and all(member in grant.destinations for member in wanted)
-            ):
+            if _is_live(grant, reading) and subject.covered_by(grant):
                 return grant
         return None
 
@@ -1006,6 +1014,73 @@ class SqliteRecipientGrantStore:
             self._conn.close()
 
 
+class _CoverageSubject(NamedTuple):
+    """The three values ADR-0193 §3's store-side comparisons are decided over.
+
+    Built by :func:`_coverage_subject` before the first ``await`` and consulted
+    afterwards in its place, so that one lookup answers about one request.
+    """
+
+    tool: ToolDefinition
+    account: BoundAccount
+    wanted: tuple[CanonicalDestination, ...]
+
+    def covered_by(self, grant: RecipientGrant) -> bool:
+        """Whether ``grant`` covers this subject — §3's four store-side comparisons.
+
+        Containment is membership and nothing looser: no case folding, no domain
+        matching, no treating an account member as covering a recipient member or
+        the reverse, and no re-canonicalising either side. Liveness is the
+        caller's, because the clock is read once for the whole lookup.
+        """
+        return (
+            grant.tool == self.tool
+            and grant.account == self.account
+            and all(member in grant.destinations for member in self.wanted)
+        )
+
+
+def _coverage_subject(request: ActionRequest) -> _CoverageSubject | None:
+    """What ``request`` asks this store, as values, or ``None`` if it asks nothing.
+
+    **Read before the first await, and detached** (ADR-0065). A lookup suspends —
+    for a lock, for a read, or for whatever a double models — and a frozen model
+    is rewritable through ``__dict__``, so a caller can replace ``request.tool``
+    while the lookup waits. An implementation that captured the destination set on
+    the way in and re-read the declaration on the way out would then return the
+    grant established for the *second* tool as covering the *first* tool's
+    recipients — an answer describing neither request, from the seam whose answer
+    is the gate.
+
+    Detached as well as captured, because capturing the objects leaves the same
+    rewrite available one level down. ``ActionRequest`` already takes its own copy
+    of both the declaration and the binding at construction
+    (``core.types._detached_tool`` and ``_detached_binding``), so this is that
+    discipline continued across a suspension rather than a new one, and it is
+    spelled the way those are: rebuilt through validation, never deep-copied.
+
+    ``None`` **covers nothing and is not an error.** A request with no binding is
+    not an egress call and this store has no question to answer about it; a
+    request that cannot be read as one at all is answered the same way, which is
+    the fail-closed direction — no grant, so the disclosure floor stands and the
+    user is asked (ADR-0193 §1's fail-closed clause, §7's floors).
+    """
+    binding = request.egress_binding
+    if binding is None:
+        return None
+    try:
+        return _CoverageSubject(
+            tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
+            account=BoundAccount.model_validate(field_state(BoundAccount, binding.account)),
+            wanted=tuple(
+                CanonicalDestination.model_validate(field_state(CanonicalDestination, member))
+                for member in binding.canonical_destination_set
+            ),
+        )
+    except Exception:  # a request this store cannot read coherently is covered by nothing
+        return None
+
+
 def _revalidated(grant: RecipientGrant) -> RecipientGrant:
     """Rebuild ``grant`` as a validated :class:`RecipientGrant`.
 
@@ -1049,11 +1124,14 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
     rebuild below constructs every nested model afresh and the store shares no
     object with the caller at any depth.
 
-    **The refusal names the id out of the same mapping**, never through
-    ``grant.id``: a record whose ``__dict__`` is missing a field has no ``id``
-    attribute at all, so composing the message from one would raise a bare
-    ``AttributeError`` out of the handler and replace the refusal this layer owes
-    with a builtin escaping its error boundary.
+    **Nothing of the caller's is read outside the guard**, the diagnostic id
+    included (:func:`_named`). ``record`` is typed to take a ``RecipientGrant`` and
+    the caller is not obliged by anything at runtime to pass one: a ``None``, or a
+    record whose ``__dict__`` is missing a field, has no ``id`` attribute at all,
+    and a read of one outside the ``try`` would replace the refusal this layer owes
+    with a builtin escaping its error boundary. ``field_state`` hands a value that
+    is not a ``RecipientGrant`` straight to ``model_validate`` untouched, which
+    refuses it as the invalid record it is.
 
     Raises:
         InvalidRecipientGrantError: If the record does not satisfy its own model,
@@ -1065,7 +1143,6 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
             the *store fault* and only the subclass says "your record was refused",
             which is the distinction a consumer's fail-closed branch keeps alive.
     """
-    fields = dict(object.__getattribute__(grant, "__dict__"))
     try:
         return RecipientGrant.model_validate(field_state(RecipientGrant, grant))
     except ValueError as exc:
@@ -1073,9 +1150,36 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
         # re-raises a `ValueError` the caller's own code raised, and a hostile
         # `__str__` on it would replace this refusal with whatever it threw — from
         # inside the `except` block that exists to report it.
-        named = describe_untrusted(fields.get("id"))
-        msg = f"recipient grant {named} is not a valid record: {describe_untrusted(exc)}"
+        msg = f"recipient grant {_named(grant)} is not a valid record: {describe_untrusted(exc)}"
         raise InvalidRecipientGrantError(msg) from exc
+
+
+def _named(given: object) -> str:
+    """Name ``given`` for a refusal message, without reading an attribute of it.
+
+    ``given.id`` is not available: the value reaching :func:`_revalidated` is
+    whatever the caller passed, and a record whose ``__dict__`` is missing a field
+    — or a value that is not a record at all — has no ``id`` attribute, so
+    composing the message from one would replace the refusal this layer owes with
+    a builtin escaping its error boundary. ``isinstance`` is inside the guard with
+    everything else, because asking what something is consults ``__class__``,
+    which can be a property that raises.
+
+    Nothing here hashes a key the caller controls: a model's ``__dict__`` is
+    annotated ``dict[str, Any]`` and nothing enforces it at runtime, so a key can
+    be an object whose ``__hash__`` collides with a field name and whose ``__eq__``
+    raises on the comparison that collision provokes. Iterating hashes nothing, and
+    only a real ``str`` — whose hash and equality are the interpreter's — is asked
+    whether it names the id.
+    """
+    try:
+        if isinstance(given, RecipientGrant):
+            for key, value in object.__getattribute__(given, "__dict__").items():
+                if type(key) is str and key == "id":
+                    return describe_untrusted(value)
+    except Exception:  # the value cannot even be named; say so and carry on
+        return "the given value"
+    return "the given value"
 
 
 def _decode(data: str) -> RecipientGrant:

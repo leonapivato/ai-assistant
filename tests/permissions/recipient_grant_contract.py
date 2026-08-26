@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from recipient_builders import (
@@ -1291,3 +1291,52 @@ class RecipientGrantStoreContract(RecipientGrantsContract, RecipientGrantResolut
         assert held.destinations == (member(ALICE),)
         assert held.tool == TOOL
         assert held.account == ACCOUNT
+
+    @pytest.mark.parametrize(
+        "given", [None, "g-1", object()], ids=["none", "a string", "a bare object"]
+    )
+    async def test_a_value_that_is_not_a_record_is_refused_as_one(
+        self, store: RecipientGrantStore, given: object
+    ) -> None:
+        """The declared error family holds for **every** argument, not the well-typed ones.
+
+        ``record`` is typed to take a ``RecipientGrant`` and nothing obliges a
+        caller at runtime to pass one, so a store that reads the argument before
+        its guard answers with a builtin — an ``AttributeError`` out of a seam
+        whose documented refusal is ``InvalidRecipientGrantError``, past every
+        fail-closed branch written against that class.
+        """
+        with pytest.raises(InvalidRecipientGrantError, match="not a valid record"):
+            await store.record(cast("RecipientGrant", given))
+
+        assert await store.export() == []
+
+    async def test_a_request_rewritten_while_the_lookup_is_queued_is_answered_as_submitted(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """ADR-0065 on the read path: one lookup answers about one request.
+
+        ``covering`` compares four things — the declaration, the account and the
+        destination set, against a live record — and it suspends before it can
+        compare any of them. An implementation that captured the destination set on
+        the way in and re-read the declaration on the way out answers about
+        neither request: the caller asks about a tool it holds no grant for,
+        rewrites ``request.__dict__["tool"]`` while the lookup waits, and is handed
+        the grant established for the *other* tool as covering *these* recipients.
+
+        A concurrent write occupies the store so the interval is a real one rather
+        than a hoped-for interleaving, exactly as the write-path case above does.
+        """
+        await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
+        elsewhere = TOOL.model_copy(update={"description": "Send an email, politely."})
+        asked = request(binding(ALICE), tool=elsewhere)
+
+        async def _rewrite_the_declaration() -> None:
+            asked.__dict__["tool"] = TOOL
+
+        blocker = recipient_grant(member(BOB), grant_id="g-2")
+        _, found, _ = await asyncio.gather(
+            store.record(blocker), store.covering(asked), _rewrite_the_declaration()
+        )
+
+        assert found is None
