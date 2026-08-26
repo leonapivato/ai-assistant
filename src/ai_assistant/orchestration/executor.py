@@ -43,6 +43,7 @@ from ai_assistant.core.errors import (
     AssistantError,
     PlanningError,
     RetriesExhaustedError,
+    SpendError,
     ToolBindingError,
 )
 from ai_assistant.core.types import (
@@ -99,6 +100,17 @@ _REFUSED = (
 #: never retries it either.
 _UNCLAIMED = (
     "the invoker could not record the call against its authorisation, so the tool was not reached"
+)
+
+#: What a spend refusal records when its own account cannot be read.
+#: :func:`_spend_refusal` records the error's own message, so this stands in for
+#: the two ways a raiser can leave nothing recordable — a ``__str__`` that raises,
+#: and text ``StepFailure`` rejects — neither of which may strand the step durably
+#: ``RUNNING``. It keeps the *ground*, which is the whole point of separating this
+#: path: a budget stop must not read as an internal fault (ADR-0194 §4).
+_UNSTATED = (
+    "the invocation was refused on spend grounds before the tool was reached, and the "
+    "refusal's own account could not be read"
 )
 
 #: What a cancelled call records, on both the ``FAILED`` and the
@@ -478,6 +490,11 @@ class StepExecutor:
 
         - a ``ToolBindingError`` is the seam's own rejection, committed ``FAILED``
           and never retried (:meth:`_refuse`, ADR-0029 §5 reads a result's kind);
+        - a ``SpendError`` is a spend ceiling refusing the call before the
+          callable, which is the same window and the same ``FAILED``, but not the
+          same news: it is committed with the refusal's **own** account so a
+          budget stop does not read as an internal fault
+          (:meth:`_close_refused_by_spend`, ADR-0194 §4);
         - any **other** ``AssistantError`` is an exit from the seam's own claim
           on the authorisation, which ADR-0192 §1 places before the callable
           **as a clause of the contract**, and is committed ``FAILED`` for the
@@ -500,6 +517,8 @@ class StepExecutor:
             returned = await self._invoker.invoke(authorised, timeout=timeout)
         except ToolBindingError:
             return await self._refuse(state, step_id), None
+        except SpendError as refusal:
+            return await self._close_refused_by_spend(state, step_id, refusal), None
         except AssistantError:
             return await self._close_unclaimed(state, step_id), None
         except asyncio.CancelledError:
@@ -663,6 +682,12 @@ class StepExecutor:
         reaches here as itself. A handler naming ``AuditError`` alone would leave
         exactly that exit durably ``RUNNING``.
 
+        A ``SpendError`` is taken one branch earlier
+        (:meth:`_close_refused_by_spend`) and reaches the same ``FAILED``: the
+        clause governs the outcome, which no branch here varies, and that branch
+        varies only which sentence the record carries — the ledger seam's, which
+        is false of a budget stop, or the refusal's own (ADR-0194 §4).
+
         A *completion*-path failure never arrives here at all, because the seam
         absorbs it and returns the call's own ``ToolResult`` (ADR-0192 §3); and a
         ``BaseException`` is not reached either — §1 states no outcome for one and
@@ -680,6 +705,48 @@ class StepExecutor:
         """
         return await self._finish(
             state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_UNCLAIMED)
+        )
+
+    async def _close_refused_by_spend(
+        self, state: ExecutionState, step_id: str, refusal: SpendError
+    ) -> ExecutionState:
+        """Commit ``RUNNING → FAILED`` for a spend refusal, in its own words (ADR-0194 §4).
+
+        A ``SpendError`` sits in the same window as :meth:`_close_unclaimed` and
+        gets the same outcome for the same reason — the gate refuses **before**
+        the callable, so nothing ran, ``FAILED`` is honest and no result exists
+        for ADR-0029 §5 to read a retry from. What differs is the *record*.
+
+        **The generic wording would be false here.** ``_UNCLAIMED`` says the
+        invoker "could not record the call against its authorisation", and that is
+        not what happened: the authorisation is intact and recorded ``ALLOW``, and
+        what refused is arithmetic over a calendar period. ADR-0194 §4 keeps
+        :class:`~ai_assistant.core.errors.SpendError` out of
+        :class:`~ai_assistant.core.errors.PermissionDeniedError` precisely so a
+        trace can separate "you declined" from "you are out of budget"; collapsing
+        it into the ledger seam's sentence one hop later loses the separation the
+        type system was shaped to keep, and hides the remedy §4 names — the user
+        raises the ceiling, in configuration, as a deliberate act.
+
+        **So the error's own message is recorded, and none is composed here.**
+        ADR-0194 §4 authors that text: which ceiling was crossed, its period, its
+        currency, the accounted and projected totals — or, for
+        :class:`~ai_assistant.core.errors.SpendUndeterminedError`, which of the six
+        grounds fired and deliberately **no** amount. §3 has both ceilings bind
+        independently and one error name both when both are crossed, in
+        ``SpendPeriod``'s fixed order; a second sentence composed here could only
+        contradict it or duplicate it. :func:`_spend_refusal` is where the reading
+        happens, and why reading it is safe.
+
+        **Naming a class here does not reopen "on the window and not on a list of
+        causes"** (ADR-0192 §1). That clause governs the *outcome*, and the outcome
+        is unchanged for every class: everything leaving ``invoke`` as an
+        ``AssistantError`` still commits ``FAILED`` and is still never retried.
+        This branch selects which authored sentence describes it — the same thing
+        the ``ToolBindingError`` branch beside it has always done.
+        """
+        return await self._finish(
+            state, step_id, StepStatus.FAILED, failure=_spend_refusal(refusal)
         )
 
     async def _discard_unusable(self, state: ExecutionState, step_id: str) -> ExecutionState:
@@ -1009,6 +1076,43 @@ def _failure_of(result: ToolResult) -> StepFailure:
     if failure is None:
         return StepFailure(kind=None, message=_UNEXPLAINED)
     return StepFailure(kind=failure.kind, message=failure.message)
+
+
+def _spend_refusal(refusal: SpendError) -> StepFailure:
+    """The ``StepFailure`` a spend refusal records: the error's own account.
+
+    **Carried rather than authored, which is the opposite of the ledger seam's
+    treatment, and the difference is contractual.** The executor authors
+    :data:`_REFUSED` and :data:`_UNCLAIMED` because those errors' own messages are
+    not log-safe — a ``ToolBindingError`` interpolates identifiers off an
+    untrusted call, and an ``AuthorisationSpentError`` names a decision id, which
+    ADR-0031 §5 records is not contractually log-safe. ADR-0194 §4 states the
+    reverse of a ``SpendError``: its message is **payload-free** — "no argument
+    value, no recipient, no account, no tool output and no digest of any of them"
+    — and is authored to be read. It clears ADR-0004 §5 as Tier 2 text on the
+    contract's own word, so it crosses unedited, exactly as a tool's own failure
+    message does in :func:`_failure_of`.
+
+    **Two ways a raiser can still leave nothing recordable, and neither may
+    strand the step.** This runs inside an exception handler on an already
+    durably-``RUNNING`` step: an exception escaping it abandons the close, and
+    recovery would read that ``RUNNING`` as ``INDETERMINATE`` — "we cannot tell
+    whether it acted" — about a call the gate provably stopped. So a ``__str__``
+    that raises is caught (the hazard ``permissions/audit.py`` names when it
+    refuses to interpolate a collaborator's exception), and text
+    :class:`~ai_assistant.core.types.StepFailure` rejects — blank, or with no
+    UTF-8 encoding — is caught as well. Both fall back to :data:`_UNSTATED`, which
+    still says the refusal was a spend one: the ground survives even when the
+    account does not.
+    """
+    try:
+        stated = str(refusal)
+    except Exception:
+        return StepFailure(kind=None, message=_UNSTATED)
+    try:
+        return StepFailure(kind=None, message=stated)
+    except ValidationError:
+        return StepFailure(kind=None, message=_UNSTATED)
 
 
 def _interrupted(trusted: ToolDefinition | None) -> ToolOutcome:
