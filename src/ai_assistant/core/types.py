@@ -8615,8 +8615,8 @@ class RecipientGrant(BaseModel):
         confirmed: PermissionDecision,
         answer: PermissionDecision,
         *,
-        id: Identifier,  # noqa: A002 — names the field it fills; ADR-0193 §1 fixes the signature
-        expires_at: datetime,
+        id: DurableIdentifier,  # noqa: A002 — names the field it fills; ADR-0193 §1's signature
+        expires_at: UtcInstant,
     ) -> RecipientGrant:
         """Build the grant a user's answer to ``confirmed`` establishes (ADR-0193 §2).
 
