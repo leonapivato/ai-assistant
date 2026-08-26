@@ -32,7 +32,7 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 
 import pytest
 import structlog.testing
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
         MutableMapping,
         Sequence,
     )
+    from types import GetSetDescriptorType
 
     from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import FrozenJson, ToolInvocation, ToolResult
@@ -509,6 +510,19 @@ def appended(captured: Sequence[Mapping[str, Any]]) -> list[dict[str, object]]:
         for each in captured
         if each.get("event") == APPEND_FAILED
     ]
+
+
+def cause_of(exception: BaseException) -> BaseException | None:
+    """Read ``exception``'s cause out of the slot, past any ``__cause__`` it declares.
+
+    The seam attaches the cause through ``BaseException``'s own descriptor
+    precisely so that a subclass cannot intercept the write. Reading it back with
+    plain attribute access would hand the question to the very ``__cause__``
+    property the write went around, so the check reads the same slot the write
+    landed in.
+    """
+    descriptor: GetSetDescriptorType = BaseException.__dict__["__cause__"]
+    return cast("BaseException | None", descriptor.__get__(exception))
 
 
 class NameRaises(type):
@@ -2142,58 +2156,79 @@ class ToolInvokerContract:
             "the completion is written, so the claim does not stay open"
         )
 
-    @pytest.mark.parametrize("refusal", ["raises", "silently-drops"])
+    @pytest.mark.parametrize("refusal", ["setattr-raises", "setattr-drops", "own-cause-descriptor"])
     async def test_a_cancellation_that_will_not_hold_the_cause_still_carries_it(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], refusal: str
     ) -> None:
-        """Attaching the cause is the collaborator's code too.
+        """Attaching the cause must not enter the collaborator's code.
 
         When the completion append fails while a cancellation is propagating,
-        ADR-0192 §3 has the cancellation leave carrying that failure as its cause.
-        The seam attaches it to the exception it caught rather than raising a new
-        one, deliberately: ``Task.cancel`` accepts an arbitrary message object, so
-        rendering the original would run a ``__str__`` this seam does not own.
+        ADR-0192 §3 has **that** cancellation leave carrying the failure as its
+        cause, and ``ToolInvoker.invoke``'s contract has this method "re-raise
+        what it was already raising". So the exception the tool raised is what
+        the caller receives — same object, same type, same arguments — with the
+        append's failure attached to it.
 
-        But ``__setattr__`` is that object's code as surely as ``__str__`` is, and
-        the object need not be a built-in ``CancelledError`` at all — an
-        externally cancelled tool may catch the injected cancellation and raise
-        its own subclass. One rejecting the assignment raises *from this frame*,
-        so what leaves is neither the cancellation ADR-0060 §1 requires nor the
-        append failure §3 requires it to carry, and the pending request is left
-        with nothing honouring it.
+        Attaching it is where the difficulty is, because the object need not be a
+        built-in ``CancelledError`` at all: an externally cancelled tool may catch
+        the injected cancellation and raise its own subclass, and then
+        ``cancellation.__cause__ = failure`` runs *that tool's* code. Three
+        refusals are driven, and the quiet ones are the dangerous ones:
 
-        So nothing is written to it at all once the append has failed: a
-        cancellation this seam owns carries the failure instead. Attempting the
-        assignment and falling back only where it *raises* is not enough, which is
-        what the second arm drives — a ``__cause__`` property whose setter returns
-        without storing leaves the fallback unreached and the failure silently
-        gone, and reading the attribute back to check would only move the problem
-        to the getter.
+        * a ``__setattr__`` that **raises** — an assignment would leave this frame
+          with neither the cancellation ADR-0060 §1 requires nor the failure §3
+          requires it to carry;
+        * a ``__setattr__`` that **accepts and stores nothing** — an assignment
+          would look correct with the failure silently gone, so falling back only
+          where the assignment *raises* is not enough;
+        * a ``__cause__`` **descriptor of the subclass's own**, whose setter drops
+          the value and whose getter answers ``None`` — which no ``__setattr__``
+          fallback reaches at all.
 
-        The original's identity is lost on this branch and nothing here asserts
-        it: ADR-0060 §1 requires that *a* cancellation reaches the caller, and the
-        cause is the fact §3 puts a rule on. Where the completion *lands*, the
-        exception the tool raised is still re-raised untouched.
+        None of them is entered: the seam writes through ``BaseException``'s own
+        ``__cause__`` descriptor, into a slot no subclass can shadow. The last arm
+        is why :func:`cause_of` reads that slot rather than the attribute — a
+        hostile *getter* can still misreport what the object holds, which is a
+        collaborator lying about its own exception and not something this seam can
+        cure. What §3 puts a rule on is that the failure is attached.
         """
 
-        class Rejecting(asyncio.CancelledError):
-            """A cancellation a tool raised, which will not hold an annotation.
-
-            Two refusals, and the quiet one is the dangerous one: a setter that
-            *accepts* the assignment and stores nothing leaves a cancellation
-            looking correct with the append failure gone.
-            """
+        class RaisesOnSet(asyncio.CancelledError):
+            """Refuses the annotation by raising."""
 
             def __setattr__(self, name: str, value: object) -> None:
-                if refusal == "raises":
-                    msg = "this exception refuses to be annotated"
-                    raise RuntimeError(msg)
+                msg = "this exception refuses to be annotated"
+                raise RuntimeError(msg)
+
+        class DropsOnSet(asyncio.CancelledError):
+            """Accepts the annotation and stores nothing."""
+
+            def __setattr__(self, name: str, value: object) -> None:
+                return
+
+        class OwnCauseDescriptor(asyncio.CancelledError):
+            """Declares ``__cause__`` itself, dropping writes and answering ``None``."""
+
+            @property
+            def __cause__(self) -> BaseException | None:
+                return None
+
+            @__cause__.setter
+            def __cause__(self, value: BaseException | None) -> None:
+                return
+
+        rejecting: type[asyncio.CancelledError] = {
+            "setattr-raises": RaisesOnSet,
+            "setattr-drops": DropsOnSet,
+            "own-cause-descriptor": OwnCauseDescriptor,
+        }[refusal]
 
         class Substituting:
             """Catches the injected cancellation and raises its own instead."""
 
             def __init__(self) -> None:
                 self.entered = asyncio.Event()
+                self.raised: asyncio.CancelledError | None = None
 
             async def __call__(
                 self,
@@ -2205,7 +2240,8 @@ class ToolInvokerContract:
                 try:
                     await asyncio.sleep(3600)
                 except asyncio.CancelledError:
-                    raise Rejecting from None
+                    self.raised = rejecting()
+                    raise self.raised from None
                 return None
 
         trail = FakeAuditTrail()
@@ -2225,9 +2261,14 @@ class ToolInvokerContract:
         with pytest.raises(asyncio.CancelledError) as caught:
             await running
 
-        assert caught.value.__cause__ is refused, (
-            "the append's own failure travels with the cancellation, and the "
-            "refusal to be annotated replaces neither"
+        assert tool_under_test.raised is not None
+        assert caught.value is tool_under_test.raised, (
+            "the cancellation the tool raised is what leaves — a completion that "
+            "failed does not cost the caller its type, its arguments or its identity"
+        )
+        assert cause_of(caught.value) is refused, (
+            "the append's own failure travels with the cancellation, and no "
+            "refusal to be annotated keeps it off"
         )
 
     async def test_a_log_processor_that_cancels_this_task_is_not_answered_with_a_result(

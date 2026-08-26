@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -42,6 +42,7 @@ from ai_assistant.core.types import CostBasis, ToolCost, fault_class_of
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
+    from types import GetSetDescriptorType
 
     from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import (
@@ -361,6 +362,26 @@ async def _complete(
     raise error
 
 
+_CAUSE_SLOT: Final[GetSetDescriptorType] = BaseException.__dict__["__cause__"]
+"""``BaseException``'s own ``__cause__`` descriptor, for writing past a subclass.
+
+``exception.__cause__ = failure`` is an attribute *assignment*, so on an exception
+a collaborator raised it runs that collaborator's code — a ``__setattr__``
+override, or a ``__cause__`` property of its own. Binding the base class's
+descriptor and calling ``__set__`` on it runs neither: the write lands in the
+C-level slot no subclass can shadow, it sets ``__suppress_context__`` exactly as
+``raise ... from ...`` does, and for an exception value it cannot raise. A hostile
+``__cause__`` *getter* can still lie about what the object holds when the attribute
+is read back — that is a collaborator misreporting its own exception, which no seam
+can prevent, and the failure is attached either way.
+"""
+
+
+def _attach_cause(exception: BaseException, cause: BaseException) -> None:
+    """Attach ``cause`` to ``exception`` without entering the object's own code."""
+    _CAUSE_SLOT.__set__(exception, cause)
+
+
 def _cancellation(reason: str, cause: BaseException | None) -> asyncio.CancelledError:
     """Build the ``CancelledError`` this seam delivers onward, carrying ``cause``.
 
@@ -498,7 +519,7 @@ async def consumed_call(
     claim = await _claimed(ledger, definition=definition, decision=decision)
     try:
         result = await act()
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         appended = await _complete(
             ledger,
             claim,
@@ -507,27 +528,24 @@ async def consumed_call(
         )
         if appended.failure is None:
             raise
-        # **A seam-owned cancellation, unconditionally, once the append failed.**
-        # Attaching the failure to the exception this frame caught would be
-        # cheaper and would keep its identity, and an earlier version did that.
-        # It cannot be made safe: the object came from a tool that caught the
-        # injected cancellation and raised its own subclass, so `__setattr__` is
-        # that tool's code. One rejecting the assignment raises from this frame —
-        # so neither the cancellation ADR-0060 §1 requires nor the failure §3
-        # requires it to carry is what leaves. One *accepting* it and storing
-        # nothing — a `__cause__` property with a no-op setter — is worse still,
-        # because it fails silently: the cancellation leaves looking correct with
-        # the append failure gone. Reading the attribute back would only move the
-        # problem to the getter.
+        # **The cancellation this frame caught is what leaves, carrying the
+        # append's failure as its cause** — ADR-0192 §3 names that exception, and
+        # `ToolInvoker.invoke`'s contract says this method "re-raises what it was
+        # already raising". So its identity, its type and its arguments survive a
+        # completion that failed, exactly as they do wherever the completion
+        # lands.
         #
-        # So nothing is written to it. The identity of the tool's own exception is
-        # lost on this branch and nowhere else — the bare `raise` above still
-        # re-raises it untouched wherever the completion landed — and §1 requires
-        # that *a* cancellation reaches the caller, not that object.
-        raise _cancellation(  # noqa: B904 — the cause is the append failure, deliberately
-            "the invoking task was cancelled while the tool was running",
-            appended.failure,
-        )
+        # The object may well be a tool's own `CancelledError` subclass: an
+        # externally cancelled callable can catch the injected cancellation and
+        # raise one. `cancellation.__cause__ = ...` would therefore run that
+        # tool's code — a `__setattr__` refusing the assignment raises *from this
+        # frame*, so neither the cancellation ADR-0060 §1 requires nor the failure
+        # §3 requires it to carry would leave; one accepting it and storing
+        # nothing loses the failure while looking correct. `_attach_cause` runs
+        # none of it, writing through `BaseException`'s own descriptor into a slot
+        # no subclass can shadow.
+        _attach_cause(cancellation, appended.failure)
+        raise
 
     appended = await _complete(
         ledger,
