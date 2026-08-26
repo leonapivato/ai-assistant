@@ -26,6 +26,7 @@ Refs: ADR-0194 §3, §11; ADR-0029 §4; ADR-0054.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
@@ -33,6 +34,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from tool_invoker_contract import Spy, call_for, tool
 
+from ai_assistant.core.errors import SpendUndeterminedError
 from ai_assistant.core.types import CostBasis, ToolCost
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.spend import SpendConfiguration
@@ -127,19 +129,28 @@ async def test_this_holders_wedged_read_outlives_the_deadline_invoke_was_given(
     assert result is not None
 
 
-async def test_the_holder_closes_cleanly_with_that_read_outstanding(
+async def test_shutdown_reaching_this_holder_mid_read_returns_without_waiting(
     wedged: tuple[InMemoryToolRegistry, SqliteAuditTrail, ThreadSuspension],
 ) -> None:
-    """The second half §11 names: what shutdown reaches this holder as.
+    """The second half §11 names: **what happens to the connection at shutdown**.
 
-    A shutdown arriving while the read is parked cannot take the connection out
-    from under the worker — ``close`` waits for the same absorption the deadline
-    met. So the sequence a shutdown really produces is: the worker finishes, the
-    call returns, and the connection closes with nothing left holding it.
+    Stated rather than asserted as a bound, for the same reason the deadline case
+    above is: what is not conforming is a lane that leaves a reader believing
+    something the implementation does not do.
 
-    Asserted rather than assumed, because the alternative — a close that raced the
-    worker — is the concurrent-connection use ADR-0054 exists to prevent, and it
-    would surface as a flake somewhere else entirely.
+    What this holder does is close **without waiting**. ``SqliteAuditTrail.close``
+    is ``suppress(sqlite3.Error)`` around ``conn.close()`` and takes no lock, so a
+    shutdown arriving while the worker is parked inside a read returns straight
+    away and the parked worker finds a closed connection when it is released. That
+    is safe in the running system because ADR-0083 §4 has the engine **drain**
+    every tracked operation to quiescence before it closes anything — the ordering
+    is the façade's, not the store's — and it is stated here because the store on
+    its own does not enforce it.
+
+    What matters at *this* seam is the half that is enforced, and it is asserted:
+    the store's own error type never reaches ``tools/``. ADR-0194 §4 requires a
+    backend exception to be translated rather than propagated, and a closed
+    connection is exactly such a backend exception arriving from underneath.
     """
     registry, trail, parked = wedged
     definition = tool(cost=_COST)
@@ -147,11 +158,21 @@ async def test_the_holder_closes_cleanly_with_that_read_outstanding(
     call = call_for(definition)
     await trail.record(call.decision)
 
-    running = asyncio.ensure_future(registry.invoke(call, timeout=_BRIEF))
+    # Patient, so what the call comes back as is the *store's* answer rather than
+    # ADR-0029 §4's classification of an expiry — the case above owns that half.
+    running = asyncio.ensure_future(registry.invoke(call, timeout=timedelta(seconds=30)))
     await parked.reached()
-    parked.release()
-    await asyncio.wait_for(running, _WAITING)
 
-    trail.close()
-    # Idempotent, which is what a drain reaching an already-closed store needs.
-    trail.close()
+    closing = asyncio.get_running_loop().run_in_executor(None, trail.close)
+    await asyncio.wait_for(closing, _WAITING)
+    assert not running.done(), "the read is still parked; only the connection went away"
+
+    parked.release()
+    with pytest.raises(SpendUndeterminedError) as caught:
+        await asyncio.wait_for(running, _WAITING)
+
+    assert "store could not be read" in str(caught.value)
+    assert not isinstance(caught.value, sqlite3.Error), (
+        "a backend exception is translated rather than propagated (ADR-0194 §4), "
+        "so `tools/` never sees a store's own error type"
+    )
