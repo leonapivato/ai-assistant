@@ -575,6 +575,23 @@ class _RecipientGrantLog:
             held.model_copy(deep=True) for held in (ordered if limit is None else ordered[:limit])
         ]
 
+    def under(self, max_outstanding: int) -> _RecipientGrantLog:
+        """A second view of **this** history under a different ceiling.
+
+        What a durable store's reopen is, for a fake that has no file: the record
+        list is the same object, so a write through either view is visible through
+        both, and only the admission ceiling differs. That is the whole of what
+        changes when a deployment edits ``Settings`` and restarts, and it is the
+        one arrangement ADR-0193 §1's admission-not-eviction clause needs — a store
+        holding records a newly lowered ceiling would not admit is a *legal* state,
+        and it is unreachable through a constructor that applies the new ceiling to
+        the seed.
+        """
+        view = _RecipientGrantLog(max_outstanding=max_outstanding)
+        # One history, two admission ceilings: the list is the same object.
+        view._records = self._records
+        return view
+
     def clear(self) -> int:
         """Drop every record, returning the number removed.
 
@@ -1040,6 +1057,37 @@ class FakeRecipientGrantStore:
             raise RecipientGrantError(msg) from self._write_failure
         async with self._resource.held():
             return self._log.clear()
+
+    def reopened_at(self, max_outstanding: int) -> FakeRecipientGrantStore:
+        """This store's **own history** under a different admission ceiling.
+
+        Test-only. What a durable store does when a deployment edits
+        ``Settings.recipient_grant_max_outstanding`` and restarts: the records are
+        the same records, and only what the store will *admit* next has changed.
+        A fake reconstructed from ``export()`` cannot model it — the seed would be
+        applied under the new ceiling and refused — so a store above a newly
+        lowered ceiling, which ADR-0193 §1 calls a **legal** state, would be
+        unreachable from any test and the admission-not-eviction clause would have
+        nothing exercising it.
+
+        The clock and the scripted faults are **not** carried over: this is a
+        restart, and a fault armed on the old object is a fault of that object.
+        The clock is, because liveness is a property of the history rather than of
+        the process reading it.
+
+        Args:
+            max_outstanding: The ceiling the reopened store admits under. Zero is
+                meaningful and admitted.
+
+        Returns:
+            A second store over the same history.
+        """
+        reopened = FakeRecipientGrantStore(max_outstanding=max_outstanding)
+        # One history, two views; the clock belongs to the history rather than
+        # to the process reading it.
+        reopened._log = self._log.under(max_outstanding)
+        reopened._clock = self._clock
+        return reopened
 
 
 __all__ = [
