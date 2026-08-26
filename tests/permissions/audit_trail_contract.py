@@ -17,6 +17,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
@@ -24,11 +25,26 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from permission_builders import AT, action, decision, ruling, tool
+from recipient_builders import (
+    ACCOUNT,
+    ALICE,
+    BOB,
+    NOW,
+    OTHER_ACCOUNT,
+    TOOL,
+    account_member,
+    binding,
+    member,
+    origin_unrecorded,
+    route_b_decision,
+)
 
 from ai_assistant.core.errors import (
     AuditError,
     DuplicateDecisionError,
+    InvalidAuthorisationError,
     InvalidResolutionError,
+    RecipientGrantError,
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -45,13 +61,18 @@ from ai_assistant.core.types import (
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
+from ai_assistant.testing.recipient_grants import (
+    FakeRecipientGrantResolution,
+    recipient_grant,
+    recipient_revocation_of,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
-    from ai_assistant.core.protocols import AuditTrail
-    from ai_assistant.core.types import ActionRequest
+    from ai_assistant.core.protocols import AuditTrail, RecipientGrantResolution
+    from ai_assistant.core.types import ActionRequest, RecipientGrant
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 
@@ -355,6 +376,32 @@ def _as_ledger(trail: AuditTrail) -> Any:
     return trail
 
 
+@dataclass(slots=True)
+class _MovesAfterAnswering:
+    """A resolution face that changes the store **after** answering one read.
+
+    The only way to reach ADR-0193 §6's stated linearisation point from a test.
+    ``record`` resolves the pointer and then appends, and those are two awaits with
+    no transaction across the two stores — so a revocation or a ``clear`` landing
+    *in between* is exactly what §9's residual window is, and a case that asserts
+    the limit rather than the guarantee is what stops a later lane reading §6 as
+    promising atomicity.
+
+    Not a fake capability: nothing in ``ai_assistant.testing`` scripts this,
+    because a conforming store cannot be asked to mutate itself while answering.
+    It is the suite's own stub, over a conforming seam.
+    """
+
+    seam: RecipientGrantResolution
+    after: RecipientGrantResolution
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
+        """Answer from the first seam, then become the second."""
+        answer = await self.seam.outstanding(grant_id)
+        self.seam = self.after
+        return answer
+
+
 class AuditTrailContract:
     """Behaviour every ``AuditTrail`` implementation must exhibit."""
 
@@ -362,6 +409,552 @@ class AuditTrailContract:
     def trail(self) -> AuditTrail:
         """Return an empty trail under test."""
         raise NotImplementedError
+
+    # --- ADR-0193 §6: a route-(b) pointer is resolved, never taken on trust ---
+    #
+    # The trail is the second enforcement point, and it is the one that checks the
+    # policy's word against a record the policy cannot write. Every case here needs
+    # a **resolution seam**, which is why this suite gains a factory beside its
+    # ``trail`` fixture (ADR-0193 §15): a trail built without one is a conforming
+    # trail that refuses every route-(b) row, so the ordinary fixture cannot state
+    # a single one of these clauses.
+
+    def trail_over(self, resolution: RecipientGrantResolution) -> AuditTrail:
+        """Override to build an **empty** trail resolving pointers against ``resolution``.
+
+        The factory ADR-0193 §15 names — "ADR-0021 §4's shared ``AuditTrail``
+        conformance suite gains a factory that accepts a resolution seam; that is
+        an addition to a suite, not a change to a Protocol". It is a method rather
+        than a fixture because each case builds the seam it needs first, and a
+        fixture would have to guess.
+        """
+        raise NotImplementedError
+
+    def _held(self, *grants: RecipientGrant) -> FakeRecipientGrantResolution:
+        """A resolution seam holding ``grants``, for a case to build a trail over."""
+        return FakeRecipientGrantResolution(grants)
+
+    async def test_a_route_b_decision_resting_on_an_outstanding_grant_is_recorded(
+        self,
+    ) -> None:
+        """The positive case, so every refusal below is about its own ground.
+
+        Without it a trail that refused *every* route-(b) row would pass all eight
+        refusal cases and the scope case, and the invariant would read as held
+        while nothing could ever be written under it.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+
+        assert await trail.record(recorded) == "d-route-b"
+        assert await trail.get("d-route-b") == recorded
+
+    async def test_a_pointer_naming_no_outstanding_grant_is_refused(self) -> None:
+        """Existence, kind and unrevokedness in one answer (ADR-0193 §6).
+
+        ``outstanding`` answers only for a granting record no revoking record
+        names, so the three grounds ADR-0193 §14 lists separately — absent, a
+        revoking record's own id, an already-revoked grant — arrive here as one
+        ``None``. Each is asserted, because a store could get any one of them
+        wrong on its own.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        revocation = recipient_revocation_of(granted, grant_id="r-1")
+        seam = self._held(granted, revocation)
+        trail = self.trail_over(seam)
+
+        for named in ("g-missing", "r-1", "g-1"):
+            await _refuses(
+                trail,
+                route_b_decision(
+                    grant_id=named,
+                    subject=granted.subject_digest,
+                    decision_id=f"d-{named}",
+                ),
+                InvalidAuthorisationError,
+            )
+
+    async def test_a_grant_that_expired_before_the_ruling_is_refused(self) -> None:
+        """An expired grant never sources a **new** ``ALLOW`` (ADR-0193 §6)."""
+        granted = recipient_grant(
+            member(ALICE),
+            grant_id="g-1",
+            decided_at=AT - timedelta(days=30),
+            expires_at=AT - timedelta(days=29),
+        )
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=granted.subject_digest, at=NOW),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_grant_that_expires_after_the_ruling_and_before_the_write_is_recorded(
+        self,
+    ) -> None:
+        """Expiry is decided against the decision's own ``decided_at`` (ADR-0193 §6).
+
+        ``record`` reads **no clock**, exactly as ADR-0021 §4's "a resolution may
+        not predate its confirmation" compares two recorded instants. The question
+        is whether the grant was live *at the moment the ruling was made*, which is
+        the only question about liveness a durable record answers identically on
+        every later read — so a grant that expires between the ruling and the write
+        does not retract an honest ``ALLOW``. This case fails against an
+        implementation that read a clock, and it is the half of the liveness pair
+        no other case here reaches.
+        """
+        granted = recipient_grant(
+            member(ALICE),
+            grant_id="g-1",
+            decided_at=AT,
+            expires_at=AT + timedelta(minutes=1),
+        )
+        trail = self.trail_over(self._held(granted))
+
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest, at=AT)
+
+        assert await trail.record(recorded) == "d-route-b"
+
+    async def test_a_revocation_recorded_before_the_resolution_read_refuses_the_write(
+        self,
+    ) -> None:
+        """Revocation is prospective and it **bites at the write too** (ADR-0193 §9).
+
+        The other half of the pair, and it fails against an implementation that
+        decided revocation as of the decision's ``decided_at`` — which would be
+        unsound, because a revoking record's own instant is caller-supplied and may
+        legitimately predate the grant it revokes. Under ADR-0037 §2's decide →
+        record → read back → claim, refusing here means the call does not happen,
+        which is the fail-closed direction and what a user who revokes expects.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        seam = self._held(granted)
+        trail = self.trail_over(seam)
+        seam.hold(recipient_revocation_of(granted, grant_id="r-1"))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=granted.subject_digest),
+            InvalidAuthorisationError,
+        )
+
+    @pytest.mark.parametrize(
+        ("case", "stored"),
+        [
+            pytest.param(
+                "a reworded declaration",
+                {"tool": TOOL.model_copy(update={"description": "Send an email, politely."})},
+                id="declaration by value",
+            ),
+            pytest.param(
+                "another connected account",
+                {"account": OTHER_ACCOUNT},
+                id="account by value",
+            ),
+            pytest.param(
+                "a narrower destination set",
+                {"destinations": (member(BOB),)},
+                id="destination containment",
+            ),
+        ],
+    )
+    async def test_a_grant_that_does_not_cover_the_decision_is_refused(
+        self, case: str, stored: dict[str, object]
+    ) -> None:
+        """Three of §3's comparisons, taken at the write over the record the store holds.
+
+        The trail is a **second** enforcement point and a test of the policy is not
+        a test of it: the policy compares its own view and this compares the
+        store's, and the two are what stop a policy authoring an ``ALLOW`` on a
+        grant that does not cover the call. The account case differs in the
+        connection reference alone and shares an identity, so a trail comparing
+        identity alone fails here; the declaration case differs by one reworded
+        line, so one comparing ``tool.id`` fails.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1").model_copy(update=stored)
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=granted.subject_digest),
+            InvalidAuthorisationError,
+        )
+
+    async def test_an_account_only_grant_does_not_cover_a_selected_recipient(self) -> None:
+        """The negative half of §3's third clause, owed **here** as well (ADR-0193 §14).
+
+        An account-only grant does not contain a decision's selected-recipient
+        member, whatever strings the two hold — and the strings are chosen to
+        coincide, so a trail that flattened both arms of
+        :class:`~ai_assistant.core.types.CanonicalDestination` to an identity or to
+        canonical text records a row authorising a send to a recipient the user
+        never named.
+        """
+        granted = recipient_grant(account_member(), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(
+                grant_id="g-1",
+                subject=granted.subject_digest,
+                bound=binding(ACCOUNT.identity),
+            ),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_decision_planned_over_external_content_is_refused(self) -> None:
+        """ADR-0193 §4's floor at the second enforcement point.
+
+        A grant covers no such call whatever grants exist, and the trail says so
+        rather than trusting that the policy did: this is the row a policy that
+        skipped §4 would produce, and the write is where it stops.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(
+                grant_id="g-1",
+                subject=granted.subject_digest,
+                bound=binding(ALICE, external=True),
+            ),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_decision_whose_origin_was_never_recorded_is_refused_by_name(self) -> None:
+        """The check is over the binding's **arm**, not over a field's value (§6).
+
+        Only :class:`~ai_assistant.core.types.EgressBinding` carries
+        ``planned_with_external_content`` at all, so an implementation reading the
+        check as a field test raises ``AttributeError`` — or accepts the row — and
+        §4's floor is bypassed by a *missing* field rather than by a false one.
+        Refused by the same error as every other route-(b) ground, which is what
+        this case asserts by type.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(
+                grant_id="g-1",
+                subject=granted.subject_digest,
+                bound=origin_unrecorded(ALICE),
+            ),
+            InvalidAuthorisationError,
+        )
+
+    async def test_an_unreadable_resolution_seam_refuses_the_write_and_keeps_the_cause(
+        self,
+    ) -> None:
+        """A component that cannot get an answer **fails closed** (ADR-0193 §1, §6).
+
+        Chained rather than swallowed, so a caller keeps the one ``AuditError``
+        handler while an operator keeps two facts apart in the message and in
+        ``__cause__``: "the pointer named no outstanding grant" and "the seam could
+        not be read". A trail that treated an unreadable seam as "no grant named"
+        would report the wrong one; one that treated it as "carry on" would write a
+        row whose authorisation was never checked.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        seam = self._held(granted)
+        trail = self.trail_over(seam)
+        seam.fail_outstanding(RuntimeError("disk gone"))
+
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+        with pytest.raises(InvalidAuthorisationError) as raised:
+            await trail.record(recorded)
+
+        assert isinstance(raised.value.__cause__, RecipientGrantError)
+        assert await trail.get("d-route-b") is None
+
+    # --- §6: the invariant's scope, and its digest ---------------------------
+
+    async def test_a_decision_with_no_binding_is_recorded_without_consulting_the_seam(
+        self,
+    ) -> None:
+        """The scope pin, and it fails against a general rule about ``authorised_by``.
+
+        A non-resolving ``ALLOW`` whose ``egress_binding`` is ``None`` is **not an
+        egress call**, so ADR-0021 §6's standing grants for other actions fall
+        outside this invariant rather than needing an exception inside it — which is
+        what keeps the ADR that opens one an *added arm* here rather than a breaking
+        change to ``PermissionDecision``. Asserted over the seam's call count as
+        well as over the outcome, because a trail that resolved the pointer and
+        happened to find a matching grant would pass the outcome half.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        seam = self._held(granted)
+        trail = self.trail_over(seam)
+        recorded = decision(
+            "d-standing",
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="g-1"),
+        )
+
+        assert await trail.record(recorded) == "d-standing"
+        assert seam.call_count == 0
+
+    async def test_a_route_b_decision_carrying_no_fingerprint_is_refused(self) -> None:
+        """A pointer with nothing on the row to contradict a rebinding (ADR-0193 §6)."""
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=None),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_fingerprint_of_a_different_grant_is_refused(self) -> None:
+        """The digest is recomputed from the record the store returned (ADR-0193 §6).
+
+        Never read off the decision as evidence of anything: an implementation
+        comparing a decision's ``authorised_subject`` against itself, or against a
+        value derived from the decision rather than from the store, has not
+        implemented the clause and passes every other case here.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        other = recipient_grant(member(BOB), grant_id="g-2")
+        trail = self.trail_over(self._held(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=other.subject_digest),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_resolving_allow_carrying_a_fingerprint_is_refused(self) -> None:
+        """Route (a) rests on a confirmation, which is not a grant (ADR-0193 §6).
+
+        The pairing rule ``PermissionRuling`` cannot state on its own: the type can
+        refuse a digest with no pointer, and only ``record`` can see ``resolves``
+        and say which of the two shapes is *owed*.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+        confirmed = decision("d-confirm", ruled=ruling(PermissionOutcome.CONFIRM))
+        await trail.record(confirmed)
+
+        await _refuses(
+            trail,
+            decision(
+                "d-answer",
+                ruled=ruling(
+                    PermissionOutcome.ALLOW,
+                    authorised_by="d-confirm",
+                    authorised_subject=granted.subject_digest,
+                ),
+                resolves="d-confirm",
+            ),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_route_a_allow_with_no_fingerprint_is_recorded_unchanged(self) -> None:
+        """The converse is **not** required, and this is the case that says so."""
+        trail = self.trail_over(self._held())
+        confirmed = decision("d-confirm", ruled=ruling(PermissionOutcome.CONFIRM))
+        await trail.record(confirmed)
+        answered = decision(
+            "d-answer",
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="d-confirm"),
+            resolves="d-confirm",
+        )
+
+        assert await trail.record(answered) == "d-answer"
+        assert await trail.get("d-answer") == answered
+
+    # --- §6: the interval's lower end ---------------------------------------
+
+    @pytest.mark.parametrize(
+        ("offset", "recorded"),
+        [
+            pytest.param(timedelta(seconds=-1), False, id="before the grant"),
+            pytest.param(timedelta(0), True, id="equal to the grant"),
+            pytest.param(timedelta(seconds=1), True, id="after the grant"),
+        ],
+    )
+    async def test_the_lower_end_of_the_interval_is_closed(
+        self, offset: timedelta, recorded: bool
+    ) -> None:
+        """Three cases over one boundary, and the **equal** one is the point (§6).
+
+        An implementation reaching for a strict comparison on both ends by symmetry
+        with the open upper end passes the other two: ADR-0021 §4 already
+        contemplates a coarse clock stamping two records alike, and a grant
+        established and spent in the same instant is an ordinary thing rather than
+        a suspicious one. What the lower end refuses is a decision resting on a
+        grant established **after** the ruling — not a stale authorisation but a
+        **backdated** one, because the policy could not have read a record that did
+        not exist when it ruled.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1", decided_at=AT)
+        trail = self.trail_over(self._held(granted))
+        subject = route_b_decision(grant_id="g-1", subject=granted.subject_digest, at=AT + offset)
+
+        if recorded:
+            assert await trail.record(subject) == "d-route-b"
+        else:
+            await _refuses(trail, subject, InvalidAuthorisationError)
+
+    async def test_a_revocation_landing_after_the_resolution_read_leaves_the_row_recorded(
+        self,
+    ) -> None:
+        """§6's guarantee is stated over the **read** and not over the append.
+
+        The counterpart of the revocation case above, and it asserts the *limit*
+        rather than the guarantee — so that a later lane cannot read §6 as
+        promising atomicity across the two stores. The ADR is falsified rather
+        than this case adjusted if it cannot be written: the resolution read and
+        the append are two awaits, this ADR builds no linearisation point across
+        them, and §9 states the residual window that leaves rather than rounding
+        it to zero.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        revoked = FakeRecipientGrantResolution(
+            [granted, recipient_revocation_of(granted, grant_id="r-1")]
+        )
+        trail = self.trail_over(
+            _MovesAfterAnswering(seam=FakeRecipientGrantResolution([granted]), after=revoked)
+        )
+
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+
+        assert await trail.record(recorded) == "d-route-b"
+        assert await revoked.outstanding("g-1") is None
+
+    async def test_a_clear_and_re_record_after_the_resolution_read_leaves_the_row_recorded(
+        self,
+    ) -> None:
+        """The same window, reached the other way (ADR-0193 §1's ``clear`` clause).
+
+        A ``clear`` and a re-record landing between the read and the append put a
+        *different* grant behind the pointer, and the row is still written —
+        because the check was made, once, against the store as it stood at the
+        read. What that cannot do is make the row say something false: it carries
+        the digest of the grant it was actually validated against, so the
+        substitution is legible to anyone holding both exports.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        rebound = FakeRecipientGrantResolution([recipient_grant(member(BOB), grant_id="g-1")])
+        trail = self.trail_over(
+            _MovesAfterAnswering(seam=FakeRecipientGrantResolution([granted]), after=rebound)
+        )
+
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+
+        assert await trail.record(recorded) == "d-route-b"
+        read_back = await trail.get("d-route-b")
+        assert read_back is not None
+        assert read_back.ruling.authorised_subject == granted.subject_digest
+        now_held = await rebound.outstanding("g-1")
+        assert now_held is not None
+        assert now_held.subject_digest != granted.subject_digest
+
+    # --- §1, §9: what a `clear` and a re-recorded id can and cannot do -------
+
+    async def test_a_row_written_before_a_clear_still_says_what_authorised_it(
+        self,
+    ) -> None:
+        """``clear`` on the grant store **retracts, invalidates and re-opens nothing**.
+
+        A recorded ``ALLOW`` stays recorded, stays true about the moment it was
+        made, and still names the grant it rested on; the check ``record`` made is
+        performed **once**, at its resolution read, and no component re-evaluates
+        it. Asserted over the seam's call count as well, because ADR-0193 §11 bars
+        any read of the grant store in the render path — what is lost after an
+        erase is the grant's own *text*, and the row still carries the whole
+        binding.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        seam = self._held(granted)
+        trail = self.trail_over(seam)
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+        await trail.record(recorded)
+        after_write = seam.call_count
+
+        read_back = await trail.get("d-route-b")
+
+        assert read_back == recorded
+        assert read_back is not None
+        assert read_back.ruling.authorised_by == "g-1"
+        assert read_back.ruling.authorised_subject == granted.subject_digest
+        assert seam.call_count == after_write
+
+    async def test_a_new_decision_on_a_re_recorded_id_fails_the_digest(self) -> None:
+        """The digest's whole reason for existing (ADR-0193 §6, §14).
+
+        A ``clear`` followed by a re-recorded id can put a *different* grant behind
+        one pointer, because ids are caller-minted and ``clear`` erases the history
+        that would have made one unrecyclable. The row carries the fingerprint of
+        the grant it was validated against, so the rebound id resolves to a record
+        that fails the comparison — and the failure is conclusive in that one
+        direction.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        seam = self._held(granted)
+        trail = self.trail_over(seam)
+        await trail.record(route_b_decision(grant_id="g-1", subject=granted.subject_digest))
+
+        rebound = FakeRecipientGrantResolution([recipient_grant(member(BOB), grant_id="g-1")])
+        later = self.trail_over(rebound)
+
+        await _refuses(
+            later,
+            route_b_decision(grant_id="g-1", subject=granted.subject_digest, decision_id="d-later"),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_re_recorded_grant_established_at_another_instant_fails_the_digest(
+        self,
+    ) -> None:
+        """The near-miss, and the case ``decided_at`` is in the digest for (§14).
+
+        Identical in ``tool``, ``account`` and ``destinations`` — which is exactly
+        the triple §6's subject match compares — and established at a different
+        instant. The subject match alone accepts it; the digest does not, which is
+        what round 11's blocker was about and why the establishing act is on the
+        record at all.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1", decided_at=AT)
+        trail = self.trail_over(self._held(granted))
+        await trail.record(route_b_decision(grant_id="g-1", subject=granted.subject_digest))
+
+        near = recipient_grant(
+            member(ALICE), grant_id="g-1", decided_at=AT + timedelta(microseconds=1)
+        )
+        later = self.trail_over(self._held(near))
+
+        await _refuses(
+            later,
+            route_b_decision(grant_id="g-1", subject=granted.subject_digest, decision_id="d-later"),
+            InvalidAuthorisationError,
+        )
+
+    def test_the_digest_guarantee_runs_in_one_direction_only(self) -> None:
+        """A **mismatch** is conclusive; a **match** is *consistency* (ADR-0193 §6).
+
+        Written so that no later lane reads this suite as certifying that a
+        matching record **is** the authorising act. The sequence it cannot exclude
+        is stated rather than glossed: both stores cleared, both ids reused, one
+        clock instant — after which every digested field can be made to agree, and
+        the comparison says only that this record agrees with the row in every
+        field a grant carries but its ``id``.
+
+        A pure comparison, so it needs no trail and no seam; it is here rather than
+        beside the record's own tests because what it constrains is how a *reader
+        of a row* may talk about the answer.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        rebound = recipient_grant(member(BOB), grant_id="g-1")
+        consistent = granted.model_copy(update={"id": "g-2"})
+
+        assert rebound.subject_digest != granted.subject_digest
+        assert consistent.subject_digest == granted.subject_digest
 
     # --- append-only ------------------------------------------------------
 
