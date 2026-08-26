@@ -335,16 +335,26 @@ class ReportedOutput(BaseModel):
 > exemption and this ADR takes it identically: a cancellation is not an accounting
 > fact.
 
-> **Normative.** **The order is fixed: the cost is read and validated first, and the
-> seam's interruption state is read after it.** Reading a reported cost runs the
-> tool's code, so a deadline can expire and a cancellation can be delivered *inside*
-> the read. An implementation that checked interruption before the read would build a
-> result carrying a figure obtained after the seam had stopped waiting; one that
-> never re-read it would let the discard rule below silently not fire. So the
-> sequence at each exit is: read every tool-authored value under the guard — the
-> envelope's two fields at the success exit (§2), the carrier's three attributes at
-> the classified-failure exit — then evaluate interruption, then build the result — and where interruption answers, the cost is
-> discarded with the classification it accompanied.
+> **Normative.** **The order is fixed, and it is two interruption checks rather than
+> one moved.** The seam's existing check keeps its place **before any tool-authored
+> value is read**, and this ADR adds a **second** after the guarded reads. The
+> sequence at each exit is: evaluate interruption; where it answers, return its
+> result and read nothing off the returned object or off the carrier; otherwise read
+> every tool-authored value under the guard — the envelope's two fields at the
+> success exit (§2), the carrier's three attributes at the classified-failure exit —
+> evaluate interruption **again**; and where that second check answers, discard the
+> values read together with the classification they accompanied.
+
+> **Normative.** Neither check is redundant, and one alone is unsound in whichever
+> direction the other closes. The **first** keeps ADR-0032 §4's precedence exactly
+> where that section put it, and is what stops a callable that swallowed its own
+> cancellation from having its accessors entered at all: a seam that already knows
+> the call was interrupted runs no more of the tool's code, which is the property
+> `invoke` has today — it checks interruption before it builds a `ToolResult` — and
+> which the envelope must not cost it. The **second** exists because reading a
+> tool-authored value can itself deliver a cancellation or let the deadline expire,
+> so a check made only before the reads would build a result carrying a figure
+> obtained after the seam had stopped waiting.
 
 > **Normative.** A cost that does **not** survive the round-trip **or whose read
 > raised** is **discarded, and nothing else is**. The outcome stands, the output stands, the failure and
@@ -793,6 +803,9 @@ forbids.
 > - a deadline expiry and a delivered cancellation each discard a reported cost with
 >   the classification they pre-empt, and the row records `UNKNOWN`;
 > - a returned JSON mapping carrying an `incurred_cost` key is output, not a report;
+> - a callable that **swallowed a delivered cancellation** and returned an envelope
+>   has **neither** field accessor entered: the first interruption check answers, and
+>   a case proving the accessors were not called is what holds that order in place;
 > - a `ReportedOutput` **subclass** whose `output` accessor raises takes the
 >   `INTERNAL` path with its reported cost discarded, the completion written and the
 >   claim closed;
