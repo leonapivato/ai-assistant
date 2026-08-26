@@ -8550,8 +8550,9 @@ class RecipientGrant(BaseModel):
         """A fingerprint of this record under one schema (ADR-0193 §1, §6).
 
         SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of this
-        record's own ``model_dump(mode="json")`` with **exactly one key removed**,
-        ``id``. Every other field is in it, and a field added to
+        record's own JSON-mode field state — taken by this class's serializer,
+        never through ``self.model_dump`` (:meth:`_digest_projection`) — with
+        **exactly one key removed**, ``id``. Every other field is in it, and a field added to
         :class:`RecipientGrant` by a later ADR is in it too unless that ADR
         removes it by name.
 
@@ -8604,8 +8605,28 @@ class RecipientGrant(BaseModel):
         The removal is by ``pop`` over the whole dump rather than by rebuilding
         from a list, which is ADR-0193 §1's clause as code: there is no inventory
         here for a later field to be missing from.
+
+        **Serialised by this class's own serializer, never through
+        ``self.model_dump``.** That method is an ordinary attribute: a subclass can
+        override it and an instance can shadow it through ``__dict__``, and either
+        can return a valid-but-false mapping. This digest is the value ADR-0193 §6
+        has ``AuditTrail.record`` *recompute* on the grant the resolution seam
+        returns, so a record whose dump described a different grant would let a
+        route-(b) row rest on a subject the record does not carry — the one check
+        that comparison exists to be. ``ai_assistant.orchestration.executor`` and
+        the trail's own ``field_state`` state the same reasoning about the same
+        method; the serializer is resolved on the class, reads the instance's field
+        values, and consults no instance attribute.
+
+        ``RecipientGrant``'s serializer and not ``type(self)``'s, which is the
+        docstring above as code: the projection is under *this* class's field set,
+        so a subclass's own fields are outside the schema the digest is taken under
+        rather than silently inside it. ``warnings=False`` because serialising a
+        subclass through the base's schema warns, and the warning is noise here.
         """
-        projection: dict[str, Any] = self.model_dump(mode="json")
+        projection: dict[str, Any] = RecipientGrant.__pydantic_serializer__.to_python(
+            self, mode="json", warnings=False
+        )
         projection.pop("id")
         return projection
 

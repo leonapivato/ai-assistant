@@ -357,6 +357,25 @@ def test_the_digest_survives_a_json_round_trip() -> None:
     assert rebuilt.subject_digest == grant.subject_digest
 
 
+def test_a_grant_whose_model_dump_lies_is_digested_on_its_real_field_state() -> None:
+    """``model_dump`` is an ordinary attribute, and this digest is a check.
+
+    An instance can shadow the method through ``__dict__`` — the same bypass
+    ``frozen=True`` leaves open everywhere else in this module — and a projection
+    built by calling it would then fingerprint whatever that mapping described.
+    ADR-0193 §6 has ``AuditTrail.record`` **recompute** this value on the grant the
+    resolution seam returns and compare it with the row's ``authorised_subject``,
+    so a record able to nominate its own digest is a record able to satisfy a row
+    it does not match, which is the whole of what the comparison is for.
+    """
+    grant = _grant()
+    elsewhere = _grant(id="g-2", destinations=(_member("bob@example.com"),))
+    grant.__dict__["model_dump"] = elsewhere.model_dump
+
+    assert grant.subject_digest != elsewhere.subject_digest
+    assert grant.subject_digest == _grant().subject_digest
+
+
 def test_the_digest_is_a_property_and_not_a_field() -> None:
     """A stored digest can be read back disagreeing with what it was computed from."""
     assert "subject_digest" not in _grant().model_dump()

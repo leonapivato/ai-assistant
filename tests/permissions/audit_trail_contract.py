@@ -20,7 +20,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -110,6 +110,25 @@ async def _resolved(
     }
     fields.update(overrides)
     return decision(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+
+@final
+class _ResolvingTo:
+    """A resolution seam handing back **exactly** the record it was given.
+
+    :class:`~ai_assistant.testing.recipient_grants.FakeRecipientGrantResolution`
+    detaches what it answers with, which is its contract and is what makes it
+    useless for this one case: the subject here is a record that describes itself
+    falsely, and a copy of it would not.
+    """
+
+    def __init__(self, grant: RecipientGrant) -> None:
+        """Hold ``grant`` as the one record this seam resolves."""
+        self._grant = grant
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
+        """The held record where ``grant_id`` names it, else ``None``."""
+        return self._grant if grant_id == self._grant.id else None
 
 
 async def _refuses(
@@ -603,6 +622,32 @@ class AuditTrailContract:
                 subject=granted.subject_digest,
                 bound=binding(ACCOUNT.identity),
             ),
+            InvalidAuthorisationError,
+        )
+
+    async def test_a_grant_whose_model_dump_lies_is_digested_on_its_real_field_state(
+        self,
+    ) -> None:
+        """§6's recomputation is a check, and a record cannot nominate its answer.
+
+        The digest is the one comparison that distinguishes a record from another
+        record with the same id, so it is computed over what the grant *is*.
+        ``model_dump`` is an ordinary attribute and an instance can shadow it
+        through ``__dict__``, so a seam handing back a grant whose dump described a
+        second grant would satisfy a row resting on the second one's subject —
+        while the record the row actually rests on is the first. ``established_by``
+        is the field the two differ in, because it is in the digest and in none of
+        §6's other comparisons: every other ground passes, and only the digest can
+        refuse this row.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        elsewhere = granted.model_copy(update={"established_by": "d-elsewhere"})
+        granted.__dict__["model_dump"] = elsewhere.model_dump
+        trail = self.trail_over(_ResolvingTo(granted))
+
+        await _refuses(
+            trail,
+            route_b_decision(grant_id="g-1", subject=elsewhere.subject_digest),
             InvalidAuthorisationError,
         )
 
