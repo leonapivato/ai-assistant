@@ -82,17 +82,41 @@ def checked_timeout(timeout: object) -> timedelta:
     would already have acted. Refusing the value never creates the coroutine,
     which is the only placement that holds for every tool.
 
+    **A plain ``timedelta`` is returned, never the caller's object.** ``isinstance``
+    admits a subclass, and this seam reads the duration *after* the claim has
+    landed — ``asyncio.timeout(timeout.total_seconds())`` — so an overridden
+    ``total_seconds`` could raise there, leaving a claim open with no completion
+    and no ``ToolResult``, or return ``inf`` and disable the deadline the contract
+    says there always is. Reading the duration **here** and rebuilding a plain
+    ``timedelta`` from it puts every one of those failures back where ADR-0034 §1
+    already puts a refused deadline: a pre-callable exit with no claim appended.
+    The comparison below is made against the snapshot for the same reason — an
+    overridden ``__le__`` decides nothing the seam then relies on.
+
+    Returns:
+        A plain ``timedelta`` of the same duration, which is the value the seam
+        uses from here on.
+
     Raises:
-        ValueError: If ``timeout`` is not a ``timedelta``, or is not strictly
-            positive.
+        ValueError: If ``timeout`` is not a ``timedelta``, is not strictly
+            positive, or is one whose duration cannot be read and enforced.
     """
     if not isinstance(timeout, timedelta):
         msg = f"timeout must be a timedelta, got {type(timeout).__name__}"
         raise ValueError(msg)
-    if timeout <= timedelta(0):
-        msg = f"timeout must be strictly positive, got {timeout}"
+    try:
+        duration = timedelta(seconds=timeout.total_seconds())
+    except Exception as exc:
+        # Anything the duration read or the reconstruction raises — an overridden
+        # `total_seconds` failing, a non-numeric return, `inf`, a value outside
+        # `timedelta`'s range — is a deadline this seam could not enforce, and
+        # that is the refusal this guard exists to make (ADR-0029 §4).
+        msg = "timeout must be a timedelta whose duration can be read and enforced"
+        raise ValueError(msg) from exc
+    if duration <= timedelta(0):
+        msg = f"timeout must be strictly positive, got {duration}"
         raise ValueError(msg)
-    return timeout
+    return duration
 
 
 def revalidated_call(call: ToolCall) -> ToolCall:
@@ -392,7 +416,7 @@ class InMemoryToolRegistry:
                 not change what the act produced (ADR-0192 §3).
             CancelledError: If the invoking task is cancelled from outside.
         """
-        checked_timeout(timeout)
+        duration = checked_timeout(timeout)
         checked = revalidated_call(call)
 
         binding = self._live.get(checked.request.tool.id)
@@ -438,7 +462,12 @@ class InMemoryToolRegistry:
         entering = checked_pairing(binding.implementation, checked)
 
         async def act() -> ToolResult:
-            return await run_prepared_call(entering, definition=binding.definition, timeout=timeout)
+            # `duration`, not the caller's object: the deadline is opened after
+            # the claim, and reading a hostile subclass's duration there would
+            # leave a claim open with no completion (ADR-0192 §1, §3).
+            return await run_prepared_call(
+                entering, definition=binding.definition, timeout=duration
+            )
 
         return await consumed_call(
             ledger=self._ledger,
