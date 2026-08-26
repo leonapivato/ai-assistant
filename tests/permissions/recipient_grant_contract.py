@@ -1359,3 +1359,61 @@ class RecipientGrantStoreContract(RecipientGrantsContract, RecipientGrantResolut
         )
 
         assert found is None
+
+    # --- §1, §9: the enumeration is bounded exactly as the gate is ----------
+
+    async def test_standing_is_bounded_at_both_ends_exactly_as_covering_is(
+        self, store: RecipientGrantStore, clock: MovableClock
+    ) -> None:
+        """§14's other half: the liveness bounds are asserted on **both** queries.
+
+        ``standing`` is where a user reads what they have granted, and it is a
+        second computation of one rule — the fake states in as many words that an
+        enumeration free to decide liveness its own way is free to disagree with
+        the gate, and the one that disagreed would still pass its own suite. So
+        each bound the ``RecipientGrants`` cases above pin on ``covering`` is
+        pinned here on the enumeration: **before** the grant's own act, **at** it,
+        and **at** its expiry.
+
+        The middle case is the one an implementation reaching for
+        ``decided_at < now`` fails while passing the other two, which is why the
+        three are asserted together rather than as a pair about the ends.
+        """
+        await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
+
+        clock.set(AT - timedelta(seconds=1))
+        assert await store.standing() == []
+
+        clock.set(AT)
+        assert [held.id for held in await store.standing()] == ["g-1"]
+
+        clock.set(EXPIRES)
+        assert await store.standing() == []
+
+    async def test_a_read_concurrent_with_a_revocation_is_never_torn(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """§14's concurrency clause: one answer or the other, never a torn one.
+
+        A revocation is an *append*, so a store whose read is not atomic against
+        the write can observe the log half-extended — a revoking record present
+        while the gate still answers from a set computed before it, or the reverse.
+        Either whole answer is conforming and the choice between them is the
+        store's; what is not conforming is an answer describing neither state, or a
+        read that leaves the store answering inconsistently afterwards.
+
+        Asserted over the pair, because the second half is what catches a torn read
+        that happened to return the *right* answer this time: after both operations
+        have landed the grant is revoked, and every later read says so.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        await store.record(granted)
+
+        _, found = await asyncio.gather(
+            store.record(recipient_revocation_of(granted, grant_id="r-1")),
+            store.covering(request(binding(ALICE))),
+        )
+
+        assert found is None or found == granted
+        assert await store.covering(request(binding(ALICE))) is None
+        assert await store.standing() == []
