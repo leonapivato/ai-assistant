@@ -17,7 +17,7 @@ import heapq
 import json
 import re
 import unicodedata
-from collections.abc import Hashable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -40,7 +40,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.functional_serializers import PlainSerializer
-from pydantic.functional_validators import AfterValidator
+from pydantic.functional_validators import AfterValidator, BeforeValidator
 
 # --- preamble: shared values, and the helper that never raises ---------------
 # `_FULL_CONFIDENCE` belongs to `Provenance` below, `Embedding` to ADR-0006's
@@ -3845,6 +3845,168 @@ class FrozenDict(Mapping[str, "FrozenJson"]):
         return (FrozenDict, (dict(self._items),))
 
 
+_MAX_JSON_DEPTH: Final = 128
+"""How deeply a :data:`FrozenJson` value may nest containers (ADR-0196 §3).
+
+One constant in ``core``, applied to every :data:`FrozenJson` value alike: not
+configurable, not per-holder, and **never derived from**
+``sys.getrecursionlimit()``. What a shared ingress accepts has to be a fact about
+the type rather than about the process, or two processes reading the same store
+disagree about whether a persisted record is loadable (ADR-0196 §3, ADR-0145 §2
+clause (b)).
+
+Counted in the vocabulary of :func:`_json_depth`, in which a scalar is depth 0
+and ``{}`` is depth 1. The number sits between two bounds and the room between
+them is why it is a judgement rather than a derivation: it must exceed
+:data:`_MAX_SCHEMA_DEPTH` strictly, so that ADR-0145 §6's own refusal stays
+reachable for a schema between the two (ADR-0196 §4), and it must sit well below
+the tightest mechanism that walks such a value — 255 containers, where a model
+holding one stops serialising. Tool schemas and tool arguments here nest well
+under ten containers, so the ceiling is headroom rather than a bound anyone meets.
+
+Before this constant existed the acceptance set was decided by pydantic-core's
+own cycle detector: an unpinned upstream number, undocumented here, asserted by
+no test, and one that moves with the interpreter's recursion limit.
+"""
+
+
+def _canonical_children(value: object) -> list[object] | None:
+    """Return ``value``'s children, or ``None`` if it is not a container.
+
+    "Children" means *the contents validation will use*, obtained without
+    invoking any method the value's type could have overridden — which is what
+    ADR-0196 §1's third clause requires of the front measurement and what makes
+    the set below so narrow:
+
+    - **any ``dict``, subclass included, read through ``dict.values``.** A
+      subclass is safe here and only here, because pydantic-core enumerates any
+      dict instance through the concrete ``dict`` too, so the two agree by
+      construction. A subclass whose own ``values()`` raises, or returns nothing,
+      is measured on what it really holds.
+    - **exactly ``list``, ``tuple`` and :class:`FrozenDict`** — subclasses
+      refused rather than measured. :class:`FrozenDict` looks safe and is not: a
+      subclass whose concrete ``_items`` holds one pair while its ``items()``,
+      ``keys()`` and ``__getitem__`` report a 201-container mapping validates to
+      depth 201, because pydantic reads it through the mapping protocol, which is
+      the half a subclass can rewrite. There is no concrete access that makes the
+      two agree, so the only faithful answer for a non-``dict`` mapping is the
+      exact type; ``list`` and ``tuple`` are held to the same rule at no cost,
+      since nothing in ``core`` produces a subclass of either.
+
+    A ``str`` is a leaf, and so are ``bytes`` and ``bytearray``: pydantic
+    validates all three against the ``str`` member of :data:`FrozenJson` — it
+    never enumerates them as sequences — so reading them as containers would be
+    unfaithful in the other direction.
+    """
+    if isinstance(value, dict):
+        return list(dict.values(value))
+    if type(value) is list or type(value) is tuple:
+        return list(value)
+    if type(value) is FrozenDict:
+        return [item for _key, item in value._items]
+    return None
+
+
+def _presents_as_container(value: object) -> bool:
+    """Whether ``value`` offers itself as a JSON container of some other kind.
+
+    Everything :func:`_canonical_children` cannot read the way validation will —
+    a custom :class:`~collections.abc.Mapping`, a :class:`FrozenDict`, ``list``
+    or ``tuple`` subclass — but which still presents as a mapping or a non-``str``
+    sequence. ADR-0196 §1 refuses these rather than measuring them on an
+    enumeration they supplied themselves.
+    """
+    if isinstance(value, Mapping):
+        return True
+    return isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
+
+
+def _faithful_json_depth(value: object, limit: int) -> int:
+    """Return how deeply ``value`` nests containers, as validation will read it.
+
+    Breadth-first with an explicit frontier, stopping once past ``limit``: the
+    measurement allocates no Python stack frame per level, so it holds at any
+    ``sys.getrecursionlimit()`` and completes before anything recursive is
+    entered (ADR-0196 §2).
+
+    Raises:
+        ValueError: If ``value``, or anything nested in it, presents as a mapping
+            or a non-``str`` sequence whose contents cannot be obtained the way
+            validation will obtain them. Guessing at such a value is what lets an
+            input choose the depth it is measured at.
+    """
+    depth = 0
+    frontier: list[object] = [value]
+    while frontier and depth <= limit:
+        children: list[object] = []
+        holds_container = False
+        for item in frontier:
+            nested = _canonical_children(item)
+            if nested is not None:
+                holds_container = True
+                children.extend(nested)
+            elif _presents_as_container(item):
+                msg = (
+                    "this value nests a mapping or sequence whose contents cannot be read "
+                    "the way they are validated, so its nesting depth cannot be measured"
+                )
+                raise ValueError(msg)
+        if not holds_container:
+            break
+        depth += 1
+        frontier = children
+    return depth
+
+
+def _refuse_deep_json(value: object, measure: Callable[[object, int], int]) -> None:
+    """Refuse ``value`` if ``measure`` finds it nested past :data:`_MAX_JSON_DEPTH`.
+
+    The refusal is a plain ``ValueError`` and not a named error, for the reason
+    ADR-0196 §1 gives: the two refusals already on this ingress are plain
+    ``ValueError`` refusals, pydantic turns each into a ``ValidationError`` on the
+    field, and every holder already handles that. A named error would give
+    callers a second shape to catch for a refusal they already catch.
+
+    No ``Exception`` other than that ``ValueError`` escapes a measurement — an
+    enumeration that raises becomes an ordinary construction refusal rather than
+    a ``RuntimeError`` arriving from inside a validator. A ``BaseException``
+    propagates unchanged, as everywhere else in this repository (ADR-0029 §3).
+
+    Raises:
+        ValueError: If ``value`` nests past the ceiling, or if its depth cannot
+            be measured at all.
+    """
+    try:
+        depth = measure(value, _MAX_JSON_DEPTH)
+    except ValueError:
+        raise
+    except Exception as exc:
+        msg = f"this value's nesting depth could not be measured, so it cannot be stored: {exc}"
+        raise ValueError(msg) from exc
+    if depth > _MAX_JSON_DEPTH:
+        msg = (
+            f"this value nests containers deeper than {_MAX_JSON_DEPTH}, "
+            "so it cannot be stored or exported"
+        )
+        raise ValueError(msg)
+
+
+def _depth_bounded_json(value: object) -> object:
+    """Return ``value`` unchanged unless it nests past the ceiling (ADR-0196 §1).
+
+    The front half of the ceiling, and a ``BeforeValidator`` rather than an
+    ``AfterValidator`` for one reason: pydantic-core validates the recursive
+    :data:`FrozenJson` alias *before* an ``AfterValidator`` runs, and that walk
+    costs Python stack per level. A check placed after it would hold only for a
+    range of ``sys.getrecursionlimit()`` — set the limit under the ceiling and
+    the alias refuses first, with 1276 errors headed "Input should be a valid
+    string" about a value whose only defect is its depth. Running first is what
+    makes the refusal independent of a process-global.
+    """
+    _refuse_deep_json(value, _faithful_json_depth)
+    return value
+
+
 def _deep_freeze(value: FrozenJson) -> FrozenJson:
     """Convert a JSON value into an immutable one, recursively.
 
@@ -3884,6 +4046,15 @@ def _freeze_json(value: FrozenJson) -> FrozenJson:
     - a **non-finite float**, refused structurally in :func:`_deep_freeze`
       (``json.dumps`` renders it rather than raising, so the encoder cannot
       catch it);
+    - **a value nested past :data:`_MAX_JSON_DEPTH`**, measured here a second
+      time (ADR-0196 §1). :func:`_depth_bounded_json` has already measured the
+      *raw* input ahead of everything else; this one measures the **validated**
+      structure, in which nothing can lie about its own depth because pydantic
+      built it out of plain containers. Two positions, two jobs: the front one
+      is what makes the refusal independent of ``sys.getrecursionlimit()``, and
+      this one is defence in depth against the front's canonical set falling
+      behind a pydantic version that built a container form it measured as a
+      leaf. One constant, checked twice;
     - **anything the encoder itself rejects** — a lone surrogate ``str`` with no
       UTF-8 encoding, or an integer past CPython's integer-string conversion
       limit — caught by *running the real encoder* (``json.dumps(...,
@@ -3902,9 +4073,11 @@ def _freeze_json(value: FrozenJson) -> FrozenJson:
     as a holder grows fields.
 
     Raises:
-        ValueError: If a non-finite float is present, or the frozen value has no
-            JSON encoding.
+        ValueError: If the value nests past :data:`_MAX_JSON_DEPTH`, if a
+            non-finite float is present, or if the frozen value has no JSON
+            encoding.
     """
+    _refuse_deep_json(value, _json_depth)
     frozen = _deep_freeze(value)
     try:
         json.dumps(_thaw_json(frozen), ensure_ascii=False).encode("utf-8")
@@ -3931,12 +4104,18 @@ def _thaw_json(value: Any) -> Any:
 
 
 type FrozenJsonValue = Annotated[
-    FrozenJson, AfterValidator(_freeze_json), PlainSerializer(_thaw_json)
+    FrozenJson,
+    BeforeValidator(_depth_bounded_json),
+    AfterValidator(_freeze_json),
+    PlainSerializer(_thaw_json),
 ]
 """A single :data:`FrozenJson` value, frozen on validation and thawed on dump."""
 
 type FrozenJsonMapping = Annotated[
-    Mapping[str, FrozenJson], AfterValidator(_freeze_json), PlainSerializer(_thaw_json)
+    Mapping[str, FrozenJson],
+    BeforeValidator(_depth_bounded_json),
+    AfterValidator(_freeze_json),
+    PlainSerializer(_thaw_json),
 ]
 """A string-keyed mapping of :data:`FrozenJson` values, frozen on validation."""
 
@@ -5139,10 +5318,20 @@ frames per level against a limit of 1000, and
 keeps that a measurement rather than a claim. Real tool schemas nest well under
 ten levels, so the bound is headroom rather than a ceiling anyone meets.
 
-The **instance** half is deliberately unbounded here: a deep parameter mapping
-exhausts the stack in :func:`_deep_freeze` on the way in, before any schema
-evaluation exists to bound it, and fixing that reaches every holder of a
-:data:`FrozenJsonMapping` (issue #1107, ADR-0145 §14).
+The **instance** half is bounded separately and more loosely, by
+:data:`_MAX_JSON_DEPTH` at the frozen-JSON ingress (ADR-0196). This constant must
+stay strictly below that one, or ADR-0145 §6's refusal here becomes unreachable —
+the ingress would already have refused every schema this bound means to refuse,
+and a tool author would be told about the wrong bound (ADR-0196 §4).
+``test_the_schema_bound_sits_strictly_inside_the_frozen_json_ceiling`` is what
+keeps the ordering a measurement rather than a comment.
+
+ADR-0145 §6 argued the instance half was *unbounded* on the grounds that "a
+payload deep enough to matter exhausts the stack in :func:`_deep_freeze` on the
+way in". That was measured false on 2026-08-26 and ADR-0196 §7 amends it: nothing
+reaches :func:`_deep_freeze` except through the recursive :data:`FrozenJson`
+alias, which pydantic-core refuses at 257 containers, and the walk itself
+survives 997 (issue #1107, ADR-0145 §14).
 """
 
 _MAX_REPORTED_VIOLATIONS: Final = 100
