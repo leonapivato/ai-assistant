@@ -794,6 +794,14 @@ forbids.
 > Every one is reachable against the tree as it stands:
 > - a returned `ReportedOutput` reaches `ToolInvocation.incurred_cost` unaltered,
 >   through **both** callable shapes;
+> - `ReportedOutput(output=...)` with **no** `incurred_cost` raises a
+>   `ValidationError` — asserted directly on the model, because every case below
+>   supplies a cost and an implementation that defaulted the field (to `UNKNOWN`,
+>   say) would pass all of them while minting the second spelling of a bare return
+>   that §2 makes the field required to foreclose, and on which the Alternatives
+>   section's answer to ADR-0032's two-spellings objection rests;
+> - a bare return alongside it, as the control: the row records `UNKNOWN` and no
+>   envelope is involved;
 > - a `ReportedOutput` carrying an `UNKNOWN` basis lands identically to a bare
 >   return;
 > - a `ToolCost.model_construct`-built cost that fails revalidation is discarded
