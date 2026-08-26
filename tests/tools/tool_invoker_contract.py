@@ -2016,8 +2016,9 @@ class ToolInvokerContract:
             "the exception leaves the emitting frame, so no diagnostic stands in for it"
         )
 
+    @pytest.mark.parametrize("thrown", ["exception", "cancellation"])
     async def test_a_raising_log_processor_costs_the_diagnostic_and_nothing_else(
-        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], thrown: str
     ) -> None:
         """A broken *emitter* is not the classifier ADR-0192 §3 governs.
 
@@ -2047,6 +2048,12 @@ class ToolInvokerContract:
         So an ``Exception`` from the pipeline costs the **diagnostic** and nothing
         else: the append's own failure stays intact for the path to dispose of by
         its own rules, and a successful ``ToolResult`` still reaches the caller.
+        A ``CancelledError`` from it is the same, and the second arm drives that:
+        every emission here happens after the ``Task.cancelling()`` count has been
+        read, and none of them awaits, so one a processor raises is invented with
+        nothing cancelled — ADR-0031 §2's case, which ADR-0029 §4 makes a fault.
+        Delivering it would answer a completed act with a cancellation nobody
+        requested.
 
         The processor is configured rather than the module logger patched, because
         a shared suite has two subjects in two modules and only the pipeline is
@@ -2058,6 +2065,12 @@ class ToolInvokerContract:
             """What a misconfigured processor raises on the way to its sink."""
 
         def refuse(_logger: object, _name: str, _event: MutableMapping[str, Any]) -> NoReturn:
+            if thrown == "cancellation":
+                # Invented, with nothing cancelled: both seams read the
+                # `Task.cancelling()` count before emitting and the emission is
+                # synchronous, so ADR-0031 §2 governs and ADR-0029 §4 makes it a
+                # fault rather than a cancellation of this call.
+                raise asyncio.CancelledError
             msg = "the log pipeline is broken"
             raise BrokenSinkError(msg)
 

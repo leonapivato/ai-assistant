@@ -305,14 +305,21 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     path of every tool nobody thought about.
     """
     fault = _fault_class(exc)
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception, asyncio.CancelledError):
         # Guarded because this runs **after** the claim: a configured processor
         # that raises would otherwise leave this frame in place of the
         # ``ToolResult``, and ADR-0192 §3 would get no completion for a claim it
         # had already appended — a known-failed act permanently spending its
         # authorisation, with the tool's failure lost as data. ADR-0029 §3 makes
         # a broken tool a result rather than an exception, and a broken log sink
-        # does not undo that. Only an ``Exception`` is dropped.
+        # does not undo that.
+        #
+        # The ``CancelledError`` is named for the same reason `_fault_class`
+        # names it: this branch has already established that none was requested,
+        # and the emission is synchronous, so one raised by a processor is
+        # invented with nothing cancelled (ADR-0031 §2) and ADR-0029 §4 makes
+        # that ``INTERNAL`` rather than a cancellation. Every other
+        # ``BaseException`` still propagates.
         _log.warning(
             "tool_implementation_raised",
             tool_id=definition.id,
