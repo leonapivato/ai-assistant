@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 import pytest
 from tool_invoker_contract import PATIENT, Spy, ToolInvokerContract, call_for, tool
 
+from ai_assistant.core.errors import UnrecordedAuthorisationError
 from ai_assistant.core.types import ToolOutcome
-from ai_assistant.testing import FakeToolInvoker
+from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,3 +61,19 @@ async def test_the_default_implementation_succeeds_with_no_output() -> None:
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output is None
+
+
+async def test_the_fake_records_no_call_the_ledger_refused() -> None:
+    """``invocations`` is what a consumer reads to prove nothing was accepted.
+
+    A call the ledger refused reached no callable, so recording it would let a
+    consumer's test report an execution that never occurred — the same falsehood
+    a call refused by the three checks would be (ADR-0192 §1).
+    """
+    trail = FakeAuditTrail()
+    invoker = FakeToolInvoker([(tool(), Spy())], ledger=trail)
+
+    with pytest.raises(UnrecordedAuthorisationError):
+        await invoker.invoke(call_for(tool()), timeout=PATIENT)
+
+    assert invoker.invocations == []
