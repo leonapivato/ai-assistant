@@ -36,7 +36,11 @@ from tool_invoker_contract import (
     tool,
 )
 
-from ai_assistant.core.errors import AuthorisationSpentError, ToolBindingError
+from ai_assistant.core.errors import (
+    AuthorisationSpentError,
+    ToolBindingError,
+    UnrecordedAuthorisationError,
+)
 from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
@@ -171,6 +175,83 @@ def test_the_two_copies_of_the_diagnostics_vocabulary_agree() -> None:
         fake_invoker.COMPLETION,
         fake_invoker.APPEND_FAILED,
     )
+
+
+class Watchful:
+    """An **egress** callable that counts every read of ``invoke_bound``.
+
+    Fetching the bound method is an attribute access on an object this seam did
+    not write, so it runs that object's own ``__getattribute__``. This one only
+    counts; a hostile one would transmit. (The ``isinstance`` against the
+    ``runtime_checkable`` Protocol does *not* — since 3.12 it resolves through
+    ``inspect.getattr_static`` — so the fetch is the whole of the exposure, and it
+    happens only for a registration that already has the shape.)
+    """
+
+    def __init__(self) -> None:
+        """Record nothing yet."""
+        object.__setattr__(self, "shape_reads", 0)
+        object.__setattr__(self, "calls", 0)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "invoke_bound":
+            # `object.__getattribute__` throughout, so the counter does not
+            # recurse back through this method.
+            reads = object.__getattribute__(self, "shape_reads")
+            object.__setattr__(self, "shape_reads", reads + 1)
+        return object.__getattribute__(self, name)
+
+    async def invoke_bound(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+        egress_binding: EgressBinding,
+    ) -> FrozenJson:
+        """Record the entry and succeed."""
+        object.__setattr__(self, "calls", object.__getattribute__(self, "calls") + 1)
+        return None
+
+
+def _reads(watchful: Watchful) -> int:
+    """Read the counter without going through the counting ``__getattribute__``."""
+    read: int = object.__getattribute__(watchful, "shape_reads")
+    return read
+
+
+async def test_a_refused_claim_reaches_no_code_the_implementation_owns() -> None:
+    """The shape is read at registration, so an invocation reads nothing off the object.
+
+    ADR-0192 §1 puts the pairing check above the claim, and part of that check is
+    fetching the registration's bound method — an attribute access that runs the
+    implementation's own ``__getattribute__``. Performed per call it would run
+    **before** the claim, so a call the ledger then refused
+    ``UnrecordedAuthorisationError`` would already have reached the
+    implementation's code, with no invocation row anywhere to say so.
+
+    Performed at registration it runs once, at composition time, under no
+    authorisation and with no decision to run ahead of — and ADR-0016 §5 already
+    binds an id to *that* callable for the life of the process, so there is
+    nothing later to re-read. The counter is the whole assertion: it moves when
+    the tool is registered, and never again.
+    """
+    trail = FakeAuditTrail()
+    watchful = Watchful()
+    call = call_carrying(tool(), binding())
+    registry = InMemoryToolRegistry([(tool(), watchful)], ledger=trail)
+
+    at_registration = _reads(watchful)
+    assert at_registration == 1, "the shape is decided once, when the callable is registered"
+
+    # Never recorded, so the ledger refuses this claim.
+    with pytest.raises(UnrecordedAuthorisationError):
+        await registry.invoke(call, timeout=PATIENT)
+
+    assert _reads(watchful) == at_registration, (
+        "a refused claim reached no code the implementation owns"
+    )
+    assert object.__getattribute__(watchful, "calls") == 0
+    assert await rows(trail) == []
 
 
 class Shifty:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -56,6 +57,12 @@ if TYPE_CHECKING:
     #: ``from __future__ import annotations`` leaves unevaluated, so binding it at
     #: runtime would buy three imports nothing else in this module needs.
     EntersCallable = Callable[[], Coroutine[Any, Any, FrozenJson]]
+
+    #: The bound egress method a registration carries, read off the object **once
+    #: at registration** (:func:`resolved_implementation`). Spelled with an
+    #: ellipsis because it is called only through ``functools.partial`` below,
+    #: which supplies the keywords :class:`EgressToolImplementation` declares.
+    EgressCallable = Callable[..., Coroutine[Any, Any, FrozenJson]]
 
 _log = structlog.get_logger(__name__)
 
@@ -142,18 +149,71 @@ class EgressToolImplementation(Protocol):
 BoundImplementation = ToolImplementation | EgressToolImplementation
 
 
-def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> EntersCallable:
+@dataclass(frozen=True, slots=True)
+class ResolvedImplementation:
+    """A registration's callable shape, decided once and held by the registry.
+
+    **Nothing the implementation controls is read per call.** Deciding the shape
+    means asking the object two questions — is it an
+    :class:`EgressToolImplementation`, and what is its ``invoke_bound`` — and both
+    are attribute accesses on an object this seam did not write, so both run
+    whatever that object's ``__getattribute__`` does. Asked at invocation time
+    they would run it *before* the claim, so a call the ledger then refused
+    ``UnrecordedAuthorisationError`` would already have reached
+    implementation-controlled code. Asked at **registration** they run once, at
+    composition time, under no authorisation at all — an object being registered
+    is trusted by definition, and there is no decision for it to run ahead of.
+
+    That also makes ADR-0192 §1's property hold by construction rather than by
+    care: an implementation that acquires or sheds ``invoke_bound`` after
+    registration changes nothing the seam reads, so no re-read can raise a
+    ``ToolBindingError`` after the claim. ADR-0016 §5 already binds an id to *the*
+    callable for the life of the process and refuses a different one under a used
+    id; this holds the shape of that callable to the same standard.
+
+    Exactly one field is set, which is what makes the pairing check below a
+    two-way branch on the registry's own record rather than a question for the
+    object.
+    """
+
+    #: The bound egress method, where the registration satisfied the egress shape.
+    egress: EgressCallable | None
+    #: The plain callable, where it did not.
+    ordinary: ToolImplementation | None
+
+
+def resolved_implementation(implementation: BoundImplementation) -> ResolvedImplementation:
+    """Decide ``implementation``'s shape, at registration and not at invocation.
+
+    Args:
+        implementation: The callable being registered.
+
+    Returns:
+        The shape, with exactly one field set.
+    """
+    if isinstance(implementation, EgressToolImplementation):
+        return ResolvedImplementation(egress=implementation.invoke_bound, ordinary=None)
+    return ResolvedImplementation(egress=None, ordinary=implementation)
+
+
+def checked_pairing(resolved: ResolvedImplementation, call: ToolCall) -> EntersCallable:
     """Check the pairing and return what will enter the callable — **without entering it**.
 
     Two things have to be true at once since ADR-0192 §1, and an implementation
     that does either without the other is wrong in a way no ordinary test sees.
 
-    **The shape is resolved exactly once, above the claim.** Reading it again
-    afterwards would let an object that acquired or shed ``invoke_bound`` while the
-    claim append was in flight raise a ``ToolBindingError`` *after* the claim, and
-    §3 would owe a completion carrying an outcome ADR-0029 computes for no such
-    error. §1 states that as a **property, not a list**: after the claim, ``invoke``
-    performs no check that can raise a seam fault.
+    **The shape is resolved exactly once, and not here.**
+    :class:`ResolvedImplementation` is read off the object at *registration*, so
+    this check asks the registry's own record and never the implementation.
+    Reading the shape again per call would let an object that acquired or shed
+    ``invoke_bound`` while the claim append was in flight raise a
+    ``ToolBindingError`` *after* the claim, and §3 would owe a completion carrying
+    an outcome ADR-0029 computes for no such error. §1 states that as a
+    **property, not a list**: after the claim, ``invoke`` performs no check that
+    can raise a seam fault. Resolving at registration also keeps a *refused* claim
+    from reaching implementation-controlled code at all — an attribute access is
+    that object's own ``__getattribute__``, and asking for it per call would run
+    it before the ledger had accepted anything.
 
     **And nothing is called here.** An earlier version returned the *coroutine*,
     which meant invoking the registered callable to obtain one. Nothing makes a
@@ -200,7 +260,8 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> Ente
     else in the system would notice a root that paired them wrongly.
 
     Args:
-        implementation: The registry's callable for the call's tool.
+        resolved: The shape the registry decided when this callable was
+            registered (:func:`resolved_implementation`).
         call: The revalidated, detached call.
 
     Returns:
@@ -210,30 +271,30 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> Ente
     Raises:
         ToolBindingError: If the callable's shape and the call's binding disagree.
     """
-    binding = call.request.egress_binding
-    if isinstance(implementation, EgressToolImplementation):
-        if binding is None:
+    authorised = call.request.egress_binding
+    if resolved.egress is not None:
+        if authorised is None:
             msg = (
                 f"tool {call.request.tool.id!r} is bound to an egress callable and this call "
                 f"carries no egress binding, so there is no authorised account, endpoint or "
                 f"destination set for it to transmit under (ADR-0148 §4, ADR-0152 §8)"
             )
             raise ToolBindingError(msg)
-        bound = implementation.invoke_bound
         return partial(
-            bound,
+            resolved.egress,
             call.request.parameters,
             idempotency_key=call.idempotency_key,
-            egress_binding=binding,
+            egress_binding=authorised,
         )
-    if binding is not None:
+    if authorised is not None:
         msg = (
             f"tool {call.request.tool.id!r} was authorised as an egress call and is bound to a "
             f"callable that takes no egress binding, so what would run cannot be held to what "
             f"was authorised (ADR-0148 §4)"
         )
         raise ToolBindingError(msg)
-    return partial(implementation, call.request.parameters, idempotency_key=call.idempotency_key)
+    assert resolved.ordinary is not None  # noqa: S101 — exactly one field is set
+    return partial(resolved.ordinary, call.request.parameters, idempotency_key=call.idempotency_key)
 
 
 #: What names an invented cancellation, as a **literal** rather than a read. A
@@ -438,7 +499,9 @@ async def run_bound_call(
         CancelledError: If the invoking task was cancelled from outside.
     """
     return await run_prepared_call(
-        checked_pairing(implementation, call), definition=definition, timeout=timeout
+        checked_pairing(resolved_implementation(implementation), call),
+        definition=definition,
+        timeout=timeout,
     )
 
 
@@ -524,9 +587,11 @@ async def run_prepared_call(
 __all__ = [
     "BoundImplementation",
     "EgressToolImplementation",
+    "ResolvedImplementation",
     "ToolImplementation",
     "checked_pairing",
     "internal_failure",
+    "resolved_implementation",
     "run_bound_call",
     "run_prepared_call",
 ]
