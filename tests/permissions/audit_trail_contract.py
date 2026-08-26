@@ -827,6 +827,38 @@ class AuditTrailContract:
         assert await trail.record(recorded) == "d-route-b"
         assert await revoked.outstanding("g-1") is None
 
+    async def test_replaying_a_route_b_decision_after_a_revocation_is_a_duplicate(
+        self,
+    ) -> None:
+        """A replayed write is reported as one, whatever the grant store now says.
+
+        Round 1's adversarial finding, and it is about **which error an operator
+        gets**. ``record`` is write-once (ADR-0021 §4), and the two refusals it can
+        raise say different things: ``DuplicateDecisionError`` means "this
+        identifier is already recorded, nothing changed", and
+        ``InvalidAuthorisationError`` means "a row was offered whose authorisation
+        does not hold". A trail that resolved the pointer *before* the duplicate-id
+        check would report the second for a decision that was already validated and
+        already written — the state transition is on the grant store, not on the
+        write — and an operator reading the log would go looking for an
+        authorisation fault that never happened.
+
+        The grant is live for the first write and revoked for the replay, which is
+        the only ordering that separates the two implementations.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        revoked = FakeRecipientGrantResolution(
+            [granted, recipient_revocation_of(granted, grant_id="r-1")]
+        )
+        trail = self.trail_over(
+            _MovesAfterAnswering(seam=FakeRecipientGrantResolution([granted]), after=revoked)
+        )
+        recorded = route_b_decision(grant_id="g-1", subject=granted.subject_digest)
+        assert await trail.record(recorded) == "d-route-b"
+
+        await _refuses(trail, recorded, DuplicateDecisionError)
+        assert await revoked.outstanding("g-1") is None
+
     async def test_a_clear_and_re_record_after_the_resolution_read_leaves_the_row_recorded(
         self,
     ) -> None:

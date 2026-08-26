@@ -33,7 +33,7 @@ import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast, get_args
+from typing import TYPE_CHECKING, Any, Final, cast, final, get_args
 from uuid import uuid4
 
 import structlog
@@ -613,13 +613,16 @@ class SqliteAuditTrail:
                 grant would be one ``record`` call away from authorising the row it
                 is about to validate.
 
-                ``None`` is a trail that **refuses every route-(b) row**, and that
-                is the fail-closed default rather than an exemption: a trail with
-                no seam cannot validate a pointer, and ADR-0193 §6's whole content
-                is that such a pointer is not written unvalidated. It is the
-                default so that a fixture with no route-(b) row need not wire a
-                seam it has no use for, in the shape ``spend`` above already takes;
-                a deployment wires the real store (ADR-0193 §1).
+                ``None`` substitutes :class:`_NoRecipientGrants`, so the trail
+                always **has** a seam. ADR-0193 §6 is unqualified about that and
+                gives the trail no counterpart to §7's no-source mode for a
+                policy, and the substituted seam holds nothing: every route-(b)
+                pointer resolves to ``None`` and the row is refused. That is the
+                fail-closed direction and the only answer a deployment with no
+                grant store can give. A deployment wires the real store
+                (ADR-0193 §1); the composition root passes **one** object to this
+                trail and to the policy, and ``tests/app/test_composition.py``
+                pins that over the object's identity.
 
         Raises:
             AuditError: If the database cannot be opened or initialised.
@@ -631,7 +634,9 @@ class SqliteAuditTrail:
         )
         self._lock = asyncio.Lock()
         self._spend = spend if spend is not None else SpendConfiguration()
-        self._recipient_grants = recipient_grants
+        self._recipient_grants: RecipientGrantResolution = (
+            recipient_grants if recipient_grants is not None else _NO_RECIPIENT_GRANTS
+        )
         # Its own lock: ADR-0194 §3 serialises admissions against each other and
         # deliberately not against the appends, so a completion can land while an
         # admission reads and an admission never sits in front of a write.
@@ -973,11 +978,22 @@ class SqliteAuditTrail:
             # two are still separate awaits and ADR-0193 §6 states the guarantee
             # over the read rather than over the append, but nothing else on *this*
             # trail interleaves between them.
-            await self._check_standing_authorisation(snapshot)
-            await _run_to_completion(self._record_sync, snapshot)
+            #
+            # Its **verdict is carried into the transaction rather than raised
+            # here**, so the duplicate-id checks refuse first. A replayed route-(b)
+            # decision whose grant has since been revoked is a *replayed write*,
+            # and reporting it as an unvalidated authorisation would blur the two
+            # classes ADR-0021 §4 split precisely so an operator can tell them
+            # apart. Raising it here instead was the other repair and is refused:
+            # a read in front of ``BEGIN IMMEDIATE`` is the window #526 is about,
+            # and this store pins the write lock as its *first* statement.
+            refusal = await self._resolve_standing_authorisation(snapshot)
+            await _run_to_completion(self._record_sync, snapshot, refusal)
         return snapshot.id
 
-    async def _check_standing_authorisation(self, decision: PermissionDecision) -> None:
+    async def _resolve_standing_authorisation(
+        self, decision: PermissionDecision
+    ) -> InvalidAuthorisationError | None:
         """Resolve a route-(b) pointer against the grant records (ADR-0193 §6).
 
         The other five of ADR-0193 §6's eight checks — the ones that need the
@@ -1029,32 +1045,43 @@ class SqliteAuditTrail:
         against anything derived from the decision, has not implemented this
         clause.
 
+        **It returns the refusal rather than raising it**, so ``record`` can apply
+        it *inside* the transaction and after the duplicate-id checks. Two
+        constraints meet here and only this shape satisfies both: the seam is an
+        ``await``, so the read cannot happen inside the worker thread's
+        transaction; and #526 pins ``BEGIN IMMEDIATE`` as this store's **first**
+        statement, so the duplicate-id read cannot be lifted out in front of the
+        seam either. Carrying the verdict costs one seam read on a replayed write
+        and buys the error class an operator needs.
+
         Args:
             decision: The validated snapshot about to be appended.
 
+        Returns:
+            The refusal this decision has earned, or ``None`` where the pointer
+            resolved to a grant covering it — and ``None`` too for every decision
+            outside ADR-0193 §6's scope, which is the majority.
+
         Raises:
-            InvalidAuthorisationError: If the pointer named no outstanding grant,
-                if the grant it named does not cover this decision, or if the seam
-                could not be read — the last chained from the
+            InvalidAuthorisationError: If the seam could not be read. **Raised**
+                rather than returned, and the asymmetry is deliberate: a store
+                fault is not something a later duplicate-id refusal should be
+                allowed to mask, because the two say different things to an
+                operator and only one of them is about this decision. It is
+                chained from the
                 :class:`~ai_assistant.core.errors.RecipientGrantError` it came
                 from, so a caller keeps the one ``AuditError`` handler while an
-                operator keeps the two facts apart.
+                operator keeps "the pointer named no outstanding grant" and "the
+                seam could not be read" apart.
         """
         if not _names_a_standing_authorisation(decision):
-            return
+            return None
         binding = decision.egress_binding
         # `_check_standing_shape` has already refused every other arm, and ran
         # before this method on both write paths. The narrowing is repeated for
         # `mypy`, which reads the union rather than the ordering.
         assert isinstance(binding, EgressBinding)  # noqa: S101 — narrowing, refused above
         named = str(decision.ruling.authorised_by)
-        if self._recipient_grants is None:
-            msg = (
-                f"decision {decision.id!r} names standing authorisation {named!r} and this "
-                f"trail was constructed with no resolution seam, so nothing can validate it; "
-                f"an unvalidated pointer is not written (ADR-0193 §6)"
-            )
-            raise InvalidAuthorisationError(msg)
         try:
             grant = await self._recipient_grants.outstanding(named)
         except RecipientGrantError as exc:
@@ -1065,16 +1092,22 @@ class SqliteAuditTrail:
             )
             raise InvalidAuthorisationError(msg) from exc
         if grant is None:
-            msg = (
+            return InvalidAuthorisationError(
                 f"decision {decision.id!r} names standing authorisation {named!r}, which is "
                 f"not an outstanding grant: it is absent, is a revoking record, or has been "
                 f"revoked (ADR-0193 §6)"
             )
-            raise InvalidAuthorisationError(msg)
-        _check_grant_covers(decision, grant, binding)
+        return _grant_covers(decision, grant, binding)
 
-    def _record_sync(self, snapshot: PermissionDecision) -> None:
-        """Validate against what is stored and insert, as one transaction."""
+    def _record_sync(
+        self, snapshot: PermissionDecision, refusal: InvalidAuthorisationError | None
+    ) -> None:
+        """Validate against what is stored and insert, as one transaction.
+
+        ``refusal`` is :meth:`_resolve_standing_authorisation`'s verdict, applied
+        **after** the two duplicate-id checks so a replayed write is reported as
+        one.
+        """
         with self._transaction(f"record decision {snapshot.id!r}") as conn:
             if conn.execute("SELECT 1 FROM decisions WHERE id = ?", (snapshot.id,)).fetchone():
                 msg = (
@@ -1095,6 +1128,8 @@ class SqliteAuditTrail:
                     f"invocation; one identifier names one record, of either kind"
                 )
                 raise AuditError(msg)
+            if refusal is not None:
+                raise refusal
             if snapshot.resolves is not None:
                 self._check_resolution(snapshot)
             conn.execute(
@@ -2938,6 +2973,41 @@ def _spend_refusal(decision_id: str) -> Callable[[str], AuthorisationSpentError]
     return _refuse
 
 
+@final
+class _NoRecipientGrants:
+    """A conforming :class:`RecipientGrantResolution` that holds nothing.
+
+    ADR-0193 §6 is unqualified — "``AuditTrail`` implementations **are
+    constructed with** a ``RecipientGrantResolution``" — and gives the trail no
+    counterpart to §7's explicit no-source mode for a policy. So a trail always
+    has a seam, and one wired with nothing gets **this** rather than a special
+    case in :meth:`SqliteAuditTrail.record`: a store holding no standing grants is
+    an ordinary state a deployment can be in (``recipient_grant_max_outstanding``
+    of zero is ADR-0193 §1's own way of declining route (b)), and it is not a
+    third mode of the trail.
+
+    Every route-(b) pointer therefore resolves to ``None`` and the row is refused,
+    which is the fail-closed direction and the only answer a deployment with no
+    grant store can give.
+
+    **What it does not decide is where the seam comes from.** A trail holding this
+    one and a policy holding a real store would author ``ALLOW``s the trail
+    refuses; so would two real stores over two files. That is a property of the
+    composition root — it passes one object to both — and
+    ``tests/app/test_composition.py`` pins it there, over the object's identity,
+    which is the only place it can be pinned.
+    """
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:  # noqa: ARG002
+        """Answer ``None``: this seam holds no grant, whatever is asked of it."""
+        return None
+
+
+#: The one instance every trail wired with no grant store shares. Stateless, so
+#: sharing it is free and holds nothing between trails.
+_NO_RECIPIENT_GRANTS: Final = _NoRecipientGrants()
+
+
 def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
     """Whether ADR-0193 §6's invariant is in scope for ``decision``.
 
@@ -3027,9 +3097,9 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
         raise InvalidAuthorisationError(msg)
 
 
-def _check_grant_covers(
+def _grant_covers(  # noqa: PLR0911 — one return per ADR-0193 §6 comparison, and no fewer
     decision: PermissionDecision, grant: RecipientGrant, binding: EgressBinding
-) -> None:
+) -> InvalidAuthorisationError | None:
     """Compare the resolved grant against the decision it is claimed to authorise.
 
     Six of ADR-0193 §6's eight checks — the two ends of the liveness interval and
@@ -3048,52 +3118,53 @@ def _check_grant_covers(
         binding: ``decision``'s own binding, already narrowed to the arm that
             records an origin.
 
-    Raises:
-        InvalidAuthorisationError: If any of the six comparisons fails.
+    **It returns the refusal rather than raising it**, so ``record`` can apply it
+    inside its transaction and after the duplicate-id checks — see
+    :meth:`SqliteAuditTrail._resolve_standing_authorisation` for why that ordering
+    is the only one both #526's pin and ADR-0021 §4's error split admit.
+
+    Returns:
+        The refusal the comparison earned, or ``None`` where the grant covers the
+        decision.
     """
     named = grant.id
     if grant.decided_at > decision.decided_at:
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} rests on grant {named!r}, which was established "
             f"after the ruling was made; the policy could not have read a record that "
             f"did not exist when it ruled (ADR-0193 §6)"
         )
-        raise InvalidAuthorisationError(msg)
     if grant.expires_at <= decision.decided_at:
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} rests on grant {named!r}, which was not live when "
             f"the ruling was made; an expired grant never sources a new ALLOW "
             f"(ADR-0193 §6)"
         )
-        raise InvalidAuthorisationError(msg)
     if grant.tool != decision.tool:
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} rests on grant {named!r}, which was established "
             f"about a different declaration; coverage compares the ToolDefinition whole "
             f"and by value, so a declaration edit re-prompts (ADR-0193 §1, §3)"
         )
-        raise InvalidAuthorisationError(msg)
     if grant.account != binding.account:
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} rests on grant {named!r}, which was established "
             f"against a different connected account; an account is two facts, identity "
             f"and connection reference, and never one (ADR-0193 §3)"
         )
-        raise InvalidAuthorisationError(msg)
     if any(member not in grant.destinations for member in binding.canonical_destination_set):
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} rests on grant {named!r}, which does not name "
             f"every recipient of this call; coverage is set membership and nothing "
             f"looser (ADR-0193 §3)"
         )
-        raise InvalidAuthorisationError(msg)
     if decision.ruling.authorised_subject != grant.subject_digest:
-        msg = (
+        return InvalidAuthorisationError(
             f"decision {decision.id!r} fingerprints a standing authorisation the store's "
             f"grant {named!r} does not match; the digest is recomputed from the record "
             f"the store returned and never taken on the decision's word (ADR-0193 §6)"
         )
-        raise InvalidAuthorisationError(msg)
+    return None
 
 
 def _check_authorisation(decision: PermissionDecision) -> None:
