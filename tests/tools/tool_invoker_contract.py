@@ -3406,3 +3406,49 @@ class ToolInvokerContract:
         )
         assert sleeper.calls == 1, "the callable was entered; it simply did not finish"
         assert len(gate.released) == 1
+
+    async def test_the_claim_append_does_not_consume_the_callables_window(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0192 §7's exclusion, pinned so that ADR-0194 §3 cannot be read past it.
+
+        §3 puts the **admission** inside the window ``invoke`` already enforces, and
+        §11 drives that as one window shared with the callable. It says nothing about
+        ADR-0192's appends, and ADR-0192 §7 is explicit in the other direction:
+        "``timeout`` is the deadline for the *call*, and it is not a budget for this
+        method's whole frame … **Neither ledger append is bounded by it**: each is
+        awaited to its outcome, so a store that has stopped answering blocks the call
+        before the callable."
+
+        So a slow claim does not shorten the callable's window, and a conforming
+        ``invoke`` measures the remainder it hands the callable **before** the claim
+        rather than after it. An implementation recomputing the remainder afterwards
+        would let an append bound the call — the exact narrowing §7 refuses — and
+        would classify a call as timed out on the strength of a store's latency.
+
+        This is stated as a fixture rather than left to be inferred because the
+        opposite reading is available and plausible: a reviewer reading §3's "single
+        original deadline" alone, without §7 beside it, concludes that the claim
+        must eat the budget too.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy())
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=BRIEF))
+        await ledger.claim.entered.wait()
+        # Well past the caller's deadline, with the claim still in flight.
+        await asyncio.sleep(BRIEF.total_seconds() * 4)
+        assert not task.done(), "the claim is awaited to its outcome, not to the deadline"
+
+        ledger.claim.hold.set()
+        result = await asyncio.wait_for(task, 5.0)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED, (
+            "the callable kept its own window: the append that delayed it is not "
+            "bounded by the deadline and does not shorten what the call is given"
+        )
