@@ -250,8 +250,16 @@ async def test_a_retryable_failure_on_a_spendable_keyed_call_admits_the_retry() 
     *spendable*, the precise complement of §1's discriminator. So on a spendable
     authorisation the deadline always yields ``INDETERMINATE``, which spends, and
     "a retryable ``FAILED`` on a spendable ``KEYED`` authorisation" has no
-    producer until #1558 lands a carrier that lets an integration report its own
-    kind. Filed as #1583.
+    producer through ``invoke`` today.
+
+    **The carrier that would give it one is ADR-0032's, not #1558's**, and the
+    distinction matters because the two answer different halves: #1558 is
+    ADR-0192 §5's *cost* transport, while ADR-0032 §1 mints ``ClassifiedToolError``
+    as the **failure** transport — "a tool reporting a failure it classified
+    itself … caught by ``ToolInvoker.invoke``, which turns it into a
+    ``ToolResult``". That ADR is Accepted and **unimplemented**: the symbol
+    appears nowhere under ``src/``, which is what issue #596 records. So the case
+    is owed by ADR-0032's implementation lane, and is tracked on #1583.
 
     What is constructible is the boundary ADR-0192 §5 and §2 actually decide, and
     it carries the whole of what §9's clause is for: the kind is **transcribed**
