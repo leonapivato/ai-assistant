@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import pytest
 from assistant_engine_contract import (
     _DECISION_LIMIT,
+    _INVOCATION_LIMIT,
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
@@ -39,8 +40,11 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    InvocationSubject,
     ReadSubject,
     backwards_clock,
+    overfull_invocation_rows,
+    seeded_invocation_trail,
     seeded_read_trail,
     seeded_trail,
 )
@@ -593,6 +597,35 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield ReadSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def invocations(self) -> AsyncIterator[InvocationSubject]:
+        """One wired engine over a seeded invocation trail, and that trail.
+
+        Built and handed over on :attr:`decisions`' terms exactly — the engine holds
+        its ``AuditTrail`` privately, so the suite's negative controls are only
+        expressible if the case can read the store the composition root wired — and
+        over the **same** wiring parameter, because ADR-0192 §2 puts the invocation
+        rows and the decision rows in one store and one object satisfies both faces.
+        """
+        trail = await seeded_invocation_trail()
+        built = _wire(trail=trail)
+        await built.start()
+        try:
+            yield InvocationSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_invocations(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine at the invocation limit, over a trail too large for it."""
+        trail = await seeded_invocation_trail(rows=overfull_invocation_rows())
+        built = _wire(trail=trail, max_payload_bytes=_INVOCATION_LIMIT)
+        await built.start()
+        try:
+            yield built
         finally:
             await built.aclose()
 

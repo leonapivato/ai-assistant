@@ -109,12 +109,14 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     ProvisioningState,
+    RecordedInvocation,
     ReplyChunk,
     Reversibility,
     RiskLevel,
     SourceReadRecord,
     ToolCost,
     ToolDefinition,
+    ToolOutcome,
     TurnOutcome,
     secret_value,
 )
@@ -127,10 +129,11 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 
     from ai_assistant.core.types import SecretValue
     from ai_assistant.testing import FakeConnectionProvisioner
+    from ai_assistant.testing.permissions import MintsIdentifiers
 
 #: A credential over :data:`_TINY_LIMIT` and comfortably under
 #: :data:`~ai_assistant.core.types.SECRET_VALUE_MAX_BYTES`, so ``secret_value``
@@ -357,17 +360,39 @@ class SeededAuditTrail(FakeAuditTrail):
     relaying implementation fails every run rather than most of them.
     """
 
-    def __init__(self, *, ordered_export: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        ordered_export: bool = True,
+        now: Callable[[], datetime] | None = None,
+        identifiers: MintsIdentifiers | None = None,
+    ) -> None:
         """Create an empty trail.
 
         Args:
             ordered_export: Whether ``export`` hands back the order ``recent`` uses.
                 ``False`` returns the reverse, which the store's contract permits.
+            now: The clock the ledger stamps an invocation row's ``recorded_at``
+                from. Passed through so :func:`seeded_invocation_trail` can put
+                rows at instants it names rather than at whatever the wall clock
+                read while the fixture ran — ADR-0192 §4's order is over that
+                value, so a fixture racing a real clock states no order at all.
+            identifiers: The factory each invocation row's ``id`` is minted from,
+                passed through for the same reason: the tie-break is on that id,
+                so a suite that cannot name it cannot exercise the tie.
         """
-        super().__init__()
+        # The wall clock spelled out rather than reached for through the fake's
+        # private default: every case but the invocation ones injects nothing and
+        # cares about no instant the ledger stamps, and a test module importing a
+        # ``_``-prefixed name from the package it is a double for is a coupling
+        # worth one line to avoid.
+        super().__init__(
+            now=now if now is not None else (lambda: datetime.now(UTC)),
+            identifiers=identifiers,
+        )
         #: Which reads reached the store, in the order they arrived.
         self.reads: list[str] = []
-        #: Scripted, and when set **both** reads raise it instead of answering.
+        #: Scripted, and when set **every** read raises it instead of answering.
         #:
         #: A store that cannot be read is a declared failure of both operations —
         #: ``SqliteAuditTrail.recent`` and ``export`` raise ``AuditError`` "if the
@@ -394,6 +419,28 @@ class SeededAuditTrail(FakeAuditTrail):
             raise self.fail_with
         rows = await super().export()
         return rows if self._ordered_export else list(reversed(rows))
+
+    async def recent_invocations(self, *, limit: int = 50) -> list[RecordedInvocation]:
+        """Log the read, then raise :attr:`fail_with` or answer as the fake does."""
+        self.reads.append("recent_invocations")
+        if self.fail_with is not None:
+            raise self.fail_with
+        return await super().recent_invocations(limit=limit)
+
+    async def export_invocations(self) -> list[RecordedInvocation]:
+        """Log the read, then raise :attr:`fail_with` or answer as the fake does.
+
+        **No ``ordered_export`` limb, and its absence is the contract's.**
+        ``AuditTrail.export`` states *no* order, which is why that read has one; the
+        invocation twin states one in terms — "in the same order and joined the same
+        way" — so a trail answering otherwise would be non-conforming, and a case
+        driven through one would prove nothing about a conforming implementation.
+        :class:`FakeSourceReadTrail` gets the same treatment for the same reason.
+        """
+        self.reads.append("export_invocations")
+        if self.fail_with is not None:
+            raise self.fail_with
+        return await super().export_invocations()
 
 
 async def seeded_trail(
@@ -430,6 +477,229 @@ class DecisionSubject:
             control** — a ``limit`` ADR-0186 §3 refuses locally must leave ``reads``
             empty — and as the evidence that the unordered binding is not vacuous,
             since a case can ask the trail directly what order it handed over.
+    """
+
+    engine: AssistantEngine
+    trail: SeededAuditTrail
+
+
+#: When the seeded invocation trail's first row was appended. Fixed, for
+#: :data:`_RULED_AT`'s reason.
+_RECORDED_AT: Final = datetime(2026, 3, 3, 11, 0, 0, tzinfo=UTC)
+
+#: The invocation rows every seeded trail holds, **in the order they are
+#: appended**, as ``(row id, seconds after`` :data:`_RECORDED_AT` ``, the decision
+#: it runs under, the completion to write or ``None``)``.
+#:
+#: :data:`_SEEDED_DECISIONS`' two deliberate properties, one row kind over
+#: (ADR-0192 §9). The append order is not the ``recorded_at`` order, so an
+#: implementation relaying insertion order is caught; and ``i-4`` and ``i-3`` share
+#: an instant **and are appended in the wrong order for it**, so the ``id``
+#: tie-break is *exercised* rather than assumed. Both halves are needed: rows at
+#: distinct instants leave an implementation with no tie-break at all passing, and a
+#: tie whose append order already agrees with the tie-break leaves one passing that
+#: merely relies on its sort being stable.
+#:
+#: **A clock that steps backwards is not a contrived fixture here**, it is the state
+#: ADR-0192 §2 writes the store's own ordering rule against: the ledger decides every
+#: admission on its durable append order precisely "so a wall clock that steps
+#: backwards cannot make a completed act stop being the most recent one". §4's
+#: *listing* order is nonetheless on ``recorded_at``, and these two facts living
+#: side by side is what the ordering cases below are for.
+#:
+#: **One claim per decision**, because :data:`_RULED_TOOL` is side-effecting with
+#: ``Idempotency.NONE`` and ADR-0192 §1's consume refuses a second claim under such
+#: a decision. That is the contract working rather than a limit on the fixture: four
+#: attempts are four authorisations, which is what the ADR is about.
+_SEEDED_INVOCATIONS: Final[tuple[tuple[str, int, str, ToolOutcome | None], ...]] = (
+    ("i-1", 2, "d-1", None),
+    ("i-2", 0, "d-2", None),
+    ("i-4", 1, "d-2", ToolOutcome.SUCCEEDED),
+    ("i-3", 1, "d-3", None),
+)
+
+#: ADR-0192 §4's total order over :data:`_SEEDED_INVOCATIONS`: the row's
+#: ``recorded_at`` descending, ties broken by the row's ``id`` ascending. Written
+#: out rather than computed, so the expectation is something a reader checks against
+#: the ADR rather than against a second copy of the implementation.
+_INVOCATION_ORDER: Final[tuple[str, ...]] = ("i-1", "i-3", "i-4", "i-2")
+
+#: How many invocation rows the overfull subject's trail holds.
+#:
+#: Larger than :data:`_OVERFULL_DECISIONS` and at a **smaller** limit, and the
+#: arithmetic is ADR-0192 §4's own point: "a ``RecordedInvocation`` is one small
+#: row, two identifiers and a boolean, where a ``PermissionDecision`` measured 858
+#: bytes in this tree carrying a whole ``ToolDefinition`` and an egress binding". So
+#: the export of invocations reaches a given ceiling later than the export of
+#: decisions does, and a fixture that did not say so would be asserting the refusal
+#: over a store shape the ADR expressly says is smaller.
+_OVERFULL_INVOCATIONS = 6
+
+#: A contract limit that holds **one** ``RecordedInvocation`` and not six.
+_INVOCATION_LIMIT = 512
+
+
+def overfull_invocation_rows() -> tuple[tuple[str, int, str, ToolOutcome | None], ...]:
+    """:data:`_OVERFULL_INVOCATIONS` claims, each under an authorisation of its own.
+
+    One claim per decision for :data:`_SEEDED_INVOCATIONS`' reason — ADR-0192 §1's
+    consume admits no second claim under a side-effecting, non-idempotent ruling —
+    and shared so the three bindings arrange one premise rather than three.
+
+    Returns:
+        The rows, for :func:`seeded_invocation_trail`.
+    """
+    return tuple(
+        (f"o-{index}", index, f"od-{index}", None) for index in range(_OVERFULL_INVOCATIONS)
+    )
+
+
+class _ScriptedIdentifiers:
+    """An identifier factory that hands out a written-down sequence (ADR-0192 §2).
+
+    The store mints every invocation row's id from an injected factory and accepts
+    none from a caller, which is what makes the ids unguessable in a real store and
+    unnameable in a fixture. ADR-0192 §4's tie-break is *on that id*, so a suite
+    with no way to name one cannot state the order it is asserting — which is the
+    whole reason this exists rather than the fixture reading ids back and sorting
+    them, an assertion that would pass for any order at all.
+
+    ``reserve`` is honoured rather than ignored, because ``open_invocations``
+    reserves every claim id it returns and a factory that then reissued one would
+    let a completion the recovery scan is holding land on a different call's claim
+    (ADR-0192 §2). Nothing in this block calls it, and a factory that quietly
+    dropped the promise would be a fixture teaching the wrong shape.
+    """
+
+    def __init__(self, ids: Sequence[str]) -> None:
+        """Draw from ``ids`` in order.
+
+        Args:
+            ids: The identifiers to mint, one per append.
+        """
+        self._remaining = list(ids)
+        self._reserved: set[str] = set()
+        self._beyond = count()
+
+    def __call__(self) -> str:
+        """Return the next scripted identifier, or a generated one past the script.
+
+        **The fallback is not a loosening**, it is what lets a case append rows the
+        fixture did not name — the default-page case wants fifty more rows and cares
+        about none of their ids. What the script pins is what an assertion names;
+        past it the sequence is still unique, which is all the store asks of a
+        factory.
+        """
+        while self._remaining:
+            drawn = self._remaining.pop(0)
+            if drawn not in self._reserved:
+                return drawn
+        while True:
+            drawn = f"beyond-the-script-{next(self._beyond)}"
+            if drawn not in self._reserved:
+                return drawn
+
+    def reserve(self, ids: Iterable[str]) -> None:
+        """Promise that none of ``ids`` will be returned by any later call."""
+        self._reserved.update(ids)
+
+
+async def seeded_invocation_trail(
+    *,
+    rows: tuple[tuple[str, int, str, ToolOutcome | None], ...] = _SEEDED_INVOCATIONS,
+) -> SeededAuditTrail:
+    """A trail holding ``rows`` as invocation records, appended in that order.
+
+    Shared so the three bindings cannot arrange three different premises for one
+    clause, exactly as :func:`seeded_trail` is — and built **through the ledger**
+    rather than by writing rows into the store, because the id and the instant are
+    the store's to mint and stamp (ADR-0192 §2). A fixture that reached past that
+    would be seeding a shape no conforming store can produce.
+
+    The decisions the rows run under are seeded first — every distinct one they
+    name, in first-appearance order — since ADR-0192 §1 refuses a claim under an
+    authorisation the trail did not record and §2's join refuses to return a row it
+    cannot pair. Derived from ``rows`` rather than fixed at
+    :data:`_SEEDED_DECISIONS`, so a larger fixture is a longer list of rows rather
+    than two lists that have to agree.
+
+    Args:
+        rows: What to append, as :data:`_SEEDED_INVOCATIONS` describes.
+
+    Returns:
+        The seeded trail, with :attr:`SeededAuditTrail.reads` cleared — so a case
+        reading it reads what the *subject* caused rather than what the setup did.
+    """
+    scripted = iter([_RECORDED_AT + timedelta(seconds=offset) for _, offset, _, _ in rows])
+    beyond = count(1)
+
+    def reading() -> datetime:
+        """The next scripted instant, or one **before** the seeded window past it.
+
+        Backwards rather than forwards so rows a case appends for itself sort below
+        the ones the fixture names, and the ordering assertions stay about the four
+        rows they enumerate. The decision block's default-page case back-dates its
+        extra rulings for the same reason and by the same arithmetic.
+        """
+        stamped = next(scripted, None)
+        if stamped is not None:
+            return stamped
+        return _RECORDED_AT - timedelta(seconds=next(beyond))
+
+    trail = SeededAuditTrail(
+        now=reading,
+        identifiers=_ScriptedIdentifiers([row_id for row_id, _, _, _ in rows]),
+    )
+    for index, decision_id in enumerate(dict.fromkeys(row[2] for row in rows)):
+        await trail.record(_ruling(decision_id, at=_RULED_AT + timedelta(seconds=index)))
+    open_claims: dict[str, str] = {}
+    for row_id, _, decision_id, outcome in rows:
+        if outcome is None:
+            claim = await trail.claim_invocation(decision=await _recorded(trail, decision_id))
+            open_claims[decision_id] = claim.id
+            assert claim.id == row_id, "the scripted identifier sequence has drifted"
+            continue
+        completion = await trail.complete_invocation(
+            claim_id=open_claims[decision_id],
+            outcome=outcome,
+            incurred_cost=ToolCost(basis=CostBasis.FREE),
+        )
+        assert completion.id == row_id, "the scripted identifier sequence has drifted"
+    trail.reads.clear()
+    return trail
+
+
+async def _recorded(trail: SeededAuditTrail, decision_id: str) -> PermissionDecision:
+    """The stored decision under ``decision_id``, for the ledger to claim against.
+
+    ADR-0192 §1's consume compares the decision it was **passed** against the one
+    the store holds and refuses if they differ, so a fixture handing over a
+    freshly-built copy would be testing the equality rather than the seeding. The
+    store's own copy is what a real caller holds too: it comes back from the
+    permission stage that recorded it.
+    """
+    stored = await trail.get(decision_id)
+    assert stored is not None, "the fixture must seed the decision before the act under it"
+    return stored
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationSubject:
+    """An engine on the invocation surface, and the trail standing behind it.
+
+    :class:`DecisionSubject`'s shape over ADR-0192 §4's pair, and it is a separate
+    class rather than a reuse for the reason the two operations are separate: the
+    trail is the same object, and what a case reaches for on it is not. A shared
+    subject would let a case about the invocation order be written against
+    ``recent`` by accident and pass.
+
+    Attributes:
+        engine: The subject under test.
+        trail: The seeded trail the engine ultimately reads, reached from the test
+            process rather than through the surface. Read as a **negative
+            control** — a ``limit`` ADR-0192 §4 refuses locally must leave
+            ``reads`` empty — and as the evidence that each operation reaches its
+            own store read rather than the other's.
     """
 
     engine: AssistantEngine
@@ -838,6 +1108,47 @@ class AssistantEngineContract(ABC):
         A fixture for :attr:`decisions`' reason, and one of its own: at a limit this
         small the *setup* would be refused if it ran through the surface, exactly as
         :attr:`overfull_granting_engine`'s six grants would be.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def invocations(self) -> InvocationSubject:
+        """A subject over a trail holding :data:`_SEEDED_INVOCATIONS`, and that trail.
+
+        **A fixture because nothing on this surface writes one**, on
+        :attr:`decisions`' reason and a sharper version of it: ADR-0192 §4 promotes
+        exactly two operations and both are reads, the two *appends* live on
+        :class:`~ai_assistant.core.protocols.InvocationLedger` behind the tool seam,
+        and ``AuditTrail.open_invocations`` is deliberately unpromoted. So the only
+        route to a trail with rows in it is to be handed an implementation already
+        holding them, and :func:`seeded_invocation_trail` builds it so the three
+        bindings cannot arrange three different premises for one clause.
+
+        **The trail comes with it** for :attr:`decisions`' reason: ADR-0192 §4's
+        local refusals are negative clauses — refused "before any I/O" — and an
+        assertion that no read happened is worth nothing unless a case can see the
+        log it did not reach.
+
+        There is no unordered sibling to this fixture, and the reason is
+        :attr:`reads`': ``AuditTrail.export_invocations`` *states* its order — "the
+        unbounded twin, in the same order and joined the same way" — where
+        ``AuditTrail.export`` states none, so a trail answering otherwise would be
+        non-conforming rather than exercising a freedom. What catches an
+        implementation whose sort is wrong is the fixture's own shape instead: every
+        plausible wrong ordering of these four rows is a different sequence from
+        :data:`_INVOCATION_ORDER`.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_invocations(self) -> AssistantEngine:
+        """A subject at :data:`_INVOCATION_LIMIT` holding :data:`_OVERFULL_INVOCATIONS` rows.
+
+        Enough that the whole trail does not fit the contract limit, and few enough
+        that a single row does — :attr:`overfull_decisions`' shape, at a **smaller**
+        limit and over **more** rows, which is ADR-0192 §4's own arithmetic about
+        this projection being bounded by construction where a decision carries a
+        whole ``ToolDefinition``.
         """
 
     @pytest.fixture
@@ -3166,6 +3477,286 @@ class AssistantEngineContract(ABC):
             await overfull_reads.export_reads()
 
         assert await overfull_reads.recent_reads(limit=1) != ()
+
+    # --- the trail's two invocation reads (ADR-0192 §4, §9) ----------------
+    #
+    # **The engine operations' own obligations, pinned as conformance cases**,
+    # because ADR-0192 §4 states them over "every implementation" and §9 says in
+    # terms that "no adapter or store case reaches them". Three groups: the order,
+    # the prefix invariant, and ``limit`` validation — "without them an engine that
+    # forwards a ``limit`` straight through, or relays the store's order
+    # unmaterialised, passes every adapter case §9 names while breaking §4's clauses
+    # in terms". The surrounding cases are the decision block's, one row kind over,
+    # for that block's stated reason: this suite is the only place a clause binds
+    # the concrete engine, the canonical fake and ``HubClient`` at once.
+
+    async def test_the_invocation_listing_and_export_share_one_total_order(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4: ``recorded_at`` descending, ties broken by ``id`` ascending, on both.
+
+        The order is the **operation's** guarantee "over a list it has
+        materialised", which is why it is asserted here and not left to the store:
+        two implementations handing back the same rows in different orders satisfy
+        every other clause of §4 while giving two users two different accounts of
+        what this system did.
+        """
+        listed = await invocations.engine.recent_invocations()
+        exported = await invocations.engine.export_invocations()
+
+        assert tuple(row.invocation.id for row in listed) == _INVOCATION_ORDER
+        assert tuple(row.invocation.id for row in exported) == _INVOCATION_ORDER
+
+    async def test_the_tie_break_orders_two_rows_recorded_at_one_instant(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4, over rows that really share a ``recorded_at``.
+
+        The pair is asserted on its own because a whole-sequence comparison passes
+        for an implementation whose tie-break happens to agree with the order it was
+        handed. Here ``i-4`` is appended **before** ``i-3`` and must still come
+        second of the two, so an implementation "sorting on the instant alone or
+        leaving insertion order for a tie" answers them the wrong way round (§9).
+
+        **The sort key is the row's and not the join's** (ADR-0192 §2). ``id`` and
+        ``recorded_at`` live on ``RecordedInvocation.invocation``; the join adds the
+        tool, the capability and the egress boolean and restates neither. An
+        implementation reaching for a top-level key finds none, and one keying on
+        something the join added would order two rows of one attempt by a fact about
+        the *decision*.
+        """
+        exported = await invocations.engine.export_invocations()
+        tied = [
+            row
+            for row in exported
+            if row.invocation.recorded_at == _RECORDED_AT + timedelta(seconds=1)
+        ]
+
+        assert [row.invocation.id for row in tied] == ["i-3", "i-4"]
+
+    async def test_the_invocation_order_is_not_the_order_the_rows_were_appended_in(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4: the listing orders the instant a row was **recorded**.
+
+        The two disagree here by construction, and deliberately so: ADR-0192 §2 has
+        the *ledger* decide every admission rule on its durable append order "so a
+        wall clock that steps backwards cannot make a completed act stop being the
+        most recent one", while §4's listing is ordered on ``recorded_at``. Both are
+        true at once, and an implementation relaying the append order satisfies
+        neither clause it thought it was satisfying.
+        """
+        exported = await invocations.engine.export_invocations()
+
+        appended = tuple(row_id for row_id, _, _, _ in _SEEDED_INVOCATIONS)
+        assert appended != _INVOCATION_ORDER, "the fixture must make the two disagree"
+        assert tuple(row.invocation.id for row in exported) == _INVOCATION_ORDER
+
+    async def test_the_invocation_listing_is_a_prefix_of_the_export(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4: ``recent_invocations(limit=n)`` is the first ``n`` of the export.
+
+        Asserted for an ``n`` **short of, equal to and past** the row count, which
+        ADR-0192 §9 requires by name: at ``n`` past the count the two answers are
+        the same whole sequence, and an implementation that padded, wrapped or
+        raised there would be a page that lies about the trail rather than about
+        itself.
+        """
+        exported = await invocations.engine.export_invocations()
+
+        for size in range(1, len(_INVOCATION_ORDER) + 3):
+            page = await invocations.engine.recent_invocations(limit=size)
+            assert page == exported[:size], f"the page of {size} is not the export's prefix"
+
+    async def test_each_invocation_operation_reaches_its_own_store_read_and_no_other(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4: the listing reads ``recent_invocations``, the export reads its twin.
+
+        The decision block's clause one row kind over, and it also pins the negative
+        that matters most here: **neither operation reads the decision store**.
+        ADR-0192 §4 has the engine relay precisely because the join is the store's,
+        so an implementation that read rows and then read their decisions would
+        leave ``recent`` or ``export`` in this log — and would have an ``await``
+        between the two that a ``clear()`` can land in (§2).
+        """
+        await invocations.engine.recent_invocations(limit=2)
+
+        assert invocations.trail.reads == ["recent_invocations"]
+
+        invocations.trail.reads.clear()
+        await invocations.engine.export_invocations()
+
+        assert invocations.trail.reads == ["export_invocations"]
+
+    async def test_the_invocation_export_is_not_bounded_by_the_listing_s_default_page(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0192 §4: the export "takes no argument and pages nothing".
+
+        The observable half of that clause, over a trail larger than
+        :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` — the size at which a
+        truncating implementation stops agreeing with a conforming one, and the
+        size at which an ``export_invocations`` written as
+        ``recent_invocations(limit=50)`` turns the artifact discharging ADR-0004 §6
+        into the partial export §4 forbids "without saying so".
+
+        Seeded by the case rather than by a fixture, because what every other case
+        needs is a trail small enough to state §4's order over by name. The rows are
+        claims under fresh decisions for :data:`_SEEDED_INVOCATIONS`' reason: the
+        ruled tool is side-effecting with ``Idempotency.NONE``, so ADR-0192 §1's
+        consume admits one claim per authorisation.
+        """
+        for index in range(DEFAULT_PAGE_SIZE):
+            decision_id = f"x-{index:03d}"
+            await invocations.trail.record(
+                _ruling(decision_id, at=_RULED_AT - timedelta(seconds=index + 1))
+            )
+            await invocations.trail.claim_invocation(
+                decision=await _recorded(invocations.trail, decision_id)
+            )
+        invocations.trail.reads.clear()
+
+        exported = await invocations.engine.export_invocations()
+
+        assert len(exported) == len(_SEEDED_INVOCATIONS) + DEFAULT_PAGE_SIZE
+        assert await invocations.engine.recent_invocations() == exported[:DEFAULT_PAGE_SIZE]
+
+    @pytest.mark.parametrize("bad", [0, -1, 2**63])
+    async def test_recent_invocations_refuses_a_non_positive_limit_locally(
+        self, invocations: InvocationSubject, bad: int
+    ) -> None:
+        """ADR-0192 §4's local-refusal clause, over §9's enumerated values.
+
+        ``AuditTrail.recent_invocations`` refuses a non-positive ``limit`` and
+        ADR-0085 §9 would admit zero, and §4 resolves that by refusing it
+        **locally in every implementation** — ``recent_decisions``' rule, stated
+        again for this pair rather than inherited, because §4 states it in its own
+        terms.
+
+        The untouched log is the half that says *locally*: a client that shipped
+        ``limit=0`` to the hub would be exactly the silently more permissive
+        implementation ADR-0085 §9 forbids, and would leave a read behind here.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await invocations.engine.recent_invocations(limit=bad)
+
+        assert invocations.trail.reads == []
+
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    async def test_an_invocation_limit_that_is_not_an_integer_is_refused_locally(
+        self, invocations: InvocationSubject, bad: object
+    ) -> None:
+        """The type before the range (ADR-0192 §4, §9).
+
+        ``0 < 1.5 < 2**63`` is true, so a range check alone admits a float; and
+        ``True`` is an ``int`` that would silently mean a page of one, which is a
+        wrong answer rather than a refusal. ADR-0192 §4 names the ``bool`` case
+        explicitly for that reason.
+        """
+        with pytest.raises(TypeError, match=r"\w"):
+            # The wrong *type* is the point of the case, so the annotation is
+            # deliberately violated here.
+            await invocations.engine.recent_invocations(limit=bad)  # type: ignore[arg-type]
+
+        assert invocations.trail.reads == []
+
+    def test_the_invocation_page_size_default_is_the_declared_one(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0085 §3a reaches ``recent_invocations`` like every other paging method."""
+        parameter = inspect.signature(invocations.engine.recent_invocations).parameters["limit"]
+        assert parameter.default == DEFAULT_PAGE_SIZE
+
+    def test_the_invocation_export_takes_no_argument(self, invocations: InvocationSubject) -> None:
+        """ADR-0192 §4: no ``limit``, no ``offset``, no filter, no cursor.
+
+        "There is no ``offset``" is the ADR's own sentence, and the export's
+        argument list is where a later lane would put one. Asserted over the
+        signature because the failure is an argument being **added**, which no call
+        that omits it would ever notice.
+        """
+        assert inspect.signature(invocations.engine.export_invocations).parameters == {}
+
+    async def test_both_invocation_reads_return_a_tuple(
+        self, invocations: InvocationSubject
+    ) -> None:
+        """ADR-0085 §3b: a caller that mutated what it was handed changed nothing."""
+        assert isinstance(await invocations.engine.recent_invocations(), tuple)
+        assert isinstance(await invocations.engine.export_invocations(), tuple)
+
+    async def test_neither_invocation_read_returns_a_mixed_sequence(
+        self, invocations: InvocationSubject, decisions: DecisionSubject
+    ) -> None:
+        """ADR-0192 §4: two row kinds, two operations, two sequences.
+
+        "No operation returns a mixed sequence; no lane widens ADR-0186 §1's return
+        type or adds a ``ToolInvocation`` or a ``RecordedInvocation`` to what
+        ``recent_decisions`` or ``export_decisions`` returns." Asserted over the
+        **values** rather than over the annotations, because a widening arrives as a
+        row of the wrong type in a real answer and an annotation a lane forgot to
+        change would hide it.
+
+        The decision half is asserted over a trail that holds invocation rows too,
+        which is the only arrangement in which the mixing could happen at all: the
+        rows are on one store, and §4's separation is a claim about the two
+        operations rather than about two databases.
+        """
+        for row in await invocations.engine.recent_invocations():
+            assert isinstance(row, RecordedInvocation)
+        for row in await invocations.engine.export_invocations():
+            assert isinstance(row, RecordedInvocation)
+
+        for ruled in await invocations.engine.recent_decisions():
+            assert isinstance(ruled, PermissionDecision)
+        for ruled in await invocations.engine.export_decisions():
+            assert isinstance(ruled, PermissionDecision)
+        assert decisions.trail is not invocations.trail, "two subjects, so neither case is vacuous"
+
+    @pytest.mark.parametrize("operation", ["recent_invocations", "export_invocations"])
+    async def test_an_invocation_read_that_fails_is_reported_as_the_failure_it_was(
+        self, invocations: InvocationSubject, operation: str
+    ) -> None:
+        """The store's declared failure reaches the caller as itself, on both reads.
+
+        ``AuditError`` is what both invocation reads raise when the trail cannot be
+        read **or holds a row it could not pair with a decision** — the corrupt
+        state ADR-0192 §2's join reports rather than silently dropping. A clause the
+        shared suite is the only place for, because the three implementations reach
+        it by three different routes: the in-process pair let the exception out of a
+        relayed store call, while the client has to recognise the type on an error
+        frame and rebuild it (ADR-0085 §10a).
+
+        What it forecloses is the same plausible kindness the decision case names:
+        an implementation answering ``()`` for an unreadable trail would tell a user
+        nothing ever ran, which is the one wrong answer this surface can give.
+        """
+        invocations.trail.fail_with = AuditError("the trail is not readable")
+
+        with pytest.raises(AuditError):
+            await getattr(invocations.engine, operation)()
+
+    async def test_an_invocation_export_too_large_for_the_frame_is_refused_whole(
+        self, overfull_invocations: AssistantEngine
+    ) -> None:
+        """ADR-0192 §4: the oversized **result**, refused whole and never truncated.
+
+        "No implementation truncates the artifact, samples it, or returns a partial
+        export without saying so", and the refusal is typed so a client renders it
+        as one rather than mistaking it for a trail with nothing in it.
+
+        The neighbouring read still answers at the same limit, which is the control:
+        a case that only asserted the raise would pass against an implementation
+        whose limit was simply too small for anything at all. That control is worth
+        more here than on either other pair, because §4's ground for reusing
+        ADR-0085 §8c unchanged is precisely that this projection is **small** — so a
+        limit at which no single row fits would be testing a premise the ADR denies.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_invocations.export_invocations()
+
+        assert await overfull_invocations.recent_invocations(limit=1) != ()
 
 
 def backwards_clock() -> Callable[[], datetime]:
