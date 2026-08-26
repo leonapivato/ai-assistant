@@ -93,18 +93,36 @@ RECIPIENT_GRANT_EXPIRES_AT: Final = RECIPIENT_GRANT_DECIDED_AT + timedelta(days=
 #: about liveness moves this rather than the record.
 RECIPIENT_GRANT_NOW: Final = RECIPIENT_GRANT_DECIDED_AT + timedelta(hours=1)
 
-#: The declaration a scripted grant is about unless a test names another. It
-#: **discloses**, because ADR-0148 §8's second clause makes a non-empty
+#: The declaration a scripted grant is about unless a test names another.
+#:
+#: **It discloses**, because ADR-0148 §8's second clause makes a non-empty
 #: ``discloses`` true of every tool registered at the egress seam — so a grant
 #: over a non-disclosing declaration would be a grant covering calls that never
 #: needed one, and a policy test built on it would prove nothing about the floor
 #: route (b) exists to relieve (ADR-0021 §5, §6).
+#:
+#: **And it trips nothing else**: ``LOW`` risk, ``REVERSIBLE``, at a known cost.
+#: That is deliberate and is the opposite of realistic — the shipped
+#: ``send_email`` declares ``HIGH`` risk, ``IRREVERSIBLE`` and an ``UNKNOWN``
+#: cost — because a grant discharges the **disclosure** ground and nothing else
+#: (ADR-0193 §3): every other clause is an independent floor or a threshold the
+#: user configured, and a base declaration that tripped one of them would leave a
+#: policy case unable to tell "the grant was consulted and used" from "the grant
+#: was never reached". A case that wants one of those grounds raises that field on
+#: a copy of this, which is what ADR-0193 §14's independent-floor clause asks for.
+#:
+#: **What that says about the running system is real and is not this constant's to
+#: fix.** With ``send_email``'s declaration as it stands, three clauses fire beside
+#: the disclosure floor, and one of them — ``UNKNOWN`` cost — is a floor no
+#: configuration reaches, so route (b) cannot fire for it — recorded as **#1593**
+#: rather than repaired here, because a declared cost is the budget lane's and
+#: ADR-0193 §13 forbids citing that ADR toward it.
 RECIPIENT_GRANT_TOOL: Final = ToolDefinition(
     id="send_email",
     capability="send_email",
     description="Send an email through the connected account.",
     risk_level=RiskLevel.LOW,
-    reversibility=Reversibility.IRREVERSIBLE,
+    reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
     reads=(),
     writes=(),
