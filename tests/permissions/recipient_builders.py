@@ -20,7 +20,7 @@ Not a conformance suite itself: nothing here asserts anything.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     ActionRequest,
@@ -261,6 +261,35 @@ class MovableClock:
         """
         self._step = step
 
+    def reset(self) -> MovableClock:
+        """Return this clock to its starting reading, step and count.
+
+        Returns:
+            This clock, so a fixture can reset and hand it over in one expression.
+        """
+        self._at = NOW
+        self._step = timedelta(0)
+        self.readings = 0
+        return self
+
+
+#: The one clock every recipient-grant subject in these suites is built over.
+#:
+#: **A module-level object rather than a per-test one**, and the reason is
+#: ``tests/core/test_protocol_triad.py``. That check proves a binding by
+#: *evaluating* the subject fixture — "only running the fixture shows what the
+#: conformance suite is actually handed" — and it can only evaluate one whose
+#: signature is exactly ``self``. A subject fixture taking a ``clock`` fixture is a
+#: deliberate false negative there, so the canonical fakes would go unbound and the
+#: triad rule would report a gap that is not one.
+#:
+#: The alternative was to stop injecting a clock at all, which would have cost the
+#: liveness interval and the single-read clause every case that pins them. So the
+#: clock is shared and :meth:`MovableClock.reset` is what makes it per-test:
+#: ``RecipientGrantsContract.clock`` resets it before every case, tests within a
+#: worker run one at a time, and xdist workers are separate processes.
+SHARED_CLOCK: Final = MovableClock()
+
 
 __all__ = [
     "ACCOUNT",
@@ -271,6 +300,7 @@ __all__ = [
     "EXPIRES",
     "NOW",
     "OTHER_ACCOUNT",
+    "SHARED_CLOCK",
     "TOOL",
     "MovableClock",
     "account_member",

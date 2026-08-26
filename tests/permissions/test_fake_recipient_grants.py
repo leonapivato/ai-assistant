@@ -19,7 +19,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from recipient_builders import ALICE, AT, MovableClock, binding, member, request
+from recipient_builders import (
+    ALICE,
+    AT,
+    SHARED_CLOCK,
+    MovableClock,
+    binding,
+    member,
+    request,
+)
 from recipient_grant_contract import (
     CEILING,
     RecipientGrantResolutionContract,
@@ -48,8 +56,17 @@ class TestFakeRecipientGrantsContract(RecipientGrantsContract):
     """``FakeRecipientGrants`` against the query seam's clauses."""
 
     @pytest.fixture
-    def grants(self, clock: MovableClock) -> RecipientGrants:
-        return FakeRecipientGrants(now=clock)
+    def grants(self) -> RecipientGrants:
+        """The fake, over the suite's shared clock.
+
+        Takes **only** ``self``, which is not a style choice:
+        ``tests/core/test_protocol_triad.py`` proves a binding by *evaluating* this
+        fixture, and one that requested the ``clock`` fixture instead would be a
+        deliberate false negative there — the fake would go unbound and the triad
+        rule would report a gap that is not one.
+        ``RecipientGrantsContract.clock`` resets the same object per case.
+        """
+        return FakeRecipientGrants(now=SHARED_CLOCK)
 
     async def given(self, grants: RecipientGrants, *records: RecipientGrant) -> None:
         assert isinstance(grants, FakeRecipientGrants)
@@ -76,6 +93,17 @@ class TestFakeRecipientGrantStoreContract(RecipientGrantStoreContract):
     rather than through a second object — which is what makes the inheritance
     evidence rather than decoration.
     """
+
+    @pytest.fixture
+    def store(self) -> RecipientGrantStore:
+        """The fake, over the suite's shared clock, at the suite's ceiling.
+
+        Overridden from :class:`RecipientGrantStoreContract` so it takes **only**
+        ``self`` — see :meth:`TestFakeRecipientGrantsContract.grants` for why. The
+        inherited definition routes through :meth:`make_store`, which the ceiling
+        cases still use because they build stores at a ceiling of their own.
+        """
+        return FakeRecipientGrantStore(max_outstanding=CEILING, now=SHARED_CLOCK)
 
     def make_store(self, *, max_outstanding: int, now: MovableClock) -> RecipientGrantStore:
         return FakeRecipientGrantStore(max_outstanding=max_outstanding, now=now)
