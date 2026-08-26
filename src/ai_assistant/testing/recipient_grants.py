@@ -41,7 +41,7 @@ only honour by violating their own contract is refused where it is written
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Final, NamedTuple, final
 from uuid import uuid4
 
 from ai_assistant.core.clock import checked_clock
@@ -289,6 +289,101 @@ def recipient_revocation_of(
     )
 
 
+def _named(given: object) -> str:
+    """Name ``given`` for a refusal message, without reading an attribute of it.
+
+    ``given.id`` is not available: the value reaching :func:`_revalidated` is
+    whatever the caller passed, and a record whose ``__dict__`` is missing a field
+    — or a value that is not a record at all — has no ``id`` attribute, so
+    composing the message from one would replace the refusal this layer owes with
+    a builtin escaping its error boundary. ``isinstance`` is inside the guard with
+    everything else, because asking what something is consults ``__class__``,
+    which can be a property that raises.
+
+    Nothing here hashes a key the caller controls: a model's ``__dict__`` is
+    annotated ``dict[str, Any]`` and nothing enforces it at runtime, so a key can
+    be an object whose ``__hash__`` collides with a field name and whose ``__eq__``
+    raises on the comparison that collision provokes. Iterating hashes nothing, and
+    only a real ``str`` — whose hash and equality are the interpreter's — is asked
+    whether it names the id.
+    """
+    try:
+        if isinstance(given, RecipientGrant):
+            for key, value in object.__getattribute__(given, "__dict__").items():
+                if type(key) is str and key == "id":
+                    return describe_untrusted(value)
+    except Exception:  # the value cannot even be named; say so and carry on
+        return "the given value"
+    return "the given value"
+
+
+class _CoverageSubject(NamedTuple):
+    """The three values ADR-0193 §3's store-side comparisons are decided over.
+
+    Built by :func:`_coverage_subject` before the first ``await`` and consulted
+    afterwards in its place, so that one lookup answers about one request.
+    """
+
+    tool: ToolDefinition
+    account: BoundAccount
+    wanted: tuple[CanonicalDestination, ...]
+
+    def covered_by(self, grant: RecipientGrant) -> bool:
+        """Whether ``grant`` covers this subject — §3's four store-side comparisons.
+
+        Containment is membership and nothing looser: no case folding, no domain
+        matching, no treating an account member as covering a recipient member or
+        the reverse, and no re-canonicalising either side. Liveness is the
+        caller's, because the clock is read once for the whole lookup.
+        """
+        return (
+            grant.tool == self.tool
+            and grant.account == self.account
+            and all(member in grant.destinations for member in self.wanted)
+        )
+
+
+def _coverage_subject(request: ActionRequest) -> _CoverageSubject | None:
+    """What ``request`` asks this store, as values, or ``None`` if it asks nothing.
+
+    **Read before the first await, and detached** (ADR-0065). A lookup suspends —
+    for a lock, for a read, or for whatever a double models — and a frozen model
+    is rewritable through ``__dict__``, so a caller can replace ``request.tool``
+    while the lookup waits. An implementation that captured the destination set on
+    the way in and re-read the declaration on the way out would then return the
+    grant established for the *second* tool as covering the *first* tool's
+    recipients — an answer describing neither request, from the seam whose answer
+    is the gate.
+
+    Detached as well as captured, because capturing the objects leaves the same
+    rewrite available one level down. ``ActionRequest`` already takes its own copy
+    of both the declaration and the binding at construction
+    (``core.types._detached_tool`` and ``_detached_binding``), so this is that
+    discipline continued across a suspension rather than a new one, and it is
+    spelled the way those are: rebuilt through validation, never deep-copied.
+
+    ``None`` **covers nothing and is not an error.** A request with no binding is
+    not an egress call and this store has no question to answer about it; a
+    request that cannot be read as one at all is answered the same way, which is
+    the fail-closed direction — no grant, so the disclosure floor stands and the
+    user is asked (ADR-0193 §1's fail-closed clause, §7's floors).
+    """
+    binding = request.egress_binding
+    if binding is None:
+        return None
+    try:
+        return _CoverageSubject(
+            tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
+            account=BoundAccount.model_validate(field_state(BoundAccount, binding.account)),
+            wanted=tuple(
+                CanonicalDestination.model_validate(field_state(CanonicalDestination, member))
+                for member in binding.canonical_destination_set
+            ),
+        )
+    except Exception:  # a request this store cannot read coherently is covered by nothing
+        return None
+
+
 class _RecipientGrantLog:
     """The append-only history all three fakes answer from (ADR-0193 §1).
 
@@ -353,7 +448,6 @@ class _RecipientGrantLog:
                 count above the ceiling, or if it revokes and fails any of §1's
                 invariants.
         """
-        fields = dict(object.__getattribute__(grant, "__dict__"))
         try:
             snapshot = RecipientGrant.model_validate(field_state(RecipientGrant, grant))
         except ValueError as exc:
@@ -361,7 +455,7 @@ class _RecipientGrantLog:
             # re-raises a `ValueError` the caller's own code raised, and a hostile
             # `__str__` on it would replace this refusal with whatever it threw —
             # from inside the `except` block that exists to report it.
-            named = describe_untrusted(fields.get("id"))
+            named = _named(grant)
             msg = f"recipient grant {named} is not a valid record: {describe_untrusted(exc)}"
             raise InvalidRecipientGrantError(msg) from exc
         if any(held.id == snapshot.id for held in self._records):
@@ -520,8 +614,10 @@ class _RecipientGrantLog:
             held for held in self._outstanding() if held.decided_at <= instant < held.expires_at
         ]
 
-    def covering(self, request: ActionRequest, instant: datetime) -> RecipientGrant | None:
-        """The live grant covering ``request``, detached, or ``None``.
+    def covering(
+        self, subject: _CoverageSubject | None, instant: datetime
+    ) -> RecipientGrant | None:
+        """The live grant covering ``subject``, detached, or ``None``.
 
         Four of ADR-0193 §3's five comparisons — liveness, tool equality by value,
         account equality by value, and containment of the request's canonical
@@ -535,6 +631,11 @@ class _RecipientGrantLog:
         comparison is :class:`~ai_assistant.core.types.CanonicalDestination`'s
         own, over every field and never across protocols.
 
+        **The request is read before the caller's first await**, never here: the
+        subject arrives as values (:func:`_coverage_subject`), so a double that
+        suspends inside its modelled resource cannot answer about a request that
+        was rewritten while it waited (ADR-0065).
+
         **Precedence is total** (ADR-0193 §1): the greatest ``decided_at`` wins,
         ties broken by the least ``id`` under code-point order. Two passes over a
         stable sort rather than one composite key, because the two halves run in
@@ -543,17 +644,9 @@ class _RecipientGrantLog:
         match it found would give two conforming implementations different answers
         for one state.
         """
-        binding = request.egress_binding
-        if binding is None:
+        if subject is None:
             return None
-        wanted = binding.canonical_destination_set
-        matching = [
-            held
-            for held in self._live(instant)
-            if held.tool == request.tool
-            and held.account == binding.account
-            and all(member in held.destinations for member in wanted)
-        ]
+        matching = [held for held in self._live(instant) if subject.covered_by(held)]
         if not matching:
             return None
         by_id = sorted(matching, key=lambda held: held.id)
@@ -753,11 +846,12 @@ class FakeRecipientGrants:
             RecipientGrantError: If a failure is scripted
                 (:meth:`fail_covering`), wrapping it as ``__cause__``.
         """
+        subject = _coverage_subject(request)
         self._calls += 1
         if self._failure is not None:
             msg = "fake: the recipient-grant store could not be read"
             raise RecipientGrantError(msg) from self._failure
-        return self._log.covering(request, self._clock())
+        return self._log.covering(subject, self._clock())
 
 
 @final
@@ -1011,9 +1105,10 @@ class FakeRecipientGrantStore:
         Raises:
             RecipientGrantError: If a read fault is scripted (:meth:`fail_reads`).
         """
+        subject = _coverage_subject(request)
         self._refuse_read()
         async with self._resource.held():
-            return self._log.covering(request, self._clock())
+            return self._log.covering(subject, self._clock())
 
     async def outstanding(self, grant_id: str) -> RecipientGrant | None:
         """Return the outstanding granting record with ``grant_id``, or ``None``.
