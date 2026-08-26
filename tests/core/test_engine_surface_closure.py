@@ -138,20 +138,27 @@ _NAMESPACE: Final = {
 #: The walk reaches it through **two** optional hops, ``Question.retires ->
 #: Retirement.warrant``, and terminates immediately: ``BeliefBand``, ``bool`` and
 #: ``Attestation`` are all already here.
-#: ``ToolInvocation`` and ``RecordedInvocation`` are **not** here yet, and their
-#: absence is this test working rather than an omission. ADR-0192 §9 says they join
-#: this set; the operations that name them are §4's and land with that ADR's
-#: *surface* group, so nothing on the surface reaches them today and
-#: :func:`test_the_walk_reaches_every_promoted_type` would fail on a promotion the
-#: walk cannot arrive at. What the paired lane owed was the **placement**: they are
-#: declared *after* :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, so
+#: The fortieth and forty-first are ADR-0192 §4's ``RecordedInvocation`` and the
+#: ``ToolInvocation`` it carries: the row this system writes when it spends an
+#: authorisation on an act, joined to the tool identifier, the capability and the
+#: egress boolean its decision fixes. The walk reaches them through
+#: ``recent_invocations`` and ``export_invocations``, and it terminates there —
+#: ``ToolOutcome``, ``ToolFailureKind`` and ``ToolCost`` are all already inside this
+#: closure through ``StepOutcome`` and ``ToolDefinition``, and the row carries
+#: nothing else.
+#:
+#: **The paired lane owed the placement and this one owes the entry**, which is the
+#: mechanism working rather than two lanes remembering. They are declared *after*
+#: :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, so
 #: :func:`_declared_by_this_change` counts them and
-#: :func:`test_the_promoted_set_is_the_one_the_adrs_gathered` fails the moment the
-#: walk reaches them — which is what makes the surface group add them here rather
-#: than remember to. Declared ahead of that boundary they would have been sorted as
-#: pre-existing leaves and this check would never have asked.
+#: :func:`test_the_promoted_set_is_the_one_the_adrs_gathered` failed the moment the
+#: walk reached them — the failure this lane resolved by adding them here. Declared
+#: ahead of that boundary they would have been sorted as pre-existing leaves and
+#: this check would never have asked.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "ToolInvocation",
+        "RecordedInvocation",
         "ContinuationToken",
         "Confirmation",
         "StepOutcome",
@@ -411,13 +418,29 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ADR-0177 §1's own closed enumeration rather than by any inheritance, so its
     thirty is unmoved.
 
+    ADR-0192 §4's two take it to thirty-eight: ``recent_invocations`` and
+    ``export_invocations``, the audit trail's **third** pair and its second row
+    kind — what this system did on an authorisation, where the pair above says what
+    was decided about one. Two for ADR-0186 §1's reason exactly, and *two
+    operations rather than one interleaved listing* for a reason of §4's own: a
+    mixed sequence would have to change what ``recent_decisions`` returns, which
+    ADR-0186 §1's first clause fixes, and would put ADR-0188 §7's merge inside the
+    contract — "at which point either this record is rendered as a ruling, which is
+    false, or the rulings are rendered as transmissions". ``AuditTrail``'s
+    ``open_invocations`` is deliberately **not** here, and its reason is
+    ``resolution_of``'s one row kind over: it answers no question a user can ask —
+    it is the exact set ADR-0192 §3's recovery scan is written against, reserving
+    every id it returns — and promoting it would put a claim-reservation call one
+    request away on a remote transport. Neither of the two is a browser operation,
+    by ADR-0177 §1's own closed enumeration, so its thirty is unmoved.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 36
+    assert len(_method_names()) == 38
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -544,6 +567,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     for putting the note on the change that adds the methods, not a clause §10
     carries over.
 
+    **ADR-0192 §4 is under the first limb, and under the second as well** — the
+    second time a bump has had two grounds rather than one, ADR-0173 §11 being the
+    first. ``recent_invocations`` and ``export_invocations`` take the method set to
+    thirty-eight and the version to 15, and the first limb decides it on 12's and
+    14's reasoning without amendment: ``wire/surface.METHODS`` is derived from the
+    Protocol, so a version 15 client sending ``export_invocations`` to a version 14
+    hub is refused there. The second limb is reached because a wire-carried ``core``
+    type really did change — ``ToolResult`` gained ``incurred_cost`` in ADR-0192's
+    paired lane — and ADR-0192 §9 puts that arithmetic here rather than there: "a
+    bump is owed at the surface group whether or not the field reached the wire
+    earlier — ADR-0124 §9's obligation is on whoever moves the set." So this entry
+    carries no "no ``core`` type changes for it" sentence, unlike 12's and 14's.
+    ``ToolInvocation`` and ``RecordedInvocation`` are new *promoted* types rather
+    than new wire declarations, reaching the surface by being named in a return
+    annotation, exactly as ``Warrant`` did at 13.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -552,7 +591,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (36, 14), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (38, 15), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
