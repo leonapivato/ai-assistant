@@ -1,0 +1,413 @@
+"""Tests for the ``--start``/``--wait`` modes of scripts/codex-review.sh (issue #1594).
+
+A round runs for minutes, and a caller that cannot hold one process open that long
+has to start it and poll it instead. What these pin is the part that decides
+whether such a caller behaves: the three answers ``--wait`` gives, the exit status
+carrying each — 0 recorded, 3 ``still running``, 4 no round in flight for HEAD's
+tree — and the **tree match** that decides which of them is right. A wait that
+reported a round running on some other tree would hand the caller a review of
+content it has already changed, which is the failure the tree match exists for, so
+it is exercised by breaking it: a commit lands under a round in flight.
+
+The property underneath all of it is that ``--start`` launches the driver's own
+foreground round rather than reimplementing one, so the artifact ``--wait`` reports
+is the artifact the round recorded — asserted directly rather than assumed.
+
+Driven with the shared fake ``codex`` (``_fake_codex``), so no OpenAI call happens.
+``FAKE_CODEX_PRE_CMD`` is what makes a round slow enough to observe in flight.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_codex import (  # path-inserted shared test helper
+    SCRIPT,
+    artifact_for,
+    bash,
+    install_fake_codex,
+    require_artifact,
+    review_env,
+    run_review,
+)
+
+_GIT = shutil.which("git")
+
+# The three answers, named. A caller's next move differs for each, and confusing
+# two of them is precisely what the modes exist to stop (see the module docstring).
+RECORDED = 0
+STILL_RUNNING = 3
+NOT_IN_FLIGHT = 4
+USAGE = 2
+
+
+def _git(repo: Path, *args: str) -> str:
+    assert _GIT is not None
+    return subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "docs" / "review").mkdir(parents=True)
+    (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
+    (repo / ".gitignore").write_text(".review/\n")
+    (repo / "f.txt").write_text("one\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-qb", "feature")
+    (repo / "f.txt").write_text("two\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "change")
+
+
+def _commit(repo: Path, content: str, message: str) -> None:
+    (repo / "f.txt").write_text(content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", message)
+
+
+def _tree(repo: Path) -> str:
+    return _git(repo, "rev-parse", "HEAD^{tree}")
+
+
+def _env(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    """The fake on PATH, an isolated CODEX_HOME, and a one-second poll."""
+    install_fake_codex(tmp_path / "bin")
+    return review_env(tmp_path, CODEX_REVIEW_WAIT_INTERVAL="1", **overrides)
+
+
+def _run(repo: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test env
+        [bash(), str(SCRIPT), *args],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _fields(stdout: str) -> dict[str, str]:
+    """The ``key=value`` lines a mode writes to stdout, as a mapping."""
+    out = {}
+    for line in stdout.splitlines():
+        key, _, value = line.partition("=")
+        out[key] = value
+    return out
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _round_pids(repo: Path) -> list[int]:
+    pids = []
+    for marker in (repo / ".review" / "session").glob("*.round"):
+        for line in marker.read_text().splitlines():
+            if line.startswith("pid="):
+                with contextlib.suppress(ValueError):
+                    pids.append(int(line.removeprefix("pid=")))
+    return pids
+
+
+def _reap(repo: Path, seconds: float = 60.0) -> None:
+    """Block until no round this repo started is still running.
+
+    A detached round outlives the ``--start`` that launched it — that is the whole
+    point of it — so a test that leaves one in flight would leave a process writing
+    into a ``tmp_path`` pytest is about to remove. Every test that starts a round it
+    does not wait out reaps it here.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not any(_alive(pid) for pid in _round_pids(repo)):
+            return
+        time.sleep(0.2)
+
+
+def _await_round(repo: Path, seconds: float = 30.0) -> None:
+    """Block until a round has published the tree it pinned.
+
+    `--start` does this for its caller and does not return until it has. A round
+    launched some other way — the foreground one below — has no such handshake, so a
+    test that polls it must wait for the round to establish itself first, or it is
+    racing a process that has not reached its first statement.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        for marker in (repo / ".review" / "session").glob("*.round"):
+            if f"tree={_tree(repo)}" in marker.read_text():
+                return
+        time.sleep(0.2)
+    raise AssertionError("no round published a tree within the deadline")
+
+
+def test_start_returns_while_the_round_runs_and_wait_reports_its_artifact(tmp_path: Path) -> None:
+    """The split's whole point, end to end — and the artifact is the round's own."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 3")
+
+    started = _run(repo, env, "--start", "adversarial", "main")
+
+    assert started.returncode == 0, started.stderr
+    fields = _fields(started.stdout)
+    assert fields["tree"] == _tree(repo)
+    assert fields["sha"] == _git(repo, "rev-parse", "HEAD")
+    assert fields["loop_id"] not in ("", "noloop")
+    # It really did return before the round finished: the fake is still sleeping.
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
+
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+
+    assert waited.returncode == RECORDED, waited.stderr
+    reported = _fields(waited.stdout)
+    assert reported["verdict"] == "APPROVE"
+    assert reported["tree"] == _tree(repo)
+    assert reported["round"] == "1"
+    # Not "an" artifact — the one the round recorded. `--start` re-executes the
+    # driver's foreground form, so there is no second thing that could be reported.
+    assert repo / reported["artifact"] == require_artifact(repo, _git(repo, "rev-parse", "HEAD"))
+
+
+def test_a_wait_that_times_out_says_still_running_and_loses_nothing(tmp_path: Path) -> None:
+    """Exit 3 is 'ask again'. The round survives the deadline that reported it."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 4")
+    _run(repo, env, "--start", "adversarial", "main")
+
+    early = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "1")
+
+    assert early.returncode == STILL_RUNNING
+    assert "still running" in early.stderr
+    assert early.stdout == ""
+
+    later = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+
+    assert later.returncode == RECORDED, later.stderr
+    assert _fields(later.stdout)["verdict"] == "APPROVE"
+
+
+def test_wait_refuses_a_round_that_is_reviewing_a_different_tree(tmp_path: Path) -> None:
+    """Break the tree match: commit under a round in flight.
+
+    A round is in flight and its lock is held, so a wait that matched on the lock
+    alone would keep waiting and then report a review of the tree the author has
+    just moved off. `--wait` is asked about HEAD's tree, so it names both trees and
+    exits 4 — no round is in flight *for that tree*, which is the truth.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 6")
+    _run(repo, env, "--start", "adversarial", "main")
+    reviewed_tree = _tree(repo)
+
+    _commit(repo, "three\n", "a commit landing under the round")
+    moved = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+
+    assert moved.returncode == NOT_IN_FLIGHT
+    assert reviewed_tree[:12] in moved.stderr
+    assert _tree(repo)[:12] in moved.stderr
+    assert moved.stdout == ""
+    # And the round in flight records nothing for either tree: the driver's own
+    # settled-tree check refuses it, which is what makes exit 4 the honest answer.
+    _reap(repo)
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
+
+
+def test_wait_says_no_round_is_in_flight_when_none_was_started(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = _run(repo, _env(tmp_path), "--wait", "adversarial", "main", "--timeout", "0")
+
+    assert result.returncode == NOT_IN_FLIGHT
+    assert "no 'adversarial' round is in flight" in result.stderr
+    assert "--start adversarial" in result.stderr
+
+
+def test_wait_reports_a_round_that_died_without_recording(tmp_path: Path) -> None:
+    """The third shape of exit 4, and the one a caller cannot diagnose alone.
+
+    The round claimed the loop and then failed a validation, so there is a marker
+    for HEAD's tree, no lock, and no artifact. Polling forever is the wrong move and
+    so is starting a second round blindly; `--wait` says which it is and shows the
+    detached round's own output.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_REVIEW="", FAKE_CODEX_PRE_CMD="sleep 1")
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    result = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+
+    assert result.returncode == NOT_IN_FLIGHT
+    assert "is no longer" in result.stderr
+    assert "recorded no artifact" in result.stderr
+    assert "codex produced an empty review" in result.stderr
+
+
+def test_start_refuses_a_second_round_of_the_same_persona(tmp_path: Path) -> None:
+    """ADR-0015 and #142's rule, refused at the start rather than in a log."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    second = _run(repo, env, "--start", "adversarial", "main")
+
+    assert second.returncode == 1
+    assert "already running" in second.stderr
+    assert "--wait adversarial" in second.stderr
+    _reap(repo)
+
+
+def test_wait_attributes_a_round_started_in_the_foreground(tmp_path: Path) -> None:
+    """Issue #1594's second recorded case: a foreground call cut off mid-round.
+
+    Nothing about that round is detached, so `--start` never ran and there is no
+    log — but a round publishes the tree it pinned whichever way it was launched,
+    so the poll still finds it rather than reporting nothing in flight.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
+    foreground = subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script
+        [bash(), str(SCRIPT), "adversarial", "main"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _await_round(repo)
+        waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+    finally:
+        foreground.wait(timeout=60)
+
+    assert waited.returncode == RECORDED, waited.stderr
+    assert _fields(waited.stdout)["verdict"] == "APPROVE"
+
+
+def test_wait_reports_an_artifact_that_is_already_recorded(tmp_path: Path) -> None:
+    """No round need be in flight: the question is about HEAD's tree, not a process."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_review(repo, tmp_path)
+
+    result = _run(repo, _env(tmp_path), "--wait", "adversarial", "main", "--timeout", "0")
+
+    assert result.returncode == RECORDED, result.stderr
+    reported = _fields(result.stdout)
+    assert reported["round"] == "1"
+    assert reported["verdict"] == "APPROVE"
+
+
+def _path_without_codex() -> str | None:
+    """A PATH carrying the tools the script needs but no ``codex``, or ``None``."""
+    dirs: list[str] = []
+    for tool in ("git", "bash", "sed", "awk", "grep", "head", "tail", "date", "flock"):
+        found = shutil.which(tool)
+        if found is None:
+            continue
+        parent = str(Path(found).parent)
+        if parent not in dirs:
+            dirs.append(parent)
+    path = os.pathsep.join(dirs)
+    if shutil.which("git", path=path) is None or shutil.which("codex", path=path) is not None:
+        return None
+    return path
+
+
+def test_wait_does_not_need_the_codex_cli(tmp_path: Path) -> None:
+    """It reads `.review/` and a lock file and calls nothing.
+
+    Requiring the CLI it never invokes would fail the one mode whose job is to
+    REPORT on a round — including a round started on a host this one only observes.
+    """
+    path = _path_without_codex()
+    if path is None:
+        pytest.skip("no PATH available that carries git but not codex")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = review_env(tmp_path)
+    env["PATH"] = path
+
+    result = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "0")
+
+    assert result.returncode == NOT_IN_FLIGHT
+    assert "codex CLI not found" not in result.stderr
+
+
+def test_wait_warns_on_a_dirty_tree_rather_than_refusing(tmp_path: Path) -> None:
+    """Its inputs are HEAD's tree and a lock, neither of which the dirt changes.
+
+    Refusing would withhold the diagnosis in the case it is most wanted — a round
+    in flight while the tree has drifted under it. The round *is* refused, as ever.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_review(repo, tmp_path)
+    (repo / "scratch.txt").write_text("untracked\n")
+
+    waited = _run(repo, _env(tmp_path), "--wait", "adversarial", "main", "--timeout", "0")
+    started = _run(repo, _env(tmp_path), "--start", "adversarial", "main")
+
+    assert waited.returncode == RECORDED, waited.stderr
+    assert "working tree is dirty" in waited.stderr
+    assert started.returncode != 0
+    assert "commit or stash first" in started.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--start", "--wait", "adversarial"], "alternatives"),
+        (["--timeout", "60", "adversarial"], "--timeout applies to --wait only"),
+        (["--wait", "adversarial", "--timeout", "sixty"], "--timeout must be"),
+        (["--wait", "adversarial", "--timeout", "060"], "leading zero"),
+        (["--wait", "adversarial", "--timeout"], "needs a value"),
+        (["--bogus", "adversarial"], "unknown option"),
+        (["--wait", "adversarial", "main", "extra"], "usage:"),
+    ],
+)
+def test_argument_errors_are_refused(tmp_path: Path, args: list[str], message: str) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = _run(repo, _env(tmp_path), *args)
+
+    assert result.returncode == USAGE, result.stderr
+    assert message in result.stderr
+
+
+def test_a_malformed_poll_interval_is_refused_before_it_spins(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path)
+    env["CODEX_REVIEW_WAIT_INTERVAL"] = "0"
+
+    result = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "5")
+
+    assert result.returncode == USAGE
+    assert "CODEX_REVIEW_WAIT_INTERVAL" in result.stderr
