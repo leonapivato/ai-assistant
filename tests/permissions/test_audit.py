@@ -25,7 +25,11 @@ import structlog.testing
 from audit_trail_contract import AuditTrailContract
 from permission_builders import AT, action, decision, ruling, tool
 
-from ai_assistant.core.errors import AuditError, DuplicateDecisionError
+from ai_assistant.core.errors import (
+    AuditError,
+    DuplicateDecisionError,
+    InvalidAuthorisationError,
+)
 from ai_assistant.core.types import (
     BoundAccount,
     CanonicalDestination,
@@ -1354,13 +1358,15 @@ async def test_cancelling_a_record_does_not_release_the_connection(tmp_path: Pat
     release = threading.Event()
     original_record = trail._record_sync
 
-    def blocking_record(snapshot: PermissionDecision) -> None:
+    def blocking_record(
+        snapshot: PermissionDecision, refusal: InvalidAuthorisationError | None
+    ) -> None:
         if not entered.is_set():
             entered.set()
             if not release.wait(timeout=5):  # pragma: no cover - only on a hang
                 msg = "the blocked worker was never released"
                 raise AssertionError(msg)
-        original_record(snapshot)
+        original_record(snapshot, refusal)
 
     trail._record_sync = blocking_record  # type: ignore[method-assign]
     try:
