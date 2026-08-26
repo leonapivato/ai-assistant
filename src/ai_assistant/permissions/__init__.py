@@ -37,8 +37,30 @@ takes it for the *source* slice of that deferral. The two may not be joined:
 ADR-0097 §7 rules that a ``SourceGrant`` may never be cited as
 ``PermissionRuling.authorised_by`` and that no ``ActionPolicy`` implementation
 may consult a grant seam, so ADR-0021 §5's disclosure floor is neither relaxed
-nor satisfied by anything here. Standing grants for *actions* stay deferred, and
-issue #74's model-provider-credential question is untouched (ADR-0097 §12).
+nor satisfied by anything here. Issue #74's model-provider-credential question is
+untouched (ADR-0097 §12).
+
+**A third subject, and it is the one ADR-0021 §6 deferred.** A
+:class:`~ai_assistant.core.types.RecipientGrant` is about *sending* — one
+declaration, one connected account, one canonical destination set, until one
+instant — and ADR-0193 lands the store ADR-0021 §6 called "a store, not a field"
+for the recipient axis. Three faces on one
+:class:`~ai_assistant.permissions.recipient_grants.SqliteRecipientGrantStore`:
+:class:`~ai_assistant.core.protocols.RecipientGrants` for the policy's one lookup
+per ruling, :class:`~ai_assistant.core.protocols.RecipientGrantResolution` for the
+trail's resolution read, and
+:class:`~ai_assistant.core.protocols.RecipientGrantStore` for the operations that
+append and erase.
+
+**The two grant seams stay unjoined, in both directions.** ADR-0097 §7 stands
+verbatim — a source grant may never be an action authorisation and no
+``ActionPolicy`` may consult either source-grant seam — and ADR-0193 §13 restates
+it. A recipient grant cannot authorise a read either: the two stores hold
+different records, are consulted by different components, neither Protocol is
+reachable from the other's holder, and their error classes are deliberately
+separate families so one handler cannot join them. Standing grants for actions
+*other* than egress at the designated seam stay deferred and unnarrowed
+(ADR-0193 §6).
 """
 
 from __future__ import annotations
@@ -47,9 +69,11 @@ from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.grants import SqliteSourceGrantStore
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.permissions.reads import SqliteSourceReadTrail
+from ai_assistant.permissions.recipient_grants import SqliteRecipientGrantStore
 
 __all__ = [
     "SqliteAuditTrail",
+    "SqliteRecipientGrantStore",
     "SqliteSourceGrantStore",
     "SqliteSourceReadTrail",
     "ThresholdActionPolicy",
