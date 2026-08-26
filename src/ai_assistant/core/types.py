@@ -22,6 +22,7 @@ from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
+from itertools import pairwise
 from math import isfinite
 from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
@@ -7695,6 +7696,21 @@ class PermissionRuling(BaseModel):
     authorised_by: DurableIdentifier | None = Field(
         default=None, description="The recorded user decision this ALLOW rests on, if any."
     )
+    authorised_subject: Sha256Hex | None = Field(
+        default=None,
+        description=(
+            "The ``subject_digest`` of the :class:`RecipientGrant` this ALLOW was "
+            "sourced by, where it was sourced by one (ADR-0193 §6). Set **only** "
+            "to the digest of the record the policy's ``covering`` read returned, "
+            "recomputed from that record and never carried from anywhere else; a "
+            "policy constructed with no authorisation source leaves it unset, as "
+            "it leaves ``authorised_by`` unset. Nothing about the grant travels by "
+            "value: a digest is sixty-four hex characters whatever the grant's "
+            "size, so a grant naming ten thousand recipients adds sixty-four "
+            "characters to a decision rather than ten thousand destination entries "
+            "(ADR-0004 §7's minimisation)."
+        ),
+    )
 
     @field_validator("reason")
     @classmethod
@@ -7727,6 +7743,33 @@ class PermissionRuling(BaseModel):
         """
         if self.authorised_by is not None and self.outcome is not PermissionOutcome.ALLOW:
             msg = f"a {self.outcome} ruling cites no authorisation, got {self.authorised_by!r}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_fingerprint_needs_the_authorisation_it_fingerprints(self) -> PermissionRuling:
+        """Refuse an ``authorised_subject`` where ``authorised_by`` is unset (ADR-0193 §6).
+
+        The same shape as the refusal above and for the same reason: a
+        fingerprint of the authorisation is incoherent on a ruling that names
+        none.
+
+        **It does not require the converse**, and the asymmetry is the whole of
+        what this type can state. A route-(a) ``ALLOW`` sets ``authorised_by`` to
+        the confirmation it answers and has no grant to fingerprint, so a pointer
+        without a digest is the ordinary shape. Which of the two shapes is *owed*
+        is decided at :meth:`~ai_assistant.core.protocols.AuditTrail.record`, the
+        only component that can see ``resolves`` and ``egress_binding``.
+
+        Raises:
+            ValueError: If ``authorised_subject`` is set and ``authorised_by`` is
+                not.
+        """
+        if self.authorised_subject is not None and self.authorised_by is None:
+            msg = (
+                f"a ruling that names no authorisation fingerprints none, got "
+                f"authorised_subject={self.authorised_subject!r} (ADR-0193 §6)"
+            )
             raise ValueError(msg)
         return self
 
@@ -8258,6 +8301,451 @@ class SourceGrant(BaseModel):
             "a revocation followed by a new grant, both kept (ADR-0097 §2)."
         ),
     )
+
+
+def _canonical_destination_tuple(
+    value: tuple[CanonicalDestination, ...],
+) -> tuple[CanonicalDestination, ...]:
+    """Require ADR-0193 §1's non-empty, duplicate-free, canonically ordered set.
+
+    The order is not this ADR's invention: it is the total order
+    :attr:`EgressBinding.canonical_destination_set` already produces — account
+    members first, then selected recipients by ``protocol`` and then by
+    ``canonical`` form, every string compared by Unicode code point
+    (:func:`_destination_order`). Pinning one spelling **at construction** is what
+    lets three separate rules stated over *identity* — the store's duplicate
+    refusal, ``AuditTrail.record``'s subject match, and
+    :attr:`RecipientGrant.subject_digest` — each be written as tuple equality and
+    each mean set equality. Stating the duplicate rule over membership instead
+    was the other available repair and is the weaker one: it leaves all three
+    free to drift back into tuple equality without a test noticing, where this
+    fixes them at once.
+
+    **It costs an honest caller nothing**, because the value a grant is built
+    from is already in that order: ADR-0193 §2 admits one construction path and
+    it takes ``destinations`` from the confirmed decision's binding's derived
+    set. What this refuses is a hand-built tuple, and ``(Bob, Alice)`` is the
+    case the rule is about — it covers exactly the calls ``(Alice, Bob)`` does,
+    so a duplicate refusal over ordinary tuple equality would admit both, and
+    revoking one would leave the other standing.
+
+    **The order check runs first and the duplicate check reads adjacency**, which
+    is sound because :func:`_destination_order`'s key is injective over
+    well-formed members: two members sharing a key are equal, so duplicates are
+    adjacent in any canonically ordered tuple.
+
+    Raises:
+        ValueError: If the tuple is empty, carries a duplicate, or is in any
+            order but the canonical one.
+    """
+    if not value:
+        msg = "a recipient grant names at least one canonical destination (ADR-0193 §1)"
+        raise ValueError(msg)
+    if tuple(sorted(value, key=_destination_order)) != value:
+        msg = (
+            "a recipient grant's destinations are held in the one canonical order "
+            "EgressBinding.canonical_destination_set produces — account members first, "
+            "then selected recipients by protocol and then by canonical form "
+            "(ADR-0193 §1)"
+        )
+        raise ValueError(msg)
+    if any(earlier == later for earlier, later in pairwise(value)):
+        msg = (
+            "a recipient grant names each canonical destination once; a duplicate is a "
+            "second spelling of one authorisation (ADR-0193 §1)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+class RecipientGrant(BaseModel):
+    """One recorded user act about one canonical destination set (ADR-0193 §1).
+
+    A **standing recipient grant**, or the revocation of one: the record a
+    :class:`~ai_assistant.core.protocols.RecipientGrantStore` appends, a
+    :class:`~ai_assistant.core.protocols.RecipientGrants` answers with, and a
+    :class:`~ai_assistant.core.protocols.RecipientGrantResolution` resolves. It
+    says the user answered a confirmation about an egress call and asked, in the
+    same act, that that call's recipients be remembered until a stated instant.
+
+    **It authorises the recipient and never the payload** (ADR-0193 §3, §5). A
+    grant does not widen ``discloses``, does not raise or lower any ceiling
+    ADR-0016 §3 states, does not satisfy ADR-0148 §8's floor about the payload
+    description, and does not exempt a call from any other floor a policy owes.
+    Its only effect on an outcome is to discharge the recipient-authorisation
+    ground of ADR-0148 §3's first clause for a request it covers wholly.
+
+    **One type for both acts**, on :class:`SourceGrant`'s shape and for its
+    reason: it keeps the store's rows homogeneous and its wire encoding
+    undiscriminated. A revoking record transcribes verbatim every field of the
+    grant it withdraws except ``id``, ``decided_at``, ``established_by`` and
+    ``revokes``; the store verifies the transcription, because a record in
+    isolation cannot see the record it names.
+
+    **The declaration is embedded by value rather than named by id**, which is
+    ADR-0021 §1's ruling applied to a record that outlives the call. An id can be
+    rebound (#54), and a standing grant is exposed to that hazard for as long as
+    it is live rather than for one invocation — so a grant keyed on ``tool_id``
+    would be strictly worse than a decision keyed the same way. The cost is
+    accepted in the safe direction: because coverage compares the declaration by
+    value, any edit to a registered declaration — including one that only rewords
+    a description — leaves every grant established about the previous declaration
+    covering nothing, and the user is asked again.
+
+    **The account is compared because a destination set alone is a key with a
+    duplicate.** :class:`BoundAccount` says so in terms: two connectable records
+    can hold one identity, so "a standing grant would cover a record the user
+    never granted". A grant over ``alice@example.com`` established against the
+    user's work account does not cover a send to the same address through a
+    personal one.
+
+    **No credential value and no payload**, here or anywhere in this surface, and
+    the field list is closed: ADR-0193 §1 states the record's members exactly, and
+    a lane adding one is changing that decision rather than implementing it.
+
+    **Frozen and boundary-crossing** (ADR-0068). ``frozen=True`` refuses
+    ``grant.destinations = …`` and does *not* refuse
+    ``grant.__dict__["destinations"] = …``, which is why the store's obligation is
+    a detached, validated snapshot on both the read and the write path rather
+    than a reliance on this config.
+
+    **Two non-field members and a lane adds no third** (ADR-0193 §1):
+    :attr:`subject_digest`, derived, and :meth:`established_from`, the
+    establishing act's one construction path.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "This record's own id, minted by the caller that records it, as "
+            ":attr:`PermissionDecision.id` and :attr:`SourceGrant.id` are — a "
+            "store neither mints ids nor reads a clock (ADR-0021 §3)."
+        )
+    )
+    tool: ToolDefinition = Field(
+        description=(
+            "The declaration this grant was established about, verbatim and by "
+            "value (ADR-0021 §1's rule on a record that outlives the call). "
+            "Coverage compares it whole, so a declaration edit re-prompts rather "
+            "than silently widening what the user authorised (ADR-0193 §1, §3)."
+        )
+    )
+    account: BoundAccount = Field(
+        description=(
+            "The connected account this grant was established against, by value "
+            "— **both** facts, identity and connection reference, never one "
+            "(ADR-0148 §6, ADR-0193 §3)."
+        )
+    )
+    destinations: Annotated[
+        tuple[CanonicalDestination, ...], AfterValidator(_canonical_destination_tuple)
+    ] = Field(
+        description=(
+            "The canonical destination set this record names, or — on a revoking "
+            "record — the set the grant it revokes named, transcribed verbatim. "
+            "Non-empty, duplicate-free, and in the one canonical order "
+            ":attr:`EgressBinding.canonical_destination_set` produces (see "
+            ":func:`_canonical_destination_tuple`). Coverage is **set membership** "
+            "and is not restated over the order (ADR-0193 §1, §3)."
+        )
+    )
+    decided_at: UtcInstant = Field(
+        description=(
+            "When the user decided; timezone-aware, stored as UTC. On a granting "
+            "record it is the instant the answering decision carries, read off a "
+            "recorded decision rather than supplied (ADR-0193 §2). Naive is "
+            "refused for :attr:`PermissionDecision.decided_at`'s reason — the "
+            "store is durable *and* ordered."
+        )
+    )
+    expires_at: UtcInstant = Field(
+        description=(
+            "The instant this grant ceases to be live. **Required, with no "
+            "unbounded spelling** — no null, no sentinel, no 'forever' — and the "
+            "user chooses it in the establishing act (ADR-0193 §9). On a granting "
+            "record it is **strictly after** ``decided_at``; a revoking record is "
+            "unaffected, because it is never live and its instants are ordered by "
+            "no rule."
+        )
+    )
+    established_by: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The recorded ``CONFIRM`` decision the establishing act rode, by id. "
+            "Set on a granting record and unset on a revoking one, refused either "
+            "way round. It is a **pointer into the audit trail** this store "
+            "validates against nothing and nothing ever re-resolves; what it is "
+            "for is the digest, and the digest is a comparison between two records "
+            "rather than a resolution of either (ADR-0193 §1)."
+        ),
+    )
+    revokes: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The grant this record revokes; ``None`` on a granting record. "
+            ":attr:`SourceGrant.revokes`'s shape, chosen for its reason. "
+            "Revocation is **whole** — there is no partial revocation and no "
+            "in-place narrowing, and changing what a user has authorised is a "
+            "revocation followed by a new grant, both kept (ADR-0193 §1, §9)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_establishing_act_is_named_on_a_granting_record(self) -> RecipientGrant:
+        """Require ``established_by`` on a granting record and refuse it on a revoking one.
+
+        A granting record without it names no act; a revoking record with it
+        claims an establishment it is not (ADR-0193 §1). The two are one rule
+        because they are one field's meaning, and stating it here is what makes a
+        grant say **which** user act made it rather than merely that one did.
+
+        Raises:
+            ValueError: If the pairing does not hold.
+        """
+        if self.revokes is None and self.established_by is None:
+            msg = (
+                "a granting recipient grant names the recorded CONFIRM its establishing act "
+                "rode, in established_by (ADR-0193 §1)"
+            )
+            raise ValueError(msg)
+        if self.revokes is not None and self.established_by is not None:
+            msg = (
+                "a revoking recipient grant establishes nothing, so it names no act: "
+                f"established_by={self.established_by!r} (ADR-0193 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_granting_record_is_live_for_some_duration(self) -> RecipientGrant:
+        """Require ``expires_at`` strictly after ``decided_at`` on a granting record.
+
+        A record expiring at or before the instant it was decided is never live
+        for any duration, so it authorises nothing while still occupying an
+        outstanding slot against the store's count ceiling and blocking an
+        identical new grant until the user performs a revocation they had no
+        reason to expect. It is a grant in shape and nothing in effect, and
+        refusing it here is cheaper than every clause that would otherwise have to
+        tolerate it (ADR-0193 §9).
+
+        **A revoking record is unaffected**, at any ordering, including an
+        ``expires_at`` transcribed from a grant that has since expired: it is
+        never live, and ADR-0193 §1 orders its instants by no rule.
+
+        Raises:
+            ValueError: If a granting record's ``expires_at`` is at or before its
+                ``decided_at``.
+        """
+        if self.revokes is None and self.expires_at <= self.decided_at:
+            msg = (
+                "a granting recipient grant expires strictly after it was decided; "
+                "one that does not is live for no duration (ADR-0193 §9)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def subject_digest(self) -> Sha256Hex:
+        """A fingerprint of this record under one schema (ADR-0193 §1, §6).
+
+        SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of this
+        record's own ``model_dump(mode="json")`` with **exactly one key removed**,
+        ``id``. Every other field is in it, and a field added to
+        :class:`RecipientGrant` by a later ADR is in it too unless that ADR
+        removes it by name.
+
+        **The rule is a removal from the whole dump rather than a list of
+        members**, and an implementation that hand-wrote the list has not
+        implemented it: a list goes stale silently the first time a field is
+        added, and a removal cannot. ``tests/core`` pins the roster off
+        ``model_fields`` so a field added later without deciding its place is a
+        red test rather than a silent exclusion.
+
+        **``id`` is the one removal**, because the digest exists to be checked
+        *against* an id: a fingerprint that included its own pointer would match
+        only where the pointer already matched, which is the comparison it is
+        meant to be independent of.
+
+        **A property and never a stored field**, for the reason
+        :attr:`EgressBinding.canonical_destination_set` is one: a stored digest
+        can be read back disagreeing with the fields it was computed from, and
+        nothing downstream would catch it. It reads no clock, no store and no
+        seam; it is total and never raises.
+
+        **What it is for, stated at the strength the evidence carries**
+        (ADR-0193 §6). A route-(b) ``ALLOW`` carries this value in
+        :attr:`PermissionRuling.authorised_subject`, so a pointer whose id was
+        recycled after a ``clear`` resolves to a record that fails the
+        comparison. The guarantee is **one-directional**: a mismatch is
+        conclusive — this record is not the one the row rested on — and a match
+        establishes only that this record agrees with the row in every field a
+        grant carries but its ``id``. The report for a match is *consistent*,
+        never "verified" or "proven".
+
+        **And it is a fingerprint under one record schema.** This is computed
+        under the field set of :class:`RecipientGrant` and of every value it
+        embeds as they stand when it is computed; no scheme is fixed here for
+        comparing across a change to that field set. A check that cannot
+        establish that both sides stand under one schema reports **not
+        comparable** and never "mismatch".
+        """
+        return sha256(_canonical_bytes(self._digest_projection())).hexdigest()
+
+    def _digest_projection(self) -> dict[str, Any]:
+        """The canonical projection :attr:`subject_digest` digests.
+
+        Built from ``model_dump(mode="json")`` rather than from the live objects,
+        so a record reconstructed from a serialised form projects identically to
+        the one it was serialised from — the parity :attr:`subject_digest`'s whole
+        use depends on, since the two sides of the comparison are a decision read
+        back out of a trail and a grant read back out of a store.
+
+        The removal is by ``pop`` over the whole dump rather than by rebuilding
+        from a list, which is ADR-0193 §1's clause as code: there is no inventory
+        here for a later field to be missing from.
+        """
+        projection: dict[str, Any] = self.model_dump(mode="json")
+        projection.pop("id")
+        return projection
+
+    @classmethod
+    def established_from(
+        cls,
+        confirmed: PermissionDecision,
+        answer: PermissionDecision,
+        *,
+        id: Identifier,  # noqa: A002 — names the field it fills; ADR-0193 §1 fixes the signature
+        expires_at: datetime,
+    ) -> RecipientGrant:
+        """Build the grant a user's answer to ``confirmed`` establishes (ADR-0193 §2).
+
+        **The one construction path**, and the only thing that creates a
+        :class:`RecipientGrant`: a user answering a recorded ``CONFIRM`` about an
+        egress call and, in the same act, asking that that call's recipients be
+        remembered. Every surface that offers the act obtains its grant from here
+        and **mints none of its own** — it builds no record field by field and
+        passes no granting record to a store that this function did not return.
+        That is ADR-0152 §5's discipline (the seam derives the binding whole and
+        accepts no part of it) read on this act rather than on a binding.
+
+        **A pure function**: it reads no clock, no store and no seam, and performs
+        no I/O. It is :meth:`PermissionDecision.from_request`'s shape for the same
+        reason — the subject is **transcribed by** ``core`` rather than asserted
+        by whoever collected the act.
+
+        **It accepts no ``tool``, no ``account``, no ``destinations``, no
+        ``established_by`` and no ``decided_at`` from its caller**, so a surface
+        has no parameter through which to substitute a subject, stamp an invented
+        act, or backdate one. That removes the capability rather than forbidding
+        it, which is the move ADR-0021 §3 made when it split
+        :class:`PermissionRuling` off :class:`PermissionDecision`.
+
+        **Nothing is typed, parsed, canonicalised or reordered here.**
+        ``destinations`` is ``confirmed``'s binding's own derived
+        ``canonical_destination_set``, which ``core`` already returns in the one
+        canonical order, so the value reaches
+        :func:`_canonical_destination_tuple` already sorted and no sort runs
+        inside this function. A surface that rebuilt the tuple in the order it
+        happened to render it in would be minting a grant this record's own
+        validator refuses.
+
+        **The answer is recorded before the grant is**, and that is an obligation
+        on the caller rather than something checked here: a pure function is
+        handed a record and cannot ask a trail whether the record is there. What
+        it *can* check, and does, is that ``answer`` resolves **this**
+        confirmation with an ``ALLOW`` — so an unanswered ``CONFIRM`` on its own
+        no longer reaches the constructor.
+
+        **It raises ``ValueError`` rather than the store's refusal class**, and
+        the reason is a boundary rather than a taste: ``core.errors`` imports
+        ``core.types`` at module scope, so this type cannot raise
+        ``InvalidRecipientGrantError`` without a deferred import, and every other
+        refusal a :class:`RecipientGrant` states is a construction refusal of
+        exactly this kind. ``InvalidRecipientGrantError`` stays what ADR-0193 §1
+        says it is: the store's refusal at ``record``.
+
+        **A refusal mints nothing looser in its place** — not a grant over the
+        supplied form, not one over the account, not one over a subset. This is
+        the discipline #1548 records OpenClaw stating for a different binding:
+        refuse to mint an approval-backed run rather than pretend full coverage.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` the user was asked. Its ``tool``,
+                its binding's ``account`` and that binding's derived canonical
+                destination set are transcribed by value and unchanged, and its
+                ``id`` becomes the grant's ``established_by``.
+            answer: The recorded resolving ``ALLOW`` that records the user's
+                answer to ``confirmed``. Its ``decided_at`` — the instant the user
+                decided — becomes the grant's, and nothing else is read from it.
+            id: The grant's own id, minted by the caller that records.
+            expires_at: The instant the user chose, past which the grant is no
+                longer live. Strictly after ``decided_at``, checked at
+                construction (ADR-0193 §9).
+
+        Returns:
+            The grant, ready to record.
+
+        Raises:
+            ValueError: If ``confirmed``'s ruling was not a ``CONFIRM``; if
+                ``answer``'s ruling is not an ``ALLOW``; if ``answer``'s
+                ``resolves`` is unset or is not ``confirmed``'s ``id``; if
+                ``confirmed`` carries no ``egress_binding``; if that binding is an
+                :class:`OriginUnrecordedBinding`; if it carries
+                ``planned_with_external_content``; or if the record the
+                transcription produces fails any of this model's own validators.
+        """
+        if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
+            msg = (
+                f"a recipient grant rides an answer to a recorded CONFIRM; decision "
+                f"{confirmed.id!r} ruled {confirmed.ruling.outcome} (ADR-0193 §2)"
+            )
+            raise ValueError(msg)
+        if answer.ruling.outcome is not PermissionOutcome.ALLOW:
+            msg = (
+                f"a recipient grant rides an approving answer; decision {answer.id!r} "
+                f"ruled {answer.ruling.outcome} (ADR-0193 §2)"
+            )
+            raise ValueError(msg)
+        if answer.resolves != confirmed.id:
+            msg = (
+                f"decision {answer.id!r} resolves {answer.resolves!r}, not the confirmation "
+                f"{confirmed.id!r} this grant would be established from; an unanswered CONFIRM "
+                f"establishes nothing (ADR-0193 §2)"
+            )
+            raise ValueError(msg)
+        binding = confirmed.egress_binding
+        if binding is None:
+            msg = (
+                f"decision {confirmed.id!r} records no egress call, so it names no account and "
+                f"no destination set to transcribe (ADR-0193 §2)"
+            )
+            raise ValueError(msg)
+        if isinstance(binding, OriginUnrecordedBinding):
+            msg = (
+                f"decision {confirmed.id!r} records an egress call whose origin was never "
+                f"recorded; a user answering such a confirmation may approve the call, and may "
+                f"not make its recipients standing (ADR-0193 §2)"
+            )
+            raise ValueError(msg)
+        if binding.planned_with_external_content:
+            msg = (
+                f"decision {confirmed.id!r} records a call planned over external content; a user "
+                f"answering such a confirmation may approve the call, and may not make its "
+                f"recipients standing (ADR-0193 §2, §4)"
+            )
+            raise ValueError(msg)
+        return cls(
+            id=id,
+            tool=confirmed.tool.model_copy(deep=True),
+            account=binding.account.model_copy(deep=True),
+            destinations=tuple(
+                member.model_copy(deep=True) for member in binding.canonical_destination_set
+            ),
+            decided_at=answer.decided_at,
+            expires_at=expires_at,
+            established_by=confirmed.id,
+        )
 
 
 class ReadOutcome(StrEnum):

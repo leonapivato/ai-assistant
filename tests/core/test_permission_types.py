@@ -259,8 +259,18 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
     for a *different* tool than the one it was handed. A ruling has nowhere to
     put one, which is true of every implementation including one written by
     someone who never read the ADR.
+
+    ``authorised_subject`` (ADR-0193 §6) joins the roster and is not a
+    counter-example: it is a ``Sha256Hex``, so it names no subsystem's type and
+    nothing can be read back out of it. It says **which grant**, not which tool,
+    which payload or which step, and a digest is not a projection.
     """
-    assert set(PermissionRuling.model_fields) == {"outcome", "reason", "authorised_by"}
+    assert set(PermissionRuling.model_fields) == {
+        "outcome",
+        "reason",
+        "authorised_by",
+        "authorised_subject",
+    }
 
 
 # --- PermissionDecision -----------------------------------------------------
