@@ -175,6 +175,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         PlanExport,
         Question,
+        RecipientGrant,
         RecordChunk,
         RecordedInvocation,
         ReplyChunk,
@@ -4606,6 +4607,487 @@ class SourceGrantStore(Protocol):
 
         Raises:
             GrantError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class RecipientGrants(Protocol):
+    """Answers whether a standing grant covers an egress request (ADR-0193 §1, §7).
+
+    The **policy's** query face, and the narrow one. An ``ActionPolicy``
+    implementation is given this and never
+    :class:`RecipientGrantStore`: a component handed the whole store is one
+    ``record`` call away from authorising the send it is ruling on, and nothing
+    about the resulting record would look wrong afterwards. That is ADR-0097 §3's
+    argument transferred without modification, and it is a **static** guarantee —
+    a concrete store satisfies this Protocol structurally, so a composition root
+    may pass one object to each seam; what a policy cannot do is *name* ``record``,
+    because ``mypy --strict`` runs over ``src`` and ``tests``.
+
+    **:meth:`covering` is the only member and no lane adds a second.** A policy
+    asks about the one request it is ruling on; a policy that could enumerate the
+    store is one that could log or leak the user's recipient set, which is
+    ADR-0097 §3's argument for keeping :class:`SourceGrants` at one member.
+    ``standing`` and ``recent`` are on the wider face, for the surface that shows
+    the user what they have granted. **There is no read-by-id member here and no
+    lane adds one**: the member that resolves an id is
+    :meth:`RecipientGrantResolution.outstanding`, held by the trail alone, which
+    is what keeps ADR-0021 §3's rebinding hazard closed inside the very subsystem
+    meant to close it.
+
+    **A recipient grant is not a source authorisation, in either direction.**
+    ADR-0097 §7 stands verbatim beside this seam: a
+    :class:`~ai_assistant.core.types.SourceGrant` may never be cited as
+    :attr:`~ai_assistant.core.types.PermissionRuling.authorised_by`, and no
+    ``ActionPolicy`` may consult a :class:`SourceGrants` or a
+    :class:`SourceGrantStore`. Nothing here relaxes that: this is a different seam
+    holding different records, and a policy holding one holds neither of those.
+
+    **A component that cannot get an answer here fails closed.** A
+    :class:`~ai_assistant.core.errors.RecipientGrantError` is not a grant, and no
+    policy proceeds on a stale answer, an earlier lookup or an absent one
+    (ADR-0193 §1).
+
+    Cancelling :meth:`covering` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous** here: the
+    one argument is an :class:`~ai_assistant.core.types.ActionRequest`, which is
+    immutable all the way down, so there is no caller-owned container for a result
+    to be torn across.
+    """
+
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
+        """The live grant covering ``request``'s recipients, or ``None``.
+
+        **Returns the record rather than a boolean**, so the caller can name what
+        authorised the ``ALLOW`` it is about to author — both the grant's ``id``
+        and its :attr:`~ai_assistant.core.types.RecipientGrant.subject_digest`
+        (ADR-0193 §6).
+
+        **It takes the whole request and resolves no id.** ADR-0021 §3 makes the
+        request self-contained so that a policy never consults a registry, "a
+        policy that resolved an id would be reintroducing the rebinding hazard
+        inside the very subsystem meant to close it"; this member takes the value
+        and returns a record, so the hazard the purity framing was written against
+        stays closed here rather than merely left alone.
+
+        **Four of ADR-0193 §3's five comparisons, and the fifth is the policy's.**
+        A grant is returned when it is **live**; the request's ``tool`` equals the
+        grant's :class:`~ai_assistant.core.types.ToolDefinition` **by value**; the
+        request's binding's ``account`` equals the grant's
+        :class:`~ai_assistant.core.types.BoundAccount` by value, both facts and
+        never one; and **every** member of the request's canonical destination set
+        is a member of the grant's, compared as
+        :class:`~ai_assistant.core.types.CanonicalDestination` compares — every
+        field, never across protocols.
+
+        **It does not read ``planned_with_external_content``**, and ADR-0193 §4's
+        bar is not stated on this seam. That clause is an obligation of the
+        :class:`ActionPolicy` contract, so the policy applies it to this answer
+        and §3's coverage is the conjunction of the two. A safety rule stated in
+        both places would be two statements to keep in step, and the one that
+        drifted would be the one nobody was reading.
+
+        **Coverage is a comparison of recorded values and is never an inference.**
+        No implementation widens a grant by folding case, by matching a domain, by
+        treating an account member as covering a recipient member or the reverse,
+        by treating a grant's larger set as covering a request's under any
+        relation other than membership, or by re-canonicalising either side. The
+        canonicaliser is ADR-0148 §2's, at the seam, and there is not a second one
+        here.
+
+        **Where several live grants match, the answer is the one with the greatest
+        ``decided_at``, ties broken by the least ``id`` under code-point order.**
+        Overlapping grants are permitted — a grant over ``{Alice}`` and one over
+        ``{Alice, Bob}`` are two things a user may reasonably have said — so the
+        selection must be **total**, or two conforming stores record different
+        ``authorised_by`` values for one state and one request. Latest-decided is
+        the user's most recent expression of the same intent; the ``id`` tie-break
+        makes the order total rather than mostly determined.
+
+        **Liveness is evaluated here**, so the store reads the clock and the
+        policy does not (ADR-0021 §3, ADR-0007 §2's read-time enforcement). A
+        grant is live while it is **outstanding** — no revoking record names it —
+        and the instant read from the clock is at or after its ``decided_at`` and
+        **strictly before** its ``expires_at``. Bounded below as well as above:
+        without that half a future-dated grant would be handed to the policy and
+        ``AuditTrail.record`` would then refuse the ``ALLOW`` it sourced. The clock
+        is read **exactly once** per call and every record considered is evaluated
+        against that one instant.
+
+        **The answer is a detached snapshot** — the record and everything mutable
+        it reaches — on ADR-0018 §3's rule. ``frozen=True`` does not close the
+        bypass: a caller could rewrite ``destinations`` or ``expires_at`` through
+        ``__dict__`` on a shared object, which is a widening of what the user
+        authorised, reached through the gate's own answer.
+
+        Args:
+            request: The action being ruled on, carrying its binding by value.
+
+        Returns:
+            A detached snapshot of the covering grant, or ``None`` where none
+            covers it — which includes a request whose ``egress_binding`` is
+            ``None``. ``None`` means exactly that and **never** that the store
+            could not be read.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read. Never returned as
+                ``None``: a fault and a withdrawn grant are different facts, and a
+                policy that cannot tell them apart is one that proceeds on
+                silence.
+        """
+        ...
+
+
+@runtime_checkable
+class RecipientGrantResolution(Protocol):
+    """Resolves a recorded ``authorised_by`` against the grant records (ADR-0193 §1, §6).
+
+    The **trail's** face, and it carries one member. An
+    :class:`AuditTrail` implementation is constructed with one of these and never
+    with a :class:`RecipientGrantStore`, so the trail holds a read and nothing
+    else: it cannot append a grant, revoke one, enumerate the user's recipients or
+    erase the store. A trail that could append a grant would be one ``record``
+    call away from authorising the row it is about to validate, which is the
+    capability ADR-0097 §3 removes by splitting and which ADR-0193 §1 has already
+    removed from the policy.
+
+    **Given to** :class:`AuditTrail` **implementations and to nothing else.** No
+    ``ActionPolicy``, no surface, no :class:`EgressBinder` and no ``interfaces/``
+    adapter holds one. The query face carries no ``outstanding`` and this face
+    carries no ``covering``, so neither component can ask the other's question,
+    and :meth:`AuditTrail.record` is the only place a recorded ``authorised_by``
+    is ever resolved against this store — never at render time and never at any
+    later read (ADR-0193 §6, §11).
+
+    **A narrow Protocol rather than a second implementation.** One concrete store
+    satisfies all three faces structurally, exactly as one concrete store
+    satisfies :class:`SourceGrants` and :class:`SourceGrantStore` today; what this
+    exists for is that what an ``AuditTrail`` *names* is a read it cannot widen.
+
+    Cancelling :meth:`outstanding` is governed by this module's cancellation
+    clause (ADR-0060); its input-observation clause (ADR-0065) is **vacuous**, the
+    one argument being a ``str``.
+    """
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
+        """The **granting** record with ``grant_id``, if it is unrevoked.
+
+        One question, and it is the existence, the kind and the unrevoked check at
+        once: it answers with the record where the store holds it, it is a
+        granting record rather than a revoking one, and no revoking record names
+        it; and with ``None`` otherwise (ADR-0193 §1).
+
+        **It reads no clock.** Outstanding is a fact about two records, so an
+        **expired but unrevoked** grant is returned by this member rather than
+        withheld — expiry is not this member's question, and
+        :meth:`AuditTrail.record` decides it against the decision's own
+        ``decided_at`` (ADR-0193 §6). It evaluates no coverage, ranks nothing, and
+        returns a detached snapshot as every other query on this seam does.
+
+        Args:
+            grant_id: The id a decision's ``authorised_by`` carries.
+
+        Returns:
+            A detached snapshot of the outstanding granting record, or ``None``
+            where the store holds none such. ``None`` means exactly that and
+            **never** that the store could not be read.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read. The trail refuses
+                the write rather than proceeding, chaining this as ``__cause__``
+                of an
+                :class:`~ai_assistant.core.errors.InvalidAuthorisationError`
+                (ADR-0193 §6).
+        """
+        ...
+
+
+@runtime_checkable
+class RecipientGrantStore(Protocol):
+    """The append-only record of the recipients the user made standing (ADR-0193 §1).
+
+    The durable face, and the widest of the three. It satisfies
+    :class:`RecipientGrants` and :class:`RecipientGrantResolution` structurally,
+    so one implementation serves all three seams and a composition root may pass
+    one object to each. **Nothing but the hub's grant operations holds one** — no
+    ``ActionPolicy``, no ``AuditTrail``, no surface, no :class:`EgressBinder`.
+
+    A **Tier 1 local store** (ADR-0004 §7): a canonical destination is a recipient
+    of the user's, and this store is durable, ordered and rendered to them. So
+    ADR-0004 §2's residency clause governs it — implementations persist locally
+    only, under ``Settings.data_dir`` and owner-only, and none of this may be
+    written to a remote service.
+
+    **Append-only, and a revocation is a record rather than a mutation.** A grant
+    is never edited, narrowed, re-scoped or extended in place; changing what a
+    user has authorised is a revocation followed by a new grant, and both records
+    are kept (ADR-0097 §2's shape, read one store over). Ids, instants and
+    ``established_by`` are supplied by the caller that records, as
+    :attr:`~ai_assistant.core.types.PermissionDecision.id` and
+    :attr:`~ai_assistant.core.types.SourceGrant.id` are: a store mints no id and
+    reads no clock on the write path (ADR-0021 §3). The only source of a
+    ``revokes`` value is the ``id`` of a record the store already holds.
+
+    **There is no ``get(id)`` and no ``delete(id)``.** A selective delete is the
+    page torn out of the book, and its reason here is narrower than the trail's
+    and is stated on its own: an ``authorised_by`` in the trail points into this
+    store, so deleting the record it points at would make a recorded ``ALLOW``
+    unexplainable while leaving it looking complete. Revocation is the act a user
+    wants and it is available; erasure is a data right and it is available
+    **wholesale** (ADR-0193 §9). A read-by-id exists as
+    :meth:`outstanding`, which answers a narrower question than a ``get`` would.
+
+    **Nothing mints a grant from what is already configured.** Not a prior call,
+    not a recipient that has appeared before, not a credential's scope or
+    audience, not a configured base URL or host, not an account the user
+    connected, not an allowlist the system assembled, not a ``Settings`` value,
+    not a first run, not an upgrade or a migration (ADR-0193 §2). The one thing
+    that creates a grant is a user answering a recorded ``CONFIRM`` about an
+    egress call and asking, in the same act, that that call's recipients be
+    remembered — through
+    :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, the one
+    construction path.
+
+    **A deployment configures a ceiling** on how many **outstanding granting
+    records** this store holds — ``Settings.recipient_grant_max_outstanding``,
+    supplied to an implementation at construction — and :meth:`record` refuses a
+    granting record that would take the count above it. The ceiling governs
+    **admission and never eviction**: lowering it deletes nothing, expires
+    nothing, hides nothing, and omits nothing from :meth:`standing`,
+    :meth:`recent` or :meth:`export`. A store holding records a newly lowered
+    ceiling would not admit is a **legal** state (ADR-0193 §1).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**, as it is
+    for :class:`SourceGrantStore` and for the same reason: the one caller-owned
+    argument is a :class:`~ai_assistant.core.types.RecipientGrant`, which is
+    immutable all the way down. What a caller *can* still do is write past the
+    frozen model through ``__dict__``, which is what :meth:`record`'s detachment
+    obligation closes.
+    """
+
+    async def record(self, grant: RecipientGrant) -> str:
+        """Append ``grant`` to the store and return its id.
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts
+        is one where history can be rewritten by replaying a write.
+
+        **Atomic**: the duplicate-id check, the duplicate-**subject** refusal, the
+        **ceiling count**, the revocation invariants and the append are **one**
+        operation, not a read followed by a write. The ceiling is named explicitly
+        because a count read outside the operation is the one that fails the way a
+        duplicate-id check does not: two writers of **different** subjects at one
+        below the ceiling both see room, both append, and the store ends one over
+        — a race the duplicate-subject refusal cannot catch, because the two
+        subjects differ.
+
+        **Stores a detached, validated snapshot**, recursively over reachable
+        state, and never retains the caller's object. Both halves matter and the
+        write-side one is easy to drop: ``frozen=True`` refuses
+        ``grant.destinations = …`` and does not refuse
+        ``grant.__dict__["destinations"] = …``, so a store keeping the caller's
+        object would let a grant be **widened after it was appended**, through a
+        store whose entire premise is that its records are not rewritten
+        (ADR-0018 §4, ADR-0021 §4).
+
+        **It reads no clock**, so every rule it applies is a fact about two
+        records. In particular the duplicate refusal is stated over
+        **outstanding** rather than over live: a refusal over "already live"
+        obliges this member to read one, and a refusal that substituted the
+        caller's ``decided_at`` is breakable by clock skew in both directions at
+        once — a forward-skewed instant admits a second grant that is live
+        immediately, and a backward-skewed one refuses a renewal after the first
+        has genuinely expired.
+
+        **The duplicate-subject refusal.** A **granting** record whose ``tool``,
+        ``account`` and ``destinations`` all equal those of an **outstanding**
+        granting record is refused. Overlapping grants over *different*
+        destination sets stay permitted and are what :meth:`covering`'s precedence
+        is for; what is refused is a second grant that **is** the first, because
+        revoking one would leave the other standing and the user would have
+        revoked nothing. Re-granting a triple whose grant has expired is a
+        revocation followed by a new grant, both appended and both kept.
+
+        **The ceiling.** A granting record that would take the count of
+        outstanding granting records above the configured maximum is refused. The
+        refusal is not a truncation, an eviction or a silent no-op: nothing
+        already recorded is removed, narrowed or expired to make room, and no
+        looser grant is minted in its place. A **revoking** record is **never**
+        refused on this ground, whatever the count — a ceiling that could block a
+        revocation would trap a user above it with no way down.
+
+        **The revocation invariants**, checked here because this is the only place
+        both records are in hand. A revoking record transcribes verbatim every
+        field of the grant it revokes except ``id``, ``decided_at``,
+        ``established_by`` and ``revokes``, and is refused unless the named grant
+        is present, is itself a granting record, is not already revoked, and
+        matches every transcribed field.
+
+        **A revocation is never refused for its timestamp**, including one that
+        predates the grant it revokes, for :meth:`SourceGrantStore.record`'s
+        reason: ``decided_at`` is caller-supplied and this store reads no clock on
+        the write path, so a host clock corrected backwards would otherwise make a
+        grant permanently unrevokable.
+
+        Args:
+            grant: The record to append — a grant, or the revocation of one.
+
+        Returns:
+            The recorded id.
+
+        Raises:
+            InvalidRecipientGrantError: If the id is already recorded, if a
+                granting record duplicates an outstanding grant's ``tool``,
+                ``account`` and ``destinations``, if a granting record would take
+                the outstanding count above the configured ceiling, if the record
+                does not satisfy its own model, or if ``revokes`` fails any
+                invariant above.
+            RecipientGrantError: If the store cannot be written.
+        """
+        ...
+
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
+        """The live grant covering ``request``'s recipients, or ``None``.
+
+        Exactly :meth:`RecipientGrants.covering`'s semantics — the same member, on
+        the wider seam: four of ADR-0193 §3's five comparisons, liveness evaluated
+        against one clock read, latest-decided with an ``id`` tie-break where
+        several match, and a detached snapshot.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read.
+        """
+        ...
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
+        """The **granting** record with ``grant_id``, if it is unrevoked.
+
+        Exactly :meth:`RecipientGrantResolution.outstanding`'s semantics — the same
+        member, on the wider seam. It reads no clock, so an expired but unrevoked
+        grant is returned rather than withheld.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read.
+        """
+        ...
+
+    async def standing(self) -> list[RecipientGrant]:
+        """Every **live** grant in the store.
+
+        :meth:`covering`'s enumeration, and a *separate* member rather than a
+        widening of anything: :class:`RecipientGrants` stays at one member,
+        because a policy asks about the one request it is ruling on and a policy
+        that could enumerate the store is one that could log or leak the user's
+        recipient set (ADR-0097 §3, ADR-0193 §1).
+
+        **Liveness, on one clock read.** Live is outstanding **and** the instant
+        read from the clock at or after ``decided_at`` and strictly before
+        ``expires_at``. The clock is read **exactly once** and every record is
+        evaluated against that instant: a ``standing`` reading an advancing clock
+        per row could return one of two grants sharing an ``expires_at`` and omit
+        the other, which is a set true at no real instant. A **future-dated**
+        grant — one whose ``decided_at`` is after that instant — is absent, for the
+        reason :meth:`covering` states.
+
+        **Complete or nothing**, and no implementation truncates, samples or
+        elides: a page of what the user authorises reads as complete while
+        omitting an authorisation. In particular a **lowered ceiling hides
+        nothing**: a store holding records the current setting would not admit is
+        legal, and a query that hid them to make the setting look satisfied would
+        be lying to the user about their own standing policy (ADR-0193 §1).
+
+        Returns:
+            A detached snapshot of every live grant. An empty list means the store
+            holds none, never that it could not be read.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read, or holds a record
+                that no longer validates.
+        """
+        ...
+
+    async def recent(self, *, limit: int = 50) -> list[RecipientGrant]:
+        """Return the most recent records, newest first.
+
+        Ordered by ``decided_at`` **descending**, ties broken by ``id``
+        ascending, for :meth:`AuditTrail.recent`'s reason: "newest first" is
+        ambiguous between insertion order and decision time, which disagree
+        whenever records are appended out of order, and an ``id`` tie-break makes
+        the order total rather than merely mostly determined.
+
+        Revoked grants and revoking records alike are returned: a revoking record
+        appears here and in :meth:`export` as the record of an act, which is what
+        it is. This member evaluates **no liveness** and reads no clock.
+
+        Args:
+            limit: Maximum number of records to return; must be strictly
+                positive. Every strictly positive integer is admissible.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive. Raised rather than
+                clamped or passed through, for :meth:`AuditTrail.recent`'s reason
+                — a store issuing ``LIMIT ?`` against SQLite turns ``limit=-1``
+                into an unbounded read of a Tier 1 store.
+            RecipientGrantError: If the store cannot be read.
+        """
+        ...
+
+    async def export(self) -> list[RecipientGrant]:
+        """Return **every** record, in :meth:`recent`'s order (ADR-0004 §6).
+
+        The user's export right, on :meth:`AuditTrail.export`'s shape, and what
+        discharges ADR-0004 §6's portability obligation for this store — so it may
+        omit **nothing**. Live grants, expired grants, revoked grants and the
+        revoking records that revoked them all appear, each exactly once; an
+        implementation that delegated this to :meth:`standing` would silently drop
+        three of those four kinds (ADR-0193 §1).
+
+        **It is bounded by nothing, and that is stated rather than repaired.**
+        :meth:`recent` is bounded by its ``limit``; revoked grants and revoking
+        records accumulate *outside* the outstanding count, and truncating them is
+        not available, because a portable snapshot that omits records is not one.
+        A store the user never clears grows there, and the recourse is
+        :meth:`clear`, which is theirs.
+
+        Raises:
+            RecipientGrantError: If the store cannot be read.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Delete every record, returning the number removed.
+
+        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason, and the
+        count is of **every** record removed rather than of the live ones.
+
+        **It retains nothing**: no record, no id, no tombstone, no derived value.
+        An id this store held before a ``clear`` may be recorded again afterwards,
+        and what that can and cannot do is stated exactly (ADR-0193 §1). It cannot
+        mislead a **reader**, because nothing ever re-resolves an already-recorded
+        ``authorised_by``. It cannot widen what a row **authorised**, because
+        :meth:`AuditTrail.record` compared the resolved grant's tool, account and
+        destination set against that decision's own before appending. What it
+        **can** do is leave a row naming an id that later resolves to a different
+        grant — and what that cannot do is make the row say something false,
+        because the row carries the
+        :attr:`~ai_assistant.core.types.RecipientGrant.subject_digest` of the
+        grant it was validated against.
+
+        **It retracts, invalidates and re-opens nothing.** A recorded ``ALLOW``
+        stays recorded, stays true about the moment it was made, and still names
+        the grant it rested on. What is lost is the grant's own text — its other
+        members, its expiry, its establishment act — and the user's ability to
+        see, revoke or renew it (ADR-0193 §9).
+
+        **No lane makes this conditional on, coordinated with, or transactional
+        against the audit trail's ``clear``.** Cross-tier erasure is ADR-0007 §4's
+        deferred coordinator; what is decided is that each store's own wholesale
+        erase is the user's to perform.
+
+        Raises:
+            RecipientGrantError: If the store cannot be written.
         """
         ...
 
