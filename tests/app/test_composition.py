@@ -55,6 +55,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     ConnectionPurger,
     InvocationLedger,
+    RecipientGrantResolution,
     RecipientGrants,
     SpendGate,
     SpendLedger,
@@ -103,6 +104,7 @@ from ai_assistant.orchestration.upcoming import (
     PRODUCER as UPCOMING_PRODUCER,
 )
 from ai_assistant.permissions import (
+    SqliteAuditTrail,
     SqliteRecipientGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -658,6 +660,29 @@ def _policy_grant_seam(calls: list[dict[str, object]]) -> object:
     return calls[0]["grants"]
 
 
+def _spy_on_trail(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Capture the kwargs ``build_engine`` constructs the audit trail with.
+
+    The counterpart of :func:`_spy_on_policy`, and it exists for one assertion:
+    that the ``RecipientGrantResolution`` reaching the trail is the **same
+    object** as the ``RecipientGrants`` reaching the policy (ADR-0193 §1, §6).
+    """
+    calls: list[dict[str, object]] = []
+
+    def factory(**kwargs: object) -> SqliteAuditTrail:
+        calls.append(kwargs)
+        return SqliteAuditTrail(**kwargs)  # type: ignore[arg-type]  # forwarded kwargs
+
+    monkeypatch.setattr(composition_module, "SqliteAuditTrail", factory)
+    return calls
+
+
+def _trail_grant_seam(calls: list[dict[str, object]]) -> object:
+    """The one ``recipient_grants`` argument the builder constructed the trail with."""
+    assert len(calls) == 1, calls
+    return calls[0]["recipient_grants"]
+
+
 async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -719,13 +744,22 @@ async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
     invisible to the ``covering`` read of the other, and every route-(b) ``ALLOW``
     the policy authored would then be refused at ``record`` — a system that
     prompts, forgets, and prompts again, with nothing failing.
+
+    It is also the only place that hazard can be pinned. ``SqliteAuditTrail``
+    takes its resolution seam with a default — a trail wired with nothing
+    substitutes one holding no grants and refuses every route-(b) row — and a
+    *required* argument would not close this at all, because two different stores
+    satisfy it as readily as one. What closes it is identity, here.
     """
     calls = _spy_on_policy(monkeypatch)
+    trail_calls = _spy_on_trail(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         seam = _policy_grant_seam(calls)
         assert isinstance(seam, SqliteRecipientGrantStore)
         assert isinstance(seam, RecipientGrants)
+        assert isinstance(seam, RecipientGrantResolution)
+        assert _trail_grant_seam(trail_calls) is seam
     finally:
         await engine.aclose()
 
