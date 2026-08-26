@@ -2631,3 +2631,37 @@ class SpendGateContract:
         clock.failures, clock.unprintable = 1, True
         with pytest.raises(SpendUndeterminedError):
             await subject.spend_totals()
+
+    async def test_a_gap_that_swallows_midnight_without_starting_at_it(
+        self, harness: SpendHarness
+    ) -> None:
+        """``America/Toronto`` jumped from 23:29:59 on 1919-03-30 to 00:30 on the 31st.
+
+        Every other gap case here has the transition *at* midnight, where naming a
+        wall-clock midnight and taking the pre-transition offset happens to give
+        the right instant. Here midnight sits **inside** the gap rather than at its
+        start: that shortcut lands on 05:00 UTC, and the half hour from 04:30 —
+        already the 31st locally — falls in the previous day, undercounting the
+        31st and admitting a call that should be refused.
+
+        ADR-0194 §1's rule has no cases, and this is the fixture that tells an
+        implementation of the rule from an implementation of its three named
+        consequences.
+        """
+        boundary = datetime(1919, 3, 31, 4, 30, tzinfo=UTC)
+        clock = MovableClock()
+        subject = harness.open(
+            replace(BOUNDED, timezone="America/Toronto", day_ceiling=Decimal("10")), now=clock
+        )
+        rows = Rows(subject, clock)
+        await rows.completed(usd("7"), at=boundary - timedelta(minutes=1))
+        await rows.completed(usd("9"), at=boundary + timedelta(minutes=15))
+        clock.moved(datetime(1919, 3, 31, 17, tzinfo=UTC))
+
+        stated = totals_by_period(await subject.spend_totals())
+
+        day = stated[SpendPeriod.CALENDAR_DAY]
+        assert day.period_start == boundary
+        assert day.accounted == Decimal("9")
+        with pytest.raises(SpendCeilingError):
+            await subject.admit_invocation(estimate=usd("2"))

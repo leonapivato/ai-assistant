@@ -49,6 +49,15 @@ _LAST_MONTH: Final = 12
 _YEAR_ONE: Final = 1
 _NUDGES: Final = 4
 
+#: The window a boundary is hunted in, and the step and resolution of the hunt.
+_HUNT: Final = timedelta(hours=48)
+_AN_HOUR: Final = timedelta(hours=1)
+_A_SECOND: Final = timedelta(seconds=1)
+
+#: ADR-0026 §3's localization margin, which is what makes the rendering clamp
+#: total: a bound this far inside ``datetime``'s range survives *any* offset.
+_MARGIN: Final = timedelta(days=1)
+
 
 class SpendTrapError(Exception):
     """A sized computation trapped — ADR-0194 §4's sixth ground.
@@ -231,25 +240,85 @@ def _span(zone: ZoneInfo) -> tuple[datetime, datetime]:
     return floor - min(early, timedelta(0)), peak - max(late, timedelta(0))
 
 
+def _offset(instant: datetime, zone: ZoneInfo) -> timedelta:
+    """Return the UTC offset in force at ``instant``."""
+    return instant.astimezone(zone).utcoffset() or timedelta(0)
+
+
+def _turns(low: datetime, high: datetime, zone: ZoneInfo) -> list[datetime]:
+    """Return every instant in ``(low, high]`` at which the offset changes.
+
+    An hourly walk to find the hour a change falls in, then a bisection inside
+    that hour down to the second the database records it at. Deliberately a
+    forward scan rather than a recursive split of the whole window: an hour is
+    small enough that no zone carries two changes inside one, and the walk needs
+    no assumption about how many the window holds.
+    """
+    marks: list[datetime] = []
+    walk = low
+    while walk < high:
+        # Bounded before it is taken: at the very end of ``datetime``'s range the
+        # step itself raises, and the window's own close is the answer there.
+        step = high if high - walk <= _AN_HOUR else walk + _AN_HOUR
+        if _offset(walk, zone) != _offset(step, zone):
+            near, far = walk, step
+            while (far - near) > _A_SECOND:
+                middle = near + timedelta(seconds=int((far - near).total_seconds()) // 2)
+                if _offset(middle, zone) == _offset(near, zone):
+                    near = middle
+                else:
+                    far = middle
+            marks.append(far)
+        walk = step
+    return marks
+
+
 def _edge(day: date, zone: ZoneInfo, span: tuple[datetime, datetime]) -> datetime:
     """Return ADR-0194 §1's boundary instant for civil date ``day``, clamped.
 
-    The boundary is the earliest instant whose local civil date is at least
-    ``day``. ``fold`` is stated rather than defaulted, which is what selects the
-    earlier instant of a repeated midnight and the transition instant itself where
-    midnight does not exist; where the whole civil date is skipped it lands on the
-    first instant of the next date that exists, making ``day``'s own period
-    zero-length.
+    **The earliest instant whose local civil date is at least ``day``**, and
+    nothing about a wall-clock midnight: naming one and taking whatever ``fold``
+    resolves it to is right only where a gap *begins* at midnight, and
+    ``America/Toronto`` jumped from 23:29:59 on 1919-03-30 to 00:30 on the 31st,
+    putting midnight inside the gap rather than at its start.
+
+    Each offset the window carries answers "when does *my* clock read midnight on
+    ``day``", and each transition answers "when does the clock jump onto it". The
+    earliest of those that is genuinely in force where it lands is the boundary —
+    which is what makes §1's three named cases consequences rather than branches.
     """
     low, high = span
     try:
-        civil = datetime(day.year, day.month, day.day, tzinfo=zone, fold=0)
-        # Converted to UTC before anything is compared to it or added to it:
-        # arithmetic on a zone-aware value moves its *wall clock*, so a
-        # representability check made on one asks about a different instant.
-        return min(max(civil.astimezone(UTC), low), high)
-    except OverflowError, ValueError, OSError:
+        midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    except OverflowError, ValueError:  # pragma: no cover - `date` refuses first
         return low if day.year <= _YEAR_ONE else high
+    opened = _pushed(midnight, -_HUNT, low, low)
+    closed = _pushed(midnight, _HUNT, high, high)
+    if opened > closed:
+        return low if day.year <= _YEAR_ONE else high
+    reached: list[datetime] = []
+    marks = _turns(opened, closed, zone)
+    for offset in {_offset(opened, zone), *(_offset(mark, zone) for mark in marks)}:
+        try:
+            reads_midnight = midnight - offset
+        except OverflowError, ValueError, OSError:
+            continue
+        if opened <= reads_midnight <= closed and _offset(reads_midnight, zone) == offset:
+            reached.append(reads_midnight)
+    reached.extend(mark for mark in marks if mark.astimezone(zone).date() >= day)
+    if not reached:
+        return low if day.year <= _YEAR_ONE else high
+    return min(max(min(reached), low), high)
+
+
+def _pushed(instant: datetime, by: timedelta, limit: datetime, fallback: datetime) -> datetime:
+    """Return ``instant + by`` bounded by ``limit``, or ``limit`` where it overflows."""
+    try:
+        moved = instant + by
+    except OverflowError, ValueError:
+        return fallback.replace(microsecond=0)
+    bounded = min(moved, limit) if by > timedelta(0) else max(moved, limit)
+    return bounded.replace(microsecond=0)
 
 
 def _step(first: date, period: SpendPeriod) -> date | None:
@@ -276,15 +345,19 @@ def _with_offset(
     """
     low, high = span
     for _ in range(_NUDGES):
-        offset = bound.astimezone(zone).utcoffset() or timedelta(0)
+        offset = _offset(bound, zone)
         try:
             bound + offset
         except OverflowError, ValueError:
             bound = min(max(bound - offset, low), high)
             continue
         return bound, offset
-    msg = f"no representable rendering for a boundary in {zone.key!r}"
-    raise SpendTrapError(msg)
+    # Total by construction rather than a refusal: ADR-0194 §4 has no ground for
+    # "the period could not be rendered", so raising here would have to be
+    # reported under one that did not apply. Inside ADR-0026 §3's margin a bound
+    # plus any offset the database carries is representable.
+    bound = min(max(bound, low + _MARGIN), high - _MARGIN)
+    return bound, _offset(bound, zone)
 
 
 @dataclass(eq=False)

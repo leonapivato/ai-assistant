@@ -1744,9 +1744,13 @@ class SqliteAuditTrail:
         single statement, so the pair is always one a snapshot could have produced
         and a completion appended mid-read cannot land between two aggregations.
 
-        It takes no lock. It reads no reservation — those bound what may be
-        *admitted* and are not spend — so nothing here needs to exclude an
-        admission, and a totals read never queues behind a wedged one.
+        It takes no **admission** lock. It reads no reservation — those bound what
+        may be *admitted* and are not spend — so nothing here needs to exclude an
+        admission, and a totals read never queues behind a wedged one. It does take
+        the connection's own exclusion for the length of its read, as every method
+        of this store does and as one ``sqlite3`` connection requires (ADR-0054);
+        that is a different lock, held only while the statement runs, and an
+        admission wedged *after* its snapshot is not holding it.
 
         Raises:
             SpendUndeterminedError: Only where the values cannot be produced at
@@ -1773,7 +1777,16 @@ class SqliteAuditTrail:
         try:
             return tuple(period_bounds(instant, self._spend, period) for period in SpendPeriod)
         except (SpendArithmeticError, OverflowError, ValueError, OSError) as exc:
-            raise SpendUndeterminedError(_undetermined(_CLOCK_RAISED)) from exc
+            # **Not** the clock ground: the clock already answered, and naming
+            # it would send an operator to a collaborator that did nothing wrong.
+            # ADR-0194 §1's boundary rule is total for every reading
+            # ``checked_clock`` accepts — every case it enumerates is clamped
+            # rather than refused — so this handler is unreachable and exists only
+            # to keep §5's ``Exception`` set closed against a defect in *this*
+            # implementation's own arithmetic, which is what §4's sixth ground is
+            # for: "the class is what an implementation raises when its own sizing
+            # is wrong".
+            raise SpendUndeterminedError(_undetermined(_ARITHMETIC_TRAPPED)) from exc
 
     def _spend_reading(self) -> datetime:
         """Take the one guarded clock reading a spend decision is made on.
