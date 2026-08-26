@@ -55,6 +55,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     ConnectionPurger,
     InvocationLedger,
+    RecipientGrants,
     SpendGate,
     SpendLedger,
 )
@@ -101,7 +102,11 @@ from ai_assistant.orchestration.upcoming import (
 from ai_assistant.orchestration.upcoming import (
     PRODUCER as UPCOMING_PRODUCER,
 )
-from ai_assistant.permissions import SqliteSourceReadTrail, ThresholdActionPolicy
+from ai_assistant.permissions import (
+    SqliteRecipientGrantStore,
+    SqliteSourceReadTrail,
+    ThresholdActionPolicy,
+)
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
@@ -635,6 +640,24 @@ def _spy_on_policy(
     return calls
 
 
+def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
+    """``calls`` with the grant seam lifted out, leaving the four threshold knobs.
+
+    The two cases below are about **which settings field maps to which
+    constructor parameter** (#239), and a seam in the dict would make each of
+    them fail whenever an unrelated dependency was added — the brittleness that
+    turns a mapping test into a roster test nobody meant to write.
+    :func:`_policy_grant_seam` is where the seam itself is asserted, once.
+    """
+    return [{name: value for name, value in call.items() if name != "grants"} for call in calls]
+
+
+def _policy_grant_seam(calls: list[dict[str, object]]) -> object:
+    """The one ``grants`` argument the builder constructed the policy with."""
+    assert len(calls) == 1, calls
+    return calls[0]["grants"]
+
+
 async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -649,7 +672,7 @@ async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert calls == [
+        assert _thresholds(calls) == [
             {
                 "confirm_at_risk": RiskLevel.HIGH,
                 "confirm_at_reversibility": Reversibility.RECOVERABLE,
@@ -668,7 +691,7 @@ async def test_build_engine_defaults_the_policy_to_todays_gate(
     calls = _spy_on_policy(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        assert calls == [
+        assert _thresholds(calls) == [
             {
                 "confirm_at_risk": RiskLevel.MEDIUM,
                 "confirm_at_reversibility": Reversibility.IRREVERSIBLE,
@@ -676,6 +699,33 @@ async def test_build_engine_defaults_the_policy_to_todays_gate(
                 "deny_at_reversibility": None,
             }
         ]
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0193 §7: route (b) is reachable only because this wiring exists.
+
+    A policy constructed with no ``RecipientGrants`` is a conforming policy that
+    reaches no route-(b) ``ALLOW`` at all, so the whole of ADR-0193's effect on a
+    running system rests on the composition root passing one — and nothing about a
+    policy built without it looks wrong afterwards.
+
+    Asserted as the **same object** the builder wired into the trail, not merely
+    as something of the right shape: two stores over two files would each hold half
+    the state, so a grant the establishing act recorded through one would be
+    invisible to the ``covering`` read of the other, and every route-(b) ``ALLOW``
+    the policy authored would then be refused at ``record`` — a system that
+    prompts, forgets, and prompts again, with nothing failing.
+    """
+    calls = _spy_on_policy(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        seam = _policy_grant_seam(calls)
+        assert isinstance(seam, SqliteRecipientGrantStore)
+        assert isinstance(seam, RecipientGrants)
     finally:
         await engine.aclose()
 
@@ -1471,12 +1521,13 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns **eleven** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
+    owns **twelve** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
     that ruling by living inside the directory the instance lock already covers.
     ADR-0130 §9's notification store is the eighth and obeys it for the same
     reason: inside the directory the instance lock already covers, opened by the
     same process, closed in the same ordered shutdown. ADR-0185 §4's read trail is
-    the eleventh, on the same terms.
+    the eleventh, on the same terms, and ADR-0193 §1's recipient-grant store is
+    the twelfth on the same terms again.
 
     **The count in this docstring said "eight" while the list below named ten**,
     which is exactly the hazard ADR-0123's Context records — "the count in the most
@@ -1513,6 +1564,14 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # Tier 1: a row names the source a read was about and the grant it ran
             # under, which is the record of an access to the user's own data.
             "reads.db",
+            # ADR-0193 §1's standing recipient grants, the twelfth and the
+            # eleventh that is Tier 1: a record names recipients of the user's,
+            # and the declaration and connected account they were made standing
+            # for. A separate file from ``grants.db`` because the two seams may
+            # not be joined (ADR-0097 §7, ADR-0193 §13) — one authorises reading
+            # in, the other sending out — and separately erasable because each
+            # store's own wholesale erase is the user's to perform (§9).
+            "recipient_grants.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
