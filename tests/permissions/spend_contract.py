@@ -132,6 +132,25 @@ class ClockFailedError(RuntimeError):
     """
 
 
+class UnprintableError(RuntimeError):
+    """A failure that refuses to be rendered, which is a reachable shape.
+
+    Nothing obliges an injected collaborator's exception to have a printable
+    message, and a handler composing one from it leaves as this class instead of
+    the two ADR-0194 §5 permits.
+    """
+
+    def __str__(self) -> str:
+        """Refuse."""
+        msg = "this failure will not be printed"
+        raise LookupError(msg)
+
+    def __repr__(self) -> str:
+        """Refuse the other way in too."""
+        msg = "this failure will not be represented"
+        raise LookupError(msg)
+
+
 @dataclass(eq=False)
 class MovableClock:
     """An injected clock a case moves, scripts, or breaks.
@@ -142,7 +161,8 @@ class MovableClock:
             wants to catch an implementation reading the clock twice scripts two
             instants that would answer differently and asserts one of them
             governed both periods.
-        failures: How many of the next readings raise :class:`ClockFailedError`.
+        failures: How many of the next readings raise.
+        unprintable: Whether those failures refuse to be rendered.
         reads: How many readings have been taken, which is what a case asserts on
             when the rule is "one reading".
     """
@@ -150,6 +170,7 @@ class MovableClock:
     now: datetime = NOON
     walk: list[datetime] = field(default_factory=list)
     failures: int = 0
+    unprintable: bool = False
     reads: int = 0
 
     def __call__(self) -> datetime:
@@ -157,6 +178,8 @@ class MovableClock:
         self.reads += 1
         if self.failures > 0:
             self.failures -= 1
+            if self.unprintable:
+                raise UnprintableError
             msg = "the clock could not be read"
             raise ClockFailedError(msg)
         return self.walk.pop(0) if self.walk else self.now
@@ -2550,3 +2573,61 @@ class SpendGateContract:
                 assert stated[SpendPeriod.CALENDAR_DAY].accounted is None
                 with pytest.raises(SpendUndeterminedError, match=GROUND["amount"]):
                     await subject.admit_invocation(estimate=usd(amount))
+
+    @pytest.mark.optional_obligation
+    async def test_an_append_and_a_second_read_land_while_an_admission_is_parked(
+        self, harness: SpendHarness
+    ) -> None:
+        """The admission's own exclusion must not be the store's (ADR-0194 §3).
+
+        A holder that kept whatever its rows are read through — a connection, a
+        lock — held across the window between an admission's snapshot and its
+        decision makes the interleaving §3 is written about unreachable: the
+        completion a call already in flight appends would queue behind the
+        admission, and so would every other read. Worse on a real backend, where
+        two workers inside one connection can meet a ``BEGIN`` while a transaction
+        is open and refuse a call the ceiling had nothing to do with.
+
+        So both are driven while the admission is parked: an append lands and is
+        visible to a second totals read, and the admission is still decided on the
+        snapshot it took before either.
+        """
+        clock = MovableClock()
+        subject = harness.open(now=clock)
+        rows = Rows(subject, clock)
+        await rows.completed(usd("10"))
+        parked = harness.arm_read(subject)
+        if parked is None:
+            pytest.skip("this implementation exposes no point inside a running admission")
+
+        admission = asyncio.ensure_future(subject.admit_invocation(estimate=usd("10")))
+        await parked.reached()
+        await rows.completed(usd("10"))
+        stated = totals_by_period(await subject.spend_totals())
+        parked.release()
+
+        assert stated[SpendPeriod.CALENDAR_DAY].accounted == Decimal("20")
+        assert await asyncio.wait_for(admission, _PATIENCE)
+
+    async def test_a_collaborator_whose_failure_cannot_be_printed_is_still_translated(
+        self, harness: SpendHarness
+    ) -> None:
+        """The translation must not itself raise (ADR-0194 §5's closed set).
+
+        This seam is written to distrust its collaborators, and an injected clock
+        is one of them: a failure whose ``__str__`` raises reaches any handler that
+        formats it into a message and leaves as *that* exception instead of
+        ``SpendUndeterminedError`` — a third class out of a member ADR-0194 §5
+        closes at two, and the one thing the translation exists to prevent. Driven
+        on the clock, which is the collaborator a suite can reach through the
+        Protocol, and on the store where the harness can break one.
+        """
+        clock = MovableClock(failures=1, unprintable=True)
+        subject = harness.open(now=clock)
+
+        with pytest.raises(SpendUndeterminedError):
+            await subject.admit_invocation(estimate=usd("1"))
+
+        clock.failures, clock.unprintable = 1, True
+        with pytest.raises(SpendUndeterminedError):
+            await subject.spend_totals()
