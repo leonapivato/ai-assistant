@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.core.protocols import AuditTrail, RecipientGrantResolution
     from ai_assistant.core.types import PermissionDecision
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -97,6 +97,16 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self, ephemeral: SqliteAuditTrail) -> AuditTrail:
         return ephemeral
+
+    def trail_over(self, resolution: RecipientGrantResolution) -> AuditTrail:
+        """An empty in-memory trail resolving route-(b) pointers against ``resolution``.
+
+        The factory ADR-0193 §15 adds to the suite. Not closed by the case: an
+        in-memory database dies with its connection and its connection dies with
+        the object, so there is nothing to release that outliving the test would
+        leak — the same reason ``ephemeral`` above is the only fixture that closes.
+        """
+        return SqliteAuditTrail(path=":memory:", recipient_grants=resolution)
 
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(

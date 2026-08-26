@@ -804,6 +804,52 @@ def test_load_settings_rejects_a_non_positive_deferral_queue_limit(
         load_settings()
 
 
+# --- ADR-0193 §1's ceiling on outstanding standing recipient grants ----------
+#
+# Four cases, and each is named in ADR-0193 §14 because each fails against a
+# different plausible implementation.
+
+
+def test_the_recipient_grant_ceiling_refuses_a_negative() -> None:
+    """An implementation special-casing only zero accepts ``-1`` (ADR-0193 §14).
+
+    And a store opened at ``-1`` would refuse every granting write for a reason no
+    message explains — the deployment would look configured and quietly decline
+    route (b) with nothing saying so.
+    """
+    with pytest.raises(ValidationError):
+        Settings(recipient_grant_max_outstanding=-1)
+
+
+def test_the_recipient_grant_ceiling_accepts_a_positive() -> None:
+    """The ordinary case, so the two refusals above and below are about their own grounds."""
+    assert Settings(recipient_grant_max_outstanding=8).recipient_grant_max_outstanding == 8
+
+
+def test_the_recipient_grant_ceiling_accepts_zero() -> None:
+    """Zero is **meaningful** rather than a misconfiguration (ADR-0193 §1).
+
+    It is how a deployment declines route (b): in one that has never established a
+    grant, nothing can be established and ``covering`` answers ``None`` for every
+    request. It is admission-only like every other value — a store already holding
+    live grants keeps them — so it is not a kill switch and the store's own tests
+    say so over a populated store.
+    """
+    assert Settings(recipient_grant_max_outstanding=0).recipient_grant_max_outstanding == 0
+
+
+def test_the_recipient_grant_ceiling_carries_the_shipped_default() -> None:
+    """A ``_IntegerSetting`` without a default leaves a fresh ``Settings()`` undefined.
+
+    And a lane free to pick would be picking whether route (b) is reachable at all
+    — zero declines it outright. Sixty-four is ADR-0193 §1's own figure, and §13
+    records that the ADR recommends nothing to a *deployment* over it: high enough
+    that ordinary use never reaches it, low enough that the store's ``standing()``
+    stays small in practice.
+    """
+    assert Settings().recipient_grant_max_outstanding == 64
+
+
 # --- a flag is not a count: every integer setting refuses a non-integer (#471) ---
 #
 # Discovered from the model rather than listed, so a new `int` field is covered
