@@ -4017,14 +4017,18 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     offer = functions["offerApproval"]
 
     # Both controls take one state, computed in one place, so the pair cannot get out of
-    # step with itself — and the state is *derived* from ``spent`` rather than written
-    # beside it, which is what makes a row that is no longer answerable render as one
-    # wherever it came from (#1536).
+    # step with itself — and the state is *derived* from the three sets rather than
+    # written beside them, which is what makes a row that is no longer answerable render
+    # as one wherever it came from (#1536).
+    assert "const out = answering.has(token);" in offer
     assert "const answered = spent.has(token);" in offer
-    assert offer.count("disabled = waiting || answered;") == 2
+    assert offer.count("disabled = out || answered;") == 2
     assert "} finally {" in offer
-    assert offer.count("settle(true);") == 1
-    assert offer.count("settle(false);") == 2
+    # The park is claimed before the row's own request, so a click on either row of one
+    # park starts at most one ``resume``.
+    assert "if (answering.has(token) || spent.has(token)) {" in offer
+    assert offer.index("answering.add(token);") < offer.index("await answerConfirmation(")
+    assert "answering.delete(token);" in offer
     # **And the guarantee is per park rather than per row**, because one park is on
     # screen twice: a turn that parks renders its confirmation with the answer, and the
     # recovery listing renders the same park again — carrying the *same* token, since
@@ -4094,6 +4098,7 @@ def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock(
             assert clock not in body, (name, clock)
     # What ends the wait is a control, built beside the pair it hands back.
     offer = functions["offerApproval"]
+    assert "refreshParks();" in offer
     assert 'stop.textContent = "Stop waiting";' in offer
     assert "stopping.abort();" in offer
     assert "stopping = new AbortController();" in offer
@@ -4151,9 +4156,11 @@ def test_the_listing_is_what_hands_an_abandoned_parks_token_back() -> None:
     functions = _functions(script)
     offer = functions["offerApproval"]
 
-    assert "if (unresolved.delete(token)) {\n    spent.delete(token);\n  }" in offer
+    assert (
+        "if (unresolved.delete(token)) {\n    spent.delete(token);\n    refreshParks();\n  }"
+    ) in offer
     # Before a control is built from it, so nothing renders off the state it corrects.
-    assert offer.index("unresolved.delete(token)") < offer.index("settle(false);")
+    assert offer.index("unresolved.delete(token)") < offer.index("parkRows.add(")
     assert offer.index("unresolved.delete(token)") < offer.index('document.createElement("button")')
     # Two writes and no third: taken where an answer was abandoned, given up where the
     # listing says the park survived it.
@@ -4184,15 +4191,15 @@ def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing
     offer = _functions(script)["offerApproval"]
     words = _functions(script)["parkWords"]
 
-    assert offer.rstrip().endswith("settle(false);\n}")
+    assert offer.rstrip().endswith("parkRows.add({ node: item, settle });\n  settle();\n}")
     assert "const answered = spent.has(token);" in offer
     assert "const stranded = unresolved.has(token);" in offer
-    assert "said.textContent = parkWords(waiting, answered, stranded);" in offer
+    assert "said.textContent = parkWords(waiting, out, answered, stranded);" in offer
     assert 'said.hidden = said.textContent === "";' in offer
-    # Total over the three states a row can be in, and it takes no token: ADR-0177 §8
+    # Total over the four states a row can be in, and it takes no token: ADR-0177 §8
     # has the front end render the continuation nowhere.
     assert "token" not in words
-    assert words.count("return") == 3
+    assert words.count("return") == 4
 
 
 def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> None:
@@ -4244,3 +4251,49 @@ def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
     assert "await readPending(false);" not in body
     assert "readPending(false);" in body
     assert body.index("readPending(false);") < body.index('fault(PARK_UNRESOLVED, "confirmations")')
+
+
+def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> None:
+    """The round-1 adversarial finding, which is #1536's residual surviving inside its
+    own fix.
+
+    One park is on screen twice — a turn that parks renders its own confirmation, and
+    the recovery listing renders the same park again, "with the *same* token, because
+    ``pending_confirmations`` reuses that entry's token rather than minting a second".
+    A per-row state therefore left the *other* row enabled over a token
+    ``answerConfirmation`` returns early on: a control that submits nothing, which is
+    exactly the failure this change exists to close.
+
+    So the rows are registered and every one of them is told when the park's state
+    moves. The registry is pruned by ``isConnected`` and by nothing else, which is the
+    question ``abandonAsk`` asks of the answer panel and for its reason: ownership of
+    what is on screen is a fact about *now*, and ``clearNode`` replaces a whole listing
+    on every read.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    refresh = functions["refreshParks"]
+
+    assert "parkRows.forEach((row) => {" in refresh
+    assert "if (row.node.isConnected) {" in refresh
+    assert "row.settle();" in refresh
+    assert "parkRows.delete(row);" in refresh
+    # Reached where the park's state moves, and from nowhere else — a row is never left
+    # rendering a fact that has moved, and nothing re-renders on a schedule.
+    assert {name for name, body in functions.items() if "refreshParks();" in body} == {
+        "offerApproval"
+    }
+    offer = functions["offerApproval"]
+    # Three: the park claimed, the park settled, and the token the listing handed back —
+    # the last of which is what keeps the row that *sent* the abandoned answer from
+    # standing there saying its outcome is not known after the listing has said the park
+    # survived it.
+    assert offer.count("refreshParks();") == 3
+    assert "parkRows.add({ node: item, settle });" in offer
+    # And the second row says an answer is on its way rather than that the park was
+    # answered, because ``spent`` is claimed before the request goes out and cannot tell
+    # the two apart on its own.
+    assert "PARK_ELSEWHERE" in _functions(script)["parkWords"]
+    elsewhere = _constant(script, "PARK_ELSEWHERE")
+    assert "already on its way" in elsewhere
+    assert "not the live control" in elsewhere

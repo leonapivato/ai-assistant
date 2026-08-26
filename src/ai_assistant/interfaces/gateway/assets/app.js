@@ -1177,6 +1177,16 @@ const PARK_UNRESOLVED =
 // token `answerConfirmation` returns early on. An enabled control that submits nothing
 // is the silent refusal this surface spends the most words preventing, so the pair is
 // disabled and the row says why.
+// **The other row of the same park, while the answer is still out.** One park is on
+// screen twice and `spent` is claimed before the request goes out, so without this the
+// second row would say the park had been answered while its answer was in flight —
+// which is a state this page has not read. It says what it does know: an answer is on
+// its way, this is not the control that sent it, and where the outcome will appear.
+const PARK_ELSEWHERE =
+  "An answer for this park is already on its way, sent from the other place it is " +
+  "shown on this page. This row is not the live control, and what became of that " +
+  "answer will be said where it was sent from.";
+
 const PARK_ANSWERED =
   "That park has been answered from this page, so this row is no longer the live one. " +
   "Press Confirmations to read what is still waiting.";
@@ -1185,9 +1195,12 @@ const PARK_ANSWERED =
 // fourth — and it is a function so that the *token* is not one of them: ADR-0177 §8
 // has the front end render the continuation nowhere, so nothing that computes a text
 // node takes one.
-function parkWords(waiting, answered, stranded) {
-  if (waiting) {
+function parkWords(mine, out, answered, stranded) {
+  if (mine) {
     return PARK_WAITING;
+  }
+  if (out) {
+    return PARK_ELSEWHERE;
   }
   if (!answered) {
     return "";
@@ -1212,8 +1225,15 @@ function offerApproval(item, token) {
   // resolved. That is a read rather than a guess, which is what ADR-0139 §4 asks for:
   // "the state is never inferred from the unresolved act, and where this surface cannot
   // read it, the user's next call can."
+  //
+  // **And every other row of this park is told**, because the one that sent the
+  // abandoned answer is still on screen saying its outcome is not known — true when it
+  // was written and stale the moment the listing says the park survived. The row being
+  // built is not registered yet and does not need to be: it takes the same state from
+  // `settle` at the end of this function.
   if (unresolved.delete(token)) {
     spent.delete(token);
+    refreshParks();
   }
   const approve = document.createElement("button");
   approve.type = "button";
@@ -1241,20 +1261,29 @@ function offerApproval(item, token) {
   //
   // **What this row is, said and enabled in one place** so the pair, the sentence and
   // the way out cannot get out of step with each other — `askWaiting`'s device, one
-  // surface over. The enabled state is derived from `spent` rather than held beside it,
-  // which is what closes #1536's residual: a row whose token is still spent renders
-  // disabled and says so, wherever it came from and whichever path left it that way.
+  // surface over.
   //
-  // **Which of the two things a spent token means is read off the two sets**, so a row
-  // rendered long afterwards — by a listing read, or by a turn that parked again — says
-  // the same thing as the row the answer went out from.
-  const settle = (waiting) => {
+  // **Every state but one is the park's, read off the three sets rather than held
+  // beside them**, which is what closes #1536's residual: a row over a token that is
+  // claimed renders disabled and says which of the three things that means, wherever
+  // the row came from and whichever path left the token that way. `waiting` is the one
+  // fact that is this row's — it is the row that has a wait to leave — and it is why
+  // the control is per row while the pair is per park.
+  //
+  // **And it is reached for every row of the park, not just this one**, which is what
+  // the registry above buys. Adversarial review found the gap on round 1: answering
+  // from the listing's row left the answer panel's row for the same park enabled over a
+  // token `answerConfirmation` returns early on — a control that submits nothing, which
+  // is the residual surviving inside its own fix.
+  let waiting = false;
+  const settle = () => {
+    const out = answering.has(token);
     const answered = spent.has(token);
-    approve.disabled = waiting || answered;
-    decline.disabled = waiting || answered;
     const stranded = unresolved.has(token);
+    approve.disabled = out || answered;
+    decline.disabled = out || answered;
     stop.hidden = !waiting;
-    said.textContent = parkWords(waiting, answered, stranded);
+    said.textContent = parkWords(waiting, out, answered, stranded);
     said.hidden = said.textContent === "";
   };
   let stopping = null;
@@ -1269,12 +1298,22 @@ function offerApproval(item, token) {
     }
   });
   const answer = async (approved) => {
+    // The park's own guard, taken before the row's: a click on a row the registry has
+    // not reached yet — one rendered in the same turn of the event loop as the answer —
+    // must not start a second request either.
+    if (answering.has(token) || spent.has(token)) {
+      return;
+    }
+    waiting = true;
+    answering.add(token);
     stopping = new AbortController();
-    settle(true);
+    refreshParks();
     try {
       await answerConfirmation(token, approved, stopping);
     } finally {
-      settle(false);
+      waiting = false;
+      answering.delete(token);
+      refreshParks();
     }
   };
   approve.addEventListener("click", () => answer(true));
@@ -1283,7 +1322,8 @@ function offerApproval(item, token) {
   item.appendChild(decline);
   item.appendChild(stop);
   item.appendChild(said);
-  settle(false);
+  parkRows.add({ node: item, settle });
+  settle();
 }
 
 // The one recovery route (ADR-0177 §8). A browser that has been closed and reopened,
@@ -1378,6 +1418,44 @@ const spent = new Set();
 // `pending_confirmations`, and a park it hands back after a reload is one the engine
 // still holds.
 const unresolved = new Set();
+
+// The tokens an answer is out on **right now**, which is the fact neither set above
+// carries. `spent` is claimed before the request and never given back on a resolution,
+// so it cannot tell an answer that is in flight from one that settled; and the
+// difference is a sentence the owner reads: a second row of the same park may not say
+// "that park has been answered" while the answer is still on its way.
+//
+// Adversarial review found the gap on round 1, in the shape the file already warns
+// about two comments up — one park is on screen twice.
+const answering = new Set();
+
+// Every park row on screen, so one park's state reaches all of its rows.
+//
+// **A registry rather than a lookup by token**, because two rows of one park are two
+// nodes in two panels — the answer panel, where a turn that parked renders its own
+// confirmation, and the recovery listing — and neither knows about the other. Before
+// it, answering from one row disabled that row and left the other enabled over a token
+// `answerConfirmation` returns early on: a control that submits nothing, which is the
+// residual #1536 is about, surviving inside its own fix.
+//
+// **A row is pruned when it leaves the document, and by nothing else.** `clearNode`
+// replaces a whole listing on every read, so a registry that waited to be told would
+// grow one entry per row ever rendered; `isConnected` is the same question
+// `abandonAsk` asks of the answer panel, and for its reason — ownership of what is on
+// screen is a fact about *now*, and no bookkeeping has to be kept in step to know it.
+const parkRows = new Set();
+
+// Every row still on screen, told what its park is now. Called where the state changes
+// and nowhere else, so a row cannot be left rendering a fact that has moved.
+function refreshParks() {
+  parkRows.forEach((row) => {
+    if (row.node.isConnected) {
+      row.settle();
+    } else {
+      parkRows.delete(row);
+    }
+  });
+}
 
 // One answer, relayed. The page conveys consent and rules on nothing (ADR-0042 §6):
 // a refusal comes back as an ordinary outcome whose step was denied, not as a fault,
