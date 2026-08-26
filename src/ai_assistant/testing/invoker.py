@@ -637,17 +637,15 @@ def _diagnose(
 
 
 def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
-    """Return the exception this path must dispose of, keeping the other as context.
+    """Return the exception this path must dispose of, untouched.
 
     See `ai_assistant.tools.consume` for the reasoning: a ``BaseException`` the
     class read raised is governed by ADR-0192 §3's own clauses on one raised on
-    that path, not exempted from them and not swallowed.
+    that path, and it is neither inspected nor annotated on the way — a hostile
+    ``__setattr__`` would otherwise replace the exception §3 requires unchanged
+    with the failure of the attempt to annotate it.
     """
-    if unclassifiable is None:
-        return error
-    if unclassifiable.__context__ is None:
-        unclassifiable.__context__ = error
-    return unclassifiable
+    return error if unclassifiable is None else unclassifiable
 
 
 @dataclass(frozen=True, slots=True)
