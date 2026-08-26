@@ -1214,19 +1214,26 @@ def test_the_three_states_are_distinct_and_none_is_rendered_as_another(
     assert len(set(prose)) == 3, prose
 
 
-def test_a_row_naming_an_authorisation_other_than_its_own_question_is_the_second_state(
+def test_a_row_naming_an_authorisation_other_than_its_own_question_gets_no_state(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one combination the type admits and no trail can hold, rendered by its letter.
+    """The one combination the type admits, no trail can hold, and no state fits.
 
     ``AuditTrail.record`` refuses a *resolving* ``ALLOW`` whose ``authorised_by`` is
     not its own ``resolves``, which is what makes §11's three states total over every
-    row a trail can return. The types alone do not: this row validates, and this
-    surface renders whatever the operation hands it — over the wire, from a hub the
-    adapter does not own. It lands in the second state because that is the only one
-    of the three whose claim stays true of it: ``authorised_by`` is set, and it is
-    demonstrably **not** the confirmation about this call, so what the row names is
-    not a decision about that call.
+    row a trail can return — the totality the section claims when it says "the
+    discriminator is total because ``authorised_by`` and ``resolves`` are". The types
+    alone are looser: this row validates, and the surface renders whatever the
+    operation hands it, over the wire, from a hub the adapter does not own.
+
+    **No state's claim is true of it**, so it is assigned none. It answers a
+    confirmation about this call and rests on something that is not that
+    confirmation, so the first state's claim is false; the second is conditioned on
+    ``resolves`` unset, and widening it to cover this row would assign a state §11
+    does not define for it; the third is false outright, because ``authorised_by`` is
+    set. §11 rejects "no statement at all" for a *non-egress* ``ALLOW`` expressly
+    because "the record already determines the answer" there — here it does not, and
+    the line says so and names neither value as the basis.
     """
     _listing(
         output,
@@ -1235,9 +1242,35 @@ def test_a_row_naming_an_authorisation_other_than_its_own_question_is_the_second
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
     assert _basis_line(output) == (
-        "Authorised by: a standing authorisation this ruling names, recorded as g-1 "
-        "(what the row names, and no more)"
+        "Authorised by: this row does not say — it answers one decision and names a "
+        "different one as what authorised it, and nothing here guesses between them"
     )
+
+
+def test_no_state_is_assigned_to_a_row_none_of_the_three_conditions_reaches(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the case above: none of §11's three renderings appears.
+
+    An equality on the line pins what *is* said; this pins that none of the three
+    states is said, which is the failure the clause is actually about — "each
+    distinct from the other two and none rendered as any other" is unsatisfiable for
+    a row the discriminator does not reach, and the repair is to render none of them
+    rather than to pick the least wrong.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-odd", resolves="d-ask", authorised_by="g-1"),
+        _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
+    )
+    for state in (
+        "a decision you took about this call",
+        "a standing authorisation this ruling names",
+        "the policy's own rules",
+    ):
+        assert state not in rendered, state
+    assert "Answers the question: d-ask" in rendered
 
 
 def test_a_resolving_row_carrying_no_authorisation_is_the_third_state(

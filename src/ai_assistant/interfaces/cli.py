@@ -8008,19 +8008,30 @@ def _authorisation_line(decision: PermissionDecision) -> str:
     ADR-0193 §6's digest makes possible is an out-of-band one over two exports, and
     this is not the render path for it.
 
-    **Total in code, because the type admits a combination the trail cannot hold.**
-    ``PermissionRuling`` refuses ``authorised_by`` on a non-``ALLOW`` and
-    ``AuditTrail.record`` refuses a *resolving* ``ALLOW`` whose ``authorised_by`` is
-    not its own ``resolves``, which together make §11's three states total over every
-    row a trail can return. The types alone do not: a row carrying ``resolves`` and a
-    *different* ``authorised_by`` validates, and this surface reads whatever the
-    operation hands it — over the wire, from a hub this adapter does not own. Such a
-    row is rendered by its own letter and lands in the second state, which is the
-    only one of the three whose claim stays true of it: ``authorised_by`` is set and
-    is demonstrably not the confirmation about this call, so what the row names is
-    not a decision about that call. A row carrying ``resolves`` with ``authorised_by``
-    unset is the third state by §11's own condition, which is stated over
-    ``authorised_by`` alone.
+    **Each state is rendered on §11's own condition and on no wider one**, which is
+    what keeps the enumeration the ADR's rather than this function's. The third is
+    conditioned on ``authorised_by`` unset **and on nothing else**, so a row carrying
+    a ``resolves`` and no ``authorised_by`` is the third state by the clause as
+    written. The second is conditioned on ``resolves`` unset, so it is never widened
+    to cover a resolving row.
+
+    **A row satisfying none of the three conditions gets no statement of the fact,
+    and that is §11's own reasoning rather than a gap left in it.** ``PermissionRuling``
+    refuses ``authorised_by`` on a non-``ALLOW`` and ``AuditTrail.record`` refuses a
+    *resolving* ``ALLOW`` whose ``authorised_by`` is not its own ``resolves``, which
+    together make §11's three states total over every row a trail can return — the
+    totality the section claims when it says "the discriminator is total because
+    ``authorised_by`` and ``resolves`` are". The types alone are looser: a row
+    carrying ``resolves`` and a *different* ``authorised_by`` validates, and this
+    surface renders whatever the operation hands it, over the wire, from a hub this
+    adapter does not own. No state's claim is true of such a row — it answers a
+    confirmation about this call and rests on something that is not that
+    confirmation — so assigning it one would be asserting the basis the record does
+    not determine. §11 rejects "no statement at all" for a *non-egress* ``ALLOW``
+    expressly because "the record already determines the answer" there; here it does
+    not, and the line says so and names neither. That is a refusal to state §11's
+    fact, not a fourth answer to it: nothing is rendered as any of the three, and
+    every conforming row still reaches exactly one.
 
     Args:
         decision: The recorded ruling, whose outcome the caller has already
@@ -8037,14 +8048,19 @@ def _authorisation_line(decision: PermissionDecision) -> str:
     authorised_by = decision.ruling.authorised_by
     if authorised_by is None:
         return "[bold]Authorised by:[/] the policy's own rules, resting on no decision of yours"
+    if decision.resolves is None:
+        return (
+            "[bold]Authorised by:[/] a standing authorisation this ruling names, "
+            f"recorded as {_safe(authorised_by)} [dim](what the row names, and no more)[/]"
+        )
     if authorised_by == decision.resolves:
         return (
             "[bold]Authorised by:[/] a decision you took about this call, "
             f"recorded as {_safe(authorised_by)}"
         )
     return (
-        "[bold]Authorised by:[/] a standing authorisation this ruling names, "
-        f"recorded as {_safe(authorised_by)} [dim](what the row names, and no more)[/]"
+        "[bold]Authorised by:[/] this row does not say — it answers one decision and names "
+        "a different one as what authorised it, and nothing here guesses between them"
     )
 
 
