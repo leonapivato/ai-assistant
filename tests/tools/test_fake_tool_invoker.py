@@ -19,7 +19,11 @@ from ai_assistant.core.types import ToolOutcome
 from ai_assistant.testing import FakeToolInvoker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tool_invoker_contract import InvocableToolRegistry
+
+    from ai_assistant.core.protocols import InvocationLedger
 
 
 class TestFakeToolInvokerContract(ToolInvokerContract):
@@ -28,6 +32,10 @@ class TestFakeToolInvokerContract(ToolInvokerContract):
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
         return FakeToolInvoker()
+
+    @pytest.fixture
+    def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
+        return lambda ledger: FakeToolInvoker(ledger=ledger)
 
 
 async def test_fake_records_the_calls_it_accepted() -> None:

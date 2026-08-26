@@ -51,7 +51,7 @@ from ai_assistant.core.errors import (
     SourceNotGrantedError,
     TraceStoreError,
 )
-from ai_assistant.core.protocols import ConnectionPurger
+from ai_assistant.core.protocols import ConnectionPurger, InvocationLedger
 from ai_assistant.core.types import (
     BeliefBand,
     ClassReach,
@@ -473,6 +473,39 @@ async def test_build_engine_wires_one_registry_object_as_both_registry_and_invok
         assert isinstance(tools, InMemoryToolRegistry)
         assert engine._runner._executor._registry is tools
         assert engine._runner._executor._invoker is tools
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_hands_the_invoker_the_ledger_face_of_the_one_trail(
+    tmp_path: Path,
+) -> None:
+    """ADR-0192 §9's wiring clause, and the object identity it turns on.
+
+    One object satisfies ``AuditTrail``, ``InvocationLedger`` and
+    ``InvocationCompleter`` over one store, and each consumer is handed the face
+    its job needs. A composition that handed the invoker the trail, or gave it a
+    *second* store over the same file, would be a defect no Protocol can close:
+    the ledger requires the decision it is passed to equal the decision the store
+    holds under that id, so a second handle would refuse every claim under a
+    ruling the runner had just recorded.
+
+    Asserted as identity against the trail the runner records into, because that
+    is the whole content of the clause — the narrowing itself is the parameter's
+    annotation and is what ``mypy`` checks.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        tools = engine._runner._registry
+        assert isinstance(tools, InMemoryToolRegistry)
+        # Compared as objects: the two names are annotated with the two *faces*,
+        # which is the whole point of the clause, so a typed identity check is the
+        # one thing a static checker calls non-overlapping.
+        ledger: object = tools._ledger
+        assert ledger is engine._runner._trail, (
+            "the invoker claims through the same object the runner records decisions into"
+        )
+        assert isinstance(ledger, InvocationLedger)
     finally:
         await engine.aclose()
 

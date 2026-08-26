@@ -960,6 +960,13 @@ async def drive_the_probe(
     reach a callable, and the arm would be reading a zero produced by the
     permission layer instead of by the absence of a route.
 
+    It is **recorded in this deployment's own trail** before the call, because
+    since ADR-0192 §1 the seam claims the authorisation through that trail and a
+    decision it did not record authorises nothing. That is what the runner does in
+    front of every execution, so recording it here keeps the arm on the production
+    path rather than around it — and a probe refused by the consume would be
+    another zero produced by something other than the absence of a route.
+
     Args:
         composition: The built deployment.
         definition: Which probe to drive; see :func:`register_probe`.
@@ -974,6 +981,7 @@ async def drive_the_probe(
         id=f"m25-d-{definition.id}",
         decided_at=DECIDED_AT,
     )
+    await composition.engine._runner._trail.record(decision)
     return await registry(composition).invoke(
         ToolCall(request=request, decision=decision), timeout=TIMEOUT
     )

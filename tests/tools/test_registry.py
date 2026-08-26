@@ -27,8 +27,12 @@ from ai_assistant.testing import succeeds
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tool_invoker_contract import InvocableToolRegistry
     from tool_registry_contract import PopulatableToolRegistry
+
+    from ai_assistant.core.protocols import InvocationLedger
 
 
 class TestInMemoryToolRegistryContract(ToolRegistryContract):
@@ -50,6 +54,10 @@ class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
         return InMemoryToolRegistry()
+
+    @pytest.fixture
+    def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
+        return lambda ledger: InMemoryToolRegistry(ledger=ledger)
 
 
 # --- construction -------------------------------------------------------

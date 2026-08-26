@@ -40,7 +40,14 @@ from ai_assistant.testing.grants import (
     revocation_of,
     source_grant,
 )
-from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
+from ai_assistant.testing.invoker import (
+    APPEND_FAILED,
+    CLAIM,
+    COMPLETION,
+    FakeToolImplementation,
+    FakeToolInvoker,
+    succeeds,
+)
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
@@ -118,6 +125,9 @@ from ai_assistant.testing.transport import (
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
+    "APPEND_FAILED",
+    "CLAIM",
+    "COMPLETION",
     "DEFAULT_BATCH_ISSUER",
     "DEFAULT_BATCH_REPLY",
     "DEFAULT_CHECKED_AT",
