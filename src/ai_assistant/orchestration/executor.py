@@ -39,7 +39,12 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import PlanningError, RetriesExhaustedError, ToolBindingError
+from ai_assistant.core.errors import (
+    AuditError,
+    PlanningError,
+    RetriesExhaustedError,
+    ToolBindingError,
+)
 from ai_assistant.core.types import (
     Idempotency,
     StepFailure,
@@ -79,6 +84,21 @@ _STATUS_BY_OUTCOME: Mapping[ToolOutcome, StepStatus] = {
 #: paired ``kind`` is ``None`` (ADR-0039 §3).
 _REFUSED = (
     "the invoker refused the call before the tool ran: it is not the call that was authorised"
+)
+
+#: What the seam's own ledger refusal records (ADR-0192 §1, ADR-0034 §1). Every
+#: ``AuditError`` that leaves ``invoke`` is a **claim-path** one: the claim is
+#: appended before the callable is entered, and every completion-path failure is
+#: absorbed at the seam, which returns the call's own result rather than raising
+#: (ADR-0192 §3). So the callable was never reached, ``FAILED`` is the honest
+#: record on ADR-0034 §1's second ground, and ``INDETERMINATE`` would report a
+#: call that provably never started as one that may have acted. Authored here for
+#: :data:`_REFUSED`'s reason: an ``AuthorisationSpentError``'s own message names
+#: the decision, and ``StepFailure.message`` is Tier 2 operator text (ADR-0004 §5,
+#: ADR-0031 §5). ``kind`` is ``None`` — no tool classified it — so ADR-0029 §5
+#: never retries it either.
+_UNCLAIMED = (
+    "the invoker could not record the call against its authorisation, so the tool was not reached"
 )
 
 #: What a cancelled call records, on both the ``FAILED`` and the
@@ -363,10 +383,10 @@ class StepExecutor:
                 (:func:`_checked_timeout`).
 
         **Nothing that fails between the claim and the callable leaves a step
-        durably ``RUNNING``** (ADR-0034 §1). A cancelled claim, a raising clock
-        and a ``ToolBindingError`` all close it ``FAILED`` before propagating:
-        nothing ran, and recovery would otherwise record ``INDETERMINATE`` about
-        a call that provably never started.
+        durably ``RUNNING``** (ADR-0034 §1). A cancelled claim, a raising clock, a
+        ``ToolBindingError`` and the seam's own ``AuditError`` at the ledger all
+        close it ``FAILED``: nothing ran, and recovery would otherwise record
+        ``INDETERMINATE`` about a call that provably never started.
         """
         _checked_timeout(timeout)
         # One snapshot, taken before anything durable names the call, and used
@@ -457,6 +477,11 @@ class StepExecutor:
 
         - a ``ToolBindingError`` is the seam's own rejection, committed ``FAILED``
           and never retried (:meth:`_refuse`, ADR-0029 §5 reads a result's kind);
+        - an ``AuditError`` is the seam's **ledger** refusal — the authorisation
+          was already spent, the decision is not the one the trail holds, or the
+          claim could not be written at all — and is committed ``FAILED`` for the
+          same reason one step earlier: the claim precedes the callable, so
+          nothing ran (:meth:`_close_unclaimed`, ADR-0192 §1, ADR-0034 §1);
         - a ``CancelledError`` commits the interrupted-call classification and
           propagates, because swallowing it would break shutdown;
         - a result that does not survive revalidation is tampered past
@@ -465,15 +490,18 @@ class StepExecutor:
           ``KeyError``/``AttributeError`` past the claim
           (:func:`_detached_result`, :meth:`_discard_unusable`).
 
-        Only the last case is new; the first two are the seam's two contracted
-        exits (ADR-0029 §8). Detaching the result before either the record or the
-        retry decision reads it is what makes both total over what the seam
-        returned, the mirror of :func:`_detached` for the inbound call.
+        Only the last case is the executor's own invention; the first three are
+        the seam's contracted exits (ADR-0029 §8, ADR-0192 §9). Detaching the
+        result before either the record or the retry decision reads it is what
+        makes both total over what the seam returned, the mirror of
+        :func:`_detached` for the inbound call.
         """
         try:
             returned = await self._invoker.invoke(authorised, timeout=timeout)
         except ToolBindingError:
             return await self._refuse(state, step_id), None
+        except AuditError:
+            return await self._close_unclaimed(state, step_id), None
         except asyncio.CancelledError:
             await self._commit_through_cancellation(state, step_id, _interrupted(trusted))
             raise
@@ -611,6 +639,38 @@ class StepExecutor:
         """
         return await self._finish(
             state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_REFUSED)
+        )
+
+    async def _close_unclaimed(self, state: ExecutionState, step_id: str) -> ExecutionState:
+        """Commit ``RUNNING → FAILED`` for a seam refusal at the ledger (ADR-0192 §1).
+
+        The executor's ``→ RUNNING`` claim precedes ``invoke``, and ``invoke``'s
+        own claim on the authorisation precedes the callable, so an ``AuditError``
+        arrives after the step is durably ``RUNNING`` and before anything could
+        have acted. Letting it propagate uncommitted would strand the step until
+        recovery, which would record ``INDETERMINATE`` — "we cannot tell whether it
+        acted" — about a call that provably never reached the callable.
+
+        **Every ``AuditError`` out of ``invoke`` is such an exit**, which is what
+        makes catching the class rather than a member of it correct.
+        ``AuthorisationSpentError`` and ``UnrecordedAuthorisationError`` are its
+        two named subclasses on that path, and a store fault the seam translated is
+        the third (ADR-0192 §2, §9); a *completion*-path failure never arrives here
+        at all, because the seam absorbs it and returns the call's own
+        ``ToolResult`` (ADR-0192 §3).
+
+        **It does not repair the trail.** Where the seam's claim append committed
+        and then failed, that row stands and its claim is left open under a step
+        this commit takes out of ``RUNNING`` — ADR-0192 §3's not-``RUNNING`` clause,
+        which that ADR states rather than repairs, and which no recovery scan
+        returns for. Nothing here deletes, rewrites or compensates for it.
+
+        Retried never, by the same mechanism as :meth:`_refuse`: ADR-0029 §5's
+        conjuncts read ``result.failure.kind`` and an exception produces no result
+        to read.
+        """
+        return await self._finish(
+            state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_UNCLAIMED)
         )
 
     async def _discard_unusable(self, state: ExecutionState, step_id: str) -> ExecutionState:

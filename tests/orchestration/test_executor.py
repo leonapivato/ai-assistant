@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import PlanningError, ToolBindingError
+from ai_assistant.core.errors import (
+    AuditError,
+    AuthorisationSpentError,
+    PlanningError,
+    ToolBindingError,
+    UnrecordedAuthorisationError,
+)
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
 from ai_assistant.core.types import (
     ActionPlan,
@@ -1700,3 +1706,154 @@ async def test_retrying_stops_at_the_trackers_ceiling() -> None:
     step = await stored_step(store, state)
     assert step.attempts == 3, "the ceiling FakePlanStore enforces"
     assert step.status is StepStatus.FAILED
+
+
+# --- ADR-0192 §9: the seam's ledger exits, at the executor ---------------
+
+
+class LedgerRefusingInvoker:
+    """A ``ToolRegistry``/``ToolInvoker`` pair whose ``invoke`` raises before the tool.
+
+    The seam's own ledger exits, at the boundary the executor sees them across.
+    ADR-0192 §1 puts the claim on the authorisation **before** the callable, so
+    every one of these arrives with nothing having run — which is the fact the
+    executor's answer has to be right about. The callable is a :class:`Spy` this
+    double never calls, so "the tool was never reached" is asserted rather than
+    assumed.
+    """
+
+    def __init__(self, definition: ToolDefinition, refusal: BaseException) -> None:
+        """Raise ``refusal`` from every ``invoke``."""
+        self._definition = definition
+        self._refusal = refusal
+        self.calls = 0
+        self.tool = Spy()
+
+    async def get(self, tool_id: str) -> ToolDefinition | None:
+        """Return the declaration, detached, or ``None``."""
+        if tool_id != self._definition.id:
+            return None
+        return self._definition.model_copy(deep=True)
+
+    async def find(self, capability: str) -> list[ToolDefinition]:
+        """Return the declaration when it advertises ``capability``."""
+        return [self._definition] if self._definition.capability == capability else []
+
+    async def capabilities(self) -> tuple[str, ...]:
+        """Return the one advertised capability."""
+        return (self._definition.capability,)
+
+    async def all_tools(self) -> list[ToolDefinition]:
+        """Return the one declaration."""
+        return [self._definition]
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's signature (ADR-0029 §4)
+        """Refuse, without entering the tool."""
+        del call, timeout
+        self.calls += 1
+        raise self._refusal
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        AuthorisationSpentError("the authorisation recorded as 'd-1' is spent"),
+        UnrecordedAuthorisationError("no decision is recorded under 'd-1'"),
+        AuditError("the trail could not be written"),
+    ],
+    ids=["spent", "unrecorded", "store-fault"],
+)
+async def test_a_ledger_refusal_is_committed_failed_and_never_indeterminate(
+    refusal: AuditError,
+) -> None:
+    """ADR-0034 §1's second ground, over the seam's three claim-path exits.
+
+    ADR-0192 §1 appends the claim before the callable is entered, and ADR-0192 §3
+    has ``invoke`` **absorb** every completion-path failure and return the call's
+    own result — so an ``AuditError`` leaving ``invoke`` is always a claim-path
+    one and always means nothing ran. ``FAILED`` is therefore the honest record,
+    and the two facts asserted together are what make it so: the step is not left
+    ``RUNNING`` for a recovery scan to read as ``INDETERMINATE``, and it is not
+    recorded ``INDETERMINATE`` here either — that would report a call that
+    provably never started as one that may have acted.
+
+    The declaration is the side-effecting, non-``NATURAL`` one, whose
+    ``interrupted_outcome`` **is** ``INDETERMINATE``: on any other tool the two
+    answers coincide and the test would pass without deciding anything.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = LedgerRefusingInvoker(tool(), refusal)
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "never INDETERMINATE: nothing ran"
+    assert step.attempts == 1, "a refused claim is not re-claimed"
+    assert step.finished_at is not None
+    assert step.failure is not None
+    assert step.failure.kind is None, "no tool classified this"
+    assert step.failure.message
+    assert seam.tool.calls == [], "the callable was never entered"
+
+
+async def test_a_ledger_refusal_records_nothing_the_executor_did_not_author() -> None:
+    """The exception's own text stays out of the durable record (ADR-0004 §5).
+
+    An ``AuthorisationSpentError`` interpolates the decision id, and ADR-0031 §5's
+    neighbouring finding is that a decision id is not contractually log-safe — a
+    conforming :data:`DurableIdentifier` reading ``recipient@example.com`` is a
+    valid value. ``StepFailure.message`` is Tier 2 operator text bound for a log,
+    so the executor authors it, exactly as it does for a ``ToolBindingError``.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = LedgerRefusingInvoker(
+        tool(), AuthorisationSpentError("spent: recipient@example.com asked twice")
+    )
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.failure is not None
+    assert "recipient@example.com" not in step.failure.message
+
+
+async def test_a_cancellation_out_of_the_seam_commits_the_interrupted_outcome() -> None:
+    """The mirror case, and it answers the other way (ADR-0192 §9, ADR-0029 §4).
+
+    A cancellation delivered while a ledger append that then *fails* is in flight
+    reaches the caller as a ``CancelledError`` carrying that failure as its cause
+    — the append failure never stands in its place (ADR-0060 §1). At the executor
+    that must commit ``interrupted_outcome`` and **not** ``FAILED``, because a
+    ``CancelledError`` is what left ``invoke`` and the executor holds no fact
+    about how far the call got (#234, ADR-0034 §1).
+
+    Asserting the exception alone would leave the durable outcome — the half the
+    two rules could disagree about — untested, so this asserts the committed step
+    as well. The tool here is side-effecting and non-``NATURAL``, so
+    ``interrupted_outcome`` is ``INDETERMINATE`` and the two answers are
+    distinguishable.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    cause = AuditError("the completion could not be written")
+    cancelled = asyncio.CancelledError()
+    cancelled.__cause__ = cause
+    seam = LedgerRefusingInvoker(tool(), cancelled)
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        )
+
+    assert caught.value.__cause__ is cause, "the append failure rides as the cause"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.INDETERMINATE, "interrupted_outcome, never FAILED"
+    assert step.failure is not None
+    assert step.failure.kind is None
+    assert seam.tool.calls == []

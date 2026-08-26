@@ -18,6 +18,14 @@ already holds (ADR-0044 §3) — and writes each completion through
 the seam's act, and a dependency that cannot express the call is what makes "the
 scan never claims" checkable instead of trusted.
 
+**It mints no reachability fact, and #234 stays narrowed rather than closed**
+(ADR-0192 §3, §9). The scan asks how far no call got: it completes **every** claim
+open under the decision, because the record cannot tell one attempt's state from
+another's and a `ToolInvocation` names no step. What ADR-0192 gives #234 is that
+the *store* now distinguishes a cancellation before the claim from one after it;
+what #234 still owns is the executor's `interrupted_outcome` classification, which
+reads a declaration and not this store. Nothing here infers either from the other.
+
 Nothing here reads an invocation row to decide a step's outcome, and nothing
 reads a step to decide a row's. ADR-0192 §3 states the two records answer two
 questions and are **not required to agree**, in both directions; ADR-0014 §4's
