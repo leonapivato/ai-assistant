@@ -283,10 +283,17 @@ _last_verdict_line() {
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
-# One field of the round marker (`key=value` per line), first occurrence.
+# One field of a round marker (`key=value` per line), first occurrence.
+_marker_field() {
+    [[ -n "$1" && -f "$1" ]] || return 0
+    sed -n "s/^${2}=//p" "$1" | head -n 1
+}
+
+# The same, for THIS invocation's own loop key. `--start` uses it because the key
+# it watches is by definition its own; `--wait` cannot assume that (see
+# `_live_marker`).
 _round_field() {
-    [[ -f "$round_file" ]] || return 0
-    sed -n "s/^${1}=//p" "$round_file" | head -n 1
+    _marker_field "$round_file" "$1"
 }
 
 # Whether a round of this (loop, persona) holds the in-flight lock right now.
@@ -304,6 +311,54 @@ _round_field() {
 _lock_held() {
     [[ "$serialized" -eq 1 && -e "$inflight_file" ]] || return 1
     ! flock -n "$inflight_file" true 2>/dev/null
+}
+
+# Whether the round described by marker $1, whose loop key is $2, is running.
+# The lock is the signal wherever there is one to read; the marker's own pid is
+# the fallback only where there is not, for the reason `--wait` states below.
+_marker_live() {
+    local inflight="${session_dir}/${2}.${persona}.inflight" pid
+    if [[ "$serialized" -eq 1 && -e "$inflight" ]]; then
+        ! flock -n "$inflight" true 2>/dev/null
+        return
+    fi
+    pid="$(_marker_field "$1" pid)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# The marker of a live round of this persona on this branch, whatever loop key it
+# was filed under — newest by `started_at`, or nothing.
+#
+# Scanned rather than read from this invocation's own path, because the loop key
+# folds in the BASE (ADR-0025 §1, deliberately: a moved base is a different diff
+# and must not inherit a session). So a base that moves while a round runs files
+# that round under a key this invocation no longer computes, and reading one path
+# would answer "nothing is in flight" about a round plainly visible on disk —
+# after which the caller, told never to poll an exit 4, would start a replacement
+# round it did not need. `--wait` already declines to pretend about a round on a
+# different TREE; declining to pretend about one on a different base is the same
+# courtesy, and its absence was an inconsistency rather than a policy.
+#
+# Scoped by branch, which is what identifies "this review loop" across exactly
+# the rewrites the workflow relies on — the same key the aggregate counts by.
+_live_marker() {
+    local m key started candidate="" newest=-1
+    shopt -s nullglob
+    for m in "${session_dir}"/*."${persona}".round; do
+        [[ "$(_marker_field "$m" branch)" == "$branch" ]] || continue
+        key="${m##*/}"
+        key="${key%".${persona}.round"}"
+        _marker_live "$m" "$key" || continue
+        started="$(_marker_field "$m" started_at)"
+        [[ "$started" =~ ^[0-9]+$ ]] || started=0
+        if [[ "$started" -ge "$newest" ]]; then
+            newest="$started"
+            candidate="$m"
+        fi
+    done
+    shopt -u nullglob
+    printf '%s' "$candidate"
+    return 0
 }
 
 # The artifact recorded for (this persona, HEAD's tree), or nothing.
@@ -615,7 +670,8 @@ _mode_wait() {
     fi
 
     local deadline=$(($(date +%s) + timeout))
-    local artifact line verdict r_tree r_pid live now remaining
+    local artifact line verdict r_tree marker m_tree m_base live now remaining
+    local noted_base=0
     while :; do
         artifact="$(_artifact_for_tree)"
         if [[ -n "$artifact" ]]; then
@@ -645,29 +701,47 @@ _mode_wait() {
             return 0
         fi
 
+        # This loop key's own marker, kept for the "it died" diagnosis below: that
+        # question is about the round THIS invocation would have started, and its
+        # log is the one at this key's path.
         r_tree="$(_round_field tree)"
-        r_pid="$(_round_field pid)"
+        # Liveness, across every loop key on this branch — a base that moved while
+        # a round ran filed it under a key this invocation no longer computes.
+        marker="$(_live_marker)"
+        m_tree=""
+        m_base=""
         live=0
-        if _lock_held; then
+        if [[ -n "$marker" ]]; then
             live=1
-        elif [[ "$serialized" -eq 0 && -n "$r_pid" ]] && kill -0 "$r_pid" 2>/dev/null; then
-            # No lock to read: the unserialized fallback (#142) takes none, so the
-            # marker's own pid is the liveness signal there. Such a round is
-            # always a FOREGROUND one, since `--start` refuses without `flock`,
-            # which is exactly the round this arm exists to let a cut-off caller
-            # pick up. It is NOT consulted where the lock is available, because a
-            # recycled pid would report a finished round as running forever, and a
-            # lock cannot be wrong that way. The bypass path has neither, and is
-            # reported below.
+            m_tree="$(_marker_field "$marker" tree)"
+            m_base="$(_marker_field "$marker" base_sha)"
+        elif _lock_held; then
+            # The lock is claimed before the marker is published, so for about a
+            # second at the start of every round there is a held lock and no
+            # marker to find. That is in flight, not absent.
             live=1
         fi
 
-        if [[ "$live" -eq 1 && -n "$r_tree" && "$r_tree" != "$tree" ]]; then
+        if [[ "$live" -eq 1 && -n "$m_tree" && "$m_tree" != "$tree" ]]; then
             echo "the '${persona}' round running in this clone is reviewing tree" >&2
-            echo "  ${r_tree:0:12}, not HEAD's ${tree:0:12}. Nothing will record an" >&2
+            echo "  ${m_tree:0:12}, not HEAD's ${tree:0:12}. Nothing will record an" >&2
             echo "  artifact for HEAD's tree until a round is started on it — most" >&2
             echo "  often because a commit landed after that round was started." >&2
             exit 4
+        fi
+
+        # Said once, not every poll. The round is reviewing HEAD's tree against a
+        # base that has since moved, so it will record an artifact for this tree
+        # under the older base — which is worth waiting out either way, since
+        # whether that artifact still covers the PR is ADR-0027 §2's question and
+        # `ship` is what answers it.
+        if [[ "$live" -eq 1 && -n "$m_base" && "$m_base" != "$base_sha" &&
+            "$noted_base" -eq 0 ]]; then
+            noted_base=1
+            echo "note: the round in flight was started against base ${m_base:0:12}," >&2
+            echo "  which has since moved to ${base_sha:0:12}. It is reviewing HEAD's" >&2
+            echo "  tree and will record an artifact for it; whether that still covers" >&2
+            echo "  the PR is ADR-0027 §2's question, which 'just ship' answers." >&2
         fi
 
         if [[ "$live" -eq 0 ]]; then
