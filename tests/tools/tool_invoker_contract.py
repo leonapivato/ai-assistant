@@ -2142,6 +2142,80 @@ class ToolInvokerContract:
             "the completion is written, so the claim does not stay open"
         )
 
+    async def test_a_cancellation_that_refuses_annotation_still_leaves_as_a_cancellation(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """Attaching the cause is the collaborator's code too.
+
+        When the completion append fails while a cancellation is propagating,
+        ADR-0192 §3 has the cancellation leave carrying that failure as its cause.
+        The seam attaches it to the exception it caught rather than raising a new
+        one, deliberately: ``Task.cancel`` accepts an arbitrary message object, so
+        rendering the original would run a ``__str__`` this seam does not own.
+
+        But ``__setattr__`` is that object's code as surely as ``__str__`` is, and
+        the object need not be a built-in ``CancelledError`` at all — an
+        externally cancelled tool may catch the injected cancellation and raise
+        its own subclass. One rejecting the assignment raises *from this frame*,
+        so what leaves is neither the cancellation ADR-0060 §1 requires nor the
+        append failure §3 requires it to carry, and the pending request is left
+        with nothing honouring it.
+
+        So the attachment is attempted and not assumed, and where the object
+        refuses, a cancellation this seam owns carries the failure instead. The
+        original's identity is lost in that case and nothing here asserts it:
+        ADR-0060 §1 requires that *a* cancellation reaches the caller, and the
+        cause is the fact §3 puts a rule on.
+        """
+
+        class Rejecting(asyncio.CancelledError):
+            """A cancellation a tool raised, which refuses to be annotated."""
+
+            def __setattr__(self, name: str, value: object) -> None:
+                msg = "this exception refuses to be annotated"
+                raise RuntimeError(msg)
+
+        class Substituting:
+            """Catches the injected cancellation and raises its own instead."""
+
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+
+            async def __call__(
+                self,
+                parameters: Mapping[str, FrozenJson],
+                *,
+                idempotency_key: str | None,
+            ) -> FrozenJson:
+                self.entered.set()
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    raise Rejecting from None
+                return None
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        refused = RuntimeError("the store would not write the completion")
+        ledger.completion.error = refused
+        invoker = consuming(ledger)
+        tool_under_test = Substituting()
+        invoker.register(read_only("inbox"), tool_under_test)
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        running = asyncio.ensure_future(invoker.invoke(call, timeout=PATIENT))
+        await tool_under_test.entered.wait()
+        running.cancel()
+
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await running
+
+        assert caught.value.__cause__ is refused, (
+            "the append's own failure travels with the cancellation, and the "
+            "refusal to be annotated replaces neither"
+        )
+
     async def test_a_log_processor_that_cancels_this_task_is_not_answered_with_a_result(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
     ) -> None:

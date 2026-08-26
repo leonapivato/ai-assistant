@@ -507,14 +507,34 @@ async def consumed_call(
         )
         if appended.failure is None:
             raise
-        # The caught cancellation is re-raised **as itself**, never rendered and
-        # never replaced. ``Task.cancel`` accepts an arbitrary message object, so
-        # ``str(cancellation)`` runs a ``__str__`` this seam does not own — one
-        # that can raise, and would then reach the caller in place of the
-        # externally delivered cancellation, which is the conversion ADR-0060 §1
-        # and ADR-0192 §3 both refuse. Attaching the cause preserves the append's
-        # failure without touching the exception's identity.
-        cancellation.__cause__ = appended.failure
+        # The caught cancellation is re-raised **as itself** wherever it can be,
+        # never rendered and never replaced. ``Task.cancel`` accepts an arbitrary
+        # message object, so ``str(cancellation)`` runs a ``__str__`` this seam
+        # does not own — one that can raise, and would then reach the caller in
+        # place of the externally delivered cancellation, which is the conversion
+        # ADR-0060 §1 and ADR-0192 §3 both refuse. Attaching the cause preserves
+        # the append's failure without touching the exception's identity.
+        #
+        # But the attachment is itself the collaborator's code: the object came
+        # from a tool that caught the injected cancellation and raised its own
+        # subclass, and one rejecting the assignment raises from this frame — so
+        # what leaves is neither the cancellation ADR-0060 §1 requires nor the
+        # append failure §3 requires it to carry, and `Task.cancelling()` is left
+        # standing with nothing honouring it. Where the object refuses, a
+        # seam-owned cancellation carries the failure instead. That loses the
+        # original's identity, which is the lesser loss by a wide margin: what
+        # ADR-0060 §1 requires is that *a* cancellation reaches the executor.
+        try:
+            cancellation.__cause__ = appended.failure
+        except BaseException:
+            # No `from` clause: `_cancellation` has already attached the append
+            # failure, which is the cause ADR-0192 §3 puts a rule on, and
+            # `from None` would clear the very thing this branch exists to carry.
+            # The setter's own failure stays where it belongs, as context.
+            raise _cancellation(  # noqa: B904 — the cause is attached above, deliberately
+                "the invoking task was cancelled while the tool was running",
+                appended.failure,
+            )
         raise
 
     appended = await _complete(
