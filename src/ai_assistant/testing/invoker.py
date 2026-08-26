@@ -805,11 +805,24 @@ async def _consumed_call(
         )
         if appended.failure is None:
             raise
-        # Re-raised **as itself**, never rendered: ``Task.cancel`` accepts an
-        # arbitrary message object, so ``str(cancellation)`` would run a
-        # ``__str__`` this seam does not own — one that can raise and reach the
-        # caller in place of the externally delivered cancellation (ADR-0060 §1).
-        cancellation.__cause__ = appended.failure
+        # Re-raised **as itself** wherever it can be, never rendered:
+        # ``Task.cancel`` accepts an arbitrary message object, so
+        # ``str(cancellation)`` would run a ``__str__`` this seam does not own.
+        # The *assignment* is the collaborator's code too, though, and one that
+        # rejects it would replace the cancellation with its own failure — so
+        # where the object refuses, a seam-owned cancellation carries the append
+        # failure instead (ADR-0060 §1, ADR-0192 §3).
+        try:
+            cancellation.__cause__ = appended.failure
+        except BaseException:
+            # No `from` clause: `_cancellation` has already attached the append
+            # failure, which is the cause ADR-0192 §3 puts a rule on, and
+            # `from None` would clear the very thing this branch exists to carry.
+            # The setter's own failure stays where it belongs, as context.
+            raise _cancellation(  # noqa: B904 — the cause is attached above, deliberately
+                "the invoking task was cancelled while the tool was running",
+                appended.failure,
+            )
         raise
 
     appended = await _complete(
