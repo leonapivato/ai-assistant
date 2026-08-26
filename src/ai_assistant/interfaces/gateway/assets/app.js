@@ -1160,19 +1160,65 @@ const PARK_WAITING =
 // An abandoned ask has nowhere to look but the conversations listing; a park has
 // `pending_confirmations`, which ADR-0084 §7 names as the remedy for exactly this — "The
 // remedy is `pending_confirmations()`" — and ADR-0177 §8 makes this surface's one
-// recovery route. A park that listing still shows is one no answer resolved, and the
-// controls come back with it; one that has gone was answered.
+// recovery route.
 //
 // **It is the owner's act and not this page's, which is ADR-0182 §7's fifth clause.**
 // Nothing is re-sent here: the read is a read, and the answer is offered again only
 // where the engine's own enumeration says there is still a park to answer.
+
+// The route back, shared by both endings that read no reply because it does not depend
+// on which of them happened — `WHERE_TO_LOOK`'s device, one surface over.
+//
+// **It reads presence as answerability and absence as nothing at all**, which is
+// adversarial review's round-4 blocker and it is right. An earlier draft said a park the
+// listing no longer offers "was answered", and that is an inference from absence the
+// engine refuses to license: `AuditTrail.pending_confirmation` answers `None` for a
+// binding already resolved **and** for a `CONFIRM` whose origin was never recorded — a
+// row written before ADR-0181 §3, decoding to an `OriginUnrecordedBinding` (ADR-0184
+// §2), for which "nothing is written, so the step stays durably `AWAITING_APPROVAL`
+// with its `CONFIRM` unresolved and its row intact… The park is unanswerable, not
+// erased." So the enumeration walks past a park that no answer has resolved, and a page
+// reading that as a resolution would tell the owner the opposite of the state.
+//
+// ADR-0139 §4 is the rule and it does not soften for an absence: the state is never
+// inferred from what this surface could not read. What the listing does state is which
+// parks are answerable, and that is what this says.
+const PARK_ROUTE_BACK =
+  "Press Confirmations to read what is still waiting: a park still listed there is one " +
+  "that can still be answered, and its controls come back with it. A park the listing " +
+  "no longer offers is one this browser cannot answer — the listing says which parks " +
+  "are answerable and not why one is missing, so nothing here calls it resolved.";
+
 const PARK_UNRESOLVED =
   "You stopped waiting for that answer, so this browser is no longer listening for it. " +
   "What became of it is not known: the answer was sent and nothing here read a reply, " +
   "so the assistant may have carried the action out and may never have received the " +
-  "answer at all. Nothing was re-sent and nothing was cancelled. Press Confirmations " +
-  "to read what is still waiting — a park still listed there is one no answer " +
-  "resolved, and its controls come back with it; one that has gone was answered.";
+  "answer at all. Nothing was re-sent and nothing was cancelled. " +
+  PARK_ROUTE_BACK;
+
+// **The same ending, reached without the owner asking for it**, which is round 4's
+// first blocker. A `fetch` that rejects is the browser's own request failing with no
+// response read — ADR-0177 §7's fourth clause exactly, "the request was sent and no
+// response was read", which is an outcome that is **not known** "whatever the gateway
+// did". The page used to call it `GATEWAY_GONE` and hand the token back, which asserts
+// the one thing ADR-0139 §4 spends five clauses refusing to let a surface assert: the
+// gateway may have relayed the call and the hub may have run it, with only the answer
+// lost on the way home.
+//
+// **`act` is the precedent and it is in this file**: the grant surface's own `fetch`
+// site is the one that deliberately does not report a rejection as the gateway having
+// gone, for this reason and in these words. A park's answer is the same class of act
+// and spends a consent token besides, so it joins it.
+//
+// Its own sentence rather than `PARK_UNRESOLVED`'s, because that one opens with "You
+// stopped waiting", which is false here — nobody stopped anything. Everything after
+// that opening is the same, because none of it turns on which way the reply was lost.
+const PARK_LOST =
+  "The connection carrying that answer failed before this browser read a reply. What " +
+  "became of it is not known: the answer was sent and nothing here read a reply, so " +
+  "the assistant may have carried the action out and may never have received the " +
+  "answer at all. Nothing was re-sent and nothing was cancelled. " +
+  PARK_ROUTE_BACK;
 
 // **A row that is no longer the live one, said rather than left looking answerable**
 // (#1536). `spent` is per park and one park is on screen twice — a turn that parks
@@ -1495,16 +1541,28 @@ async function answerConfirmation(token, approved, stopping) {
   try {
     body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations", stopping);
   } catch (_) {
-    // **The owner's own act, which is not the gateway having gone** (#1536). `ask`'s
-    // catch keeps the same distinction and for the same reason: the gateway may be
-    // perfectly alive at the other end of a socket that stopped carrying, and a
-    // rejected `fetch` this page provoked says nothing about it either way.
+    // **No response was read, and that is the whole of what decides this** (#1536, and
+    // adversarial review's round-4 blocker). Two things reach here — the owner ending
+    // the wait, and the request failing on its own — and ADR-0177 §7's fourth clause
+    // does not distinguish them: a failure of "the **browser's own** request to the
+    // gateway — the request was sent and no response was read — is an outcome that is
+    // **not known**, whatever the gateway did". So both take the same branch, and only
+    // the sentence differs.
     //
-    // The token is **not** given back here. ADR-0139 §4 forbids inferring the state
-    // from the unresolved act, and giving it back would be inferring the most
-    // dangerous of the three — that the answer did not land — on an act that may
-    // have. It is recorded as unresolved instead, and `offerApproval` gives it back
-    // where the listing says the park is still there.
+    // The token is **not** given back on either. ADR-0139 §4 forbids inferring the
+    // state from the unresolved act, and giving it back infers the most dangerous of
+    // the three — that the answer did not land — on an act that may have: the gateway
+    // may have relayed the call and the hub may have run it, with only the reply lost.
+    // A second `resume` on a token the first resolved then raises
+    // `UnknownContinuationError`, which reaches this page as `assistant-declined` and
+    // renders as a denial ADR-0084 §7 refuses in terms. It is recorded as unresolved
+    // instead, and `offerApproval` gives it back where the listing says the park is
+    // still answerable.
+    //
+    // **So this is the one `relay` entry point that does not report a rejection as
+    // `GATEWAY_GONE`**, and it is the second such site rather than the first: `act`
+    // already refuses that report, in these words and for this reason. A park's answer
+    // is the same class of act and spends a consent token besides.
     //
     // **The tidy-up is started and not waited on**, which is the difference that
     // matters to the row: `readPending` reaches the same unbounded `relay`, so
@@ -1512,21 +1570,23 @@ async function answerConfirmation(token, approved, stopping) {
     // again — the failure being closed, one ordering over. It runs far enough to clear
     // this panel's fault before the sentence below is written, which is why the
     // sentence comes after it.
-    if (stopping.signal.aborted) {
-      unresolved.add(token);
-      readPending(false);
-      fault(PARK_UNRESOLVED, "confirmations");
-      return;
-    }
-    // The gateway is gone. Nothing was answered as far as this page can tell, so the
-    // continuation is given back and the row stays answerable.
-    spent.delete(token);
-    fault(GATEWAY_GONE, "confirmations");
+    unresolved.add(token);
+    readPending(false);
+    const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;
+    fault(lost, "confirmations");
     return;
   }
   if (body === null) {
     // A refusal the gateway named and `relay` already displayed — a full hub, a
-    // declined request. It is not a resolution, so the token is given back too.
+    // declined request. A response *was* read, so this is not the clause above: the
+    // gateway answered, and what it answered is on screen.
+    //
+    // **One condition here is still `not known` and this page cannot tell** — a `502`
+    // `hub-unreachable` is a gateway-to-hub transport failure, which ADR-0177 §7's
+    // third clause makes not known, and `relay` hands its caller a bare `null` rather
+    // than the condition it displayed. Separating them means widening `relay`'s return
+    // for all nineteen of its callers, which is its own change: filed as its own issue
+    // rather than grown into this one.
     spent.delete(token);
     return;
   }

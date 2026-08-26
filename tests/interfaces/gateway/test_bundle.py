@@ -2391,9 +2391,20 @@ _FETCH_SITES: Final = {
 #: clauses refusing to let a surface assert.
 _ACT_SITE: Final = "act"
 
+#: The ``relay`` entry point that refuses the same report for the same reason, and it
+#: is the *only* other one. A park's answer is a mutating act that additionally spends
+#: a consent token: a rejected `fetch` there may have left the hub having run the
+#: action, so "the gateway did not answer" is a claim this page has not read — and
+#: releasing the token on it would let a second ``resume`` go out on a continuation the
+#: first resolved, which ADR-0084 §7 makes emphatically not a denial and the gateway
+#: nonetheless relays as ``assistant-declined``. Enumerated beside :data:`_ACT_SITE`
+#: rather than dropped from the check, so the exception stays one a reader can count.
+_UNKNOWN_ON_REJECTION: Final = "answerConfirmation"
+
 #: Every entry point reaching ``relay``, each of which catches a rejected `fetch`
 #: itself. Enumerated rather than counted, for the reason issue #1332 records: a
 #: threshold satisfied by five of six guards leaves the sixth deletable in silence.
+#: ``answerConfirmation`` is deliberately absent: :data:`_UNKNOWN_ON_REJECTION`.
 _RELAY_ENTRIES: Final = (
     "forgetConversation",
     "listSources",
@@ -2413,7 +2424,6 @@ _RELAY_ENTRIES: Final = (
     "listConnections",
     "listConnectionLog",
     "readPending",
-    "answerConfirmation",
 )
 
 
@@ -2612,6 +2622,11 @@ def test_every_fetch_the_page_makes_is_guarded() -> None:
     # Every other entry point reaching `relay` is its own, and catches for itself.
     for entry in _RELAY_ENTRIES:
         assert _GATEWAY_GONE.search(functions[entry]), entry
+    # And the two that refuse that report do refuse it, rather than having quietly lost
+    # a guard: each still catches, and each answers with an outcome that is not known.
+    for entry in (_ACT_SITE, _UNKNOWN_ON_REJECTION):
+        assert "} catch (" in functions[entry], entry
+        assert not _GATEWAY_GONE.search(functions[entry]), entry
 
 
 def test_a_lost_request_on_a_grant_act_is_reported_as_an_unknown_outcome() -> None:
@@ -4038,11 +4053,12 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     answering = functions["answerConfirmation"]
     assert "if (spent.has(token)) {" in answering
     assert "spent.add(token);" in answering
-    # Given back on both refusal paths, because neither resolved the park: a row the
-    # gateway could not answer stays answerable. There are exactly two, and the third
-    # ending — an answer whose reply was never read — is deliberately not one of them
-    # (:func:`test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act`).
-    assert answering.count("spent.delete(token);") == 2
+    # Given back on **one** path and one only: a refusal the gateway *answered*, which
+    # is a response this browser read. Every ending that read no reply keeps the token
+    # (:func:`test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act`),
+    # and round 4's first blocker was that the rejection path did not.
+    assert answering.count("spent.delete(token);") == 1
+    assert answering.index("if (body === null) {") < answering.index("spent.delete(token);")
 
 
 def test_a_stalled_tidy_up_cannot_silently_refuse_another_parks_answer() -> None:
@@ -4130,18 +4146,20 @@ def test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act() -> N
     received the request and declined it" — a denial announced for an action that ran,
     which ADR-0084 §7 refuses in terms ("never a denial").
     """
-    body = _functions(_code("app.js"))["answerConfirmation"]
-    caught = body[body.index("} catch (_) {") :]
+    script = _code("app.js")
+    body = _functions(script)["answerConfirmation"]
+    caught = body[body.index("} catch (_) {") : body.index("if (body === null) {")]
 
-    assert "if (stopping.signal.aborted) {" in caught
-    stopped = caught[caught.index("if (stopping.signal.aborted) {") :]
-    abandoned = stopped[: stopped.index("\n    }\n")]
-    assert "unresolved.add(token);" in abandoned
-    assert "spent.delete(token);" not in abandoned
-    # And it is not the gateway having gone either, which is the branch below it: a
-    # `fetch` this page aborted says nothing about the gateway at the other end.
-    assert caught.index("if (stopping.signal.aborted) {") < caught.index("fault(GATEWAY_GONE,")
-    assert "unresolved" not in _functions(_code("app.js"))["relay"]
+    # **What decides it is that no reply was read, not which way the reply was lost.**
+    # Round 4's first blocker was a branch: the owner's abort kept the token and an
+    # ordinary rejection released it, though ADR-0177 §7's fourth clause covers both in
+    # one sentence. So there is no branch left — only the wording differs.
+    assert "unresolved.add(token);" in caught
+    assert "spent.delete(token);" not in caught
+    assert "GATEWAY_GONE" not in caught
+    assert caught.index("unresolved.add(token);") < caught.index("stopping.signal.aborted")
+    assert "const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;" in caught
+    assert "unresolved" not in _functions(script)["relay"]
 
 
 def test_the_listing_is_what_hands_an_abandoned_parks_token_back() -> None:
@@ -4225,18 +4243,39 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     script = _code("app.js")
 
     unresolved = _constant(script, "PARK_UNRESOLVED")
-    assert "not known" in unresolved
-    assert "Nothing was re-sent and nothing was cancelled." in unresolved
-    assert "Press Confirmations" in unresolved
-    # It does not promise the answer did not land, and does not promise it did.
-    assert "may have carried the action out" in unresolved
-    assert "may never have received the " in unresolved
+    lost = _constant(script, "PARK_LOST")
+    for said in (unresolved, lost):
+        assert "not known" in said
+        assert "Nothing was re-sent and nothing was cancelled." in said
+        # It does not promise the answer did not land, and does not promise it did.
+        assert "may have carried the action out" in said
+        assert "may never have received the " in said
+        # Both reach the owner's route back, and reach the *same* one — the ask's own
+        # device, so two endings cannot drift into two different instructions.
+        assert said.rstrip().endswith("PARK_ROUTE_BACK")
+    # Their openings are what differ, because only one of them was an act of the owner's.
+    assert unresolved.startswith('\nconst PARK_UNRESOLVED =\n  "You stopped waiting')
+    assert "You stopped waiting" not in lost
+    assert "connection carrying that answer failed" in lost
+
+    # **The route back states answerability and infers no resolution from an absence**,
+    # which is round 4's second blocker. ``AuditTrail.pending_confirmation`` answers
+    # ``None`` for a resolved binding *and* for a ``CONFIRM`` whose origin was never
+    # recorded, where "the step stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM``
+    # unresolved and its row intact… The park is unanswerable, not erased." A page
+    # reading absence as a resolution would tell the owner the opposite of the state.
+    route = _constant(script, "PARK_ROUTE_BACK")
+    assert "Press Confirmations" in route
+    assert "can still be answered" in route
+    assert "nothing here calls it resolved" in route
+    assert "was answered" not in route
+
     # And the wait says there is no deadline, rather than implying one.
     waiting = _constant(script, "PARK_WAITING")
     assert "puts no deadline on it" in waiting
     answered = _constant(script, "PARK_ANSWERED")
     assert "no longer the live one" in answered
-    assert len({unresolved, waiting, answered}) == 3
+    assert len({unresolved, lost, waiting, answered, route}) == 5
 
 
 def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
@@ -4257,7 +4296,7 @@ def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
 
     assert "await readPending(false);" not in body
     assert "readPending(false);" in body
-    assert body.index("readPending(false);") < body.index('fault(PARK_UNRESOLVED, "confirmations")')
+    assert body.index("readPending(false);") < body.index('fault(lost, "confirmations")')
 
 
 def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> None:
