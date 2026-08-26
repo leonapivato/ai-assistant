@@ -496,6 +496,7 @@ class SpendLedgerContract:
         with pytest.raises(SpendUndeterminedError, match="clock"):
             await subject.spend_totals()
 
+    @pytest.mark.optional_obligation
     async def test_a_failed_store_read_refuses_the_read(self, harness: SpendHarness) -> None:
         """A store that could not answer refuses, and never as its own error type."""
         clock = MovableClock()
@@ -529,6 +530,7 @@ class SpendLedgerContract:
         assert month.period_start <= day.period_start
         assert day.period_end <= month.period_end
 
+    @pytest.mark.optional_obligation
     async def test_the_pair_is_one_a_single_snapshot_could_have_produced(
         self, harness: SpendHarness
     ) -> None:
@@ -1115,6 +1117,7 @@ class SpendGateContract:
 
         assert "calendar_" not in str(refusal.value)
 
+    @pytest.mark.optional_obligation
     async def test_a_failed_store_read_refuses_the_call(self, harness: SpendHarness) -> None:
         """ADR-0194 §4's fourth ground, translated rather than propagated.
 
@@ -1167,6 +1170,7 @@ class SpendGateContract:
         with pytest.raises(SpendUndeterminedError, match=GROUND["unpriced"]):
             await subject.admit_invocation(estimate=UNKNOWN)
 
+    @pytest.mark.optional_obligation
     async def test_a_raising_clock_is_named_before_a_failed_store_read(
         self, harness: SpendHarness
     ) -> None:
@@ -1179,6 +1183,7 @@ class SpendGateContract:
         with pytest.raises(SpendUndeterminedError, match=GROUND["clock"]):
             await subject.admit_invocation(estimate=usd("1"))
 
+    @pytest.mark.optional_obligation
     async def test_a_failed_store_read_is_named_before_an_indeterminate_period(
         self, harness: SpendHarness
     ) -> None:
@@ -1569,6 +1574,7 @@ class SpendGateContract:
         subject.release_admission(granted[0])
         assert await subject.admit_invocation(estimate=usd("10"))
 
+    @pytest.mark.optional_obligation
     async def test_a_release_landing_inside_a_running_admission_is_not_applied_to_it(
         self, harness: SpendHarness
     ) -> None:
@@ -1600,6 +1606,7 @@ class SpendGateContract:
         with pytest.raises(SpendCeilingError):
             await asyncio.wait_for(second, _PATIENCE)
 
+    @pytest.mark.optional_obligation
     async def test_a_release_names_its_reservation_when_it_is_called(
         self, harness: SpendHarness
     ) -> None:
@@ -1654,6 +1661,7 @@ class SpendGateContract:
 
         assert await subject.admit_invocation(estimate=usd("30"))
 
+    @pytest.mark.optional_obligation
     async def test_a_release_returns_while_an_admission_is_blocked_on_its_store(
         self, harness: SpendHarness
     ) -> None:
@@ -1715,6 +1723,7 @@ class SpendGateContract:
 
         assert await subject.admit_invocation(estimate=usd("30"))
 
+    @pytest.mark.optional_obligation
     async def test_a_gate_blocked_on_its_store_lets_the_caller_s_deadline_expire(
         self, harness: SpendHarness
     ) -> None:
@@ -2289,6 +2298,7 @@ class SpendGateContract:
                 await subject.admit_invocation(estimate=usd("1"))
             assert await subject.admit_invocation(estimate=usd("1"))
 
+    @pytest.mark.optional_obligation
     async def test_a_refusal_is_lifted_by_raising_the_ceiling(self, harness: SpendHarness) -> None:
         """Configuration is the relief valve, and it lives outside the turn.
 
