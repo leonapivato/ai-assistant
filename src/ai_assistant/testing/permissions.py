@@ -20,6 +20,7 @@ only opt out of (#396).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import itertools
 import os
@@ -37,6 +38,8 @@ from ai_assistant.core.errors import (
     DuplicateDecisionError,
     InvalidCompletionError,
     InvalidResolutionError,
+    SpendCeilingError,
+    SpendUndeterminedError,
     UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
@@ -50,6 +53,9 @@ from ai_assistant.core.types import (
     RecordedInvocation,
     Reversibility,
     RiskLevel,
+    SpendAdmissionHandle,
+    SpendPeriod,
+    SpendTotal,
     ToolCost,
     ToolFailureKind,
     ToolInvocation,
@@ -57,9 +63,18 @@ from ai_assistant.core.types import (
     describe_untrusted,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
+from ai_assistant.testing.spend import (
+    Bounds,
+    SpendBooks,
+    SpendTrapError,
+    Unpriced,
+    add_exactly,
+    measurable,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from decimal import Decimal
 
     from ai_assistant.core.types import ActionRequest
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
@@ -336,11 +351,16 @@ class FakeAuditTrail:
     serialises the pair outright.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per ADR-0194 §1 setting, injected explicitly
         self,
         *,
         now: Callable[[], datetime] = _fake_now,
         identifiers: MintsIdentifiers | None = None,
+        currency: str | None = None,
+        day_ceiling: Decimal | None = None,
+        month_ceiling: Decimal | None = None,
+        allowance: Decimal | None = None,
+        timezone: str = "UTC",
     ) -> None:
         """Create an empty trail.
 
@@ -352,6 +372,18 @@ class FakeAuditTrail:
             identifiers: The factory each invocation row's ``id`` is minted from.
                 Defaults to the process's own, so two fakes in one process never
                 mint from independent sequences.
+            currency: ADR-0194 §1's reporting currency, or ``None``. Set alone it
+                configures a currency totals are computed under and refuses
+                nothing.
+            day_ceiling: The ``CALENDAR_DAY`` ceiling, or ``None`` for unbounded.
+            month_ceiling: The ``CALENDAR_MONTH`` ceiling, or ``None``.
+            allowance: What an unpriced call is accounted at, or ``None``.
+            timezone: The IANA zone the calendar periods are computed in — what
+                ``Settings.timezone`` supplies in the running system.
+
+        **Explicit values, never a ``Settings`` read** (ADR-0194 §11): the
+        composition root is the sole reader of those five settings, and a fixture
+        builds them here directly.
         """
         self._decisions: dict[str, PermissionDecision] = {}
         # Insertion order **is** the durable append order every admission rule in
@@ -364,6 +396,17 @@ class FakeAuditTrail:
             identifiers if identifiers is not None else FakeIdentifiers()
         )
         self._resource = SuspendableResource()
+        self._books = SpendBooks(
+            currency=currency,
+            day_ceiling=day_ceiling,
+            month_ceiling=month_ceiling,
+            allowance=allowance,
+            timezone=timezone,
+        )
+        # Its own lock and its own resource: ADR-0194 §3 serialises admissions
+        # against each other and deliberately not against the appends.
+        self._spend_lock = asyncio.Lock()
+        self._spend_reads = SuspendableResource()
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call that enters the modelled resource open inside it.
@@ -965,6 +1008,207 @@ class FakeAuditTrail:
             self._identifiers.reserve([claim.id for claim in claims])
             return [claim.model_copy(deep=True) for claim in claims]
 
+    # --- the spend ceiling (ADR-0194) --------------------------------------
+
+    def suspend_next_spend_read(self) -> LoopSuspension:
+        """Hold the next admission open **after** it has snapshotted the rows.
+
+        A second modelled resource, entered by the admission's read alone. The
+        admission deliberately does not enter the one every other method uses
+        (ADR-0194 §3): what it serialises is other *admissions*, so a completion
+        appended by a call already in flight can land while it is reading — which
+        is the interleaving §3's take-effect rule is written about and which one
+        shared resource would make unreachable.
+
+        The suspension is taken after the snapshot rather than before it, because
+        the rule under test is that a release landing between an admission's row
+        snapshot and its comparison must not be applied to that admission. Armed
+        before the snapshot the case passes against an implementation that applies
+        one.
+
+        Test-only, and not part of either spend Protocol.
+
+        Returns:
+            The handle to wait on and release.
+        """
+        return self._spend_reads.suspend_next()
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Admit this invocation and reserve its declared contribution, or refuse.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendGate.admit_invocation`.
+
+        Raises:
+            SpendCeilingError: If a configured ceiling would be crossed.
+            SpendUndeterminedError: On ADR-0194 §4's six grounds, in that
+                section's order.
+        """
+        if not self._books.bounded:
+            # ADR-0194 §3's short-circuit: nothing is read, nothing is reserved,
+            # and nothing can refuse.
+            return self._books.mint(self._identifiers)
+        contribution = self._books.declared(estimate)
+        if isinstance(contribution, Unpriced):
+            raise SpendUndeterminedError(_unmeasured(contribution.value))
+        async with self._spend_lock:
+            self._books.settle()
+            instant = self._spend_reading()
+            periods = self._spend_periods(instant)
+            rows = await self._spend_snapshot()
+            measured = {bounds.period: measurable(bounds, rows, self._books) for bounds in periods}
+            unmeasured = [
+                period.value
+                for period in SpendPeriod
+                if measured[period] is None and self._books.ceiling(period) is not None
+            ]
+            if unmeasured:
+                raise SpendUndeterminedError(
+                    _unmeasured(f"these periods cannot be measured: {', '.join(unmeasured)}")
+                )
+            return self._reserve_or_refuse(periods, measured, contribution)
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Drop the reservation ``handle`` names. Never waits, never raises.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendGate.release_admission`. It takes
+        no lock and enters no resource, so an invocation whose callable has
+        returned never queues behind another invocation's read.
+        """
+        named = getattr(handle, "handle", None)
+        if isinstance(named, str):
+            self._books.retire(named)
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Return one total per period, in ``SpendPeriod``'s fixed order.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendLedger.spend_totals`. One clock
+        reading and one row snapshot, so the pair is always one a snapshot could
+        have produced; and no lock, since it reads no reservation and a totals read
+        must never queue behind a wedged admission.
+
+        Raises:
+            SpendUndeterminedError: Only where an injected clock raised. A trapped
+                sum leaves its own periods indeterminate instead of raising, and a
+                dict has no backend read to fail.
+        """
+        instant = self._spend_reading()
+        periods = self._spend_periods(instant)
+        rows = await self._spend_snapshot()
+        priced = self._books.currency is not None
+        return tuple(
+            self._spend_total(bounds, measurable(bounds, rows, self._books) if priced else None)
+            for bounds in periods
+        )
+
+    def _spend_reading(self) -> datetime:
+        """Take the one guarded clock reading a spend decision is made on."""
+        try:
+            return self._clock()
+        except Exception as exc:
+            raise SpendUndeterminedError(_unmeasured(f"the clock raised: {exc}")) from exc
+
+    def _spend_periods(self, instant: datetime) -> tuple[Bounds, ...]:
+        """Return both periods containing ``instant``, from that one reading."""
+        try:
+            return self._books.periods(instant)
+        except (SpendTrapError, OverflowError, ValueError, OSError) as exc:
+            raise SpendUndeterminedError(
+                _unmeasured(f"the period could not be computed: {exc}")
+            ) from exc
+
+    async def _spend_snapshot(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:
+        """Snapshot every row, then model the read a durable store performs.
+
+        The snapshot is taken **before** the resource is entered, so a suspension
+        armed on it holds the admission at the one point ADR-0194 §3's take-effect
+        rule is about: rows fixed, comparison not yet made.
+        """
+        completed = {
+            row.completes for row in self._invocations.values() if row.completes is not None
+        }
+        taken = [
+            (row.recorded_at, row.incurred_cost, row.id in completed)
+            for row in self._invocations.values()
+        ]
+        async with self._spend_reads.held():
+            return taken
+
+    def _reserve_or_refuse(
+        self,
+        periods: Sequence[Bounds],
+        measured: Mapping[SpendPeriod, Sequence[Decimal] | None],
+        contribution: Decimal,
+    ) -> SpendAdmissionHandle:
+        """Compare against every configured ceiling, then reserve and mint.
+
+        Strictly above a ceiling refuses; exactly equal is admitted. The mint sits
+        on the far side of the comparison, so a refusal consults the injected
+        factory not at all — and a factory raising ``CancelledError`` cannot turn a
+        refusal into a cancellation.
+        """
+        outstanding = self._books.standing()
+        crossed: list[str] = []
+        for bounds in periods:
+            ceiling = self._books.ceiling(bounds.period)
+            amounts = measured[bounds.period]
+            if ceiling is None or amounts is None:
+                continue
+            try:
+                accounted = add_exactly(amounts)
+                projected = add_exactly([accounted, *outstanding, contribution])
+            except SpendTrapError as exc:
+                raise SpendUndeterminedError(_unmeasured(f"the arithmetic trapped: {exc}")) from exc
+            if projected > ceiling:
+                crossed.append(
+                    f"{bounds.period.value}: {projected} projected against a ceiling of "
+                    f"{ceiling} {self._books.currency}, with {accounted} accounted"
+                )
+        if crossed:
+            raise SpendCeilingError(
+                "the invocation was refused: it would cross a configured spend "
+                f"ceiling — {'; '.join(crossed)}"
+            )
+        key = self._books.hold(contribution)
+        try:
+            handle = self._books.mint(self._identifiers)
+        except BaseException:
+            # No reservation nobody can release (ADR-0194 §3): a cancellation from
+            # the factory propagates unchanged and does not strand one.
+            self._books.drop(key)
+            raise
+        self._books.name(key, handle.handle)
+        return handle
+
+    def _spend_total(self, bounds: Bounds, amounts: Sequence[Decimal] | None) -> SpendTotal:
+        """Build one period's ``SpendTotal``, indeterminacy included.
+
+        ``currency`` discriminates the two absences: absent, no currency is
+        configured and no sum was attempted; present, the period is indeterminate.
+        A trapped sum lands in the second, because the other period's figure is
+        still computable.
+        """
+        accounted: Decimal | None = None
+        if self._books.currency is not None and amounts is not None:
+            try:
+                accounted = add_exactly(amounts)
+            except SpendTrapError:
+                accounted = None
+        return SpendTotal(
+            period=bounds.period,
+            period_start=bounds.start,
+            period_end=bounds.end,
+            start_offset=bounds.start_offset,
+            end_offset=bounds.end_offset,
+            ceiling=self._books.ceiling(bounds.period)
+            if self._books.currency is not None
+            else None,
+            currency=self._books.currency,
+            accounted=accounted,
+        )
+
     def _join(self, row: ToolInvocation) -> RecordedInvocation:
         """Pair ``row`` with the decision it names (ADR-0192 §2).
 
@@ -999,6 +1243,15 @@ class FakeAuditTrail:
         """
         by_id = sorted(self._decisions.values(), key=lambda decision: decision.id)
         return sorted(by_id, key=lambda decision: decision.decided_at, reverse=True)
+
+
+def _unmeasured(because: str) -> str:
+    """Compose ADR-0194 §4's payload-free message for an unmeasurable spend.
+
+    It names which ground applied and nothing about the call: no argument value,
+    no recipient, no account, no tool output and no digest of any of them.
+    """
+    return f"the invocation was refused: the spend could not be reduced to a number — {because}"
 
 
 def _once[T](read: Callable[[], T]) -> Callable[[], T]:
@@ -1515,6 +1768,18 @@ FakeInvocationLedger = FakeAuditTrail
 #: recovery scan is handed, which cannot express a claim at all.
 FakeInvocationCompleter = FakeAuditTrail
 
+#: :class:`FakeAuditTrail` under the spend faces' names (ADR-0194 §5). **One
+#: object implements ``SpendGate``, ``SpendLedger`` and ADR-0192's ledger seam**,
+#: because all three read the same rows — two stores keyed by the same rows could
+#: disagree about a total. So the aliases name the faces the composition root
+#: hands out, exactly as the two ledger names above do: ``FakeSpendGate`` for the
+#: invoker, ``FakeSpendLedger`` for the engine's read.
+FakeSpendGate = FakeAuditTrail
+
+#: :class:`FakeAuditTrail` under the totals face's name — the one an adapter
+#: holds, and never the gate (ADR-0194 §5).
+FakeSpendLedger = FakeAuditTrail
+
 
 __all__ = [
     "FakeActionPolicy",
@@ -1523,5 +1788,7 @@ __all__ = [
     "FakeIdentifiers",
     "FakeInvocationCompleter",
     "FakeInvocationLedger",
+    "FakeSpendGate",
+    "FakeSpendLedger",
     "MintsIdentifiers",
 ]
