@@ -244,8 +244,12 @@ class ReportedOutput(BaseModel):
 > the result is then discarded with its figure.
 
 > **Normative.** The envelope is **unwrapped at the seam and travels no further**.
-> `ToolResult.output` receives `envelope.output`; `ToolResult.incurred_cost`
-> receives the validated cost (§4). No `ReportedOutput` reaches a `ToolResult`, a
+> `ToolResult.output` receives the **local** captured by the single guarded read
+> above, never a second access to the envelope; `ToolResult.incurred_cost` receives
+> the validated cost derived from the other local (§4). Every later rule in this ADR
+> naming the envelope's `output` or its cost names those two locals: a subclass whose
+> first access succeeds and whose second raises or answers differently must not find
+> two instructions to choose between, and one read per field is what leaves it none. No `ReportedOutput` reaches a `ToolResult`, a
 > `StepExecution`, an audit row, the wire or any consumer of `ToolInvoker`, so
 > ADR-0087's encoding is untouched and no `PROTOCOL_VERSION` bump is owed on this
 > ground (§9).
@@ -795,6 +799,12 @@ forbids.
 > - a `ReportedOutput` subclass whose `output` accessor **cancels the invoking task**
 >   has its result and its figure discarded: the cancellation propagates unchanged
 >   and the interruption re-read is what sees it;
+> - a `ReportedOutput` subclass whose `incurred_cost` accessor **raises** yields
+>   `UNKNOWN` with the successful output and outcome intact, the completion written
+>   and the claim closed;
+> - a `ReportedOutput` subclass whose `incurred_cost` accessor **cancels the invoking
+>   task** propagates the cancellation unchanged, and the row it leaves records
+>   `UNKNOWN`;
 > - a `ToolCost` subclass whose `model_dump()` **raises** yields `UNKNOWN` with the
 >   outcome and output intact, the completion written and the claim closed — nothing
 >   escapes `invoke` and no claim is left open;
