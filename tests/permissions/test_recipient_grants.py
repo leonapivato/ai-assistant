@@ -94,8 +94,37 @@ def test_a_negative_ceiling_is_refused_at_construction(tmp_path: Path) -> None:
     ``Settings`` carries ``ge=0`` and why this constructor states the same rule
     rather than trusting it.
     """
-    with pytest.raises(ValueError, match="negative"):
+    with pytest.raises(ValueError, match="non-negative int"):
         SqliteRecipientGrantStore(path=tmp_path / "grants.db", max_outstanding=-1)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [0.5, float("nan"), float("inf"), True, "64", None],
+    ids=["a fraction", "nan", "infinity", "a bool", "a string", "none"],
+)
+def test_a_ceiling_that_is_not_an_int_is_refused_at_construction(
+    tmp_path: Path, given: object
+) -> None:
+    """A cap a comparison cannot enforce is not a cap (ADR-0193 §1).
+
+    The sign check alone lets through values that **disable** the ceiling rather
+    than mis-size it: ``len(outstanding) >= float("nan")`` is false for every
+    count, so a store built with one admits granting records without limit while
+    every message about it still names a ceiling. ``0.5`` is the milder shape of
+    the same fault — a ceiling below one that admits the first grant — and a
+    ``str`` leaves the constructor as a raw ``TypeError`` from the comparison
+    rather than through this seam's own error.
+
+    ``True`` is here because ``bool`` is an ``int`` and ``isinstance`` would admit
+    it: a ceiling of "true" is nobody's configuration, and the check is on the
+    exact type for that reason.
+    """
+    with pytest.raises(ValueError, match="non-negative int"):
+        SqliteRecipientGrantStore(
+            path=tmp_path / "grants.db",
+            max_outstanding=given,  # type: ignore[arg-type]  # the point of the case
+        )
 
 
 def test_the_database_file_is_owner_only(tmp_path: Path) -> None:

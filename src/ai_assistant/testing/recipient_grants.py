@@ -410,10 +410,18 @@ class _RecipientGrantLog:
                 ceiling at all.
 
         Raises:
-            ValueError: If ``max_outstanding`` is negative.
+            ValueError: If ``max_outstanding`` is not a non-negative ``int``. The
+                type is checked and not only the sign, for
+                ``SqliteRecipientGrantStore``'s reason: a value that is not an
+                integer can disable the cap rather than mis-size it, and a fake
+                that admitted one would hold the durable store to a rule it did not
+                keep itself.
         """
-        if max_outstanding < 0:
-            msg = f"max_outstanding must not be negative, got {max_outstanding}"
+        if type(max_outstanding) is not int or max_outstanding < 0:
+            msg = (
+                f"max_outstanding must be a non-negative int, got "
+                f"{describe_untrusted(max_outstanding)}"
+            )
             raise ValueError(msg)
         self._max_outstanding = max_outstanding
         self._records: list[RecipientGrant] = []

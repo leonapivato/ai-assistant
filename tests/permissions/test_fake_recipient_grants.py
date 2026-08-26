@@ -205,8 +205,23 @@ async def test_the_narrow_fakes_refuse_a_history_no_store_could_hold() -> None:
 
 def test_a_negative_ceiling_names_no_bound() -> None:
     """Zero is meaningful and admitted; a negative is a value nobody meant."""
-    with pytest.raises(ValueError, match="negative"):
+    with pytest.raises(ValueError, match="non-negative int"):
         FakeRecipientGrantStore(max_outstanding=-1)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [0.5, float("nan"), float("inf"), True, "64", None],
+    ids=["a fraction", "nan", "infinity", "a bool", "a string", "none"],
+)
+def test_a_ceiling_that_is_not_an_int_is_refused_by_the_fake_too(given: object) -> None:
+    """The double keeps the rule it holds the durable store to.
+
+    A fake admitting a ceiling the store refuses is a fake that cannot be used to
+    arrange the case, and a ``nan`` ceiling disables the cap in either of them.
+    """
+    with pytest.raises(ValueError, match="non-negative int"):
+        FakeRecipientGrantStore(max_outstanding=given)  # type: ignore[arg-type]  # the case
 
 
 async def test_a_reopened_store_sees_writes_through_the_earlier_view() -> None:
