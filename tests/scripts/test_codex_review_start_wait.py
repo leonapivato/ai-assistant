@@ -676,3 +676,43 @@ def test_a_newer_round_on_another_tree_does_not_hide_the_one_covering_head(
     assert waited.returncode == STILL_RUNNING, waited.stderr
     assert "still running" in waited.stderr
     _reap(repo)
+
+
+def test_another_loops_round_cannot_mask_this_loops_starting_round(
+    tmp_path: Path,
+) -> None:
+    """A held lock with no marker yet is a round starting, not a round elsewhere.
+
+    `_claim_persona` clears the previous marker on the way in and republishes once
+    the identity settles, so for about a second every round has a held lock and no
+    marker. If an unrelated live round on another tree supplied the tree during
+    that window, `--wait` would answer exit 4 — "stop polling" — about the round
+    that is starting, which is the foreground-cutoff shape this mode exists for.
+
+    The window is reproduced exactly: the marker is removed from disk while its
+    round holds the lock, which is the on-disk state `_claim_persona` creates.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "three\n", "second change")
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 12")
+
+    # An unrelated round, on another tree, under an older base key.
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+    _git(repo, "branch", "-f", "main", "HEAD~1")
+    _commit(repo, "four\n", "third change")
+
+    # This loop's round, then rewound into its own publication window.
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+    session = repo / ".review" / "session"
+    markers = sorted(session.glob("*.adversarial.round"), key=lambda m: m.stat().st_mtime)
+    assert len(markers) == 2
+    current = markers[-1]
+    assert f"tree={_tree(repo)}" in current.read_text()
+    current.unlink()
+
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "2")
+
+    assert waited.returncode == STILL_RUNNING, waited.stderr
+    assert "still running" in waited.stderr
+    _reap(repo)

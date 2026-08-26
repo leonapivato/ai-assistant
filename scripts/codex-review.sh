@@ -681,7 +681,7 @@ _mode_wait() {
     fi
 
     local deadline=$(($(date +%s) + timeout))
-    local artifact line verdict r_tree marker m_tree m_base live now remaining
+    local artifact line verdict r_tree marker m_tree m_base live unknown now remaining
     local noted_base=0
     while :; do
         artifact="$(_artifact_for_tree)"
@@ -718,22 +718,47 @@ _mode_wait() {
         r_tree="$(_round_field tree)"
         # Liveness, across every loop key on this branch — a base that moved while
         # a round ran filed it under a key this invocation no longer computes.
+        # Liveness has two independent sources and BOTH are consulted, because
+        # each sees something the other cannot.
+        #
+        # `_live_marker` scans every loop key on this branch, which is what finds
+        # a round whose base moved under it — the loop key folds in the base, so
+        # such a round is filed under a key this invocation no longer computes. It
+        # already prefers a round covering HEAD's tree over a newer one that does
+        # not.
+        #
+        # The current loop's lock sees what no marker can: a round that has
+        # claimed the loop but not yet published its marker. `_claim_persona`
+        # clears the previous marker on the way in and republishes about a second
+        # later, so every round has such a window, and in it the round's tree is
+        # UNKNOWN rather than absent.
+        #
+        # Keeping them separate is what makes both answers right. Reading only the
+        # scan reports exit 4 about a round that is starting; reading only the
+        # current lock lets a round in this loop, on some other tree, mask a live
+        # round elsewhere that covers HEAD exactly. Each of those was a real
+        # defect here.
         marker="$(_live_marker)"
         m_tree=""
         m_base=""
         live=0
+        unknown=0
         if [[ -n "$marker" ]]; then
             live=1
             m_tree="$(_marker_field "$marker" tree)"
             m_base="$(_marker_field "$marker" base_sha)"
-        elif _lock_held; then
-            # The lock is claimed before the marker is published, so for about a
-            # second at the start of every round there is a held lock and no
-            # marker to find. That is in flight, not absent.
+        fi
+        if _lock_held; then
             live=1
+            if [[ -z "$(_round_field tree)" ]]; then
+                unknown=1
+            fi
         fi
 
-        if [[ "$live" -eq 1 && -n "$m_tree" && "$m_tree" != "$tree" ]]; then
+        # Only where the tree is actually KNOWN: an unpublished marker in this
+        # loop means a round is starting, and "stop polling" is the one answer
+        # that must never be guessed.
+        if [[ "$live" -eq 1 && "$unknown" -eq 0 && -n "$m_tree" && "$m_tree" != "$tree" ]]; then
             echo "the '${persona}' round running in this clone is reviewing tree" >&2
             echo "  ${m_tree:0:12}, not HEAD's ${tree:0:12}. Nothing will record an" >&2
             echo "  artifact for HEAD's tree until a round is started on it — most" >&2
@@ -746,8 +771,8 @@ _mode_wait() {
         # under the older base — which is worth waiting out either way, since
         # whether that artifact still covers the PR is ADR-0027 §2's question and
         # `ship` is what answers it.
-        if [[ "$live" -eq 1 && -n "$m_base" && "$m_base" != "$base_sha" &&
-            "$noted_base" -eq 0 ]]; then
+        if [[ "$live" -eq 1 && "$unknown" -eq 0 && -n "$m_base" &&
+            "$m_base" != "$base_sha" && "$noted_base" -eq 0 ]]; then
             noted_base=1
             echo "note: the round in flight was started against base ${m_base:0:12}," >&2
             echo "  which has since moved to ${base_sha:0:12}. It is reviewing HEAD's" >&2
