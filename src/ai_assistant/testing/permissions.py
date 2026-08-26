@@ -1055,7 +1055,7 @@ class FakeAuditTrail:
             self._books.settle()
             instant = self._spend_reading()
             periods = self._spend_periods(instant)
-            rows = await self._spend_snapshot()
+            rows = await self._spend_read()
             measured = {bounds.period: measurable(bounds, rows, self._books) for bounds in periods}
             unmeasured = [
                 period.value
@@ -1096,7 +1096,7 @@ class FakeAuditTrail:
         """
         instant = self._spend_reading()
         periods = self._spend_periods(instant)
-        rows = await self._spend_snapshot()
+        rows = await self._spend_read()
         priced = self._books.currency is not None
         return tuple(
             self._spend_total(bounds, measurable(bounds, rows, self._books) if priced else None)
@@ -1117,6 +1117,23 @@ class FakeAuditTrail:
         except (SpendTrapError, OverflowError, ValueError, OSError) as exc:
             raise SpendUndeterminedError(
                 _unmeasured(f"the period could not be computed: {exc}")
+            ) from exc
+
+    async def _spend_read(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:
+        """Take the snapshot, translating whatever it failed with.
+
+        ADR-0194 §4's fourth ground and §5's closed ``Exception`` set: a backend
+        failure is translated rather than propagated, so a caller never meets a
+        store's own error type through this seam. A dict cannot fail on its own,
+        but the seam owes the translation whether or not this subject can reach
+        it — an implementation that only translated where it expected a failure
+        would leak the one it did not.
+        """
+        try:
+            return await self._spend_snapshot()
+        except Exception as exc:
+            raise SpendUndeterminedError(
+                _unmeasured(f"the store could not be read: {exc}")
             ) from exc
 
     async def _spend_snapshot(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:

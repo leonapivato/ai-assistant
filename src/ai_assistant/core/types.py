@@ -9041,7 +9041,11 @@ def _is_countable_spend_amount(amount: Decimal) -> bool:
         return False
     if _effective_exponent(amount) < -_SPEND_AMOUNT_SCALE:
         return False
-    return abs(amount) < _SPEND_AMOUNT_CEILING
+    # ``copy_abs`` and not ``abs``: the latter is an arithmetic operation that
+    # rounds to the ambient precision and traps under a hostile context, which
+    # is exactly what this predicate is required not to depend on. Comparison
+    # between two finite ``Decimal``s is itself exact and context-free.
+    return amount.copy_abs() < _SPEND_AMOUNT_CEILING
 
 
 def _is_canonical_spend_total(amount: Decimal) -> bool:
