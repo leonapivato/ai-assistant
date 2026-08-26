@@ -327,7 +327,14 @@ _marker_live() {
 }
 
 # The marker of a live round of this persona on this branch, whatever loop key it
-# was filed under — newest by `started_at`, or nothing.
+# was filed under. A round covering HEAD'S TREE wins outright; failing that, the
+# newest live one, so the different-tree report below still has something to name.
+#
+# The preference is not a tie-break, it is the whole point: two rounds of one
+# persona CAN be live at once under different base keys, and picking by recency
+# alone would let a newer round on some other tree hide an older one that covers
+# HEAD exactly — answering exit 4, "stop polling", about a round that is about to
+# record the artifact being waited for.
 #
 # Scanned rather than read from this invocation's own path, because the loop key
 # folds in the BASE (ADR-0025 §1, deliberately: a moved base is a different diff
@@ -342,7 +349,7 @@ _marker_live() {
 # Scoped by branch, which is what identifies "this review loop" across exactly
 # the rewrites the workflow relies on — the same key the aggregate counts by.
 _live_marker() {
-    local m key started candidate="" newest=-1
+    local m key started candidate="" newest=-1 covering="" covering_newest=-1
     shopt -s nullglob
     for m in "${session_dir}"/*."${persona}".round; do
         [[ "$(_marker_field "$m" branch)" == "$branch" ]] || continue
@@ -351,13 +358,17 @@ _live_marker() {
         _marker_live "$m" "$key" || continue
         started="$(_marker_field "$m" started_at)"
         [[ "$started" =~ ^[0-9]+$ ]] || started=0
+        if [[ "$(_marker_field "$m" tree)" == "$tree" && "$started" -ge "$covering_newest" ]]; then
+            covering_newest="$started"
+            covering="$m"
+        fi
         if [[ "$started" -ge "$newest" ]]; then
             newest="$started"
             candidate="$m"
         fi
     done
     shopt -u nullglob
-    printf '%s' "$candidate"
+    printf '%s' "${covering:-$candidate}"
     return 0
 }
 

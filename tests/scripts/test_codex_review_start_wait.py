@@ -638,3 +638,41 @@ def test_wait_finds_a_round_whose_base_ref_moved_under_it(tmp_path: Path) -> Non
     settled = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
     assert settled.returncode == RECORDED, settled.stderr
     assert _fields(settled.stdout)["tree"] == _tree(repo)
+
+
+def test_a_newer_round_on_another_tree_does_not_hide_the_one_covering_head(
+    tmp_path: Path,
+) -> None:
+    """Two rounds of one persona can be live at once, under different base keys.
+
+    Picking the newest live marker and then judging its tree would let a newer
+    round on some other tree hide an older one covering HEAD exactly — answering
+    exit 4, "stop polling", about the very round that is about to record the
+    artifact being waited for. A marker covering HEAD's tree wins outright.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "three\n", "second change")
+    covered_sha = _git(repo, "rev-parse", "HEAD")
+    covered_tree = _tree(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 12")
+
+    # Round one: HEAD's current tree, against the original base.
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    # The base moves, so a second round of this persona files under a new loop
+    # key and can be live alongside the first — on a different, newer tree.
+    _git(repo, "branch", "-f", "main", "HEAD~1")
+    _commit(repo, "four\n", "third change")
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    # HEAD returns to the tree the OLDER round is covering.
+    _git(repo, "reset", "--hard", "-q", covered_sha)
+    assert _tree(repo) == covered_tree
+    assert len(list((repo / ".review" / "session").glob("*.adversarial.round"))) == 2
+
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "2")
+
+    assert waited.returncode == STILL_RUNNING, waited.stderr
+    assert "still running" in waited.stderr
+    _reap(repo)
