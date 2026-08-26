@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     ToolResult,
     fault_class_of,
 )
+from ai_assistant.tools.egress import IndeterminateTransmissionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -422,6 +423,82 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     )
 
 
+def indeterminate_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
+    """Report a tool that says its effect may have committed, as unknown (ADR-0148 §9).
+
+    :class:`~ai_assistant.tools.egress.IndeterminateTransmissionError` marks one
+    window and only one: the payload and its terminator are on the wire and the
+    reply that would say whether the far end accepted them could not be read. It
+    is deliberately not an ``EgressTransportError``, because every member of that
+    hierarchy is a refusal that transmitted nothing — and until this branch existed
+    the split died here, where :func:`internal_failure` flattened it into
+    ``FAILED``/``INTERNAL``: an unknown disclosure recorded as one that certainly
+    did not happen, which ADR-0191 §4's last clause forbids in as many words and
+    ADR-0017 §3 names as the whole reason for wanting an explicit outcome
+    ("otherwise a timeout is indistinguishable from a successful disclosure").
+    Issue #1602, found by driving a recorder that drops the socket after ``DATA``.
+
+    **This is the one classification here that keys on the exception's type**, and
+    the exemption is narrow enough to state. The seam refuses to take a tool's word
+    for ``TIMED_OUT`` or ``CANCELLED`` because both are the *seam's own* state and
+    a tool claiming either would say "this did not happen" about something that
+    may well have. This claim runs the other way: only the party that wrote the
+    octets can know it wrote them, the seam can observe nothing about the far end,
+    and a tool that raises this type — sincerely, mistakenly, or by subclassing it
+    to be believed — moves the record from ``FAILED`` to ``INDETERMINATE`` and no
+    further. That is the direction ADR-0014 §4 already refuses to guess in, and the
+    direction with a reconciliation path.
+
+    **The outcome is ``definition.interrupted_outcome``, not a literal
+    ``INDETERMINATE``**, so the branch is correct for every declaration rather than
+    for ``send_email``'s. That property is ``core``'s single answer to "a call of
+    this tool, cut short, means what?" — ``FAILED`` where the tool is not
+    side-effecting or its idempotency is ``NATURAL``, because neither a read nor a
+    naturally idempotent act leaves an unknown behind, and ``INDETERMINATE``
+    otherwise (ADR-0029 §4). It names three readers, and this is the one that had
+    no implementation: "the seam again when a tool reports its effect may have
+    committed". Read from the registry's committed declaration, which is what this
+    seam is handed.
+
+    **``UNAVAILABLE`` rather than ``INTERNAL``**, on both halves of the word. The
+    tool is not broken — it did exactly what ADR-0191 §4 requires of it — and the
+    upstream demonstrably either stopped answering or answered a refusal after the
+    fact, which is what that kind names. Its ``retryable`` is ``True``, and that is
+    safe here rather than in spite of the outcome: the executor's retry gate reads
+    a kind only on a ``FAILED`` result (ADR-0029 §5), so it is consulted exactly
+    where ``interrupted_outcome`` already established that a repeat leaves nothing
+    unknown, and never on the ``INDETERMINATE`` a side-effecting tool produces.
+
+    **The message names the state and never the wire.** It does not interpolate
+    ``str(exc)`` — the seam's own text names an endpoint and a tool id, and
+    ``internal_failure`` documents why a message from below is not copied outward —
+    and it says neither that the call was sent nor that nothing went out, because
+    the entire content of this result is that the seam cannot say which.
+    """
+    fault = _fault_class(exc)
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        # Guarded exactly as `internal_failure`'s emission is, for its reason: this
+        # runs after the claim, and a processor that raised would leave this frame
+        # in place of the `ToolResult` — losing the one outcome ADR-0192 §3 most
+        # needs recorded.
+        _log.warning(
+            "tool_transmission_indeterminate",
+            tool_id=definition.id,
+            # The type, never the instance: rendering the exception is the leak.
+            error_type=fault,
+        )
+    return ToolResult(
+        outcome=definition.interrupted_outcome,
+        failure=ToolFailure(
+            kind=ToolFailureKind.UNAVAILABLE,
+            message=(
+                f"tool {definition.id!r} reported that it may have transmitted and could "
+                f"not read the outcome, so whether the call took effect is unknown"
+            ),
+        ),
+    )
+
+
 def expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
     """Describe this seam's own deadline expiring.
 
@@ -562,7 +639,13 @@ async def run_prepared_call(
       the tool invented it, and a tool that raised is ``INTERNAL``. Otherwise it
       propagates: swallowing it would break structured concurrency and shutdown,
       and there is no return path from a task being torn down.
-    - **Neither of those is inferred from what the callable did**, because a
+    - ``INDETERMINATE`` is the one that *does* read a type, and reads it in the
+      only direction a tool may be believed in: an
+      :class:`~ai_assistant.tools.egress.IndeterminateTransmissionError` says the
+      effect may already have committed, which nothing out here can observe and
+      which moves the record away from "certainly did not happen" rather than
+      towards it (:func:`indeterminate_failure`, ADR-0148 §9, ADR-0191 §4).
+    - **Neither of the first two is inferred from what the callable did**, because a
       callable that catches a cancellation and returns a value leaves the seam
       holding an output and no exception at all. So the deadline and the task
       are read directly, on the normal-return path as well as the raising one —
@@ -606,6 +689,16 @@ async def run_prepared_call(
         if _pending_cancellations() > entered_with:
             raise
         return internal_failure(definition, exc)
+    except IndeterminateTransmissionError as exc:
+        # Ahead of the generic branch, and **behind** `_interruption`, which is not
+        # an ordering to tidy: `_interruption` re-raises a pending external
+        # cancellation, and swallowing one to answer with a result would break
+        # structured concurrency (ADR-0029 §4). Where it answers instead, its
+        # answer carries the same `interrupted_outcome` this branch would, so the
+        # record does not turn on which of the two spoke.
+        return _interruption(definition, named, deadline, entered_with) or indeterminate_failure(
+            definition, exc
+        )
     except Exception as exc:
         # Python's own `TimeoutError` arrives here too, and is *not* special:
         # what makes an expiry an expiry is this deadline having fired, which
@@ -634,6 +727,7 @@ __all__ = [
     "ToolImplementation",
     "checked_pairing",
     "expiry_failure",
+    "indeterminate_failure",
     "internal_failure",
     "resolved_implementation",
     "run_bound_call",

@@ -263,7 +263,9 @@ class IndeterminateTransmissionError(ToolError):
     **Not** an :class:`EgressTransportError`, and the split is the whole point:
     every member of that hierarchy is a refusal that transmitted nothing, and
     collapsing this into it would let a caller treat an unknown disclosure as one
-    that did not happen.
+    that did not happen. The caller that honours the split is
+    :func:`~ai_assistant.tools.invocation.indeterminate_failure`, which is where
+    it used to be lost one layer out (issue #1602).
     """
 
 
