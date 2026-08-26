@@ -282,8 +282,44 @@ class ReportedOutput(BaseModel):
 > reads is `ToolCost.model_validate(reported.model_dump())`: a validated, detached
 > value, on both carriers.
 
-> **Normative.** A cost that does **not** survive the round-trip is **discarded, and
-> nothing else is**. The outcome stands, the output stands, the failure and
+> **Normative.** **The whole read runs under its own `Exception` guard**, and this
+> is not a refinement of the clause above but the half that makes it safe. Every
+> step of it executes tool-authored code: the attribute access can be a property, and
+> `model_dump()` can be overridden by a `ToolCost` subclass — ADR-0032 §6 rules that
+> such an override is legitimate and that "the round-trip's result is what crosses",
+> which this ADR inherits whole. So an `Exception` raised by the attribute access,
+> the dump or the validation is caught **there** and yields `UNKNOWN`, exactly as a
+> value that fails validation does. It is the same guard ADR-0032 §6 already
+> requires for the same reason — "a `failure` property that explodes must not take
+> the `bool` down with it, so each attribute is fetched under its own guard and
+> judged on its own" — with a third attribute under it.
+
+> **Normative.** That guard is load-bearing rather than tidy, because of **where**
+> the read sits. It happens after ADR-0192 §1's claim has been appended, so an
+> exception escaping it would leave a claim with no completion — the state ADR-0192
+> §3 requires a completion attempt on every exit to prevent — and would do so over an
+> accounting field, on a call that already ran. No implementation lets a cost read
+> escape `invoke`, and none synthesises a failure from one: the outcome, the output
+> and the failure are decided by the rules that already decide them.
+
+> **Normative.** A `BaseException` that is not an `Exception` — a `CancelledError`
+> delivered from outside above all — is **propagated unchanged** and is never
+> absorbed by that guard. ADR-0029 §3, ADR-0032 §4 and ADR-0194 §4 all take that
+> exemption and this ADR takes it identically: a cancellation is not an accounting
+> fact.
+
+> **Normative.** **The order is fixed: the cost is read and validated first, and the
+> seam's interruption state is read after it.** Reading a reported cost runs the
+> tool's code, so a deadline can expire and a cancellation can be delivered *inside*
+> the read. An implementation that checked interruption before the read would build a
+> result carrying a figure obtained after the seam had stopped waiting; one that
+> never re-read it would let the discard rule below silently not fire. So the
+> sequence at each exit is: read the cost under the guard, then evaluate
+> interruption, then build the result — and where interruption answers, the cost is
+> discarded with the classification it accompanied.
+
+> **Normative.** A cost that does **not** survive the round-trip **or whose read
+> raised** is **discarded, and nothing else is**. The outcome stands, the output stands, the failure and
 > `effect_may_have_committed` stand, and the row records a `ToolCost` whose basis is
 > `UNKNOWN`.
 
@@ -663,16 +699,35 @@ forbids.
 > `core/protocols.py`, so `CONTRIBUTING.md` → "Adding a Protocol" is not engaged and
 > ADR-0137 §2's pairing clause has no triad to pair.
 
-> **Normative.** The lane spans `core/`, `tools/` and `ai_assistant.testing`, and
-> that is **one** unit of work rather than three despite "one subsystem per change",
-> for the reason ADR-0137 §3 gives for never splitting a triad. The seam and the
-> canonical fake implement **one** unwrapping-and-revalidation rule, and
-> `ai_assistant.testing.invoker` "re-implements the rules rather than importing
-> `ai_assistant.tools`" (ADR-0031 §1) — so shipping either alone leaves a consumer's
-> tests certifying behaviour the seam does not have, or a seam no consumer can test
-> against. The `core` model is inert without both. The lane is small: one model, one
-> defaulted field, one branch at the return site, one revalidation, and the fake's
-> mirror of them.
+> **Normative.** The lane touches `core/types.py`, `tools/` and
+> `ai_assistant.testing`, and it is **one** lane under **ADR-0137 §1** on that
+> section's own test — not under §2's pairing clause, which this ADR does not reach
+> and does not ask to be widened. §1 admits a slice as one lane where it "puts
+> substantial **new machinery** into at most one subsystem", and draws the line at
+> new machinery against adaptation: machinery is "a store, a loop, a codec, a
+> producer, a policy engine", and "adaptation does not count against the bound …
+> A lane may carry adaptation across any number of subsystems."
+
+> **Normative.** Applied here: the **new machinery is the unwrap-and-revalidate rule
+> at the invocation seam, and it is in `tools/` alone**. `ReportedOutput` is a frozen
+> two-field data model with no behaviour beyond declarative validation — every item
+> in §1's enumeration is a *behaviour*, and a data type in `core/types.py` is the
+> shared vocabulary every subsystem depends on under golden rule 2 rather than one
+> subsystem's machine. `ai_assistant.testing`'s change is adaptation in §1's own
+> words — "an implementation of a Protocol method a subsystem already almost
+> satisfied" — since the fake invoker already implements the whole of `invoke`'s
+> rules and gains the same one branch. The compounding §1 is about does not arise:
+> the lane presents one new behaviour, which draws one class of finding.
+
+> **Normative.** Splitting it would be worse and not merely inconvenient. A first PR
+> adding `ReportedOutput` alone would be a contract-only PR whose type nothing
+> constructs — the shape ADR-0194's own header calls "the contract-only PR followed
+> by an implementation PR that §2 exists to prevent" — and the fake cannot be split
+> from the seam at all: `ai_assistant.testing.invoker` "re-implements the rules rather
+> than importing `ai_assistant.tools`" (ADR-0031 §1) and the shared conformance suite
+> holds the two to one observable behaviour, so a PR moving either alone leaves the
+> suite asserting a rule one side does not have. The lane is small: one model, one
+> branch at the return site, one guarded revalidation, and the fake's mirror of them.
 
 > **Normative.** The lane lands the **success exit only**, because that is the exit
 > whose carrier exists. What lands:
@@ -710,6 +765,14 @@ forbids.
 > - a deadline expiry and a delivered cancellation each discard a reported cost with
 >   the classification they pre-empt, and the row records `UNKNOWN`;
 > - a returned JSON mapping carrying an `incurred_cost` key is output, not a report;
+> - a `ToolCost` subclass whose `model_dump()` **raises** yields `UNKNOWN` with the
+>   outcome and output intact, the completion written and the claim closed — nothing
+>   escapes `invoke` and no claim is left open;
+> - a `model_dump()` that **cancels the invoking task** and returns a valid value has
+>   its figure discarded: the cancellation is propagated unchanged and the
+>   interruption re-read after the cost read is what sees it;
+> - a `model_dump()` that returns a **different** valid cost crosses as the
+>   round-trip's result, which is ADR-0032 §6's rule inherited rather than a new one;
 > - **the end-to-end case ADR-0192 §9 deferred**: a registered tool that reports a
 >   `PER_CALL` figure, through `invoke`, onto a completion row, into ADR-0194 §2's
 >   accounted total, refusing a later call at a configured ceiling — driven against a
