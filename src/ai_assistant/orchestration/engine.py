@@ -1606,6 +1606,26 @@ class Engine:
         self._notification_policy = notification_policy
         self._notification_outbox = notification_outbox
         self._recovery = recovery
+        #: Whether this engine has already run ADR-0014 §4's recovery scan. The
+        #: scan's whole premise is that "no executor is live for those states"
+        #: (§4), and this method is **also** the hub scheduler's recurring
+        #: conversation-sweep job (``service/scheduler.py``'s job table names
+        #: ``engine.start``), so an unguarded scan would run on a timer against a
+        #: process serving turns and complete a *live* invocation's claim
+        #: ``INDETERMINATE`` — the exact misclassification ADR-0192 §3 relies on
+        #: that precondition to exclude. Guarded here rather than in the scan for
+        #: :meth:`_recover_leases_once`'s reason: the engine is what the hub
+        #: starts, so the ownership chain instance lock → one hub process → one
+        #: composition root → one engine → one recovery ends here.
+        self._recovery_scanned = False
+        #: Serialises the check-scan-set above. A bare flag is not a guard across
+        #: an ``await``: two overlapping ``start`` calls both read ``False``, the
+        #: first scans and returns, an executor then claims a step, and the second
+        #: resumes its already-started scan and completes that live claim. Its own
+        #: lock rather than ``_lease_recovery_lock`` or ``_recovery_lock``, for the
+        #: reason stated on the first of those — coupling two unrelated startup
+        #: exclusions makes each one's reasoning the other's problem.
+        self._recovery_scan_lock = asyncio.Lock()
         #: Whether this engine has already voided the delivery leases it inherited
         #: (ADR-0131 §3). Held here rather than in the outbox because the engine is
         #: what the hub starts: instance lock → one hub process → one composition
@@ -1661,15 +1681,16 @@ class Engine:
     async def start(self) -> None:
         """Recover what a crash left in flight, then finish the sweeps (ADR-0014 §4, ADR-0076).
 
-        **ADR-0014 §4's recovery scan first**, where one is wired. A step left
-        ``RUNNING`` by a process that died mid-call becomes ``INDETERMINATE``, and
-        — since ADR-0192 §3 — every claim still open under that step's
+        **ADR-0014 §4's recovery scan first, and on the first call only.** A step
+        left ``RUNNING`` by a process that died mid-call becomes ``INDETERMINATE``,
+        and — since ADR-0192 §3 — every claim still open under that step's
         ``approval_ref`` is completed ``INDETERMINATE`` **before** the step's
         transition is committed. §4 puts the scan "at startup" and presumes no
-        executor is live for those states; the hub calls this at step 4 of its own
-        startup and begins accepting at step 6, so that presumption is a fact about
-        the listener rather than a promise this method makes. Skipped where no scan
-        is wired.
+        executor is live for those states, and that presumption is what the guard
+        below keeps true: this method is *also* the hub scheduler's recurring
+        conversation sweep, so a scan on every call would eventually run against
+        this process's own live steps (:meth:`_recover_scan_once`). Skipped where
+        no scan is wired.
 
         ADR-0074 §8 says the reclaim runs "by the deleting call, **at engine
         start**, and later by the hub's scheduler" — this is that middle case, and
@@ -1718,19 +1739,62 @@ class Engine:
     async def _start(self) -> None:
         """Recover what a dead process left in flight, then sweep, then reconcile.
 
-        The recovery scan runs **first** of the four. Nothing else here reads
-        planning state or the trail's invocation rows, so no ADR orders it against
-        the sweeps; what running it first buys is that a step a previous process
-        left ``RUNNING`` — and every claim open under its authorisation — is
-        resolved before this engine does anything a caller can observe.
+        The recovery scan runs **first** of the four, and — unlike the two sweeps
+        beside it — **only on the first call** (:meth:`_recover_scan_once`).
+        Nothing else here reads planning state or the trail's invocation rows, so
+        no ADR orders it against the sweeps; what running it first buys is that a
+        step a previous process left ``RUNNING`` — and every claim open under its
+        authorisation — is resolved before this engine does anything a caller can
+        observe.
         """
-        if self._recovery is not None:
-            await self._recovery.recover()
+        await self._recover_scan_once()
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
         if self._notification_outbox is not None:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
+
+    async def _recover_scan_once(self) -> None:
+        """Run ADR-0014 §4's recovery scan, once per engine (ADR-0192 §3).
+
+        **Once, and that is what makes it a *startup* scan.** §4 authorises the
+        scan because it "presumes no executor is live for those states" — true of a
+        step the *previous* process left ``RUNNING``, false of one this process
+        claimed a moment ago. :meth:`start` promises it is safe to call more than
+        once and the hub's scheduler takes that promise literally: its job table
+        wires ``engine.start`` as the recurring conversation sweep, so an unguarded
+        scan would run on a timer inside a hub that is serving turns. It would then
+        complete a **live** invocation's claim ``INDETERMINATE`` and commit its step
+        out of ``RUNNING`` — after which the tool's real completion is refused
+        ``InvalidCompletionError``, its executor's terminal write is refused stale,
+        and the record says an act that in fact succeeded may or may not have
+        happened. That is the misclassification ADR-0034 §1 and ADR-0014 §4 both
+        exist to refuse, reached by running recovery at a moment recovery is not
+        for.
+
+        **The check, the scan and the flag are one critical section**, because a
+        bare flag is not a guard across an ``await`` — the same finding adversarial
+        review made against :meth:`_recover_leases_once` on its tenth round, and
+        the same remedy. Two overlapping ``start`` calls both read ``False``; the
+        first scans and returns, an executor then claims a step, and the second
+        resumes its already-started scan over that live claim.
+
+        **The flag is set only after the scan returns.** A scan that raised
+        completed nothing it had not already committed, and ADR-0192 §3's ordering
+        makes a re-run idempotent by construction: the interrupted step is still
+        ``RUNNING``, so the next scan finds it and completes whatever is still open.
+        Marking a failed attempt done would strand that step for the life of the
+        process. In the deployment this runs in the question does not arise — the
+        exception leaves ``start`` and the hub's startup fails — but the flag is a
+        property of this class rather than of that caller.
+        """
+        if self._recovery is None:
+            return
+        async with self._recovery_scan_lock:
+            if self._recovery_scanned:
+                return
+            await self._recovery.recover()
+            self._recovery_scanned = True
 
     async def _recover_leases_once(self) -> None:
         """Void the delivery leases a previous hub process left behind (ADR-0131 §3).

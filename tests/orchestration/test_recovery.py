@@ -14,11 +14,16 @@ can model but cannot prove. Those cases run over both.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
+from test_engine import Harness
+from test_engine import _composing as composing
+from test_engine import _connection_operations as connection_operations
+from test_engine import _grant_operations as grant_operations
 
 from ai_assistant.core.errors import AuditError, InvalidCompletionError
 from ai_assistant.core.protocols import AuditTrail, InvocationLedger
@@ -43,7 +48,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
 )
-from ai_assistant.orchestration import RecoveryScan
+from ai_assistant.orchestration import Engine, RecoveryScan
 from ai_assistant.permissions import SqliteAuditTrail
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.testing import FakeAuditTrail, FakeIdentifiers, FakeIdentifierSpace, FakePlanStore
@@ -820,3 +825,102 @@ async def test_the_completion_of_a_reserved_claim_lands_over_a_fresh_one(
     assert settled[RESERVED].id != RESERVED, "a completion mints its own id"
     assert interleaving.claimed.id in settled, "the fresh claim is completed too, on the re-read"
     assert (await stored_step(plans, state)).status is StepStatus.INDETERMINATE
+
+
+# --- ADR-0014 §4: the scan runs at startup, and startup happens once ------
+
+
+class CountingScan(RecoveryScan):
+    """A scan that counts its passes and suspends inside each one.
+
+    The suspension is the point rather than a detail: a guard written as a bare
+    flag is not a guard across an ``await``, and only a scan that yields lets two
+    overlapping calls both observe it unset.
+    """
+
+    def __init__(self) -> None:
+        """Count only; every collaborator is unreached because ``recover`` is not."""
+        self.calls = 0
+
+    async def recover(self) -> None:
+        """Count the pass, and give the loop somewhere to interleave."""
+        self.calls += 1
+        await asyncio.sleep(0)
+
+
+def engine_with(scan: RecoveryScan | None) -> Engine:
+    """A façade over a harness's durable state, holding ``scan``."""
+    harness = Harness()
+    return Engine(
+        composing=composing(),
+        grant_operations=grant_operations(),
+        connection_operations=connection_operations(),
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        reads=harness.reads,
+        memory=harness.memory,
+        deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_sink=harness.trace_sink,
+        trace_retention=harness.trace_retention,
+        conversations=harness.conversations,
+        observation=harness.observation,
+        questions=harness.questions,
+        recovery=scan,
+    )
+
+
+async def test_a_second_start_does_not_scan_again() -> None:
+    """``start`` is *also* the scheduler's recurring conversation sweep.
+
+    ``service/scheduler.py``'s job table wires ``engine.start`` as the sweep, so a
+    scan on every call would run on a timer inside a hub that is serving turns —
+    and ADR-0014 §4 authorises the scan only because it "presumes no executor is
+    live for those states". True of a step the *previous* process left ``RUNNING``,
+    false of one this process claimed a moment ago. An unguarded scan would
+    complete a live invocation's claim ``INDETERMINATE`` and commit its step out of
+    ``RUNNING``, after which the tool's real completion is refused and its
+    executor's terminal write is refused stale.
+
+    The sweeps beside it stay repeatable, which is what makes this a guard on one
+    step rather than on the method.
+    """
+    scan = CountingScan()
+    engine = engine_with(scan)
+
+    await engine.start()
+    await engine.start()
+
+    assert scan.calls == 1
+
+
+async def test_two_overlapping_starts_scan_once_between_them() -> None:
+    """A bare flag is not a guard across an ``await``.
+
+    Both calls read it unset; the first scans and returns, an executor then claims
+    a step, and the second resumes its already-started scan over that live claim —
+    the very state the guard exists to prevent, reached *through* the guard.
+    ``start`` is public and documents only that it is safe to call more than once,
+    so nothing in this class excludes the overlap: the hub's step 4 / step 6
+    ordering is a fact about ``service/hub.py`` and not a property callers of this
+    method inherit. The same finding adversarial review made against the lease
+    guard, one collaborator over.
+    """
+    scan = CountingScan()
+    engine = engine_with(scan)
+
+    await asyncio.gather(engine.start(), engine.start())
+
+    assert scan.calls == 1
+
+
+async def test_an_engine_wired_with_no_scan_still_starts() -> None:
+    """``recovery`` is optional, and its absence is not an error.
+
+    The CLI's in-process engine and every test façade compose none, exactly as they
+    compose no delivery outbox. A guard that dereferenced an absent scan would turn
+    an unwired deployment into a startup crash.
+    """
+    await engine_with(None).start()  # must not raise
