@@ -229,3 +229,40 @@ async def test_a_started_engine_completes_the_claim_a_crash_left_open(tmp_path: 
         assert step.failure.kind is None, "recovery had no ToolResult to classify from"
     finally:
         await engine.aclose()
+
+
+async def test_a_repeated_start_leaves_this_processes_own_running_step_alone(
+    tmp_path: Path,
+) -> None:
+    """The scan is a *startup* act, and the hub calls ``start`` on a timer.
+
+    ``service/scheduler.py``'s job table wires ``engine.start`` as the recurring
+    conversation sweep, so this is the shape a live deployment reaches: the hub
+    starts, serves, an executor claims a step and enters its tool, and the sweep
+    tick arrives. ADR-0014 §4 authorises recovery only because it "presumes no
+    executor is live for those states" — an unguarded scan here would complete that
+    live invocation's claim ``INDETERMINATE`` and commit its step out of
+    ``RUNNING``, after which the tool's real completion is refused
+    ``InvalidCompletionError`` and its executor's terminal write is refused stale.
+
+    Driven through the real composition rather than a double, because the guard is
+    on ``Engine`` and the wiring is what puts the scan behind it.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        await engine.start()
+
+        # Everything a live executor has committed by the time it enters its tool.
+        execution_id, claim_id = await _a_crash_left_a_claim_open(engine)
+
+        await engine.start()
+
+        still_open = await engine._trail.open_invocations(decision_id=DECISION)
+        assert [claim.id for claim in still_open] == [claim_id], "the live claim is untouched"
+        running = await engine._plans.get_execution(execution_id)
+        assert running is not None
+        step = running.step(STEP)
+        assert step is not None
+        assert step.status is StepStatus.RUNNING, "a live step is not crash residue"
+    finally:
+        await engine.aclose()

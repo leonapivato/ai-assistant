@@ -40,7 +40,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
-    AuditError,
+    AssistantError,
     PlanningError,
     RetriesExhaustedError,
     ToolBindingError,
@@ -86,8 +86,8 @@ _REFUSED = (
     "the invoker refused the call before the tool ran: it is not the call that was authorised"
 )
 
-#: What the seam's own ledger refusal records (ADR-0192 §1, ADR-0034 §1). Every
-#: ``AuditError`` that leaves ``invoke`` is a **claim-path** one: the claim is
+#: What the seam's own claim-path exit records (ADR-0192 §1, ADR-0034 §1). Every
+#: ``AssistantError`` that leaves ``invoke`` is a **claim-path** one: the claim is
 #: appended before the callable is entered, and every completion-path failure is
 #: absorbed at the seam, which returns the call's own result rather than raising
 #: (ADR-0192 §3). So the callable was never reached, ``FAILED`` is the honest
@@ -384,8 +384,9 @@ class StepExecutor:
 
         **Nothing that fails between the claim and the callable leaves a step
         durably ``RUNNING``** (ADR-0034 §1). A cancelled claim, a raising clock, a
-        ``ToolBindingError`` and the seam's own ``AuditError`` at the ledger all
-        close it ``FAILED``: nothing ran, and recovery would otherwise record
+        ``ToolBindingError`` and every other ``AssistantError`` the seam's own
+        claim raises all close it ``FAILED``: nothing ran, and recovery would
+        otherwise record
         ``INDETERMINATE`` about a call that provably never started.
         """
         _checked_timeout(timeout)
@@ -477,11 +478,10 @@ class StepExecutor:
 
         - a ``ToolBindingError`` is the seam's own rejection, committed ``FAILED``
           and never retried (:meth:`_refuse`, ADR-0029 §5 reads a result's kind);
-        - an ``AuditError`` is the seam's **ledger** refusal — the authorisation
-          was already spent, the decision is not the one the trail holds, or the
-          claim could not be written at all — and is committed ``FAILED`` for the
-          same reason one step earlier: the claim precedes the callable, so
-          nothing ran (:meth:`_close_unclaimed`, ADR-0192 §1, ADR-0034 §1);
+        - any **other** ``AssistantError`` is an exit from the seam's own claim
+          on the authorisation, which ADR-0192 §1 places before the callable
+          **as a clause of the contract**, and is committed ``FAILED`` for the
+          same reason one step earlier: nothing ran (:meth:`_close_unclaimed`);
         - a ``CancelledError`` commits the interrupted-call classification and
           propagates, because swallowing it would break shutdown;
         - a result that does not survive revalidation is tampered past
@@ -500,7 +500,7 @@ class StepExecutor:
             returned = await self._invoker.invoke(authorised, timeout=timeout)
         except ToolBindingError:
             return await self._refuse(state, step_id), None
-        except AuditError:
+        except AssistantError:
             return await self._close_unclaimed(state, step_id), None
         except asyncio.CancelledError:
             await self._commit_through_cancellation(state, step_id, _interrupted(trusted))
@@ -642,22 +642,31 @@ class StepExecutor:
         )
 
     async def _close_unclaimed(self, state: ExecutionState, step_id: str) -> ExecutionState:
-        """Commit ``RUNNING → FAILED`` for a seam refusal at the ledger (ADR-0192 §1).
+        """Commit ``RUNNING → FAILED`` for a seam exit before the callable (ADR-0192 §1).
 
         The executor's ``→ RUNNING`` claim precedes ``invoke``, and ``invoke``'s
-        own claim on the authorisation precedes the callable, so an ``AuditError``
-        arrives after the step is durably ``RUNNING`` and before anything could
-        have acted. Letting it propagate uncommitted would strand the step until
-        recovery, which would record ``INDETERMINATE`` — "we cannot tell whether it
-        acted" — about a call that provably never reached the callable.
+        own claim on the authorisation precedes the callable, so an
+        ``AssistantError`` from that append arrives after the step is durably
+        ``RUNNING`` and before anything could have acted. Letting it propagate
+        uncommitted would strand the step until recovery, which would record
+        ``INDETERMINATE`` — "we cannot tell whether it acted" — about a call that
+        provably never reached the callable.
 
-        **Every ``AuditError`` out of ``invoke`` is such an exit**, which is what
-        makes catching the class rather than a member of it correct.
-        ``AuthorisationSpentError`` and ``UnrecordedAuthorisationError`` are its
-        two named subclasses on that path, and a store fault the seam translated is
-        the third (ADR-0192 §2, §9); a *completion*-path failure never arrives here
-        at all, because the seam absorbs it and returns the call's own
-        ``ToolResult`` (ADR-0192 §3).
+        **Caught at the ``AssistantError`` boundary and never on a list of
+        causes**, which is ADR-0192 §1's own instruction: "the executor commits
+        ``RUNNING → FAILED`` and never retries, **on the window and not on a list
+        of causes**". The named refusals and the ``AuditError`` the ledger
+        translated a non-``AssistantError`` into are the common cases, but they are
+        not all of them — ADR-0026 §2 has the ledger propagate a **clock
+        callable's** own exception unwrapped, and §1 translates only what is *not*
+        an ``AssistantError``, so a wired-wrong clock raising a ``PlanningError``
+        reaches here as itself. A handler naming ``AuditError`` alone would leave
+        exactly that exit durably ``RUNNING``.
+
+        A *completion*-path failure never arrives here at all, because the seam
+        absorbs it and returns the call's own ``ToolResult`` (ADR-0192 §3); and a
+        ``BaseException`` is not reached either — §1 states no outcome for one and
+        asks the executor to derive nothing from it.
 
         **It does not repair the trail.** Where the seam's claim append committed
         and then failed, that row stands and its claim is left open under a step

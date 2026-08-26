@@ -20,6 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    AssistantError,
     AuditError,
     AuthorisationSpentError,
     PlanningError,
@@ -1760,22 +1761,32 @@ class LedgerRefusingInvoker:
         AuthorisationSpentError("the authorisation recorded as 'd-1' is spent"),
         UnrecordedAuthorisationError("no decision is recorded under 'd-1'"),
         AuditError("the trail could not be written"),
+        PlanningError("the ledger's clock callable is wired to the wrong thing"),
     ],
-    ids=["spent", "unrecorded", "store-fault"],
+    ids=["spent", "unrecorded", "store-fault", "collaborator-fault"],
 )
 async def test_a_ledger_refusal_is_committed_failed_and_never_indeterminate(
-    refusal: AuditError,
+    refusal: AssistantError,
 ) -> None:
-    """ADR-0034 §1's second ground, over the seam's three claim-path exits.
+    """ADR-0034 §1's second ground, over the seam's claim-path exits.
 
     ADR-0192 §1 appends the claim before the callable is entered, and ADR-0192 §3
     has ``invoke`` **absorb** every completion-path failure and return the call's
-    own result — so an ``AuditError`` leaving ``invoke`` is always a claim-path
+    own result — so an ``AssistantError`` leaving ``invoke`` is always a claim-path
     one and always means nothing ran. ``FAILED`` is therefore the honest record,
     and the two facts asserted together are what make it so: the step is not left
     ``RUNNING`` for a recovery scan to read as ``INDETERMINATE``, and it is not
     recorded ``INDETERMINATE`` here either — that would report a call that
     provably never started as one that may have acted.
+
+    **The fourth arm is not an ``AuditError`` and is the reason the handler names
+    the class boundary.** §1 has the executor decide "on the window and not on a
+    list of causes"; ADR-0026 §2 has the ledger propagate a **clock callable's**
+    own exception unwrapped, and §1 translates only what is *not* an
+    ``AssistantError`` — so a wired-wrong clock's ``PlanningError`` reaches the
+    executor as itself. A handler naming ``AuditError`` alone leaves exactly that
+    exit durably ``RUNNING``, which is what recovery would then read as
+    ``INDETERMINATE``.
 
     The declaration is the side-effecting, non-``NATURAL`` one, whose
     ``interrupted_outcome`` **is** ``INDETERMINATE``: on any other tool the two
