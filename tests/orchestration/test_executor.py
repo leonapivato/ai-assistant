@@ -671,7 +671,7 @@ async def test_a_spend_refusal_is_committed_failed_and_not_re_driven(
     ],
     ids=["ceiling", "undetermined"],
 )
-async def test_a_spend_refusal_records_nothing_the_executor_did_not_author(
+async def test_a_spend_refusal_stays_payload_free_in_the_step_a_user_reads(
     refusal: BaseException,
 ) -> None:
     """ADR-0194 §4's payload-free rule surviving into the step a user reads.
@@ -680,6 +680,12 @@ async def test_a_spend_refusal_records_nothing_the_executor_did_not_author(
     a user reads", and it is composed at a moment when the call's arguments are in
     hand. ``StepFailure.message`` is Tier 2 text bound for a log (ADR-0004 §5), so
     what must not be in it is the recipient the call carried.
+
+    **This is why the executor may carry the message at all** (see below): §4
+    states the rule *on the error*, so the text arrives already cleared for a log,
+    unlike a ``ToolBindingError``'s or an ``AuthorisationSpentError``'s. What is
+    asserted here is that property holding through the executor, on a call whose
+    arguments name a recipient.
     """
     store = FakePlanStore()
     state = await a_claimed_execution(store)
@@ -694,6 +700,231 @@ async def test_a_spend_refusal_records_nothing_the_executor_did_not_author(
     step = await stored_step(store, state)
     assert step.failure is not None
     assert "someone@example.com" not in step.failure.message
+
+
+#: What the seam's claim-path exit records, verbatim from ``executor.py``. Written
+#: out rather than imported because it is the *user-visible* sentence #1603 is
+#: about: a test importing the constant would follow it wherever it was edited to,
+#: and would go on passing while a budget stop still read as a ledger fault.
+_LEDGER_SEAM_WORDING = (
+    "the invoker could not record the call against its authorisation, so the tool was not reached"
+)
+
+
+@pytest.mark.parametrize(
+    ("refusal", "stated"),
+    [
+        (
+            SpendCeilingError,
+            "the invocation was refused: it would cross a configured spend ceiling — "
+            "CALENDAR_DAY: 101 projected against a ceiling of 100 EUR, with 90 accounted",
+        ),
+        (
+            SpendUndeterminedError,
+            "the invocation was refused: the spend could not be reduced to a number — "
+            "the declared cost has no number and no allowance is configured",
+        ),
+    ],
+    ids=["ceiling", "undetermined"],
+)
+async def test_a_spend_refusal_reaches_the_user_with_its_own_ground(
+    refusal: type[AssistantError], stated: str
+) -> None:
+    """#1603: the ground survives to the step, and the ledger seam's sentence does not.
+
+    ADR-0194 §4 keeps these two classes out of ``PermissionDeniedError`` on an
+    argument about what a user must be able to tell apart, and the messages are
+    where the distinction becomes readable: which ceiling, which period, which of
+    the six grounds. Committing them under the seam's ``_UNCLAIMED`` wording threw
+    all of it away one hop from the surface and told the user something **false**
+    about their system — the invoker recorded nothing because the gate refused,
+    not because it "could not record the call against its authorisation".
+
+    Equality, not containment: the executor carries the error's account and
+    composes nothing of its own, so a prefix, a wrapper or a second sentence
+    appended here is a failure. §3 has the error name both periods when both
+    ceilings are crossed, and §4 has it state the ground and no amount — neither
+    survives an executor that re-words.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    gate = _RefusingGate(refusal(stated))
+    seam = FakeToolInvoker([(tool(), Spy())], ledger=_AdmittingLedger(), gate=gate)
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED
+    assert step.failure is not None
+    assert step.failure.message == stated, "the refusal's own account, unedited"
+    assert _LEDGER_SEAM_WORDING not in step.failure.message
+
+
+async def test_an_unmeasurable_spend_reaches_the_user_stating_no_amount() -> None:
+    """ADR-0194 §4: ground 2 states *no* amount, and the executor adds none.
+
+    "None of these six crossed a ceiling — nothing measured one — so reporting one
+    as a crossing would tell the user a number about their budget that nothing
+    computed." The error is authored to hold no figure; the way an executor breaks
+    that is by composing a second sentence around it, so what is pinned is that
+    nothing numeric appears in the record at all.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    stated = (
+        "the invocation was refused: the spend could not be reduced to a number — "
+        "the declared cost has no number and no allowance is configured"
+    )
+    seam = FakeToolInvoker(
+        [(tool(), Spy())],
+        ledger=_AdmittingLedger(),
+        gate=_RefusingGate(SpendUndeterminedError(stated)),
+    )
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.failure is not None
+    assert step.failure.message == stated, "the ground, and only the ground"
+    assert not any(char.isdigit() for char in step.failure.message), "no amount, and none added"
+
+
+async def test_both_crossed_ceilings_stay_legible_in_the_step() -> None:
+    """ADR-0194 §3: both ceilings bind independently, so which refused must be readable.
+
+    "Naming only the day would tell a user to wait until tomorrow when their month
+    is spent, and naming only the month would hide the nearer bound." One error
+    names both, in ``SpendPeriod``'s fixed order; the clause is only observable
+    from a surface if the executor carries the whole of it, which is what #1603
+    reported as unobservable (arm S3).
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    stated = (
+        "the invocation was refused: it would cross a configured spend ceiling — "
+        "CALENDAR_DAY: 101 projected against a ceiling of 100 EUR, with 90 accounted; "
+        "CALENDAR_MONTH: 101 projected against a ceiling of 50 EUR, with 40 accounted"
+    )
+    seam = FakeToolInvoker(
+        [(tool(), Spy())], ledger=_AdmittingLedger(), gate=_RefusingGate(SpendCeilingError(stated))
+    )
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.failure is not None
+    assert step.failure.message.index("CALENDAR_DAY") < step.failure.message.index("CALENDAR_MONTH")
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        AuthorisationSpentError("the authorisation recorded as 'd-1' is spent"),
+        UnrecordedAuthorisationError("no decision is recorded under 'd-1'"),
+    ],
+    ids=["spent", "unrecorded"],
+)
+async def test_a_ledger_refusal_still_records_the_seam_wording(refusal: AssistantError) -> None:
+    """The other half of #1603: the generic sentence stays where it is true.
+
+    The fix is a narrowing, not a replacement. These two errors' own messages name
+    a decision id, which ADR-0031 §5 records is **not** contractually log-safe —
+    a conforming ``DurableIdentifier`` reading ``recipient@example.com`` is a valid
+    value — so the executor still authors their record, and the sentence it
+    authors is true of them: the claim on the authorisation is exactly what failed.
+
+    Asserted by equality against the literal, so a lane that widened the spend
+    branch to swallow the ledger's exits would fail here rather than quietly start
+    logging decision ids.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = LedgerRefusingInvoker(tool(), refusal)
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED
+    assert step.failure is not None
+    assert step.failure.message == _LEDGER_SEAM_WORDING
+
+
+class _RaisingRefusalError(SpendUndeterminedError):
+    """A ``SpendError`` whose own account raises when it is rendered."""
+
+    def __str__(self) -> str:
+        """Raise, as a collaborator's ``__str__`` is free to."""
+        msg = "this refusal cannot render itself"
+        raise RuntimeError(msg)
+
+
+class _UnencodableRefusalError(SpendUndeterminedError):
+    """A ``SpendError`` that renders as text with no UTF-8 encoding."""
+
+    def __str__(self) -> str:
+        """Return a lone surrogate, which no store can be handed."""
+        return "\udfff"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        _RaisingRefusalError("unrenderable"),
+        SpendCeilingError("   "),
+        _UnencodableRefusalError("unencodable"),
+    ],
+    ids=["str-raises", "blank", "unencodable"],
+)
+async def test_a_spend_refusal_with_no_readable_account_still_closes_the_step(
+    refusal: AssistantError,
+) -> None:
+    """The record falls back; the step does not stay ``RUNNING``.
+
+    Carrying a collaborator's text means reading it, and reading it happens inside
+    an exception handler on a step that is *already* durably ``RUNNING``. An
+    exception escaping there abandons the close, and recovery reads a standing
+    ``RUNNING`` as ``INDETERMINATE`` — "we cannot tell whether it acted" — about a
+    call the gate provably stopped. That is the one use ADR-0034 §1 refuses.
+
+    Three ways the account can be unreadable, and each is a real one rather than a
+    contrived one. ``permissions/audit.py`` names the raising ``__str__`` as the
+    hazard over which it refuses to interpolate a collaborator's exception at all.
+    ``StepFailure`` rejects blank text, which ``AssistantError.__init__`` admits —
+    it validates *encodability*, not visibility. And the surrogate arm is why the
+    encodability guard is not dead code either: that constructor validates the
+    ``str`` **arguments** it is handed, while the executor reads ``str(refusal)``,
+    which a subtype owns and can make anything.
+
+    All three must still close ``FAILED``, and must still say the refusal was a
+    spend one — the ground is what #1603 is about, and it survives even when the
+    account does not.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker(
+        [(tool(), implementation)], ledger=_AdmittingLedger(), gate=_RefusingGate(refusal)
+    )
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "never left RUNNING for recovery to misread"
+    assert step.failure is not None
+    assert step.failure.kind is None
+    assert "spend" in step.failure.message, "the ground survives an unreadable account"
+    assert step.failure.message != _LEDGER_SEAM_WORDING
+    assert implementation.calls == [], "the callable was never reached"
 
 
 # --- §8: the result mapping is total ------------------------------------
