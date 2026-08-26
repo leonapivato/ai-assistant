@@ -14,6 +14,7 @@ import re
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
 from datetime import timedelta
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Final
@@ -24,6 +25,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -755,6 +757,123 @@ _LOWEST_UNPRIVILEGED_PORT: Final = 1024
 
 #: The highest port TCP can express, and the other half of §8's validity clause.
 _HIGHEST_PORT: Final = 65535
+
+
+#: ADR-0194 §1's countability bound: an amount this mechanism may read has an
+#: absolute value **strictly** below this. Fifteen integer digits in any real
+#: currency's major unit exceeds any plausible ceiling by orders of magnitude, and
+#: the bound is what makes §2's exact arithmetic sizeable rather than aspirational.
+_SPEND_AMOUNT_CEILING: Final = Decimal("1E15")
+
+#: The other half of that predicate: a countable amount's **value** is expressible
+#: with at most this many fractional digits, which carries every currency's minor
+#: unit and every nano-unit price a metered API quotes.
+_SPEND_AMOUNT_SCALE: Final = 9
+
+#: ISO-4217's alphabetic form, which is ``ToolCost.currency``'s rule (ADR-0016 §4)
+#: and not a second one.
+_SPEND_CURRENCY_LENGTH: Final = 3
+
+
+def _spend_effective_exponent(amount: Decimal) -> int:
+    """Return the scale ``amount``'s *value* needs, ignoring trailing zeros.
+
+    ADR-0194 §1 makes countability "a test on the number and not on its
+    representation", so ``Decimal("1.0000000000")`` is countable because its value
+    is ``1`` and ``Decimal("0E-999999999999999999")`` is countable because its
+    value is zero. Everything read comes from the amount's own ``as_tuple()``, so
+    no ambient ``decimal`` precision, rounding mode or trap changes the answer or
+    makes this raise (§1's context-independence clause).
+
+    Args:
+        amount: A finite ``Decimal``.
+
+    Returns:
+        The exponent of the value's last significant digit, or ``0`` for a zero.
+    """
+    _sign, digits, exponent = amount.as_tuple()
+    if not isinstance(exponent, int):  # pragma: no cover — callers check finiteness first
+        return 0
+    if not any(digits):
+        return 0
+    trailing = 0
+    for digit in reversed(digits):
+        if digit:
+            break
+        trailing += 1
+    return exponent + trailing
+
+
+def _spend_is_countable(amount: Decimal) -> bool:
+    """Report whether ``amount`` is countable under ADR-0194 §1.
+
+    **This is a second implementation of §1's predicate, deliberately**, and not a
+    second *source* for it. The store that runs the arithmetic carries its own
+    (``permissions.spend``), and ``core`` may import no subsystem (golden rule 2);
+    both implement the ADR's clause rather than each other. The split is the one
+    ADR-0194 §1 and §11 already draw: the ``ConfigurationError`` a user meets names
+    a ``Settings`` field and is raised **here**, where that field is validated,
+    while the store's own check is its ordinary refusal of a malformed caller.
+
+    Args:
+        amount: The amount to classify.
+
+    Returns:
+        Whether this mechanism may read it.
+    """
+    if not amount.is_finite():
+        return False
+    if _spend_effective_exponent(amount) < -_SPEND_AMOUNT_SCALE:
+        return False
+    # ``copy_abs`` and not ``abs``: the latter is an arithmetic operation that
+    # rounds to the ambient precision, so under a hostile context it traps on
+    # exactly the values this predicate exists to classify.
+    return amount.copy_abs() < _SPEND_AMOUNT_CEILING
+
+
+def _checked_spend_amount(
+    value: Decimal | None, field: str | None, *, floor: str
+) -> Decimal | None:
+    """Return ``value`` if ADR-0194 §1 admits it as a spend amount, else raise.
+
+    Shared by the two ceilings and the allowance because §1 gives them one
+    countability rule and two different floors, and a single function is what keeps
+    the countability half from drifting between them.
+
+    Args:
+        value: The configured amount, or ``None`` for unset.
+        field: The setting's name, for the message the operator reads.
+        floor: ``"zero"`` where §1 admits zero — a ceiling — and ``"positive"``
+            where it does not — the allowance.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: If the amount is non-finite, below its floor, or not countable.
+            pydantic reports it as a ``ValidationError`` naming the field, which
+            ``load_settings`` reports as a ``ConfigurationError``.
+    """
+    if value is None:
+        return value
+    name = field if field is not None else "the spend amount"
+    if not value.is_finite():
+        msg = f"{name} must be finite, got {value!r}"
+        raise ValueError(msg)
+    if floor == "positive":
+        if not value > 0:
+            msg = f"{name} must be greater than zero, got {value!r}"
+            raise ValueError(msg)
+    elif value < 0:
+        msg = f"{name} must not be negative, got {value!r}"
+        raise ValueError(msg)
+    if not _spend_is_countable(value):
+        msg = (
+            f"{name} must be countable — below {_SPEND_AMOUNT_CEILING} and to at most "
+            f"{_SPEND_AMOUNT_SCALE} fractional digits, got {value!r}"
+        )
+        raise ValueError(msg)
+    return value
 
 
 class Settings(BaseSettings):
@@ -3046,6 +3165,144 @@ class Settings(BaseSettings):
             "with no unlimited spelling."
         ),
     )
+
+    # --- The ceiling on what the world may cost (ADR-0194 §1) -------------
+    # **Exactly four fields and no others.** They are the whole of what the spend
+    # mechanism adds to configuration: no lane adds a fifth, and these four are the
+    # only settings that turn it on or change what it refuses given a period. The
+    # mechanism reads one *existing* setting besides them — :attr:`timezone`, whose
+    # influence is period selection and nothing else: it fixes the ``[start, end)``
+    # bounds, so which period a row falls in and therefore which total an admission
+    # is compared against. ``app/composition.py`` is the sole reader of all five
+    # (ADR-0194 §5) and hands the holder explicit values.
+    #
+    # **Unset means unbounded, and that is a decision rather than optimism**
+    # (ADR-0194 §1). Nothing reaches the world today without the user answering
+    # about that specific call — ADR-0021 §5's disclosure floor and ADR-0148 §3's
+    # per-call route — so an unconfigured ceiling declines to add a second lock to a
+    # door already answered one call at a time. A defaulted number would be worse in
+    # both directions: too low and it refuses work the user authorised, in a currency
+    # ``core`` chose for a user it does not know; too high and it is decoration.
+    #
+    # **The four land here, in the same change as the invoker's consultation of the
+    # gate** (ADR-0194 §11). Landed apart, a merged tree would exist in which
+    # ``world_spend_day_ceiling=0`` loads without error, no surface reports anything
+    # wrong, and a confirmed send executes anyway — a user who read a configured
+    # ceiling as a ceiling would be wrong for the length of that window, which is the
+    # one failure the whole mechanism exists to prevent.
+    world_spend_currency: str | None = Field(
+        default=None,
+        description=(
+            "ISO-4217 alphabetic code the spend ceiling and its totals are denominated "
+            "in (ADR-0194 §1). Set alone it configures a reporting currency: totals are "
+            "computed and readable and nothing is ever refused."
+        ),
+    )
+    world_spend_month_ceiling: Decimal | None = Field(
+        default=None,
+        description=(
+            "Most the world may cost across a calendar month in the configured zone "
+            "(ADR-0194 §1); unset means unbounded. Needs world_spend_currency."
+        ),
+    )
+    world_spend_day_ceiling: Decimal | None = Field(
+        default=None,
+        description=(
+            "Most the world may cost across a calendar day in the configured zone "
+            "(ADR-0194 §1); unset means unbounded. Needs world_spend_currency. Both "
+            "ceilings bind independently, and a day ceiling above the month ceiling is "
+            "accepted — it is simply never the binding one."
+        ),
+    )
+    world_spend_unknown_allowance: Decimal | None = Field(
+        default=None,
+        description=(
+            "What one UNKNOWN-priced call is accounted at (ADR-0194 §2); unset, such a "
+            "call is refused rather than counted as zero. Strictly greater than zero, "
+            "and needs world_spend_currency. It is the user supplying the fact the "
+            "tool's author could not, never an escape hatch: nothing in a turn can "
+            "read, set or raise it."
+        ),
+    )
+
+    @field_validator("world_spend_currency")
+    @classmethod
+    def _spend_currency_is_iso_4217_alphabetic(cls, value: str | None) -> str | None:
+        """Require ADR-0194 §1's shape, or nothing at all.
+
+        **Shape only** — exactly three uppercase ASCII letters, neither normalised
+        nor checked against the live register. That is ``ToolCost.currency``'s rule
+        (ADR-0016 §4) and not a second one, so the two sides of a comparison are
+        spelled the same way. ``ASSISTANT_WORLD_SPEND_CURRENCY=`` sets the variable
+        to the empty string rather than to nothing, which is why the blank is
+        refused here rather than read as unconfigured.
+        """
+        if value is None:
+            return value
+        if len(value) != _SPEND_CURRENCY_LENGTH or not (
+            value.isascii() and value.isupper() and value.isalpha()
+        ):
+            msg = f"must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("world_spend_month_ceiling", "world_spend_day_ceiling")
+    @classmethod
+    def _spend_ceiling_is_countable_and_not_negative(
+        cls, value: Decimal | None, info: ValidationInfo
+    ) -> Decimal | None:
+        """Require a finite, non-negative, countable ceiling (ADR-0194 §1).
+
+        Non-finite is refused as ``ToolCost.amount`` refuses one and for the same
+        reason: ``Decimal`` admits ``Infinity`` and ``NaN``, neither survives
+        arithmetic in a running total, and ``NaN`` makes every comparison false
+        rather than answering. **Zero is a valid ceiling** and binds hardest of all,
+        so nothing here reads falsiness.
+        """
+        return _checked_spend_amount(value, info.field_name, floor="zero")
+
+    @field_validator("world_spend_unknown_allowance")
+    @classmethod
+    def _spend_allowance_is_countable_and_positive(
+        cls, value: Decimal | None, info: ValidationInfo
+    ) -> Decimal | None:
+        """Require a finite, countable allowance strictly greater than zero.
+
+        Zero is refused in every spelling ``Decimal`` admits for it —
+        ``Decimal("0")``, ``Decimal("-0")``, ``Decimal("0.00")``, ``Decimal("0E-9")``
+        — which ``> 0`` decides for all four at once. A **negative** allowance is the
+        one this refusal is load-bearing for: it would let an ``UNKNOWN`` estimate
+        *lower* a projection and admit a call already at its ceiling, which is the
+        one direction the mechanism must never move in.
+        """
+        return _checked_spend_amount(value, info.field_name, floor="positive")
+
+    @model_validator(mode="after")
+    def _spend_amounts_need_a_currency(self) -> Settings:
+        """Refuse a ceiling or an allowance with no currency to state it in.
+
+        ADR-0194 §1: a ceiling and the allowance may each be set only where
+        ``world_spend_currency`` is. The currency **may** be set alone. Without this,
+        ``world_spend_day_ceiling=10`` loads beside no currency and silently caps
+        nothing, which is a configured ceiling that does not bind — the failure §11
+        puts these four fields in this change to prevent.
+
+        No ordering is imposed between the two ceilings: §1 accepts a day ceiling
+        above the month ceiling and says the month is simply the binding one, so a
+        validator quietly requiring ``day <= month`` would reject a configuration
+        this ADR calls valid.
+        """
+        if self.world_spend_currency is not None:
+            return self
+        for name in (
+            "world_spend_month_ceiling",
+            "world_spend_day_ceiling",
+            "world_spend_unknown_allowance",
+        ):
+            if getattr(self, name) is not None:
+                msg = f"{name} needs world_spend_currency, which is not set"
+                raise ValueError(msg)
+        return self
 
     @field_validator("send_email_connection", "send_email_endpoint")
     @classmethod
