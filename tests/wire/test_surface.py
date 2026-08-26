@@ -21,6 +21,7 @@ from ai_assistant.core.types import (
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
+    CostBasis,
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
@@ -28,8 +29,13 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     ExecutionState,
+    RecordedInvocation,
     ReplyChunk,
     StepOutcome,
+    ToolCost,
+    ToolFailureKind,
+    ToolInvocation,
+    ToolOutcome,
     TurnOutcome,
 )
 from ai_assistant.wire.codec import canonical_payload, project
@@ -206,3 +212,49 @@ def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:
     payload = json.loads(canonical_payload(project(confirmation)))
     assert payload["egress"] is None
     assert return_adapter("pending_confirmations").validate_python([payload]) == (confirmation,)
+
+
+def test_the_invocation_pair_is_reflected_and_round_trips_through_the_codec() -> None:
+    """ADR-0192 §4 and §9: the two methods and the row they carry, on the wire.
+
+    **The half a bump exists to make legible.** ``METHODS`` is derived from the
+    Protocol, so a version 15 client sending ``export_invocations`` to a version 14
+    hub meets a method that build's surface does not declare — ``_dispatch`` closes
+    the connection with no reply — and ADR-0124 §9's bump is what turns that into
+    the handshake refusal naming both versions instead. The membership assertion is
+    what makes the bump's *ground* checkable: it fails the day the reflection stops
+    reaching either method, which is the day the version number stopped describing
+    the surface.
+
+    **The row crosses without a second declaration**, which is the other half of
+    ADR-0192 §9's wire obligation and the reason ``wire/codec.py`` gains no entry
+    for this type. A result payload takes the shape of the method's own declared
+    return annotation (ADR-0085 §10), so ``return_adapter`` builds the validator
+    from the Protocol and ``project`` renders the model by ``model_dump()``. A
+    completion is the shape that exercises it: it carries every optional member the
+    claim leaves unset, so a projection that dropped a ``None`` — or a validator
+    built from the wrong annotation — fails here rather than in a user's listing.
+    """
+    assert {"recent_invocations", "export_invocations"} <= METHODS
+    assert not ({"recent_invocations", "export_invocations"} & STREAMING_METHODS)
+    assert parameters("recent_invocations") == ("limit",)
+    assert parameters("export_invocations") == ()
+
+    completion = RecordedInvocation(
+        invocation=ToolInvocation(
+            id="i-2",
+            decision_id="d-1",
+            recorded_at=_AT,
+            completes="i-1",
+            outcome=ToolOutcome.FAILED,
+            incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+            failure_kind=ToolFailureKind.UNAVAILABLE,
+        ),
+        tool="smtp",
+        capability="send_email",
+        egress_call=True,
+    )
+
+    payload = json.loads(canonical_payload(project((completion,))))
+    assert return_adapter("export_invocations").validate_python(payload) == (completion,)
+    assert return_adapter("recent_invocations").validate_python(payload) == (completion,)

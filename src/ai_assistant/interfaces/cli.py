@@ -8377,9 +8377,9 @@ def _invocation_outcome(outcome: ToolOutcome, *, egress_call: bool) -> tuple[str
             if egress_call:
                 return (
                     "[green]succeeded[/]",
-                    "the tool reported success. This was an outbound call, so what it "
-                    "says is that I attempted it and the tool reported it succeeded — "
-                    "and no more than that",
+                    "the tool reported success. This was an outbound call, and what "
+                    "that states is that it was attempted and reported success — "
+                    "no more than that",
                 )
             return "[green]succeeded[/]", "the tool reported success"
         case ToolOutcome.FAILED:
@@ -8582,7 +8582,7 @@ def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int)
     console.print(
         "[dim]Nothing here names who or where an outbound call went, and nothing "
         "here says what became of it at the other end — I do not observe that. "
-        "'assistant decisions' is where a ruling's recipients are.[/]"
+        "'assistant decisions' is where a ruling's outbound binding is shown.[/]"
     )
 
 
