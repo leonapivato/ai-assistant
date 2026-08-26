@@ -129,6 +129,12 @@ async def test_shutdown_waits_for_the_wedged_spend_read_before_it_closes_anythin
     await asyncio.wait_for(closing, _WAITING)
     totals = await asyncio.wait_for(reading, _WAITING)
 
+    # **The read produced its value**, which is what proves the ordering from the
+    # call's side rather than only from the task's: had the closer run first, the
+    # parked worker would have met a closed database and this would have raised
+    # `SpendUndeterminedError` instead of answering. "Shutdown was still pending"
+    # is not evidence on its own — a shutdown that closed first and drained second
+    # would be pending too.
     assert len(totals) == 2, "the drained read produced its value rather than being torn off"
     # And the connection really is closed behind it, which is the other half of the
     # ordering: the drain is worth nothing if the close it precedes never happened.
