@@ -498,7 +498,7 @@ async def consumed_call(
     claim = await _claimed(ledger, definition=definition, decision=decision)
     try:
         result = await act()
-    except asyncio.CancelledError as cancellation:
+    except asyncio.CancelledError:
         appended = await _complete(
             ledger,
             claim,
@@ -507,35 +507,27 @@ async def consumed_call(
         )
         if appended.failure is None:
             raise
-        # The caught cancellation is re-raised **as itself** wherever it can be,
-        # never rendered and never replaced. ``Task.cancel`` accepts an arbitrary
-        # message object, so ``str(cancellation)`` runs a ``__str__`` this seam
-        # does not own — one that can raise, and would then reach the caller in
-        # place of the externally delivered cancellation, which is the conversion
-        # ADR-0060 §1 and ADR-0192 §3 both refuse. Attaching the cause preserves
-        # the append's failure without touching the exception's identity.
+        # **A seam-owned cancellation, unconditionally, once the append failed.**
+        # Attaching the failure to the exception this frame caught would be
+        # cheaper and would keep its identity, and an earlier version did that.
+        # It cannot be made safe: the object came from a tool that caught the
+        # injected cancellation and raised its own subclass, so `__setattr__` is
+        # that tool's code. One rejecting the assignment raises from this frame —
+        # so neither the cancellation ADR-0060 §1 requires nor the failure §3
+        # requires it to carry is what leaves. One *accepting* it and storing
+        # nothing — a `__cause__` property with a no-op setter — is worse still,
+        # because it fails silently: the cancellation leaves looking correct with
+        # the append failure gone. Reading the attribute back would only move the
+        # problem to the getter.
         #
-        # But the attachment is itself the collaborator's code: the object came
-        # from a tool that caught the injected cancellation and raised its own
-        # subclass, and one rejecting the assignment raises from this frame — so
-        # what leaves is neither the cancellation ADR-0060 §1 requires nor the
-        # append failure §3 requires it to carry, and `Task.cancelling()` is left
-        # standing with nothing honouring it. Where the object refuses, a
-        # seam-owned cancellation carries the failure instead. That loses the
-        # original's identity, which is the lesser loss by a wide margin: what
-        # ADR-0060 §1 requires is that *a* cancellation reaches the executor.
-        try:
-            cancellation.__cause__ = appended.failure
-        except BaseException:
-            # No `from` clause: `_cancellation` has already attached the append
-            # failure, which is the cause ADR-0192 §3 puts a rule on, and
-            # `from None` would clear the very thing this branch exists to carry.
-            # The setter's own failure stays where it belongs, as context.
-            raise _cancellation(  # noqa: B904 — the cause is attached above, deliberately
-                "the invoking task was cancelled while the tool was running",
-                appended.failure,
-            )
-        raise
+        # So nothing is written to it. The identity of the tool's own exception is
+        # lost on this branch and nowhere else — the bare `raise` above still
+        # re-raises it untouched wherever the completion landed — and §1 requires
+        # that *a* cancellation reaches the caller, not that object.
+        raise _cancellation(  # noqa: B904 — the cause is the append failure, deliberately
+            "the invoking task was cancelled while the tool was running",
+            appended.failure,
+        )
 
     appended = await _complete(
         ledger,

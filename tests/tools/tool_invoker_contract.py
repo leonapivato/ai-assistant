@@ -2142,8 +2142,9 @@ class ToolInvokerContract:
             "the completion is written, so the claim does not stay open"
         )
 
-    async def test_a_cancellation_that_refuses_annotation_still_leaves_as_a_cancellation(
-        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    @pytest.mark.parametrize("refusal", ["raises", "silently-drops"])
+    async def test_a_cancellation_that_will_not_hold_the_cause_still_carries_it(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], refusal: str
     ) -> None:
         """Attaching the cause is the collaborator's code too.
 
@@ -2161,19 +2162,32 @@ class ToolInvokerContract:
         append failure §3 requires it to carry, and the pending request is left
         with nothing honouring it.
 
-        So the attachment is attempted and not assumed, and where the object
-        refuses, a cancellation this seam owns carries the failure instead. The
-        original's identity is lost in that case and nothing here asserts it:
-        ADR-0060 §1 requires that *a* cancellation reaches the caller, and the
-        cause is the fact §3 puts a rule on.
+        So nothing is written to it at all once the append has failed: a
+        cancellation this seam owns carries the failure instead. Attempting the
+        assignment and falling back only where it *raises* is not enough, which is
+        what the second arm drives — a ``__cause__`` property whose setter returns
+        without storing leaves the fallback unreached and the failure silently
+        gone, and reading the attribute back to check would only move the problem
+        to the getter.
+
+        The original's identity is lost on this branch and nothing here asserts
+        it: ADR-0060 §1 requires that *a* cancellation reaches the caller, and the
+        cause is the fact §3 puts a rule on. Where the completion *lands*, the
+        exception the tool raised is still re-raised untouched.
         """
 
         class Rejecting(asyncio.CancelledError):
-            """A cancellation a tool raised, which refuses to be annotated."""
+            """A cancellation a tool raised, which will not hold an annotation.
+
+            Two refusals, and the quiet one is the dangerous one: a setter that
+            *accepts* the assignment and stores nothing leaves a cancellation
+            looking correct with the append failure gone.
+            """
 
             def __setattr__(self, name: str, value: object) -> None:
-                msg = "this exception refuses to be annotated"
-                raise RuntimeError(msg)
+                if refusal == "raises":
+                    msg = "this exception refuses to be annotated"
+                    raise RuntimeError(msg)
 
         class Substituting:
             """Catches the injected cancellation and raises its own instead."""

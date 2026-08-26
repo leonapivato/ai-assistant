@@ -796,7 +796,7 @@ async def _consumed_call(
     claim = await _claimed(ledger, definition=definition, decision=decision)
     try:
         result = await act()
-    except asyncio.CancelledError as cancellation:
+    except asyncio.CancelledError:
         appended = await _complete(
             ledger,
             claim,
@@ -805,25 +805,16 @@ async def _consumed_call(
         )
         if appended.failure is None:
             raise
-        # Re-raised **as itself** wherever it can be, never rendered:
-        # ``Task.cancel`` accepts an arbitrary message object, so
-        # ``str(cancellation)`` would run a ``__str__`` this seam does not own.
-        # The *assignment* is the collaborator's code too, though, and one that
-        # rejects it would replace the cancellation with its own failure — so
-        # where the object refuses, a seam-owned cancellation carries the append
-        # failure instead (ADR-0060 §1, ADR-0192 §3).
-        try:
-            cancellation.__cause__ = appended.failure
-        except BaseException:
-            # No `from` clause: `_cancellation` has already attached the append
-            # failure, which is the cause ADR-0192 §3 puts a rule on, and
-            # `from None` would clear the very thing this branch exists to carry.
-            # The setter's own failure stays where it belongs, as context.
-            raise _cancellation(  # noqa: B904 — the cause is attached above, deliberately
-                "the invoking task was cancelled while the tool was running",
-                appended.failure,
-            )
-        raise
+        # **A seam-owned cancellation, unconditionally, once the append failed**
+        # — see `ai_assistant.tools.consume`. Writing the cause onto the exception
+        # this frame caught runs a tool's own `__setattr__`: one that raises
+        # replaces the cancellation, and one that silently stores nothing loses
+        # the append failure while looking correct. The bare `raise` above still
+        # re-raises the original untouched wherever the completion landed.
+        raise _cancellation(  # noqa: B904 — the cause is the append failure, deliberately
+            "the invoking task was cancelled while the tool was running",
+            appended.failure,
+        )
 
     appended = await _complete(
         ledger,
