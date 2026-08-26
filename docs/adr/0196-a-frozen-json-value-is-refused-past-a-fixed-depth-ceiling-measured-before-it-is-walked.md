@@ -104,7 +104,7 @@ dependency's, and what it says when it refuses.
 
 ## Decision
 
-### 1. A frozen JSON value nested past a fixed ceiling is refused at the front of its own validation
+### 1. A frozen JSON value nested past a fixed ceiling is refused, at the front of its validation and again on what was validated
 
 > **Normative.** A value validated as `FrozenJsonValue` or `FrozenJsonMapping`
 > whose container nesting exceeds the ceiling of §3 is refused by raising
@@ -112,6 +112,15 @@ dependency's, and what it says when it refuses.
 > that refusal is reached **before any other validation of the value has run** —
 > including the recursive `FrozenJson` alias's own — so that it holds whatever
 > `sys.getrecursionlimit()` is set to.
+
+> **Normative.** The measurement is made a second time on the **validated**
+> value, before `_deep_freeze` walks it, and a value over the ceiling is refused
+> there too — so the ceiling holds for the structure that is actually frozen,
+> whatever the raw input presented to the first measurement.
+
+> **Normative.** No exception other than that `ValueError` escapes either
+> measurement: a raw input the first measurement cannot enumerate is refused with
+> it rather than accepted on a depth that was never established.
 
 > **Normative.** That refusal introduces no new exception type: it reaches a
 > caller as the holder's ordinary construction refusal, exactly as the
@@ -140,6 +149,34 @@ of everything else. Measured 2026-08-26 with that placement: at
 containers is still refused with the single `ValueError` naming depth and the
 ceiling, where the unguarded alias gives 1276 errors headed "Input should be a
 valid string".
+
+**And again on the validated value, because the raw input gets a vote in what
+the first measurement sees.** `_json_depth` enumerates through the
+`Mapping`/`Sequence` protocol; pydantic-core enumerates a `dict` subclass through
+the concrete `dict` and never calls an override. Where those disagree, a single
+front measurement is either fragile or wrong, and both directions were measured
+on 2026-08-26 against `main` at `c08fa53a`:
+
+- A `dict` subclass whose `values()` raises `RuntimeError`, holding `{"x": 1}`,
+  validates **today** to `FrozenDict({'x': 1})` — one container deep, accepted.
+  `_json_depth` called on it raises `RuntimeError`. A front check written as
+  `_json_depth` over raw input would therefore leak an exception that is neither
+  the depth refusal nor an ordinary construction refusal, for a value the type
+  accepts. That is what the third clause above forbids.
+- A `dict` subclass whose `values()` returns an empty iterator, holding 201
+  containers under one key, measures as **depth 1** through `_json_depth` and
+  freezes to **depth 201**. A ceiling enforced only at the front is a ceiling the
+  input can talk its way past, which is worse than the leak and is not a defect
+  of the front placement but of trusting one measurement.
+
+So the two positions have two jobs and neither subsumes the other. The **front**
+measurement is what makes the refusal independent of `sys.getrecursionlimit()`,
+and it may be conservative — it is allowed to refuse a raw shape it cannot
+enumerate faithfully, and the third clause requires it to. The **second**
+measurement is the authoritative one: it runs on a plain validated structure, in
+which nothing can lie about its own depth, and it is what the ceiling actually
+means. One constant, checked twice, for two properties that one check cannot hold
+at once.
 
 A plain `ValueError` and not a named error, for the same reason: the two refusals
 already at this site are plain `ValueError`s, pydantic turns them into a
@@ -248,7 +285,11 @@ than the value that is merely *frozen*.
 > `_MAX_SCHEMA_DEPTH` is strictly less than the ceiling, and a schema between them
 > is refused with ADR-0145 §6's reason and not with §1's; (d) with
 > `sys.setrecursionlimit` set **below** the ceiling, a value past the ceiling is
-> still refused with §1's reason and no `RecursionError` is raised.
+> still refused with §1's reason and no `RecursionError` is raised; (e) a mapping
+> whose enumeration raises is refused with an ordinary construction refusal and
+> propagates no other exception; (f) a mapping that under-reports its own contents
+> to the front measurement, and whose validated form is over the ceiling, is
+> refused.
 
 Each of these is a claim this ADR makes that would otherwise decay silently, and
 two of them are the only mechanical guard on a clause above.
@@ -263,6 +304,12 @@ so that a seventh duration field could not go unpinned.
 **(c)** is the only guard against a later lane raising `_MAX_SCHEMA_DEPTH` past
 the ceiling and quietly killing ADR-0145 §6's refusal, which is a change no reader
 of either file would see.
+
+**(e) and (f) are the two traps §1's prose measures**, and they are pinned
+separately because they fail separately: (e) catches a front measurement that
+trusts a raw enumerator, and (f) catches an implementation that measures only at
+the front. An implementation with one measurement in the right place passes every
+other pin here and fails (f).
 
 **(d) is what tests §1's ordering and §2's iterativeness at once**, and it is
 written with the recursion limit *below* the ceiling for that reason. At the
@@ -343,9 +390,12 @@ own decision, and this is it.
 
 ## Consequences
 
-**Easier.** What a `FrozenJson` value accepts becomes a fact stated in `core`,
-asserted by a test in this repository, and identical in every process — instead
-of a constant in a dependency's Rust that no file here mentions. A payload
+**Easier.** What a `FrozenJson` value is refused for becomes a fact stated in
+`core`, asserted by a test in this repository, and deterministic in every process
+— instead of a constant in a dependency's Rust that no file here mentions. The
+invariant is the over-ceiling refusal specifically, and not the whole acceptance
+set: §6 keeps one direction process-dependent, since a value *within* the ceiling
+still cannot be validated under a recursion limit set beneath it. A payload
 refused for depth says so, in one error, naming the ceiling, at every one of the
 nine holders — and, because §1 puts the check ahead of everything that consumes
 stack, at every recursion limit rather than only at the default. The two bad
@@ -367,11 +417,19 @@ here, so the exposure is theoretical rather than observed — and a deployment t
 finds one is the revisit trigger below, not a case to widen the ceiling for
 quietly.
 
-Every construction of a `FrozenJson` value also gains one more pass over it: a
-bounded breadth-first walk that stops as soon as the ceiling is exceeded, on the
-hottest ingress in `core`, ahead of the two passes (`_deep_freeze` and the
-encoder) that already run there. It is bounded where they are not, so it costs
-less than either, but it is not free.
+A second narrowing, small and deliberate: a raw mapping or sequence the front
+measurement cannot enumerate faithfully is refused rather than accepted, so a
+`dict` subclass with a raising `values()` — which validates today — will not.
+Nothing legitimate is shaped that way, and §1's third clause prefers a refusal to
+a depth nobody established.
+
+Every construction of a `FrozenJson` value also gains two more passes over it:
+bounded breadth-first walks that stop as soon as the ceiling is exceeded, on the
+hottest ingress in `core`, alongside the two passes (`_deep_freeze` and the
+encoder) that already run there. They are bounded where those are not, so each
+costs less than either, but they are not free — and two measurements are more
+implementation than one, which is the price of a ceiling that is neither
+recursion-limit-dependent nor talkable-past.
 
 `core` also gains a second depth constant next to `_MAX_SCHEMA_DEPTH`, and §5(c)
 exists because two constants whose ordering matters are two constants somebody
