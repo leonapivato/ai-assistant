@@ -118,9 +118,9 @@ dependency's, and what it says when it refuses.
 > there too — so the ceiling holds for the structure that is actually frozen,
 > whatever the raw input presented to the first measurement.
 
-> **Normative.** The first measurement descends only container forms whose
-> enumeration the input cannot override, so that what it measures is what
-> validation will build; any other value presenting as a mapping or as a
+> **Normative.** The first measurement descends a value only when it can obtain
+> the contents validation will use **without invoking any method that value's
+> type could have overridden**; any other value presenting as a mapping or as a
 > non-`str` sequence is refused with that `ValueError` rather than measured on an
 > enumeration it supplied itself.
 
@@ -181,14 +181,33 @@ catching it on the validated value would hold only at a comfortable recursion
 limit: at `sys.setrecursionlimit(120)` pydantic walks the real 201 containers
 before any second measurement can run, and raises `RecursionError` rather than
 §1's refusal. So the front measurement has to be *faithful*, not merely careful —
-which is what "only container forms whose enumeration the input cannot override"
-buys. Enumerating a `dict` instance through `dict.values` rather than through
-`value.values()` is the whole of it for the subclass case, because that is what
-pydantic-core itself does; `list`, `tuple` and `FrozenDict` are the other forms
-whose contents cannot be misreported, and anything else presenting as a container
-is refused rather than guessed at. That is the set as this is written, offered so
-the implementation is not guessing; the clause is stated as the property, because
-the set is what satisfies it and not what defines it.
+which is what the third clause buys, and the clause is stated as a property
+rather than a list because getting the list right is exactly what is hard.
+
+The set that satisfies it as this is written is narrow, and the reason it is
+narrow is worth the sentence:
+
+- **A `dict` instance, including any subclass, measured through `dict.values`.**
+  Subclasses are safe *here and only here*, because pydantic-core enumerates any
+  dict instance through the concrete dict too, so the two agree by construction.
+  Measured: a `dict` subclass whose `values()` raises validates today to
+  `FrozenDict({'x': 1})`, and one whose `values()` returns empty freezes to depth
+  201 — both of which `dict.values` sees correctly.
+- **Exactly `list`, `tuple` and `FrozenDict`** — `type(value) is …`, subclasses
+  refused. `FrozenDict` looks safe and is not: it is subclassable, and a subclass
+  whose concrete `_items` holds `(('x', 1),)` while its `items()`, `keys()` and
+  `__getitem__` report a 201-container mapping **validates to depth 201**,
+  measured 2026-08-26. Reading the concrete slot does not rescue it, because
+  pydantic does not read the concrete slot — it goes through the mapping protocol,
+  which is the half a subclass can rewrite. There is no concrete access that makes
+  the two agree, so the only faithful answer for a non-`dict` mapping is the exact
+  type. `list` and `tuple` are held to the same rule for the same reason and at no
+  cost, since nothing in `core` produces a subclass of either.
+
+Everything else presenting as a mapping or a sequence is refused rather than
+guessed at. The three exact types are precisely what `_deep_freeze` and
+`_thaw_json` themselves produce, so every value this system builds is inside the
+set and only values from outside it are turned away.
 
 So the two positions have two jobs and neither subsumes the other. The **front**
 measurement is what makes the refusal independent of `sys.getrecursionlimit()`,
@@ -310,10 +329,13 @@ than the value that is merely *frozen*.
 > `sys.setrecursionlimit` set **below** the ceiling, a value past the ceiling is
 > still refused with §1's reason and no `RecursionError` is raised; (e) a mapping
 > whose enumeration raises is refused with an ordinary construction refusal and
-> propagates no other exception; (f) a mapping that under-reports its own contents
-> through `values()`, and whose concrete contents are over the ceiling, is
-> refused with §1's reason — including with `sys.setrecursionlimit` set below the
-> ceiling, where an unfaithful front measurement yields `RecursionError` instead.
+> propagates no other exception; (f) a `dict` subclass that
+> under-reports its contents through `values()` is measured on its concrete
+> contents, so an over-deep one is refused with §1's reason; (g) a value whose
+> type is a subclass of `FrozenDict`, `list` or `tuple` is refused at the front
+> rather than measured. (f) and (g) are pinned with `sys.setrecursionlimit` set
+> below the ceiling as well as at the default, since that is where an unfaithful
+> front measurement yields `RecursionError` instead of §1's refusal.
 
 Each of these is a claim this ADR makes that would otherwise decay silently, and
 two of them are the only mechanical guard on a clause above.
@@ -329,10 +351,12 @@ so that a seventh duration field could not go unpinned.
 the ceiling and quietly killing ADR-0145 §6's refusal, which is a change no reader
 of either file would see.
 
-**(e) and (f) are the two traps §1's prose measures**, and they are pinned
+**(e), (f) and (g) are the three traps §1's prose measures**, and they are pinned
 separately because they fail separately: (e) catches a front measurement that
-propagates a raw enumerator's exception, and (f) catches one that believes it.
-(f) carries the lowered recursion limit for the reason §1 gives — at the default
+propagates a raw enumerator's exception, (f) catches one that believes a `dict`
+subclass's own `values()`, and (g) catches one that trusts a frozen or sequence
+subclass because the base type was on a list. (f) and (g) carry the lowered
+recursion limit for the reason §1 gives — at the default
 limit an unfaithful front measurement is rescued by the second one and the pin
 passes for the wrong reason, and it is only under the low limit that the
 difference between "faithful" and "caught later" becomes the difference between
@@ -445,10 +469,10 @@ finds one is the revisit trigger below, not a case to widen the ceiling for
 quietly.
 
 A second narrowing, deliberate and wider than the first looks: §1's third clause
-refuses any input presenting as a mapping or a non-`str` sequence that is not one
-of the container forms whose contents it cannot misreport. A `dict` subclass with
-a raising `values()`, and a custom `Mapping` implementation that is not a `dict`
-or a `FrozenDict`, both validate today and will not afterwards. Nothing in this
+refuses any input presenting as a mapping or a non-`str` sequence whose contents
+the measurement cannot obtain the way validation will. A `dict` subclass with a
+raising `values()`, a custom `Mapping` implementation, and a subclass of
+`FrozenDict`, `list` or `tuple` all validate today and will not afterwards. Nothing in this
 repository constructs a `FrozenJson` value from either — every producer hands over
 a `dict`, a `list`, or the frozen forms `_deep_freeze` itself makes — and the
 clause prefers a refusal to a depth the input got to choose. It is the cost of the
