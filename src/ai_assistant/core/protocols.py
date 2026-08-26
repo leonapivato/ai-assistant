@@ -3786,6 +3786,62 @@ class AuditTrail(Protocol):
         they were written when that shape *was* the current shape, which is the
         whole point of representing them rather than accepting new ones.
 
+        **Validates a route-(b) standing authorisation, against records this
+        component cannot write** (ADR-0193 §6). Implementations are constructed
+        with a :class:`RecipientGrantResolution` — one member wide, so the trail
+        can validate a grant and can never author one — and ``record`` refuses a
+        **non-resolving ``ALLOW``** whose ``egress_binding`` is not ``None`` and
+        whose ``authorised_by`` is set unless **all eight** hold:
+        ``outstanding(authorised_by)`` returns a record (which is the existence,
+        the kind and the unrevoked check at once); that record's ``decided_at`` is
+        **at or before** the decision's; its ``expires_at`` is **strictly after**
+        the decision's ``decided_at``; its ``ToolDefinition`` equals the decision's
+        ``tool`` by value; its ``BoundAccount`` equals the decision's binding's
+        ``account`` by value, both facts and not one; its canonical destination set
+        contains **every** member of the decision's; the binding is an
+        :class:`~ai_assistant.core.types.EgressBinding` whose
+        ``planned_with_external_content`` is ``False``; and the ruling's
+        ``authorised_subject`` is set and equals that record's ``subject_digest``,
+        **recomputed by ``record``** over the record the store returned. It also
+        refuses a **resolving** ``ALLOW`` carrying an ``authorised_subject`` at
+        all: route (a) rests on a confirmation, which is not a grant and has no
+        subject digest.
+
+        Before this, a non-resolving ``ALLOW`` carrying an ``authorised_by`` was
+        written with **no check of any kind** — the hole ADR-0021 §3 named when it
+        called that field "a pointer this contract does not verify". The standard
+        the check meets is that section's own: *nothing is taken on trust*.
+
+        **The guarantee is stated over the resolution read and not over the
+        append.** Those are two awaits and no linearisation point is built across
+        the two stores, so what is guaranteed is that **at the instant the pointer
+        was resolved, it named an outstanding grant covering this decision**. A
+        revocation or a ``clear`` landing before that read refuses the write; one
+        landing between the read and the append does not, and ADR-0193 §9 states
+        that residual window rather than rounding it to zero. Expiry is decided
+        against the decision's own ``decided_at`` and **never against a clock**, so
+        a grant that expires between the ruling and the write does not retract an
+        honest ``ALLOW``; revocation is decided at the read, because it is a fact
+        about two records.
+
+        **The invariant is scoped to route-(b) egress decisions and to nothing
+        else.** A decision with no ``egress_binding`` is not an egress call and no
+        rule here reaches it, so ADR-0021 §6's standing grants for *other* actions
+        stay deferred and unnarrowed — such a decision falls outside this scope
+        rather than needing an exception inside it. Route-(b) **egress**
+        authorisation is reserved to the recipient-grant store: on a decision in
+        scope, ``authorised_by`` names a
+        :class:`~ai_assistant.core.types.RecipientGrant` and there is no second
+        reading, and a later ADR wanting a different standing source for egress is
+        making a contract change to how a row in this scope is read rather than
+        inheriting an "add your own arm" permission.
+
+        **``record`` checks existence, kind, unrevokedness, liveness as of the
+        ruling, and subject match, and nothing else.** It does not re-rule, does
+        not consult a clock, does not call ``covering``, does not rank grants, and
+        returns no outcome. ADR-0021 §3's division is unchanged: the policy rules,
+        the caller records, the trail validates what it holds both halves of.
+
         Raises:
             AuditError: If the decision is not a valid record, which now includes
                 one carrying an ``OriginUnrecordedBinding``.
@@ -3793,6 +3849,13 @@ class AuditTrail(Protocol):
                 recorded.
             InvalidResolutionError: If ``resolves`` is set and the invariant
                 above does not hold.
+            InvalidAuthorisationError: If a route-(b) egress decision fails any of
+                the eight checks above, if a resolving ``ALLOW`` carries an
+                ``authorised_subject``, or if the resolution seam could not be
+                read — the last chained from the ``RecipientGrantError`` it came
+                from, so a caller keeps one handler while an operator keeps "the
+                pointer named no outstanding grant" and "the seam could not be
+                read" apart.
         """
         ...
 
