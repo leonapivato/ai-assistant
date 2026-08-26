@@ -245,8 +245,12 @@ async def test_a_row_that_no_longer_validates_is_a_store_fault(tmp_path: Path) -
     store = SqliteRecipientGrantStore(path=path, max_outstanding=CEILING)
     try:
         await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
+        # Deleted and re-inserted rather than updated: the append-only trigger
+        # refuses an ``UPDATE`` outright, which is the point of it being there.
+        store._conn.execute("DELETE FROM recipient_grants")
         store._conn.execute(
-            "UPDATE recipient_grants SET data = ? WHERE id = ?", ('{"id": "g-1"}', "g-1")
+            "INSERT INTO recipient_grants(decided_at_us, data) VALUES (?, ?)",
+            (0, '{"id": "g-1"}'),
         )
         store._conn.commit()
 
@@ -275,10 +279,8 @@ async def test_the_unique_index_survives_a_bug_in_the_revocation_check(
 
         with pytest.raises(sqlite3.IntegrityError):
             store._conn.execute(
-                "INSERT INTO recipient_grants("
-                "id, decided_at_us, expires_at_us, revokes, data"
-                ") VALUES (?, ?, ?, ?, ?)",
-                (second.id, 0, 1, second.revokes, second.model_dump_json()),
+                "INSERT INTO recipient_grants(decided_at_us, data) VALUES (?, ?)",
+                (0, second.model_dump_json()),
             )
     finally:
         store.close()
@@ -341,3 +343,115 @@ async def test_a_record_reloads_as_the_record_that_was_written(tmp_path: Path) -
     assert reloaded is not None
     assert reloaded.subject_digest == granted.subject_digest
     assert reloaded.destinations == granted.destinations
+
+
+async def test_a_revocation_cannot_be_hidden_from_the_anti_join(tmp_path: Path) -> None:
+    """The projections are **derived** from the blob, so they cannot disagree with it.
+
+    Round 1's adversarial blocker: a store whose anti-join reads a shadow column
+    while its answer decodes the blob can be made to say that a revoked grant is
+    outstanding — the policy returns `ALLOW`, `AuditTrail.record` validates it, and
+    `export()` still shows the revocation. `id` and `revokes` are
+    ``GENERATED ALWAYS`` from ``data``, which is ``SqliteAuditTrail``'s answer for
+    the ``invocations`` table one module over, so the drift is unconstructable
+    rather than merely untested.
+
+    The case reaches past `record` to prove it: a revoking record inserted with
+    nothing but its blob still revokes, because the column is not a value anyone
+    supplies.
+    """
+    path = tmp_path / "grants.db"
+    store = SqliteRecipientGrantStore(path=path, max_outstanding=CEILING)
+    try:
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        await store.record(granted)
+        revocation = recipient_revocation_of(granted, grant_id="r-1")
+        store._conn.execute(
+            "INSERT INTO recipient_grants(decided_at_us, data) VALUES (?, ?)",
+            (0, revocation.model_dump_json()),
+        )
+        store._conn.commit()
+
+        assert await store.outstanding("g-1") is None
+        assert await store.covering(request(binding(ALICE))) is None
+        assert await store.standing() == []
+    finally:
+        store.close()
+
+
+async def test_the_store_refuses_to_rewrite_a_row(tmp_path: Path) -> None:
+    """Append-only, said to SQLite rather than only to the reader (ADR-0193 §1).
+
+    A grant is never edited, narrowed, re-scoped or extended in place, and the
+    trigger is what closes the one column a comparison cannot reach —
+    ``decided_at_us``, which orders a *bounded* listing, so a row whose key was
+    altered to sort late falls beyond the ``LIMIT`` and is never decoded and never
+    compared. It also refuses a rewrite of ``data``, which is what makes the
+    derived columns whole: they cannot disagree with the blob, so the remaining
+    move against them was to move the blob.
+
+    It is not a boundary against an actor who can already run arbitrary SQL — who
+    could drop the trigger as easily as run the ``UPDATE``. ADR-0004 §4's
+    owner-only mode and ADR-0099 §1's single-user model are where that is
+    answered.
+    """
+    path = tmp_path / "grants.db"
+    store = SqliteRecipientGrantStore(path=path, max_outstanding=CEILING)
+    try:
+        await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
+
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            store._conn.execute("UPDATE recipient_grants SET decided_at_us = 0")
+    finally:
+        store.close()
+
+
+async def test_a_file_holding_another_stores_table_is_not_opened(tmp_path: Path) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` is a no-op against any shape (ADR-0193 §1).
+
+    A file arriving with a ``recipient_grants`` table of ordinary columns keeps
+    it, and both generated projections then read as ``NULL`` — so the outstanding
+    anti-join finds no revocation at all and every revoked grant answers as live.
+    That is the failure the generated columns exist to make impossible, walked
+    around rather than through, and holding every object to its own definition is
+    what closes it.
+    """
+    path = tmp_path / "grants.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE recipient_grants(id TEXT PRIMARY KEY, revokes TEXT, data TEXT)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RecipientGrantError, match="not the one this store defines"):
+        SqliteRecipientGrantStore(path=path, max_outstanding=CEILING)
+
+
+async def test_a_refused_open_leaves_the_file_unlabelled(tmp_path: Path) -> None:
+    """The refusal precedes the marker, inside one transaction.
+
+    So a file this store declined leaves as it arrived — unopened, unlabelled, and
+    not carrying this store's version marker over a shape that is not this
+    store's, which a second open would then read as current.
+    """
+    path = tmp_path / "grants.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE recipient_grants(id TEXT PRIMARY KEY, data TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RecipientGrantError):
+        SqliteRecipientGrantStore(path=path, max_outstanding=CEILING)
+
+    reopened = sqlite3.connect(path)
+    try:
+        marker = reopened.execute("SELECT name FROM sqlite_master WHERE name = 'meta'").fetchall()
+    finally:
+        reopened.close()
+
+    assert marker == []
