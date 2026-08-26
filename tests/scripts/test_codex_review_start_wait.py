@@ -500,3 +500,105 @@ def test_a_start_grace_that_cannot_be_waited_out_is_refused(tmp_path: Path, valu
     # Refused before anything was launched: no round, no marker, no log.
     assert _round_pids(repo) == []
     assert not list((repo / ".review").glob("*.md"))
+
+
+def test_start_pins_the_base_commit_for_its_child(tmp_path: Path) -> None:
+    """The child is handed a commit, not the ref, so the two cannot resolve apart.
+
+    A ref is mutable. If a fetch landed between the parent's `git merge-base` and
+    the child's, the child would key its lock, marker and artifact under a
+    different loop and the parent would poll its own key until the grace expired —
+    reporting failure while the paid round ran on and recorded an artifact
+    somewhere the parent never looked. Passing the resolved commit closes that
+    window by construction, and `--wait`, which resolves the ref for itself, still
+    finds the round: that agreement is the invariant this protects.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path)
+    merge_base = _git(repo, "merge-base", "main", "HEAD")
+
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+
+    assert waited.returncode == RECORDED, waited.stderr
+    provenance = (repo / _fields(waited.stdout)["artifact"]).read_text().splitlines()[0]
+    # `base=` is the ref for a foreground round and the pinned commit here.
+    assert f" base={merge_base} " in provenance
+    assert f" base_sha={merge_base} " in provenance
+
+
+def _bin_without_flock(tmp_path: Path) -> str:
+    """A PATH with the tools the driver needs up to its `flock` probe, minus flock.
+
+    `flock` ships in the same directory as `git` on every host this runs on, so
+    the absence has to be built rather than found: a directory of symlinks to the
+    tools that are wanted, and no link for the one that is not.
+    """
+    bin_dir = tmp_path / "no-flock-bin"
+    bin_dir.mkdir()
+    wanted = [
+        "git",
+        "bash",
+        "sh",
+        "sed",
+        "awk",
+        "grep",
+        "head",
+        "tail",
+        "date",
+        "cat",
+        "mktemp",
+        "tr",
+        "sort",
+        "wc",
+        "rm",
+        "mv",
+        "od",
+        "find",
+        "sleep",
+        "uname",
+        "cut",
+        "dirname",
+        "basename",
+        "ls",
+        "kill",
+        "touch",
+        "sha1sum",
+        "setsid",
+        "nohup",
+    ]
+    for tool in wanted:
+        found = shutil.which(tool)
+        if found is not None:
+            (bin_dir / tool).symlink_to(found)
+    install_fake_codex(tmp_path / "bin")
+    (bin_dir / "codex").symlink_to(tmp_path / "bin" / "codex")
+    return str(bin_dir)
+
+
+def test_start_is_refused_where_there_is_no_flock(tmp_path: Path) -> None:
+    """Without a lock, two detached rounds of one persona could not be prevented.
+
+    `_claim_persona` claims nothing when `flock` is absent — the pre-#142
+    degradation this script keeps on purpose — so two `--start`s would each launch
+    a round and each observe its own token in the marker they take turns
+    overwriting. Both would report success, and both would write one artifact, one
+    thread and one snapshot. The foreground form keeps the degradation because an
+    operator runs one command at a time; `--start` returns immediately and is the
+    affordance that makes two easy to launch by accident.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path)
+    env["PATH"] = _bin_without_flock(tmp_path)
+    if shutil.which("flock", path=env["PATH"]) is not None:
+        pytest.skip("could not build a PATH without flock")
+
+    result = _run(repo, env, "--start", "adversarial", "main")
+
+    assert result.returncode == USAGE, result.stderr
+    assert "--start is unavailable without 'flock'" in result.stderr
+    # Refused before launching: no round, no artifact.
+    assert _round_pids(repo) == []
+    assert not list((repo / ".review").glob("*.md"))
