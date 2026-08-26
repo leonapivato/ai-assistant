@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import pytest
 from assistant_engine_contract import (
     _DECISION_LIMIT,
+    _INVOCATION_LIMIT,
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
@@ -33,9 +34,12 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    InvocationSubject,
     ReadSubject,
     backwards_clock,
+    overfull_invocation_rows,
     page_after_mutating_the_filter,
+    seeded_invocation_trail,
     seeded_read_trail,
     seeded_trail,
 )
@@ -247,6 +251,26 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine()
         engine.reads = trail
         return ReadSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def invocations(self) -> InvocationSubject:
+        """The fake over a seeded invocation trail — the object the suite reads as control.
+
+        ``trail`` is a plain attribute on :attr:`decisions`' terms, and it is the
+        **same** attribute: ADR-0192 §2 puts both row kinds in one store, so a fake
+        holding two would be modelling a split the contract does not have.
+        """
+        trail = await seeded_invocation_trail()
+        engine = FakeAssistantEngine()
+        engine.trail = trail
+        return InvocationSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def overfull_invocations(self) -> AssistantEngine:
+        """A fake at the invocation limit whose whole trail does not fit it."""
+        engine = FakeAssistantEngine(max_payload_bytes=_INVOCATION_LIMIT)
+        engine.trail = await seeded_invocation_trail(rows=overfull_invocation_rows())
+        return engine
 
     @pytest.fixture
     async def overfull_reads(self) -> AssistantEngine:

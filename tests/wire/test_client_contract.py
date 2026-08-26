@@ -52,6 +52,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"
 
 from assistant_engine_contract import (
     _DECISION_LIMIT,
+    _INVOCATION_LIMIT,
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
@@ -64,8 +65,11 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    InvocationSubject,
     ReadSubject,
     backwards_clock,
+    overfull_invocation_rows,
+    seeded_invocation_trail,
     seeded_read_trail,
     seeded_trail,
 )
@@ -412,6 +416,43 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing.reads = trail
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield ReadSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def invocations(self, tmp_path: Path) -> AsyncIterator[InvocationSubject]:
+        """A client of a hub whose engine reads a seeded invocation trail, and that trail.
+
+        Arranged entirely hub-side on :attr:`decisions`' terms, and it arises that
+        way for a reason of ADR-0192's own: a client has no way to put an
+        invocation row in one either, because both appends are on
+        ``InvocationLedger`` behind the tool seam and ``open_invocations`` is
+        deliberately unpromoted. The trail is read from the test process rather than
+        over the wire, which is what makes it a negative control: §4's refusals must
+        happen **before a frame is sent**, and only a log read from where the read
+        would have landed says so.
+        """
+        trail = await seeded_invocation_trail()
+        backing = FakeAssistantEngine()
+        backing.trail = trail
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield InvocationSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def overfull_invocations(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose published limit the whole invocation trail exceeds.
+
+        :attr:`overfull_decisions`' binding, one row kind over: this one really
+        serialises, so the frame is the bound rather than an in-process measurement,
+        and the hub publishes the same number the backing engine measures against.
+        """
+        trail = await seeded_invocation_trail(rows=overfull_invocation_rows())
+        backing = FakeAssistantEngine(max_payload_bytes=_INVOCATION_LIMIT)
+        backing.trail = trail
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=_INVOCATION_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
+            yield client
 
     @pytest.fixture
     async def overfull_reads(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
