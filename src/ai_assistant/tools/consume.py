@@ -89,8 +89,19 @@ def pending_cancellations() -> int:
     return 0 if task is None else task.cancelling()
 
 
-async def _captured(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation | BaseException:
-    """Return what ``coro`` produced, or the exception it raised, as a value.
+async def _captured(
+    append: Callable[[], Coroutine[Any, Any, ToolInvocation]],
+) -> ToolInvocation | BaseException:
+    """Return what ``append()`` produced, or the exception it raised, as a value.
+
+    **``append`` is called here, inside the task, and not by the caller.** Nothing
+    makes a conforming ``InvocationLedger`` method a native ``async def`` — a
+    plain function returning a coroutine satisfies the Protocol — and such a
+    function can raise *before* it returns anything to await. Called in the
+    caller's frame that raise would miss the capture entirely: on the claim path
+    it would reach ``invoke`` untranslated instead of as the ``AuditError``
+    ADR-0192 §1 requires, and on the completion path it would replace a
+    ``ToolResult`` the tool had already produced and leave the claim open (§3).
 
     See :func:`_driven` for why a failure leaves this task as a value: a
     ``BaseException`` propagating out of a task is re-raised into the event loop
@@ -98,7 +109,7 @@ async def _captured(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation
     resume to write it.
     """
     try:
-        return await coro
+        return await append()
     except BaseException as exc:
         # Every class, because the caller decides what each one means and this
         # frame decides nothing (ADR-0192 §1, §3).
@@ -106,7 +117,7 @@ async def _captured(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation
 
 
 async def _driven(
-    coro: Coroutine[Any, Any, ToolInvocation],
+    append: Callable[[], Coroutine[Any, Any, ToolInvocation]],
 ) -> tuple[ToolInvocation | BaseException, bool]:
     """Drive one ledger append to its outcome, absorbing every cancellation.
 
@@ -130,7 +141,9 @@ async def _driven(
     is the *outward class* at ``invoke``'s boundary, and nothing here asserts one.
 
     Args:
-        coro: The unawaited ledger call.
+        append: Makes the ledger call. Invoked inside the task, so a synchronous
+            factory that raises before returning a coroutine is captured like any
+            other failure rather than escaping this frame.
 
     Returns:
         The stored row or the failure the append raised, and **whether a
@@ -149,7 +162,7 @@ async def _driven(
         §1 says a method never does.
     """
     absorbed = False
-    task = asyncio.ensure_future(_captured(coro))
+    task = asyncio.ensure_future(_captured(append))
     while not task.done():
         try:
             # `wait` never raises the task's own exception and never cancels the
@@ -310,7 +323,7 @@ async def _complete(
     """
     entered_with = pending_cancellations()
     appended, absorbed = await _driven(
-        ledger.complete_invocation(
+        lambda: ledger.complete_invocation(
             claim_id=claim.id,
             outcome=completion.outcome,
             incurred_cost=completion.incurred_cost,
@@ -332,6 +345,12 @@ async def _complete(
         # this path disposes of, rather than escaping past the disposition and
         # deciding the call's exit on its own. Rebound, never annotated.
         error = exc
+    # Re-read: the emission is the only thing between the sample above and here,
+    # and a processor is arbitrary code that can cancel this task. ADR-0192 §1's
+    # branch turns on the count whoever moved it, and a request left unhonoured
+    # would leave the executor an ordinary error for a call the loop had
+    # cancelled.
+    cancelled = cancelled or pending_cancellations() > entered_with
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -386,7 +405,7 @@ async def _claimed(
             call and does not leave as one (ADR-0192 §1).
     """
     entered_with = pending_cancellations()
-    appended, absorbed = await _driven(ledger.claim_invocation(decision=decision))
+    appended, absorbed = await _driven(lambda: ledger.claim_invocation(decision=decision))
     cancelled = absorbed or pending_cancellations() > entered_with
 
     if not isinstance(appended, BaseException):
@@ -416,6 +435,12 @@ async def _claimed(
         # instead of the ``AuditError`` §1 requires, so the executor would record
         # a call that provably never ran as interrupted.
         error = exc
+    # Re-read: the emission is the only thing between the sample above and here,
+    # and a processor is arbitrary code that can cancel this task. ADR-0192 §1's
+    # branch turns on the count whoever moved it, and a request left unhonoured
+    # would leave the executor an ordinary error for a call the loop had
+    # cancelled.
+    cancelled = cancelled or pending_cancellations() > entered_with
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error
