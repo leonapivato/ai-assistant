@@ -602,3 +602,39 @@ def test_start_is_refused_where_there_is_no_flock(tmp_path: Path) -> None:
     # Refused before launching: no round, no artifact.
     assert _round_pids(repo) == []
     assert not list((repo / ".review").glob("*.md"))
+
+
+def test_wait_finds_a_round_whose_base_ref_moved_under_it(tmp_path: Path) -> None:
+    """The loop key folds in the base, so a base move re-files a running round.
+
+    ADR-0025 §1 keys the loop on `(branch, base)` deliberately — a moved base is a
+    different diff and must not inherit a session — so a base that moves while a
+    round runs files that round under a key `--wait` no longer computes. Reading
+    one path would then answer "no round is in flight" about a round plainly alive
+    on disk, and the caller, told never to poll an exit 4, would start a
+    replacement round it did not need.
+
+    The ref really is moved here, forward into HEAD's own history, rather than
+    simulated by passing a different base argument.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "three\n", "second change")
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 6")
+
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+    started_base = _git(repo, "merge-base", "main", "HEAD")
+    _git(repo, "branch", "-f", "main", "HEAD~1")
+    assert _git(repo, "merge-base", "main", "HEAD") != started_base
+
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "2")
+
+    assert waited.returncode == STILL_RUNNING, waited.stderr
+    assert "still running" in waited.stderr
+    assert started_base[:12] in waited.stderr, "the moved base is named, not hidden"
+
+    # And nothing is lost: the round records an artifact for HEAD's tree under the
+    # older base, and `--wait` reports it.
+    settled = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+    assert settled.returncode == RECORDED, settled.stderr
+    assert _fields(settled.stdout)["tree"] == _tree(repo)
