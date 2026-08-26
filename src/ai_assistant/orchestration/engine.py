@@ -204,6 +204,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
+    from ai_assistant.orchestration.recovery import RecoveryScan
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
@@ -1134,6 +1135,7 @@ class Engine:
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
         notification_outbox: DeliveryOutbox | None = None,
+        recovery: RecoveryScan | None = None,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
@@ -1462,6 +1464,18 @@ class Engine:
                 rather than as ``core``'s ``NotificationOutbox``, because §3b
                 gives the latter "exactly one method" and that one is the
                 *producer's*; see that module for why the seam is local.
+            recovery: ADR-0014 §4's startup scan, or ``None`` where a deployment
+                composes none. Built by the composition root over the **same**
+                plan store and audit store this façade holds, and driven once from
+                :meth:`start` — which is where "at startup" lands in this system,
+                the hub calling it at step 4 and accepting at step 6, so the
+                precondition §4 states ("no executor is live for those states")
+                is a fact about the listener rather than a promise made here. It
+                is held as ``orchestration``'s own
+                :class:`~ai_assistant.orchestration.recovery.RecoveryScan` because
+                it is this subsystem's act: the scan reads the trail and the
+                completer (ADR-0192 §9) and commits through the plan store, and
+                nothing in `core` describes the composite.
             max_notification_budget: ADR-0131 §5a's
                 ``hub_max_notification_budget``, the ceiling a poll's ``budget``
                 is refused above. Not nullable, for §5a's reason.
@@ -1591,6 +1605,7 @@ class Engine:
         self._notifications = notifications
         self._notification_policy = notification_policy
         self._notification_outbox = notification_outbox
+        self._recovery = recovery
         #: Whether this engine has already voided the delivery leases it inherited
         #: (ADR-0131 §3). Held here rather than in the outbox because the engine is
         #: what the hub starts: instance lock → one hub process → one composition
@@ -1644,7 +1659,17 @@ class Engine:
         return self._drain_phase
 
     async def start(self) -> None:
-        """Finish the sweeps a previous run left behind (ADR-0074 §7, §8; ADR-0076).
+        """Recover what a crash left in flight, then finish the sweeps (ADR-0014 §4, ADR-0076).
+
+        **ADR-0014 §4's recovery scan first**, where one is wired. A step left
+        ``RUNNING`` by a process that died mid-call becomes ``INDETERMINATE``, and
+        — since ADR-0192 §3 — every claim still open under that step's
+        ``approval_ref`` is completed ``INDETERMINATE`` **before** the step's
+        transition is committed. §4 puts the scan "at startup" and presumes no
+        executor is live for those states; the hub calls this at step 4 of its own
+        startup and begins accepting at step 6, so that presumption is a fact about
+        the listener rather than a promise this method makes. Skipped where no scan
+        is wired.
 
         ADR-0074 §8 says the reclaim runs "by the deleting call, **at engine
         start**, and later by the hub's scheduler" — this is that middle case, and
@@ -1691,7 +1716,16 @@ class Engine:
         return await self._tracked(self._start(), "start")
 
     async def _start(self) -> None:
-        """Finish pending deletions, reclaim, then reconcile the delivery outbox."""
+        """Recover what a dead process left in flight, then sweep, then reconcile.
+
+        The recovery scan runs **first** of the four. Nothing else here reads
+        planning state or the trail's invocation rows, so no ADR orders it against
+        the sweeps; what running it first buys is that a step a previous process
+        left ``RUNNING`` — and every claim open under its authorisation — is
+        resolved before this engine does anything a caller can observe.
+        """
+        if self._recovery is not None:
+            await self._recovery.recover()
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
         if self._notification_outbox is not None:

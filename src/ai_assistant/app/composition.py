@@ -73,6 +73,7 @@ from ai_assistant.orchestration import (
     NotificationWriteStage,
     ObservationStage,
     QuestionStage,
+    RecoveryScan,
     StepExecutor,
     StepRunner,
     UpcomingEventStage,
@@ -1039,6 +1040,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             runner=runner,
             plans=plans,
             trail=trail,
+            # ADR-0014 §4's startup scan, over the **same two stores** the runner
+            # and the executor write through (ADR-0192 §9). The audit store is
+            # handed over twice, under two of the three faces one object satisfies:
+            # as `AuditTrail`, for the one query ADR-0192 §2 gives this consumer
+            # (`open_invocations`), and as `InvocationCompleter`, the narrow face
+            # over the invocation rows. It is **not** handed `InvocationLedger` —
+            # the wide face the `ToolInvoker` gets — because `claim_invocation` is
+            # the seam's act and no lane outside `tools/` calls it: withholding the
+            # member is what makes "the scan never claims" a **type** rather than a
+            # prohibition this composition is trusted to keep (ADR-0029 §1).
+            recovery=RecoveryScan(plans=plans, trail=trail, completer=trail),
             # The very trail the three drivers record into, handed over **whole**
             # here and narrowed to `SourceReadRecorder` at each of them (ADR-0185 §4,
             # ADR-0186 §10). This is the only position that names the wide seam, and

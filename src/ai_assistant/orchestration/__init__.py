@@ -194,6 +194,7 @@ from ai_assistant.orchestration.payloads import (
     canonical_payload,
 )
 from ai_assistant.orchestration.questions import QuestionStage, question_state
+from ai_assistant.orchestration.recovery import RecoveryScan
 from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
@@ -221,6 +222,7 @@ __all__ = [
     "NotificationWriteStage",
     "ObservationStage",
     "QuestionStage",
+    "RecoveryScan",
     "StepDisposition",
     "StepExecutor",
     "StepRunner",
