@@ -118,6 +118,7 @@ if TYPE_CHECKING:
         SecretValue,
         SourceGrant,
         SourceReadRecord,
+        SpendTotal,
         TurnOutcome,
     )
 
@@ -1364,6 +1365,38 @@ class HubClient:
                 published to this client.
         """
         return await self._call("export_invocations")  # type: ignore[no-any-return]
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """What each calendar period has cost, in ``SpendPeriod``'s fixed order.
+
+        **No local refusal to add**, the method taking no argument — the shape
+        ``export_decisions`` already has. Both entries come back whatever is
+        configured, and each carries the bounds ADR-0194 §1's rule computed **in the
+        hub's zone**, with the offsets in force at those two instants. A renderer
+        prints each bound from the value's own offset: this client resolves no zone,
+        reads no ``tzdata`` and consults no configuration of its own, which is what
+        lets it render a value a hub on a different zone database computed
+        correctly (ADR-0194 §5, §6).
+
+        Returns:
+            Exactly two totals, computed hub-side from one clock read and one row
+            snapshot.
+
+        Raises:
+            SpendUndeterminedError: Raised by the hub, and arriving as a typed error
+                frame, where the ledger could not produce the values at all. An
+                indeterminate *period* is not that case and comes back as a value.
+            HubUnavailableError: If no hub is listening, or the connection goes away
+                mid-request. **Unwrapped, and never translated** to
+                ``SpendUndeterminedError`` (ADR-0194 §6): a connection that was not
+                there is not one of the six grounds §4 enumerates, and reporting it
+                as one would tell a user their spend is indeterminate when the truth
+                is that there is no hub.
+            ProtocolError: On a malformed or truncated reply, likewise unwrapped.
+            OversizedValueError: Raised by the hub if the pair exceeds the contract
+                limit.
+        """
+        return await self._call("spend_totals")  # type: ignore[no-any-return]
 
 
 class HubEngineClient(HubClient):

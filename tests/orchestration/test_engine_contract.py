@@ -49,7 +49,12 @@ from assistant_engine_contract import (
     seeded_trail,
 )
 
-from ai_assistant.core.protocols import AuditTrail, InvocationLedger, SpendGate
+from ai_assistant.core.protocols import (
+    AuditTrail,
+    InvocationLedger,
+    SpendGate,
+    SpendLedger,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
@@ -130,7 +135,7 @@ CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
 
 
-class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, Protocol):
+class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Protocol):
     """Both faces of the **one** audit object (ADR-0192 §2).
 
     The composition root wires a single store as ``AuditTrail``,
@@ -356,6 +361,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         runner=runner,
         plans=plans,
         trail=audit,
+        spend=audit,
         reads=read_trail,
         memory=memory,
         deferrals=deferrals,

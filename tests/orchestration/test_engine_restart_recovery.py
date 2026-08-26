@@ -271,6 +271,7 @@ def _make_engine(
         runner=runner,
         plans=plans,
         trail=trail,
+        spend=trail,
         # ADR-0186 §10's read trail. A fresh one per engine, like the trace
         # fakes above: this module is about a restarted façade recovering a
         # durable park, and no read attempt crosses that restart.

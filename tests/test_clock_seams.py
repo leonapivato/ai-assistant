@@ -288,6 +288,7 @@ async def _engine(now: Clock) -> None:
         ),
         plans=plans,
         trail=FakeAuditTrail(),
+        spend=FakeAuditTrail(),
         reads=FakeSourceReadTrail(),
         memory=memory,
         deferrals=deferrals,

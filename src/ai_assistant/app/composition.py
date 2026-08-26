@@ -1087,6 +1087,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             runner=runner,
             plans=plans,
             trail=trail,
+            # The **ledger** face of that same object, and never the gate
+            # (ADR-0194 §5): one holder over one set of rows, so the totals a user
+            # reads and the ceiling the seam enforces cannot disagree — while an
+            # adapter reaching this member acquires no route to an admission.
+            spend=trail,
             # ADR-0014 §4's startup scan, over the **same two stores** the runner
             # and the executor write through (ADR-0192 §9). The audit store is
             # handed over twice, under two of the three faces one object satisfies:

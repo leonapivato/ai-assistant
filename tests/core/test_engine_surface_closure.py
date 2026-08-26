@@ -147,6 +147,17 @@ _NAMESPACE: Final = {
 #: closure through ``StepOutcome`` and ``ToolDefinition``, and the row carries
 #: nothing else.
 #:
+#: The forty-second and forty-third are ADR-0194 §5's ``SpendTotal`` and the
+#: ``SpendPeriod`` it names: what one calendar period has cost, its bounds, the
+#: offsets in force at them, and the ceiling and currency configured for it. The
+#: walk reaches them through ``spend_totals`` and terminates there — ``Decimal``,
+#: ``timedelta``, ``UtcInstant`` and ``EncodableText`` are scalars ADR-0087 §2c
+#: spells rather than promoted models, and the row carries nothing else.
+#: ``SpendAdmissionHandle`` is **not** here and its absence is decided rather than
+#: overlooked: ADR-0194 §5 makes the handle opaque and confines it to the seam
+#: between the invoker and its gate, so it "reaches no record, no surface and no
+#: wire frame" and no adapter, engine or client ever holds one.
+#:
 #: **The paired lane owed the placement and this one owes the entry**, which is the
 #: mechanism working rather than two lanes remembering. They are declared *after*
 #: :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, so
@@ -157,6 +168,8 @@ _NAMESPACE: Final = {
 #: this check would never have asked.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "SpendTotal",
+        "SpendPeriod",
         "ToolInvocation",
         "RecordedInvocation",
         "ContinuationToken",
@@ -434,13 +447,24 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     request away on a remote transport. Neither of the two is a browser operation,
     by ADR-0177 §1's own closed enumeration, so its thirty is unmoved.
 
+    ADR-0194 §6's **one** takes it to thirty-nine: ``spend_totals``, what each
+    calendar period has cost. One rather than a pair, because there is no unbounded
+    half to have: it returns exactly two values whatever is configured, so the
+    bounded/unbounded split ADR-0186 §1 draws for a *listing* has nothing to divide.
+    ``SpendGate``'s two members are deliberately **not** here and neither is any
+    "amount remaining" read: ADR-0194 §5 gives the engine a ``SpendLedger`` and
+    never a gate, because an adapter able to call the admission has acquired the
+    ability to spend a budget. It is not a browser operation either — ADR-0194 §6
+    and §11 say so in terms, adding no gateway route, argument or call — so
+    ADR-0177 §1's thirty is unmoved again.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 38
+    assert len(_method_names()) == 39
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -583,6 +607,20 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     than new wire declarations, reaching the surface by being named in a return
     annotation, exactly as ``Warrant`` did at 13.
 
+    **ADR-0194 §5 is under both limbs too, and says so itself** — the third bump
+    with two grounds, and the first where the deciding ADR enumerates them rather
+    than leaving a lane to. ``spend_totals`` takes the method set to thirty-nine and
+    the version to 16 under the first limb, on 12's, 14's and 15's reasoning
+    unchanged. The second limb is the **codec's domain widening**: ``project``
+    raised ``TypeError`` on a ``Decimal`` before and encodes one after, so a version
+    16 peer may emit a ``PER_CALL`` ``Decimal`` inside a ``PermissionDecision`` that
+    a version 15 peer refuses. ADR-0194 §11 forbids splitting the codec widening
+    into an earlier change for exactly this reason: two bumps where the topology
+    needs one. ADR-0087 §8's first case is **not** met — no conforming encoder
+    emitted any bytes for a ``Decimal`` before, so no ratified vector's spelling
+    moves — and §5 states that it is not a defence, because ADR-0124 §9 asks what a
+    new peer may *send* rather than whether an old spelling moved.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -591,7 +629,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (38, 15), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (39, 16), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

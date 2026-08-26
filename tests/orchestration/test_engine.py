@@ -33,7 +33,12 @@ from ai_assistant.core.errors import (
     TraceStoreError,
     UnknownConversationError,
 )
-from ai_assistant.core.protocols import AuditTrail, InvocationLedger, SpendGate
+from ai_assistant.core.protocols import (
+    AuditTrail,
+    InvocationLedger,
+    SpendGate,
+    SpendLedger,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
@@ -153,7 +158,7 @@ if TYPE_CHECKING:
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
 
-class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, Protocol):
+class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Protocol):
     """Both faces of the **one** audit object (ADR-0192 §2).
 
     The composition root wires a single store as ``AuditTrail``,
@@ -590,6 +595,7 @@ class Harness:
             runner=runner,
             plans=self.plans,
             trail=self.trail,
+            spend=self.trail,
             reads=self.reads,
             memory=self.memory,
             deferrals=self.deferrals,
@@ -1061,6 +1067,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -1179,6 +1186,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -1242,6 +1250,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -1297,6 +1306,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -1439,6 +1449,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -2187,6 +2198,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -2622,6 +2634,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -2693,6 +2706,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
@@ -2730,6 +2744,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            spend=harness.trail,
             reads=harness.reads,
             memory=harness.memory,
             deferrals=harness.deferrals,
@@ -2756,6 +2771,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            spend=harness.trail,
             reads=harness.reads,
             memory=harness.memory,
             deferrals=harness.deferrals,

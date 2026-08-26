@@ -626,6 +626,7 @@ def build_world(
         runner=runner,
         plans=plans,
         trail=trail,
+        spend=trail,
         # The very trail the ingestion stage above records into (ADR-0186 §10).
         reads=reads,
         memory=store,
