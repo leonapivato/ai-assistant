@@ -118,9 +118,15 @@ dependency's, and what it says when it refuses.
 > there too — so the ceiling holds for the structure that is actually frozen,
 > whatever the raw input presented to the first measurement.
 
-> **Normative.** No exception other than that `ValueError` escapes either
-> measurement: a raw input the first measurement cannot enumerate is refused with
-> it rather than accepted on a depth that was never established.
+> **Normative.** The first measurement descends only container forms whose
+> enumeration the input cannot override, so that what it measures is what
+> validation will build; any other value presenting as a mapping or as a
+> non-`str` sequence is refused with that `ValueError` rather than measured on an
+> enumeration it supplied itself.
+
+> **Normative.** No `Exception` other than that `ValueError` escapes either
+> measurement. A `BaseException` propagates unchanged, as it does everywhere else
+> in this repository (ADR-0029 §3).
 
 > **Normative.** That refusal introduces no new exception type: it reaches a
 > caller as the holder's ordinary construction refusal, exactly as the
@@ -169,14 +175,31 @@ on 2026-08-26 against `main` at `c08fa53a`:
   input can talk its way past, which is worse than the leak and is not a defect
   of the front placement but of trusting one measurement.
 
+**A conservative front measurement is not enough, and the second clause is why
+the third one is written the way it is.** Letting the liar through the front and
+catching it on the validated value would hold only at a comfortable recursion
+limit: at `sys.setrecursionlimit(120)` pydantic walks the real 201 containers
+before any second measurement can run, and raises `RecursionError` rather than
+§1's refusal. So the front measurement has to be *faithful*, not merely careful —
+which is what "only container forms whose enumeration the input cannot override"
+buys. Enumerating a `dict` instance through `dict.values` rather than through
+`value.values()` is the whole of it for the subclass case, because that is what
+pydantic-core itself does; `list`, `tuple` and `FrozenDict` are the other forms
+whose contents cannot be misreported, and anything else presenting as a container
+is refused rather than guessed at. That is the set as this is written, offered so
+the implementation is not guessing; the clause is stated as the property, because
+the set is what satisfies it and not what defines it.
+
 So the two positions have two jobs and neither subsumes the other. The **front**
 measurement is what makes the refusal independent of `sys.getrecursionlimit()`,
-and it may be conservative — it is allowed to refuse a raw shape it cannot
-enumerate faithfully, and the third clause requires it to. The **second**
-measurement is the authoritative one: it runs on a plain validated structure, in
-which nothing can lie about its own depth, and it is what the ceiling actually
-means. One constant, checked twice, for two properties that one check cannot hold
-at once.
+and the third clause is what makes it faithful enough to carry that. The
+**second** measurement is defence in depth against the front's canonical set
+falling behind: a pydantic version that accepted a container form the front
+refuses, or built one the front measured as a leaf, would otherwise widen the
+ceiling silently, and the second measurement runs on a plain validated structure
+in which nothing can lie about its own depth. One constant, checked twice,
+because a single check would either depend on the recursion limit or depend on
+this document's list of container forms staying current.
 
 A plain `ValueError` and not a named error, for the same reason: the two refusals
 already at this site are plain `ValueError`s, pydantic turns them into a
@@ -288,8 +311,9 @@ than the value that is merely *frozen*.
 > still refused with §1's reason and no `RecursionError` is raised; (e) a mapping
 > whose enumeration raises is refused with an ordinary construction refusal and
 > propagates no other exception; (f) a mapping that under-reports its own contents
-> to the front measurement, and whose validated form is over the ceiling, is
-> refused.
+> through `values()`, and whose concrete contents are over the ceiling, is
+> refused with §1's reason — including with `sys.setrecursionlimit` set below the
+> ceiling, where an unfaithful front measurement yields `RecursionError` instead.
 
 Each of these is a claim this ADR makes that would otherwise decay silently, and
 two of them are the only mechanical guard on a clause above.
@@ -307,9 +331,12 @@ of either file would see.
 
 **(e) and (f) are the two traps §1's prose measures**, and they are pinned
 separately because they fail separately: (e) catches a front measurement that
-trusts a raw enumerator, and (f) catches an implementation that measures only at
-the front. An implementation with one measurement in the right place passes every
-other pin here and fails (f).
+propagates a raw enumerator's exception, and (f) catches one that believes it.
+(f) carries the lowered recursion limit for the reason §1 gives — at the default
+limit an unfaithful front measurement is rescued by the second one and the pin
+passes for the wrong reason, and it is only under the low limit that the
+difference between "faithful" and "caught later" becomes the difference between
+§1's refusal and a `RecursionError`.
 
 **(d) is what tests §1's ordering and §2's iterativeness at once**, and it is
 written with the recursion limit *below* the ceiling for that reason. At the
@@ -417,11 +444,17 @@ here, so the exposure is theoretical rather than observed — and a deployment t
 finds one is the revisit trigger below, not a case to widen the ceiling for
 quietly.
 
-A second narrowing, small and deliberate: a raw mapping or sequence the front
-measurement cannot enumerate faithfully is refused rather than accepted, so a
-`dict` subclass with a raising `values()` — which validates today — will not.
-Nothing legitimate is shaped that way, and §1's third clause prefers a refusal to
-a depth nobody established.
+A second narrowing, deliberate and wider than the first looks: §1's third clause
+refuses any input presenting as a mapping or a non-`str` sequence that is not one
+of the container forms whose contents it cannot misreport. A `dict` subclass with
+a raising `values()`, and a custom `Mapping` implementation that is not a `dict`
+or a `FrozenDict`, both validate today and will not afterwards. Nothing in this
+repository constructs a `FrozenJson` value from either — every producer hands over
+a `dict`, a `list`, or the frozen forms `_deep_freeze` itself makes — and the
+clause prefers a refusal to a depth the input got to choose. It is the cost of the
+guarantee holding at every recursion limit rather than at comfortable ones, and it
+is the clause to revisit first if a legitimate producer of some other mapping type
+appears.
 
 Every construction of a `FrozenJson` value also gains two more passes over it:
 bounded breadth-first walks that stop as soon as the ceiling is exceeded, on the
