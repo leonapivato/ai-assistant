@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import unicodedata
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import Enum
 from math import isfinite
 from typing import TYPE_CHECKING, Any, Final
@@ -105,6 +106,12 @@ def _instant(value: datetime) -> str:
     )
 
 
+#: ADR-0194 §5's plain/exponential boundary: below an adjusted exponent of -6 the
+#: form is exponential, which is where ``Decimal("0.0000000001")`` becomes
+#: ``"1E-10"`` rather than being spelled out.
+_PLAIN_FORM_FLOOR: Final = -6
+
+
 def _duration(value: timedelta) -> str:
     """Spell one duration as ADR-0087 §2e fixes it.
 
@@ -145,11 +152,56 @@ def _duration(value: timedelta) -> str:
     return f"{sign}P{date_part}" + (f"T{time_part}" if time_part else "")
 
 
+def _decimal(value: Decimal) -> str:
+    """Spell one exact decimal as ADR-0194 §5 fixes it.
+
+    The **to-scientific-string** form of the General Decimal Arithmetic
+    specification, written out rather than delegated to ``str`` for ADR-0087 §1's
+    reason: "whatever ``repr`` does" is not a wire contract, and a library's ``str``
+    is the same objection. CPython 3.14's ``str`` reproduces this on every vector
+    ADR-0194 §5 states and on 200,000 pseudo-random finite decimals, so an
+    implementation *may* call ``str`` today and conform; what is ratified is the
+    grammar, and this is what would catch an interpreter that stopped agreeing.
+
+    **A JSON string and never a JSON number.** A number would be read back through
+    a binary float on the far side, which is the one thing ADR-0194 §2's exact
+    arithmetic forbids, and ADR-0087 §2c's ``float`` grammar is about a value that
+    *is* a binary64 — this one is not.
+
+    **The scale is carried and never normalised**, which follows from ADR-0087 §4
+    rather than from taste: §4's relation is indistinguishability, and
+    ``Decimal("1.0")`` and ``Decimal("1")`` differ under ``as_tuple()``, so they are
+    two values and a spelling mapping both onto one would normalise. Nothing here
+    consults ``decimal.getcontext()`` and nothing here performs arithmetic, so
+    ADR-0194 §1's context-independence holds on the wire as it holds in the
+    predicate.
+    """
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # pragma: no cover — the caller checks finiteness
+        msg = f"a non-finite Decimal has no canonical encoding, so {value!r} cannot be measured"
+        raise ValueError(msg)
+    spelled = "".join(str(digit) for digit in digits)
+    adjusted = exponent + len(digits) - 1
+    if exponent <= 0 and adjusted >= _PLAIN_FORM_FLOOR:
+        if exponent == 0:
+            body = spelled
+        elif adjusted >= 0:
+            point = len(spelled) + exponent
+            body = f"{spelled[:point]}.{spelled[point:]}"
+        else:
+            body = "0." + "0" * (-adjusted - 1) + spelled
+    else:
+        head, rest = spelled[0], spelled[1:]
+        coefficient = f"{head}.{rest}" if rest else head
+        body = f"{coefficient}E{'+' if adjusted >= 0 else '-'}{abs(adjusted)}"
+    return f"-{body}" if sign else body
+
+
 # One total dispatch over the value space, kept as a single chain deliberately: a
 # reader checking that every type this surface can carry has a form — and that the
 # two ADR-0087 §2 gives *no* form are refused rather than guessed — has one place
 # to look. Splitting it to satisfy the branch counters would move half the answer.
-def project(value: object) -> Any:  # noqa: C901, PLR0911
+def project(value: object) -> Any:  # noqa: C901, PLR0911, PLR0912
     """Render one value into the plain JSON types ADR-0087 §2's recipe encodes.
 
     The first half of the canonical encoding: ``json.dumps`` cannot render a
@@ -169,9 +221,12 @@ def project(value: object) -> Any:  # noqa: C901, PLR0911
         ``float``, ``bool`` or ``None``.
 
     Raises:
-        ValueError: If a string has no UTF-8 encoding, or a float is not finite.
-            Both are values ADR-0087 §2 gives no wire form, and §7 fixes that they
-            are refused **before** measurement rather than substituted.
+        ValueError: If a string has no UTF-8 encoding, or a ``float`` or a
+            ``Decimal`` is not finite. Each is a value ADR-0087 §2 gives no wire
+            form, and §7 fixes that they are refused **before** measurement rather
+            than substituted. The ``Decimal`` case is a backstop rather than a
+            reachable state: ADR-0194 §1's and §5's validators make every one this
+            surface carries finite already.
         TypeError: If the value is of a type this surface does not carry. Fail
             closed: a type nobody has spelled a form for has no canonical bytes,
             and guessing one would be the divergence this module exists to prevent.
@@ -189,6 +244,15 @@ def project(value: object) -> Any:  # noqa: C901, PLR0911
             msg = f"a non-finite float has no canonical encoding, so {value!r} cannot be measured"
             raise ValueError(msg)
         return value
+    if isinstance(value, Decimal):
+        # **A string, not a number** (ADR-0194 §5). The row ADR-0087 §2c's table
+        # gains, and this ADR is where it is decided because this is what puts a
+        # `Decimal` on the promoted surface — without it `spend_totals` cannot cross
+        # the wire at all, the projection below raising on a type it does not list.
+        if not value.is_finite():
+            msg = f"a non-finite Decimal has no canonical encoding, so {value!r} cannot be measured"
+            raise ValueError(msg)
+        return _decimal(value)
     if isinstance(value, str):
         return encodable_text(value)
     if isinstance(value, datetime):

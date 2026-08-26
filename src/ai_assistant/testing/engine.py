@@ -78,6 +78,7 @@ from ai_assistant.core.types import (
     Retirement,
     SkipReason,
     SourceGrant,
+    SpendTotal,
     StepExecution,
     StepOutcome,
     StepStatus,
@@ -112,7 +113,7 @@ from ai_assistant.testing.reads import FakeSourceReadTrail
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail, SourceReadTrail
+    from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
         ConnectedAccount,
         ConnectionAct,
@@ -282,7 +283,25 @@ class FakeAssistantEngine:
         #: exercising that freedom. A fake holding a bare list could only hand back
         #: what its own sort produced, and would pass that case while asserting
         #: nothing.
-        self.trail: AuditTrail = FakeAuditTrail()
+        audit = FakeAuditTrail()
+        self.trail: AuditTrail = audit
+        #: The ledger ADR-0194 §6's read relays, public and replaceable for the
+        #: ``trail`` attribute's reason: the states that matter here — an
+        #: indeterminate period, a configured ceiling, a zone whose day boundary is
+        #: not midnight UTC — are all facts about the **producer's** configuration,
+        #: and a fake holding a pair of pre-built ``SpendTotal`` values could only
+        #: hand back what a test had already assembled. Seed it by replacing it with
+        #: a ``FakeAuditTrail`` built with a currency, a ceiling and a zone, and by
+        #: claiming and completing invocations through it.
+        #:
+        #: **A ``SpendLedger`` and never a ``SpendGate``** (ADR-0194 §5): this
+        #: surface exposes no admission, and a fake offering one would let a
+        #: consumer's test spend a budget through an adapter.
+        #: **Replace it together with** :attr:`trail`, since one object carries
+        #: both faces here as it does in the composition root: a fake whose two
+        #: attributes were different objects would state totals over rows the
+        #: decision reads cannot see.
+        self.spend: SpendLedger = audit
         #: The source-read trail ADR-0186 §10's two reads relay, public and seeded
         #: the same way — ``await engine.reads.record(read)`` — and for the same
         #: reason: this surface has no producer for a row either, because a read is
@@ -1140,6 +1159,19 @@ class FakeAssistantEngine:
         return self._checked(
             _ordered_invocations(await self.trail.export_invocations()), "export_invocations"
         )
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Relay the ledger's two period totals, unchanged (ADR-0194 §6).
+
+        **Relayed rather than assembled**, which is the opposite of what
+        :meth:`export_invocations` above does and is right for the opposite reason:
+        ADR-0194 §5 makes the order, the one-clock-read coherence and the
+        period bounds the **ledger's** guarantees, so a fake computing them here
+        would be a second implementation of the rule that the shared suite could
+        then only compare against itself.
+        """
+        self.calls.append(("spend_totals", {}))
+        return self._checked(await self.spend.spend_totals(), "spend_totals")
 
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).

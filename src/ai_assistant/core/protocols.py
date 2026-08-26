@@ -9161,6 +9161,73 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- what the world has cost (ADR-0194 §6) ------------------------------
+    #
+    # **One member and a read.** It relays :meth:`SpendLedger.spend_totals` and
+    # returns what it returns — no composition, no filtering, no reordering, and no
+    # second source. The engine holds a ``SpendLedger`` and **never** a
+    # :class:`SpendGate`: an adapter able to call the admission has acquired the
+    # ability to spend a budget (ADR-0194 §5).
+    #
+    # **The browser gets nothing from it.** This operation is not one of ADR-0177
+    # §1's thirty, no browser request resolves to it, no browser argument reaches
+    # it, the gateway makes no call of its own to it, and ADR-0194 §6 widens that
+    # enumeration by nothing. A browser view is a later consumer lane with its own
+    # ratified decision.
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """What each calendar period has cost, in ``SpendPeriod``'s fixed order.
+
+        ``CALENDAR_DAY`` then ``CALENDAR_MONTH``, both entries whatever is
+        configured, and each carrying the bounds ADR-0194 §1's rule computed for
+        its own period in the **ledger's** configured zone together with the UTC
+        offsets in force at those two instants. A renderer prints each bound from
+        the value's own offset and never from its own zone or its own ``tzdata``
+        (ADR-0194 §5, §6) — which is what lets a client on a different zone
+        database render a value its producer computed correctly.
+
+        **An indeterminate period is returned rather than raised** —
+        ``accounted=None`` beside a present ``currency`` — and ``currency`` is what
+        discriminates that from the other absence: ``currency=None`` means no
+        currency is configured and no total was computed. No third meaning is
+        assigned to the absence, and a renderer collapsing the two tells a user "no
+        total" while their calls are being refused.
+
+        **No surface presents an accounted total as an amount billed, owed or
+        charged** (ADR-0194 §6). It is the sum of what this system's tools
+        *reported*, and a surface states it as that.
+
+        Returns:
+            Exactly two totals, in ``SpendPeriod``'s declaration order.
+
+        Raises:
+            SpendUndeterminedError: Only where the ledger cannot produce the values
+                at all — a store read that failed, or an injected clock that raised
+                (ADR-0194 §5). A trapped sum is **not** that case: the affected
+                period comes back indeterminate and the other period's figure is
+                still computable.
+            OversizedValueError: Under ADR-0085 §8, which this ADR does not lift and
+                makes no claim about the reachability of: ADR-0194 §1 bounds each
+                contributing amount and nothing bounds the number of rows, so an
+                accounted total is not bounded and the declaration is a real one.
+
+        **No other** ``AssistantError`` **escapes**, and that closed set is over
+        *this surface's* failure vocabulary and not over a transport's. A
+        hub-backed implementation raises
+        :class:`~ai_assistant.wire.errors.HubUnavailableError` where no hub is
+        listening or the connection goes away mid-request, and
+        :class:`~ai_assistant.wire.errors.ProtocolError` on a malformed or truncated
+        reply; **both reach the caller unwrapped**, and neither is a failure this
+        member declares. They are deliberately not translated to
+        ``SpendUndeterminedError``: ADR-0194 §4 enumerates that class over six
+        grounds, each of them a way *the spend* could not be reduced to a number,
+        and a connection that was not there is none of them — reporting one as the
+        other would tell a user a fact about their budget that nothing measured.
+        ``recent_decisions`` and ``export_decisions`` are in exactly this position
+        and declare neither (ADR-0085 §9, ADR-0186 §5).
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

@@ -378,7 +378,56 @@ from ai_assistant.wire.errors import (
 #: anything and its ground a Tier 0 credential a ``RecordedInvocation`` carries
 #: none of. The row carries no content at all: ADR-0192 §2 keeps every argument
 #: value, payload, output, failure message and digest of any of them off it.
-PROTOCOL_VERSION: Final[int] = 15
+#:
+#: **16 since ADR-0194 §5**, and this one bump carries **two independent
+#: ADR-0124 §9 grounds** because the consumer group ADR-0194 §11 names makes both
+#: incompatible changes in one change. §5 states the grounds so that neither is
+#: read as unversioned, and §11 forbids splitting the codec widening out of that
+#: group: landing the codec earlier and the member later would create a window in
+#: which a peer carrying the widened codec announces a version an old peer believes
+#: it understands, and §9's "in the same change" would then oblige that earlier lane
+#: to bump on its own — two bumps where the topology needs one.
+#:
+#: **The codec's domain widens.** ``wire/codec.py``'s projection raised
+#: ``TypeError`` on a ``Decimal`` before and encodes one after, so a version 16
+#: peer may emit a ``PER_CALL`` ``Decimal`` inside a ``PermissionDecision`` that a
+#: version 15 peer refuses — ADR-0124 §9's first limb, "a frame a conforming peer at
+#: the new version may send would be refused by a conforming peer at the old
+#: version". The gap is **older than ADR-0194**: ``ToolCost.amount`` is a
+#: ``Decimal`` today and such a decision already could not be exported (#1559), and
+#: nothing in the tree declares a ``PER_CALL`` cost, which is why it has not bitten.
+#:
+#: **The promoted method set gains a member.** ``spend_totals`` — what each
+#: calendar period has cost — is the same limb one surface out, and is the ground
+#: ADR-0186 §5 bumped on. ``wire.surface``'s ``METHODS`` is derived from the
+#: Protocol, so a version 16 client sending it to a version 15 hub is refused
+#: there, which is the half-finished upgrade §3 wants legible at the handshake.
+#:
+#: **The method set moves from thirty-eight to thirty-nine**, and ADR-0177 §1's
+#: browser enumeration does **not** move: it stands at thirty, and ADR-0194 §6 and
+#: §11 say so in terms — "the browser gets nothing from that group", no gateway
+#: route, argument or call is added, and a browser view is a later consumer lane
+#: with its own ratified decision.
+#:
+#: **ADR-0087 §8's first case is absent and that is not a defence**, which ADR-0194
+#: §5 states because the two rules are easy to conflate: §8's first case is about
+#: bytes *changing* for a value an encoder already emitted, and no conforming
+#: encoder emitted any bytes for a ``Decimal`` before — it raised — so no ratified
+#: vector's spelling moves. ADR-0124 §9's ground is met independently, asking what
+#: a new peer **may send** that an old one refuses. A lane reading ADR-0087's note
+#: as "no bump owed" and stopping there would ship the widened codec unversioned.
+#:
+#: **Nothing else under** ``wire/`` **changes for it but the client's one method
+#: and the codec's one row**, as at 12, 14 and 15. The connect exchange gains no
+#: member, no existing frame's encoding changes, no :class:`FrameKind` is added.
+#: ``METHODS``, ``STREAMING_METHODS``, both adapters and the error mapping are
+#: derived from the Protocol; ``wire/client.py`` is hand-written, so its one
+#: forwarding method is the one edit there. The method joins neither
+#: ``wire/server.py``'s ``CONNECTION_METHODS`` nor ``STREAMING_METHODS``, so both
+#: listeners carry it, by the default those constants already produce — and a
+#: ``SpendTotal`` carries no Tier 0 credential and no content of any call
+#: (ADR-0194 §4, §5).
+PROTOCOL_VERSION: Final[int] = 16
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

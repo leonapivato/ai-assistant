@@ -159,6 +159,7 @@ if TYPE_CHECKING:
         NotificationStore,
         PlanStore,
         SourceReadTrail,
+        SpendLedger,
         TraceRetention,
         TraceSink,
     )
@@ -190,6 +191,7 @@ if TYPE_CHECKING:
         SecretValue,
         SourceGrant,
         SourceReadRecord,
+        SpendTotal,
         TurnResult,
     )
     from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
@@ -1151,6 +1153,7 @@ class Engine:
         runner: StepRunner,
         plans: PlanStore,
         trail: AuditTrail,
+        spend: SpendLedger,
         reads: SourceReadTrail,
         memory: MemoryStore,
         deferrals: DeferralStore,
@@ -1210,6 +1213,13 @@ class Engine:
                 records nothing; authoring rulings stays the runner's (ADR-0042 §6).
                 A façade wired to a *second* trail would recover confirmations the
                 runner's own ``resume`` cannot resolve.
+            spend: The spend ledger — the **same object** ``trail`` is, wired
+                through its ``SpendLedger`` face (ADR-0194 §5). One holder satisfies
+                that Protocol, ``SpendGate`` and ADR-0192's ledger seam, because all
+                three read the same rows and two keyed by them could disagree about
+                a total. It is the ledger face and **never** the gate: an adapter
+                able to call the admission has acquired the ability to spend a
+                budget, which is ADR-0029 §1's argument one seam over.
             reads: The source-read trail — the **same instance** the three drivers
                 record into (a composition-root single-instance obligation of the
                 same shape as ``plans`` and ``trail``; ADR-0185 §4). The façade
@@ -1608,6 +1618,7 @@ class Engine:
         self._runner = runner
         self._plans = plans
         self._trail = trail
+        self._spend = spend
         self._reads = reads
         self._memory = memory
         self._deferrals = deferrals
@@ -4340,6 +4351,29 @@ class Engine:
             "export_invocations",
             checked=True,
         )
+
+    # --- what the world has cost (ADR-0194 §6) -----------------------------
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Relay the ledger's two period totals, unchanged (ADR-0194 §6).
+
+        It **relays**: no composition, no reordering and no second source. The
+        ledger derives both entries from one reading of the clock and one snapshot
+        of the rows, so anything this frame did between two reads of its own would
+        be the incoherence ADR-0194 §5 forbids, reintroduced one layer up.
+
+        The engine holds a ``SpendLedger`` and never a ``SpendGate``, so there is no
+        route from any adapter to an admission (ADR-0194 §5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            SpendUndeterminedError: If the ledger cannot produce the values at all —
+                a failed store read or a raising clock. An indeterminate *period* is
+                returned rather than raised (ADR-0194 §5).
+            OversizedValueError: If the pair exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._spend.spend_totals(), "spend_totals", checked=True)
 
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.

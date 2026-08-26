@@ -63,6 +63,7 @@ def _wired(
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        spend=harness.trail,
         reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
