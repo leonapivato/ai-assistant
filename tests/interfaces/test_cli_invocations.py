@@ -83,6 +83,11 @@ _AT = datetime(2026, 3, 3, 11, 0, tzinfo=UTC)
 #: module authors rather than the substring search §9 calls wrong.
 _BARRED_CLAIMS: Final = ("sent", "read", "received", "delivered", "seen", "acted on")
 
+#: What the opener writes to standard output when a case asks it to. Recognisable
+#: rather than plausible, so an assertion that it reached standard error is about
+#: this line and not about something the command legitimately printed.
+_NOISE: Final = "a-diagnostic-that-must-not-reach-the-artifact"
+
 #: The four things §4 forbids naming on an invocation row. Asserted over the
 #: **structured** half as well — the export's keys — because that is where a lane
 #: would add one and no prose assertion would notice.
@@ -237,14 +242,28 @@ def output(monkeypatch: pytest.MonkeyPatch) -> StringIO:
     return buffer
 
 
-def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
+def _wire(monkeypatch: pytest.MonkeyPatch, engine: object, *, noise: str = "") -> None:
     """Point the invocation commands' startup at ``engine``.
 
     The seam is :func:`~ai_assistant.interfaces.cli._open_engine`, as it is for
     every other command on this surface (ADR-0084 §6).
+
+    Args:
+        engine: What the commands are handed.
+        noise: Written to ``sys.stdout`` by the opener, before the engine is
+            returned. **Not decoration**: ADR-0186 §9's stream clause is about the
+            *stream* rather than about this adapter's own politeness, so an export
+            case run over a silent opener would stay green with
+            ``contextlib.redirect_stdout`` deleted — and the first log line emitted
+            anywhere on the client path would then land in the middle of a user's
+            artifact. ``structlog``'s ``PrintLoggerFactory`` defaults to
+            ``sys.stdout``, so this is the state the redirect exists against rather
+            than a hypothetical one.
     """
 
     async def _open() -> object:
+        if noise:
+            print(noise)
         return engine
 
     monkeypatch.setattr(cli, "load_settings", Settings)
@@ -715,12 +734,22 @@ def test_the_export_writes_the_document_and_nothing_else_to_standard_output(
     redirect were not there. ``json.loads`` over the whole of standard output is the
     assertion — a stray diagnostic makes the document unparseable rather than merely
     untidy, which is the failure mode the clause exists against.
+
+    **The opener really writes to standard output here**, and that is what makes
+    this a test of the redirect rather than of a silent fixture: over an opener that
+    printed nothing, deleting ``contextlib.redirect_stdout`` from
+    ``_export_invocations`` would leave the case green while a real client path's
+    first log line corrupted a user's artifact. The sentinel is asserted **on
+    standard error**, because §9's clause is that the diagnostics still reach a
+    person — a redirect to nowhere would satisfy the stdout half and lose the
+    message.
     """
-    _wire(monkeypatch, _ScriptedInvocationEngine(_claim("i-1")))
+    _wire(monkeypatch, _ScriptedInvocationEngine(_claim("i-1")), noise=_NOISE)
 
     result = CliRunner().invoke(cli.app, ["export-invocations"])
 
     assert result.exit_code == 0
+    assert _NOISE in result.stderr, "the diagnostic was redirected to nowhere"
     assert json.loads(result.stdout) == [
         {
             "invocation": {
@@ -750,13 +779,22 @@ def test_an_export_the_engine_refuses_writes_no_document_at_all(
     outcome ruled out, and it is the one a helpful adapter would produce.
     """
     engine = _ScriptedInvocationEngine(_claim("i-1"))
-    engine.export_raises = OversizedValueError("too large", limit=10, size=99, field="result")
+    refusal = OversizedValueError(
+        "the invocation trail exceeds the contract limit", limit=10, size=99, field="result"
+    )
+    engine.export_raises = refusal
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["export-invocations"])
 
     assert result.exit_code != 0
     assert result.stdout == ""
+    # Caught and said, rather than merely fatal: an uncaught exception also empties
+    # standard output and also exits non-zero, and it leaves the user with a
+    # traceback where the refusal's own words — the limit and the measured size —
+    # are what tell them which knob to turn (ADR-0042 §7, ADR-0192 §4).
+    assert result.exception is not refusal
+    assert "the invocation trail exceeds the contract limit" in _flat(result.stderr)
 
 
 # --- the error boundary, and the refusal that never reaches the engine -------
@@ -776,15 +814,26 @@ def test_a_listing_the_engine_cannot_answer_is_rendered_as_an_error(
     unreadable trail as an empty listing would tell a user nothing ever ran, which
     is the one wrong answer this surface can give — ADR-0192 §4's page-silence
     clause is about a *bound*, not about a store that failed to answer.
+
+    **A non-zero exit is not the assertion, and on its own it is barely one.**
+    ``CliRunner`` reports a non-zero code for an *uncaught* exception too, so a
+    driver with no ``except`` at all satisfies "the command failed" while the user
+    meets a traceback instead of the rendered error and the controlled exit ADR-0042
+    §7 requires. What separates the two is that the failure was **caught**: the
+    message is on screen in this module's own rendering, and the injected exception
+    did not escape the driver.
     """
     engine = _ScriptedInvocationEngine(_claim("i-1"))
     engine.listing_raises = failure
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["invocations"])
+    rendered = _flat(output.getvalue())
 
     assert result.exit_code != 0
-    assert "Nothing recorded." not in _flat(output.getvalue())
+    assert result.exception is not failure, "the failure escaped the driver uncaught"
+    assert str(failure) in rendered, "the failure was not rendered for the user"
+    assert "Nothing recorded." not in rendered
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "1.5", "x"], ids=["zero", "negative", "float", "text"])

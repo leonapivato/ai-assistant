@@ -125,6 +125,16 @@ class ServedHub:
             max_frame_bytes=max_frame_bytes, read_timeout=_PATIENT, build="test"
         )
         self._server: asyncio.Server | None = None
+        #: How many connections this hub has accepted.
+        #:
+        #: **The instrument for "before any I/O"**, and the only one that really
+        #: says it. The shared suite's negative control is the store's read log,
+        #: which is untouched whether the client refused locally *or* shipped the
+        #: argument to a hub that refused it first — so over this binding that
+        #: assertion is satisfied by the silently more permissive implementation
+        #: ADR-0085 §9 forbids. A client that sent a frame had to open a socket to
+        #: send it, and this counts that.
+        self.connections = 0
 
     async def start(self) -> HubEngineClient:
         """Bind and begin accepting, and return a client pointed at the socket."""
@@ -132,6 +142,7 @@ class ServedHub:
         return HubEngineClient(self.path, read_timeout=_PATIENT)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.connections += 1
         await serve_connection(self.backing, reader, writer, limits=self._limits)
 
     async def aclose(self) -> None:
@@ -473,3 +484,39 @@ class TestHubEngineClientContract(AssistantEngineContract):
             max_frame_bytes=_TINY_LIMIT + ENVELOPE_RESERVE_BYTES,
         ) as client:
             yield client
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2**63, True, 1.5, "1", None], ids=str)
+async def test_a_malformed_invocation_limit_never_opens_a_socket(
+    tmp_path: Path, bad: object
+) -> None:
+    """ADR-0192 §4: ``limit`` is refused "locally and before any I/O", at this client.
+
+    **The case the shared suite cannot express**, and the reason is worth stating
+    rather than leaving to be rediscovered. That suite's negative control is the
+    store's read log, and over this binding the log is empty either way: a client
+    that shipped ``limit=0`` down the socket would meet a hub whose engine refuses
+    it before touching the trail, so the shared assertion passes for exactly the
+    silently more permissive implementation ADR-0085 §9 forbids and ADR-0192 §4
+    names again in its own terms.
+
+    What says *locally* over a real transport is that **no connection was ever
+    accepted**. The client connects lazily, on its first call, so a frame it wanted
+    to send would have opened one — and :attr:`ServedHub.connections` counts that
+    from the accepting side, where a client cannot be mistaken about it.
+
+    Run over every value ADR-0192 §9 enumerates — a ``bool``, a non-integer, zero, a
+    negative and ``2**63`` — because the refusals are two different guards and only
+    the type one is reached by three of them.
+    """
+    hub = ServedHub(FakeAssistantEngine(), tmp_path / "hub.sock", max_frame_bytes=_ORDINARY_FRAME)
+    client = await hub.start()
+    try:
+        with pytest.raises((TypeError, ValueError)):
+            # The wrong *type* is half the point of the case, so the annotation is
+            # deliberately violated here.
+            await client.recent_invocations(limit=bad)  # type: ignore[arg-type]
+
+        assert hub.connections == 0, "the refusal was not local: a frame reached the hub"
+    finally:
+        await hub.aclose()
