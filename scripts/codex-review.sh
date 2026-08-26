@@ -227,6 +227,17 @@ inflight_file="${session_dir}/${loop_key}.${persona}.inflight"
 # beside the lock under `.review/`, which is already git-ignored.
 round_file="${session_dir}/${loop_key}.${persona}.round"
 log_file="${session_dir}/${loop_key}.${persona}.log"
+start_lock_file="${session_dir}/${loop_key}.${persona}.start"
+
+# An opaque random id. Mints the durable per-loop identity below (ADR-0025 §4)
+# and the per-attempt token `--start` uses to recognise its own child.
+_mint_id() {
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
 
 # The bypass path (no sandbox, or CI) keeps no Codex session (see the invocation
 # far below). Resolved here rather than there because all three modes need it:
@@ -378,11 +389,41 @@ _mode_start() {
 
     mkdir -p "$session_dir"
 
+    # `--start` is itself a read-modify-write — it READS whether a round is in
+    # flight and then WRITES one, truncating the log and launching a child — and
+    # #142's argument about the loop's state applies to it unchanged: two
+    # invocations interleaving between those two steps both launch. Exactly one
+    # round still runs, because only one child can claim the persona lock; what
+    # goes wrong is the REPORT. The loser's parent finds the winner's marker,
+    # cannot tell it from its own child's, and returns 0 for a child that was
+    # refused — and its truncation of the shared log can take the winner's early
+    # output with it. So the whole of it runs inside an exclusive lock.
+    #
+    # `-n` rather than a bounded wait: a second concurrent `--start` of one
+    # persona is a mistake, not contention worth queueing behind. Held for the
+    # confirmation poll too, which is what makes the in-flight probe below
+    # conclusive — by the time this lock is released, this invocation's child
+    # holds the persona lock, so the next probe sees it. Blocks nothing else: the
+    # lock is per (loop, persona), and the loop's own lock is untouched.
+    # The descriptor is opened unconditionally and only LOCKED where `flock`
+    # exists, so the launch below can name it in a literal `{fd}>&-` — a
+    # redirection is parsed before any expansion, so it cannot be assembled
+    # conditionally out of a variable.
+    local start_lock_fd=""
+    exec {start_lock_fd}<>"$start_lock_file"
+    if [[ "$serialized" -eq 1 ]] && ! flock -n "$start_lock_fd"; then
+        echo "another 'scripts/codex-review.sh --start ${persona}' is in progress in" >&2
+        echo "  this clone. Personas run one at a time (ADR-0015, issue #142); if it" >&2
+        echo "  is the round you wanted, wait on it:" >&2
+        echo "  scripts/codex-review.sh --wait ${persona}" >&2
+        exit 1
+    fi
+
     # Refused here as well as in the round, so the caller reads the reason on its
-    # own terminal instead of having to go and find it in a log. This is a probe,
-    # not a claim: the round below takes the lock for itself, and two `--start`s
-    # racing past this probe still end with exactly one round, because the loser
-    # hits the round's own refusal.
+    # own terminal instead of having to go and find it in a log. Under the start
+    # lock above this is conclusive rather than advisory; without `flock` it
+    # degrades to a probe, and the token check below is then what keeps this
+    # invocation from claiming another's round as its own.
     if _lock_held; then
         echo "another '${persona}' review of this loop is already running in this" >&2
         echo "clone; refusing to start a second one. Two rounds of one persona share" >&2
@@ -399,7 +440,13 @@ _mode_start() {
     *) self="${PWD}/${self}" ;;
     esac
 
-    local launched_at
+    # A token for THIS attempt, so the confirmation below is about the child this
+    # invocation launched rather than about "some round of this persona". The
+    # start lock makes a rival child impossible in the normal case; the token is
+    # what still answers correctly where there is no `flock` to take, and what
+    # keeps a `--start` from reporting success for a child that was refused.
+    local start_token launched_at
+    start_token="$(_mint_id)"
     launched_at="$(date +%s)"
     : >"$log_file"
 
@@ -411,29 +458,51 @@ _mode_start() {
     # prevent, only harder to notice. `setsid --fork` gives it a session of its
     # own; `nohup` is the fallback where util-linux is absent and closes the
     # SIGHUP half of the same problem.
+    #
+    # The start lock is CLOSED in the child. An flock lives on a descriptor and a
+    # forked child inherits it, so a round launched with it open would hold its
+    # parent's start lock for the whole round — long after the `--start` that took
+    # it had returned. The next `--start` would then be refused as "another start
+    # is in progress" when what is really true is "a round is running", which is a
+    # different fact with a different remedy. The parent keeps its own copy: a
+    # redirection binds to the command it is written on.
     if command -v setsid >/dev/null 2>&1; then
-        CODEX_REVIEW_DETACHED_LOG="$log_file" setsid --fork \
-            "${BASH:-bash}" "$self" "$persona" "$base" \
-            >"$log_file" 2>&1 </dev/null &
+        CODEX_REVIEW_DETACHED_LOG="$log_file" CODEX_REVIEW_START_TOKEN="$start_token" \
+            setsid --fork "${BASH:-bash}" "$self" "$persona" "$base" \
+            >"$log_file" 2>&1 </dev/null {start_lock_fd}>&- &
     else
-        CODEX_REVIEW_DETACHED_LOG="$log_file" nohup \
-            "${BASH:-bash}" "$self" "$persona" "$base" \
-            >"$log_file" 2>&1 </dev/null &
+        CODEX_REVIEW_DETACHED_LOG="$log_file" CODEX_REVIEW_START_TOKEN="$start_token" \
+            nohup "${BASH:-bash}" "$self" "$persona" "$base" \
+            >"$log_file" 2>&1 </dev/null {start_lock_fd}>&- &
     fi
 
-    # Hand back only once the round has published the tree it pinned. Returning
-    # any earlier would let `--start` succeed on a round that died in its first
-    # second — a dirty tree, a missing rubric, a Codex that is not there — and the
-    # caller would then poll for an artifact nothing is producing until it gave
-    # up. `started_at` must be at or after the launch, so a marker left by an
-    # earlier round of this same loop is never mistaken for this one's.
-    local deadline=$((launched_at + start_grace)) r_tree r_started
+    # Hand back only once THIS invocation's round has published the tree it
+    # pinned. Returning any earlier would let `--start` succeed on a round that
+    # died in its first second — a dirty tree, a missing rubric, a Codex that is
+    # not there — and the caller would then poll for an artifact nothing is
+    # producing until it gave up. Three things are checked, and each excludes a
+    # different wrong marker: the token excludes another invocation's child,
+    # `started_at` excludes a marker left by an earlier round of this same loop,
+    # and the tree excludes a round reviewing other content.
+    local deadline=$((launched_at + start_grace)) r_tree r_started r_token
     while :; do
         r_tree="$(_round_field tree)"
         r_started="$(_round_field started_at)"
-        if [[ "$r_tree" == "$tree" && "$r_started" =~ ^[0-9]+$ &&
-            "$r_started" -ge "$launched_at" ]]; then
+        r_token="$(_round_field start_token)"
+        if [[ "$r_token" == "$start_token" && "$r_tree" == "$tree" &&
+            "$r_started" =~ ^[0-9]+$ && "$r_started" -ge "$launched_at" ]]; then
             break
+        fi
+        # A live round under a different token: this invocation lost a race the
+        # start lock is meant to prevent, so it is only reachable without `flock`.
+        # Said at once rather than after the grace, because the answer is already
+        # known and it is not "your round is starting".
+        if [[ -n "$r_token" && "$r_token" != "$start_token" ]] &&
+            [[ "$r_started" =~ ^[0-9]+$ && "$r_started" -ge "$launched_at" ]]; then
+            echo "another '${persona}' round of this loop claimed it first; this start" >&2
+            echo "  was refused. Exactly one round is running — wait on it:" >&2
+            echo "  scripts/codex-review.sh --wait ${persona}" >&2
+            exit 1
         fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
             echo "the detached '${persona}' round did not claim this loop within" >&2
@@ -1007,16 +1076,11 @@ trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_
 # the same (persona, tree). `snapshot_file` and `prior_snapshot` are resolved
 # once loop_id is known, below.
 
-# A durable, opaque per-loop id, minted once and recorded in the artifact so the
-# ship-time snapshot can be selected by the full anchor (loop, persona, base,
-# tree) rather than the tree alone (ADR-0025 §4). Written atomically.
-_mint_id() {
-    if [[ -r /proc/sys/kernel/random/uuid ]]; then
-        cat /proc/sys/kernel/random/uuid
-    else
-        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
-    fi
-}
+# The loop id is minted with `_mint_id`, defined with the other shared helpers
+# near the top (the mode dispatch needs it too): a durable, opaque id recorded in
+# the artifact so the ship-time snapshot can be selected by the full anchor
+# (loop, persona, base, tree) rather than the tree alone (ADR-0025 §4). Written
+# atomically.
 
 # --- Serializing the loop's read-modify-write (issue #142) -------------------
 #
@@ -1220,8 +1284,12 @@ _write_round_marker() {
     mkdir -p "$session_dir"
     printf 'pid=%s\npersona=%s\nbranch=%s\nbase_sha=%s\nsha=%s\ntree=%s\n' \
         "$$" "$persona" "$branch" "$base_sha" "$sha" "$tree" >"$tmp"
-    printf 'loop_id=%s\nstarted_at=%s\nlog=%s\n' \
-        "$loop_id" "$(date +%s)" "${CODEX_REVIEW_DETACHED_LOG:-}" >>"$tmp"
+    # `start_token` is set by `--start` and empty for a foreground round, which is
+    # why `--start` requires a MATCH rather than merely a non-empty value: an
+    # unrelated foreground round must not satisfy a start's confirmation either.
+    printf 'loop_id=%s\nstarted_at=%s\nlog=%s\nstart_token=%s\n' \
+        "$loop_id" "$(date +%s)" "${CODEX_REVIEW_DETACHED_LOG:-}" \
+        "${CODEX_REVIEW_START_TOKEN:-}" >>"$tmp"
     mv "$tmp" "$round_file"
 }
 if [[ "$bypass" -eq 0 ]]; then

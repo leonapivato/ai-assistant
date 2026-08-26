@@ -24,7 +24,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -442,3 +444,36 @@ def test_wait_still_reports_a_finished_bypass_round(tmp_path: Path) -> None:
     assert result.returncode == RECORDED, result.stderr
     assert _fields(result.stdout)["verdict"] == "APPROVE"
     assert not (repo / ".review" / "session").exists()
+
+
+def test_two_simultaneous_starts_leave_one_round_and_one_success(tmp_path: Path) -> None:
+    """Only one child can claim the persona lock; only one parent may claim success.
+
+    `--start` reads whether a round is in flight and then writes one, and two
+    invocations interleaving between those steps both launch. Exactly one round
+    runs either way — the loser's child is refused by `_claim_persona` — but the
+    loser's parent must not report 0 for a child that was refused, and must not
+    truncate the winner's log out from under it. The start lock and the
+    per-attempt token are what make the report match the fact.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
+    gate = threading.Barrier(2)
+
+    def start() -> subprocess.CompletedProcess[str]:
+        gate.wait()
+        return _run(repo, env, "--start", "adversarial", "main")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(start), pool.submit(start)]]
+
+    codes = sorted(result.returncode for result in results)
+    assert codes[0] == 0, [r.stderr for r in results]
+    assert codes[1] != 0, "the second start reported success for a round it did not launch"
+    winner = next(result for result in results if result.returncode == 0)
+    # The marker belongs to the winner's own child, which is what the token buys.
+    assert _round_pids(repo) == [int(_fields(winner.stdout)["pid"])]
+
+    _reap(repo)
+    assert len(list((repo / ".review").glob("*.md"))) == 1
