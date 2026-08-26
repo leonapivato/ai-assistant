@@ -20,6 +20,7 @@ import decimal
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 import pytest
@@ -269,3 +270,19 @@ def test_a_spend_total_is_frozen_and_forbids_extra_fields() -> None:
         total(currency="USD", zone="Europe/Rome")
     with pytest.raises(ValidationError):
         stated.accounted = Decimal("2")
+
+
+def test_a_spend_total_carries_exactly_one_string_field() -> None:
+    """One and not two, because ADR-0194 §5 carries resolved offsets in place of a zone.
+
+    A lane that finds two here has added a field §5's exact schema forbids — and
+    ``tests/core/test_text_encodability_coverage.py`` is what already holds that
+    one to being ``EncodableText``-based, which this claims no exemption from.
+    """
+    built = total(currency="USD", ceiling=Decimal("1"), accounted=Decimal("1"))
+
+    strings = [
+        name for name, value in built if isinstance(value, str) and not isinstance(value, StrEnum)
+    ]
+
+    assert strings == ["currency"]

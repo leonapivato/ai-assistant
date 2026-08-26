@@ -17,11 +17,16 @@ makes reset it.
 consumer group — ``Settings``' four fields and their load refusals, the invoker's
 own call to ``admit_invocation`` and the ``ToolInvoker`` obligations that follow
 it, the ``AssistantEngine`` relay, ``wire/codec.py``'s ``Decimal`` row and §6's
-``assistant spend`` command. And the two obligations §11 gives *the lane* rather
-than this suite: the trapped computation, which no input reaching a conforming
-implementation through these Protocols can provoke, and the correspondence of a
-returned ``SpendTotal``'s bounds to §1's rule, which only a producer can be held
-to.
+``assistant spend`` command. And the trapped computation §11 gives *the lane* rather
+than this suite, because no input reaching a conforming implementation through
+these Protocols can provoke it — each binding drives that at the seam its own
+summation goes through.
+
+``SpendTotal``'s own hostile constructions live in
+``tests/core/test_spend_types.py``, where the subject is the *type* and no
+implementation is involved. What is here is the **producer** obligation §5
+declines to put on that model, checked against §1's rule recomputed in this
+module rather than against a second copy of a producer's own algorithm.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only through a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -792,9 +797,13 @@ class SpendGateContract:
         every case listed there and still refuses a call in the one configuration
         that must refuse nothing.
         """
-        subject = harness.open(REPORTING)
+        clock = MovableClock()
+        subject = harness.open(REPORTING, now=clock)
+        await Rows(subject, clock).claimed()
 
         for estimate in (usd("1E15"), UNKNOWN, eur("1")):
+            clock.failures = 1
+            harness.fail_reads(subject, 1)
             assert await subject.admit_invocation(estimate=estimate)
 
     # --- what has no number -------------------------------------------------
@@ -2440,3 +2449,94 @@ class SpendGateContract:
         month = totals_by_period(await subject.spend_totals())[SpendPeriod.CALENDAR_MONTH]
 
         assert month.start_offset != month.end_offset
+
+    async def test_a_day_ceiling_above_the_month_ceiling_is_simply_never_binding(
+        self, harness: SpendHarness
+    ) -> None:
+        """ADR-0194 §1 refuses no configuration on that ground.
+
+        A holder quietly imposing ``day <= month`` passes every crossing case here
+        and rejects a configuration this ADR calls valid. The estimate is refused
+        on the **month** while the day is nowhere near crossed.
+        """
+        subject = harness.open(
+            replace(BOUNDED, day_ceiling=Decimal("100"), month_ceiling=Decimal("10"))
+        )
+
+        with pytest.raises(SpendCeilingError) as refusal:
+            await subject.admit_invocation(estimate=usd("20"))
+
+        assert "calendar_month" in str(refusal.value)
+        assert "calendar_day" not in str(refusal.value)
+
+    async def test_a_non_countable_allowance_is_refused_by_the_holder(
+        self, harness: SpendHarness
+    ) -> None:
+        """The allowance is one of the four amounts §1's predicate governs.
+
+        A holder that checked only the zero spellings would carry an allowance its
+        own arithmetic cannot read, and would then have to decide at admission time
+        what to do with it — which is a fact about the budget nothing measured.
+        """
+        for allowance in ("1E15", "0.0000000001", "-1"):
+            with pytest.raises(Exception):  # noqa: B017, PT011 - the class is the holder's
+                harness.open(replace(BOUNDED, allowance=Decimal(allowance)))
+
+    async def test_a_month_end_beyond_the_calendar_is_clamped_in_either_direction(
+        self, harness: SpendHarness
+    ) -> None:
+        """The late clamp in a positive-offset zone **and** a negative-offset one.
+
+        December 9999's exclusive end is the first of a month that does not exist,
+        so both are closed at the latest instant representable in each — and the
+        positive-offset zone is closed earlier than the negative-offset one,
+        because its own civil rendering runs out first. Neither refuses.
+        """
+        reading = datetime(9999, 12, 30, 12, tzinfo=UTC)
+        east = harness.open(
+            replace(REPORTING, timezone="Pacific/Kiritimati"), now=MovableClock(now=reading)
+        )
+        west = harness.open(replace(REPORTING, timezone="Etc/GMT+7"), now=MovableClock(now=reading))
+
+        eastern = totals_by_period(await east.spend_totals())[SpendPeriod.CALENDAR_MONTH]
+        western = totals_by_period(await west.spend_totals())[SpendPeriod.CALENDAR_MONTH]
+
+        peak = datetime.max.replace(tzinfo=UTC)
+        assert eastern.period_end < western.period_end <= peak
+        assert eastern.period_end + eastern.end_offset <= peak
+        assert eastern.accounted == Decimal("0")
+        assert western.accounted == Decimal("0")
+
+    @pytest.mark.parametrize(
+        ("amount", "readable"),
+        [("1E15", False), ("999999999999999.999999999", True), ("0.0000000001", False)],
+    )
+    async def test_every_classification_survives_a_hostile_ambient_context(
+        self, harness: SpendHarness, amount: str, readable: bool
+    ) -> None:
+        """The countability cases again, with ``decimal``'s signals armed against them.
+
+        ADR-0194 §1's context-independence rule: no ambient precision, rounding
+        mode or trap setting changes a classification or makes one raise, and no
+        ``decimal`` exception leaks. Driven on the declared side and the reported
+        side together, since the predicate is one rule read by two callers.
+        """
+        widest = Decimal("999999999999999.999999999")
+        clock = MovableClock()
+        subject = harness.open(
+            replace(BOUNDED, day_ceiling=widest, month_ceiling=widest), now=clock
+        )
+        hostile = decimal.Context(
+            prec=10,
+            traps=[decimal.Inexact, decimal.Rounded, decimal.Overflow, decimal.Underflow],
+        )
+
+        with decimal.localcontext(hostile):
+            await Rows(subject, clock).completed(usd(amount))
+            stated = totals_by_period(await subject.spend_totals())
+            if readable:
+                assert stated[SpendPeriod.CALENDAR_DAY].accounted == Decimal(amount)
+            else:
+                assert stated[SpendPeriod.CALENDAR_DAY].accounted is None
+                with pytest.raises(SpendUndeterminedError, match=GROUND["amount"]):
+                    await subject.admit_invocation(estimate=usd(amount))
