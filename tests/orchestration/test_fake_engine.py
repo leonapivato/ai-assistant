@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
@@ -27,20 +28,24 @@ from assistant_engine_contract import (
     _OVERFULL_GRANTS,
     _OVERFULL_READS,
     _SOURCE,
+    _SPEND_LIMIT,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
     page_after_mutating_the_filter,
     seeded_invocation_trail,
     seeded_read_trail,
+    seeded_spend_ledger,
     seeded_trail,
 )
 
@@ -251,6 +256,49 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine()
         engine.reads = trail
         return ReadSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def spending(self) -> SpendSubject:
+        """The fake over a ledger carrying a zero ceiling on both periods.
+
+        ``trail`` and ``spend`` are set together, as the composition root wires one
+        object: a fake whose two attributes were different objects would state
+        totals over rows the decision reads cannot see.
+        """
+        ledger = await seeded_spend_ledger(
+            day_ceiling=SPEND_ZERO_CEILING, month_ceiling=SPEND_ZERO_CEILING
+        )
+        engine = FakeAssistantEngine()
+        engine.trail = ledger
+        engine.spend = ledger
+        return SpendSubject(engine=engine, ledger=ledger)
+
+    @pytest.fixture
+    async def unconfigured_spending(self) -> SpendSubject:
+        """The fake over a ledger with no currency configured."""
+        ledger = await seeded_spend_ledger(currency=None)
+        engine = FakeAssistantEngine()
+        engine.trail = ledger
+        engine.spend = ledger
+        return SpendSubject(engine=engine, ledger=ledger)
+
+    @pytest.fixture
+    async def indeterminate_spending(self) -> SpendSubject:
+        """The fake over a ledger holding an open claim, day ceiling only."""
+        ledger = await seeded_spend_ledger(day_ceiling=Decimal("10"), open_claim=True)
+        engine = FakeAssistantEngine()
+        engine.trail = ledger
+        engine.spend = ledger
+        return SpendSubject(engine=engine, ledger=ledger)
+
+    @pytest.fixture
+    async def overfull_spending(self) -> AssistantEngine:
+        """The fake at a limit the pair of totals cannot fit inside."""
+        ledger = await seeded_spend_ledger()
+        engine = FakeAssistantEngine(max_payload_bytes=_SPEND_LIMIT)
+        engine.trail = ledger
+        engine.spend = ledger
+        return engine
 
     @pytest.fixture
     async def invocations(self) -> InvocationSubject:

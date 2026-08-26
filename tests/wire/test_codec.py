@@ -35,23 +35,34 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from decimal import Decimal
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import TypeAdapter
 
 from ai_assistant.core.types import (
+    ActionRequest,
     Belief,
     BeliefBand,
     BeliefSummary,
     Confirmation,
     ContinuationToken,
+    CostBasis,
     Evidence,
+    Idempotency,
     MemoryKind,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
+    Reversibility,
+    RiskLevel,
+    ToolCost,
+    ToolDefinition,
 )
 from ai_assistant.orchestration.payloads import canonical_payload as engine_encode
-from ai_assistant.wire.codec import canonical_payload
+from ai_assistant.wire.codec import canonical_payload, project
 
 
 def _both(value: object) -> bytes:
@@ -606,3 +617,138 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
     # 6. A duration with a year component.
     assert TypeAdapter(timedelta).dump_json(timedelta(days=365)) == b'"P1Y"'
     assert canonical_payload(timedelta(days=365)) == b'"P365D"'
+
+
+# --- ADR-0194 §5's Decimal form, on ADR-0087 §2c's newest row ---------------
+
+#: The eight vectors ADR-0194 §5 states, each pinned to its **exact bytes**.
+#:
+#: The threshold pair matters most — an encoder emitting ``"0.0000000001"`` where
+#: §5 says ``"1E-10"`` escapes a suite that checks only round-tripping — and so
+#: does ``Decimal("1.23E+7")``, which carries the exponential branch's multi-digit
+#: coefficient that every other exponential vector here leaves untested.
+_DECIMAL_VECTORS: Final = (
+    (Decimal("1.50"), '"1.50"'),
+    (Decimal("1E15"), '"1E+15"'),
+    (Decimal("0"), '"0"'),
+    (Decimal("-0"), '"-0"'),
+    (Decimal("1.0000000000"), '"1.0000000000"'),
+    (Decimal("0.0000000001"), '"1E-10"'),
+    (Decimal("1.23E+7"), '"1.23E+7"'),
+    (Decimal("0E-999999999999999999"), '"0E-999999999999999999"'),
+)
+
+
+@pytest.mark.parametrize(("value", "expected"), _DECIMAL_VECTORS, ids=str)
+def test_a_decimal_reaches_the_bytes_adr_0194_states(value: Decimal, expected: str) -> None:
+    """§5's grammar, asserted on the bytes and not on a round trip.
+
+    A JSON **string** and never a JSON number: a number would be read back through
+    a binary float on the far side, which is the one thing ADR-0194 §2's exact
+    arithmetic forbids.
+    """
+    assert _both(value) == expected.encode()
+
+
+@pytest.mark.parametrize(("value", "_expected"), _DECIMAL_VECTORS, ids=str)
+def test_a_decimal_round_trips_to_a_value_the_type_cannot_distinguish(
+    value: Decimal, _expected: str
+) -> None:
+    """Decoding is the inverse and reads the string back to the **same triple**.
+
+    Asserted on ``as_tuple()`` rather than on ``==``, because ``Decimal("-0")``
+    equals ``Decimal("0")`` and ``Decimal("1.0")`` equals ``Decimal("1")`` — so an
+    equality assertion is exactly the one a normalising implementation passes.
+    """
+    decoded = TypeAdapter(Decimal).validate_python(json.loads(canonical_payload(value)))
+    assert decoded.as_tuple() == value.as_tuple()
+
+
+def test_two_spellings_of_one_number_reach_two_different_byte_strings() -> None:
+    """ADR-0087 §4: the scale is **carried and not normalised**.
+
+    §4's relation is indistinguishability rather than ``==``, and ``as_tuple()``
+    tells ``Decimal("1.0")`` and ``Decimal("1")`` apart — so they are two values,
+    and a spelling that mapped both onto one would normalise, which §4 forbids in
+    as many words. This is the assertion that catches such an implementation, and
+    the round-trip cases above do not.
+    """
+    assert canonical_payload(Decimal("1.0")) != canonical_payload(Decimal("1"))
+    assert canonical_payload(Decimal("1.0")) == b'"1.0"'
+    assert canonical_payload(Decimal("1")) == b'"1"'
+
+
+def test_a_multi_digit_exponential_coefficient_is_pinned_to_its_own_spelling() -> None:
+    """``Decimal("123E+5")`` and ``Decimal("1.23E+7")`` are one value, one spelling.
+
+    Round-tripping cannot catch the error this exists for: the two share a
+    ``(sign, digits, exponent)`` triple, so an encoder emitting ``"123E+5"``
+    reconstructs an indistinguishable value and passes every round-trip assertion
+    while putting two spellings of one number on the wire.
+    """
+    assert canonical_payload(Decimal("123E+5")) == b'"1.23E+7"'
+
+
+@pytest.mark.parametrize("spelling", ["NaN", "sNaN", "Infinity", "-Infinity"])
+def test_a_non_finite_decimal_has_no_encoding_and_the_projection_refuses_it(
+    spelling: str,
+) -> None:
+    """ADR-0194 §5: refused, exactly as ADR-0087 §2c gives a non-finite float none.
+
+    A backstop rather than a reachable state — §1's and §5's validators make every
+    ``Decimal`` this surface carries finite already — and refused **before**
+    measurement rather than substituted (ADR-0087 §7).
+    """
+    with pytest.raises(ValueError, match="non-finite Decimal"):
+        project(Decimal(spelling))
+
+
+def test_the_two_encoders_spell_a_decimal_identically() -> None:
+    """ADR-0087 §7: conformance is by **output**, so two encoders may exist.
+
+    ``orchestration/payloads.py`` carries its own projection because that layer may
+    not import ``wire`` — and the whole force of §7's permission is that the two
+    agree byte for byte. A ``Decimal`` added to one and not the other would let the
+    engine measure a value the client then cannot send.
+    """
+    for value, expected in _DECIMAL_VECTORS:
+        assert engine_encode(value) == expected.encode()
+
+
+def test_a_permission_decision_carrying_a_per_call_cost_crosses_the_wire() -> None:
+    """#1559's case, as a regression rather than as a promise.
+
+    A ``PER_CALL`` ``ToolCost`` puts a ``Decimal`` inside a ``PermissionDecision``,
+    which the projection refused outright before ADR-0194 §5 gave one a form. The
+    amount comes back indistinguishable from the one that went out — asserted on
+    ``as_tuple()``, since ``Decimal`` equality would accept a normalised scale.
+    """
+    definition = ToolDefinition(
+        id="smtp",
+        capability="send_email",
+        description="Send an email.",
+        risk_level=RiskLevel.HIGH,
+        reversibility=Reversibility.IRREVERSIBLE,
+        side_effecting=True,
+        reads=(),
+        writes=(),
+        discloses=(),
+        cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("1.50"), currency="USD"),
+        idempotency=Idempotency.NONE,
+    )
+    request = ActionRequest(tool=definition, parameters={"to": "a@b"}, step_id="step-1")
+    priced = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because it is allowed"),
+        id="d-1",
+        decided_at=_AT,
+    )
+
+    encoded = _both(priced)
+    restored = TypeAdapter(PermissionDecision).validate_python(json.loads(encoded))
+
+    assert b'"1.50"' in encoded
+    amount = restored.tool.cost.amount
+    assert amount is not None
+    assert amount.as_tuple() == Decimal("1.50").as_tuple()
+    assert canonical_payload(restored) == encoded

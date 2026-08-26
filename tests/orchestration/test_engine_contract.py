@@ -21,6 +21,7 @@ the composition root would.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import count
 from typing import TYPE_CHECKING, Protocol
 
@@ -33,19 +34,23 @@ from assistant_engine_contract import (
     _OVERFULL_GRANTS,
     _OVERFULL_READS,
     _SOURCE,
+    _SPEND_LIMIT,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
     seeded_invocation_trail,
     seeded_read_trail,
+    seeded_spend_ledger,
     seeded_trail,
 )
 
@@ -640,6 +645,57 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield InvocationSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def spending(self) -> AsyncIterator[SpendSubject]:
+        """One wired engine over a ledger carrying a zero ceiling on both periods.
+
+        The **same** wiring parameter as the invocation subject and one more beside
+        it, because ADR-0194 §5 wires one object as the trail, the ledger and the
+        gate: two holders keyed by the same rows could disagree about a total.
+        """
+        ledger = await seeded_spend_ledger(
+            day_ceiling=SPEND_ZERO_CEILING, month_ceiling=SPEND_ZERO_CEILING
+        )
+        built = _wire(trail=ledger)
+        await built.start()
+        try:
+            yield SpendSubject(engine=built, ledger=ledger)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def unconfigured_spending(self) -> AsyncIterator[SpendSubject]:
+        """One wired engine over a ledger with no currency configured."""
+        ledger = await seeded_spend_ledger(currency=None)
+        built = _wire(trail=ledger)
+        await built.start()
+        try:
+            yield SpendSubject(engine=built, ledger=ledger)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def indeterminate_spending(self) -> AsyncIterator[SpendSubject]:
+        """One wired engine over a ledger holding an open claim, day ceiling only."""
+        ledger = await seeded_spend_ledger(day_ceiling=Decimal("10"), open_claim=True)
+        built = _wire(trail=ledger)
+        await built.start()
+        try:
+            yield SpendSubject(engine=built, ledger=ledger)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_spending(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine at a limit the pair of totals cannot fit inside."""
+        ledger = await seeded_spend_ledger()
+        built = _wire(trail=ledger, max_payload_bytes=_SPEND_LIMIT)
+        await built.start()
+        try:
+            yield built
         finally:
             await built.aclose()
 

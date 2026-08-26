@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from ai_assistant.core.errors import OversizedValueError, UnresolvedEvidenceError
+from ai_assistant.core.errors import (
+    AssistantError,
+    OversizedValueError,
+    SpendUndeterminedError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import ENVELOPE_RESERVE_BYTES, HubEngineClient, serve_connection
 from ai_assistant.wire import envelope as env
@@ -886,3 +891,67 @@ async def test_the_loopback_client_still_authenticates_the_peer_before_sending(
                 await client.probe()
 
     assert seen == []
+
+
+# --- ADR-0194 §6's transport clause, driven on the spend read ---------------
+
+
+async def test_a_spend_read_with_no_hub_is_unavailable_and_never_undetermined(
+    tmp_path: Path,
+) -> None:
+    """ADR-0194 §6: ``HubUnavailableError`` reaches the caller **unwrapped**.
+
+    §6's closed failure set is over *this surface's* vocabulary and not over a
+    transport's, and §4 enumerates ``SpendUndeterminedError`` over six grounds each
+    of which is a way *the spend* could not be reduced to a number. A connection
+    that was not there is none of them, and a ``HubClient.spend_totals`` catching
+    ``Exception`` and translating would pass every success and budget-failure
+    fixture in the shared suite while telling a user their spend is indeterminate
+    when the truth is that there is no hub.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+
+    with pytest.raises(HubUnavailableError) as caught:
+        await client.spend_totals()
+
+    assert not isinstance(caught.value, SpendUndeterminedError)
+    assert not isinstance(caught.value, AssistantError)
+
+
+async def test_a_spend_read_answered_with_a_malformed_reply_is_a_protocol_error(
+    tmp_path: Path,
+) -> None:
+    """ADR-0194 §6: ``ProtocolError`` on a malformed reply, likewise unwrapped.
+
+    The rogue hub answers the request with a payload that is not the pair of totals
+    the surface declares, which is what a truncated or corrupted reply looks like
+    from this side. It is a fact about the *wire* and not about the budget, and the
+    class the caller catches says so.
+    """
+
+    async def _rogue(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connect = await _read_one(reader)
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.CONNECT_ACK,
+                id=connect.id,
+                payload={
+                    env.ACK_VERSION: env.PROTOCOL_VERSION,
+                    env.ACK_BUILD: "rogue",
+                    env.ACK_READY: True,
+                    env.ACK_MAX_FRAME_BYTES: _FRAME,
+                },
+            ),
+        )
+        await _read_one(reader)
+        # Bytes that are framed but are not an envelope, which is what a truncated
+        # or corrupted reply looks like from this side.
+        await write_frame(writer, b"not an envelope at all", max_frame_bytes=_FRAME)
+
+    async with _listening(tmp_path / "hub.sock", _rogue) as client:
+        with pytest.raises(ProtocolError) as caught:
+            await client.spend_totals()
+
+    assert not isinstance(caught.value, SpendUndeterminedError)
+    assert not isinstance(caught.value, AssistantError)
