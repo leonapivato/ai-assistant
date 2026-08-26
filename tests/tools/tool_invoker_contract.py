@@ -2276,48 +2276,52 @@ class ToolInvokerContract:
             "refusal to be annotated keeps it off"
         )
 
-    async def test_a_cause_reclaimed_by_its_own_finaliser_costs_identity_not_the_failure(
+    async def test_a_cause_whose_finaliser_would_reclaim_the_slot_never_runs(
         self,
         consuming: Callable[[InvocationLedger], InvocableToolRegistry],
     ) -> None:
-        """The one write the seam cannot make stick, and what it does instead.
+        """The write enters no collaborator code, and it releases none either.
 
-        Writing through ``BaseException``'s descriptor enters none of the
-        collaborator's code, but it can *release* some. The slot held a reference,
-        and ``PyException_SetCause`` stores the new value before dropping the old
-        one — so a cause the tool put there first, whose last reference this was,
-        is finalised **after** the seam's write has landed. A ``__del__`` that
-        writes the slot again from there leaves the caller holding the tool's value
-        in place of the ledger's failure, and silently: the assignment did exactly
-        what it was asked.
+        Writing through ``BaseException``'s descriptor runs nothing the object
+        declares. It can still *free* something: the slot holds a reference, and
+        ``PyException_SetCause`` stores the new value before dropping the old one,
+        so a cause the tool put there first — whose last reference the slot was —
+        would be finalised **after** the seam's value had landed. A ``__del__``
+        writing that slot again from there would leave the caller holding the
+        tool's value where the ledger's failure belongs, silently, because the
+        write did exactly what it was asked.
 
-        So the seam reads the slot back through the same descriptor, and where the
-        write did not survive it stops trying — a second write would displace a
-        value that can carry a finaliser of its own. What leaves is a cancellation
-        the seam owns, whose slot no collaborator has ever held, carrying the
-        append's failure. Identity is what is given up, and only here: ADR-0060 §1
-        requires that *a* cancellation reach the caller, and §3 that it carry the
-        failure. Both hold.
+        Substituting a cancellation the seam owns is not open to it: ADR-0192 §3
+        has ``invoke`` re-raise the exception it was already raising *exactly as it
+        would have*. So the trigger is removed instead of the damage repaired — the
+        frame that raises retains the displaced cause, which the traceback then
+        keeps alive for as long as the caller holds the exception, and the
+        finaliser does not run at all.
+
+        That last fact is what this case asserts directly: a seam that dropped the
+        reference would leave ``fired`` non-empty here, and would hand back a
+        cancellation carrying ``replacement``.
         """
+        fired: list[object] = []
+        replacement = RuntimeError("the value the finaliser would put back")
 
         class ReclaimingCauseError(Exception):
             """A cause whose finaliser writes the slot it was displaced from."""
 
-            def __init__(self, target: BaseException, replacement: BaseException) -> None:
+            def __init__(self, target: BaseException) -> None:
                 super().__init__("the cause the tool put there first")
                 self.target = target
-                self.replacement = replacement
 
             def __del__(self) -> None:
-                CAUSE_SLOT.__set__(self.target, self.replacement)
+                fired.append(self)
+                CAUSE_SLOT.__set__(self.target, replacement)
 
         class Reclaiming:
-            """Raises a cancellation whose existing cause will take its slot back."""
+            """Raises a cancellation whose existing cause would take its slot back."""
 
             def __init__(self) -> None:
                 self.entered = asyncio.Event()
                 self.raised: asyncio.CancelledError | None = None
-                self.replacement = RuntimeError("the value the finaliser puts back")
 
             async def __call__(
                 self,
@@ -2330,14 +2334,11 @@ class ToolInvokerContract:
                     await asyncio.sleep(3600)
                 except asyncio.CancelledError:
                     self.raised = asyncio.CancelledError("raised by the tool")
-                    # The only reference to it is the slot, so displacing it is
-                    # what finalises it — which is the whole of the hazard.
-                    CAUSE_SLOT.__set__(
-                        self.raised,
-                        ReclaimingCauseError(self.raised, self.replacement),
-                    )
-                    # Not `from None`: that would write the slot again and
-                    # finalise the cause this case exists to displace.
+                    # The slot is the only reference it has, so displacing it is
+                    # what would finalise it — the whole of the hazard.
+                    CAUSE_SLOT.__set__(self.raised, ReclaimingCauseError(self.raised))
+                    # Not `from None`: that writes the slot again and finalises
+                    # the cause this case exists to displace.
                     raise self.raised  # noqa: B904
                 return None
 
@@ -2358,19 +2359,17 @@ class ToolInvokerContract:
         with pytest.raises(asyncio.CancelledError) as caught:
             await running
 
-        assert tool_under_test.raised is not None
-        assert cause_of(tool_under_test.raised) is tool_under_test.replacement, (
-            "the finaliser really did reclaim the slot — without this the case "
-            "would pass against a seam that never checked"
+        assert fired == [], (
+            "the seam's write displaced the cause but did not release it, so the "
+            "collaborator's finaliser never ran"
         )
-        assert caught.value is not tool_under_test.raised, (
-            "an exception whose cause the seam cannot make stick is not the one "
-            "the caller is handed"
+        assert caught.value is tool_under_test.raised, (
+            "the cancellation the tool raised is what leaves, exactly as it would "
+            "have without a completion failure"
         )
-        assert type(caught.value) is asyncio.CancelledError
         assert cause_of(caught.value) is refused, (
-            "the append's failure reaches the caller either way — that is what "
-            "ADR-0192 §3 puts the rule on"
+            "and it carries the append's own failure, not the value the finaliser "
+            "was waiting to put back"
         )
         assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1, (
             "the completion was refused, so the claim is left open as on every "
