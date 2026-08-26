@@ -1,6 +1,6 @@
 # 196. A frozen JSON value is refused past a fixed depth ceiling, measured before it is walked
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 
 ## Context
