@@ -105,7 +105,7 @@ never ran. The tree already records the fact and its consequence:
 producer because of it. So the classified-failure exit is a **contract** exit and
 not yet a reachable one, §3 decides the cost field on it without implementing it,
 and §11 puts that half of the work where it belongs — with the carrier's own lane,
-not this one. The gap itself is filed rather than absorbed (§11).
+not this one. The gap itself is filed as **#1614** rather than absorbed (§11).
 
 **One shape question is already answered in the tree and it is the strongest
 evidence available.** `ToolImplementation` is no longer the only callable shape:
@@ -481,8 +481,7 @@ class ReportedOutput(BaseModel):
   (§5's last clause).
 - **Implementing ADR-0032.** The failure transport's carrier is ratified and
   unbuilt, and this ADR neither builds it nor commissions a lane that does (§3,
-  §11). Trigger: ADR-0032 §9's own, unchanged, and the issue this lane files
-  against it.
+  §11). Trigger: ADR-0032 §9's own, unchanged, tracked on **#1614**.
 - **Any recovery-scan cost.** `orchestration/recovery.py` completes an abandoned
   claim with `UNKNOWN` and continues to: there is no tool frame to report from, and
   a claim completed by a scan is §1's fourth route by another name.
@@ -696,7 +695,7 @@ forbids.
 > it runs: the field's type, its default, its independent revalidation, its discard
 > alone on a failed round-trip, and its discard with a classification ADR-0032 §4's
 > precedence pre-empts. That lane is not commissioned here, and the gap it would
-> close is filed as an issue rather than absorbed into this ADR's scope.
+> close is filed as **#1614** rather than absorbed into this ADR's scope.
 
 > **Normative.** What the lane proves, each case named so none is negotiated later.
 > Every one is reachable against the tree as it stands:
