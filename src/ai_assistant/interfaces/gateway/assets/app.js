@@ -234,6 +234,35 @@ const HEAD_DEADLINE_MILLISECONDS = 30000;
 // about concurrency, not about duration.
 let watching = false;
 
+// The delivery stream this page is reading, or `null` while it holds none (#1542).
+//
+// **Beside `watching` rather than a second copy of it**, because the two answer
+// different questions: `watching` is what the page *says* it is doing and what
+// `deliveryState` renders the owner's control from, and this is the request itself,
+// held so that something outside `readDeliveries` can end it. Before it existed the
+// controller was a local of that function and nothing could reach it, so `sessionLost`
+// changed the line and the button and left the socket open — and the owner's re-entry
+// then opened a **second** stream while the gateway still held the first.
+//
+// **Which is ADR-0182 §7's third clause breached at the one place nothing can observe
+// it.** §7 has the page hold "at most one delivery stream at a time" and re-establish
+// one "only while it holds none", and the cost is counted at the *gateway*: ADR-0175 §4
+// writes each delivery "to **every** delivery stream open at the moment it returned",
+// forbids the gateway to de-duplicate, and gives each stream one of
+// `gateway_max_browser_connections`. So the browser renders every notification twice
+// and nothing at either end can tell why.
+//
+// **The `409` is the case that does not close itself, and it is why this is not a
+// race worth leaving.** `no-live-session` is answered for a session that is gone, and
+// ADR-0175 §7 ends every stream that session held, so the first stream settles on its
+// own; `cookie-half-mismatch` is answered for a session that is **live**, the gateway
+// ends nothing, and the duplicate stream runs for as long as that session lasts.
+//
+// `released` is carried on the record rather than in a variable of this file, so the
+// ending is read off the stream it belongs to: a stream this page let go is not the
+// gateway having gone and must not be announced as one.
+let streaming = null;
+
 const el = (id) => document.getElementById(id);
 
 function headerHalf() {
@@ -1099,13 +1128,108 @@ function disclosureWords(provenance) {
 // page never holds a half-made answer. `resume` is answered with `approved` and
 // nothing else — the deadline is the gateway's (ADR-0177 §9) and no value from here
 // reaches it.
+// Said while an answer is out. **It does not promise a deadline**, because there is
+// none here, and that is `ASKING`'s decision one surface over rather than a second one:
+// ADR-0177 §9 gives `resume` "the same budget a turn is given at this surface" —
+// `server.py`'s `_TURN_BUDGET` — and that figure reaches the browser in no header, in
+// no value and in no setting. A page-side deadline would be a second number that can
+// silently disagree with it, and one short enough to be useful would abandon a healthy
+// resumed turn that was thinking and announce that its outcome was not known. So the
+// page puts no clock on this request, says so, and puts the control beside the
+// sentence.
+const PARK_WAITING =
+  "Sending that answer. This browser puts no deadline on it and cannot tell an answer " +
+  "that is taking a while from one whose reply will never arrive, so stopping the wait " +
+  "is yours to do.";
+
+// What stopping that wait did, and — the whole of why it is long — what it did not
+// (#1536).
+//
+// ADR-0177 §7's fourth clause is the rule: a failure of "the **browser's own** request
+// to the gateway — the request was sent and no response was read — is an outcome that
+// is **not known**, whatever the gateway did", and "no front end resolves it by
+// assuming either of the other two". ADR-0139 §4 is the same prohibition in both
+// directions, so a row that simply came back enabled would be announcing by omission
+// that nothing happened.
+//
+// **And it names the act that settles it, which is where a park differs from an ask.**
+// An abandoned ask has nowhere to look but the conversations listing; a park has
+// `pending_confirmations`, which ADR-0084 §7 names as the remedy for exactly this — "The
+// remedy is `pending_confirmations()`" — and ADR-0177 §8 makes this surface's one
+// recovery route. A park that listing still shows is one no answer resolved, and the
+// controls come back with it; one that has gone was answered.
+//
+// **It is the owner's act and not this page's, which is ADR-0182 §7's fifth clause.**
+// Nothing is re-sent here: the read is a read, and the answer is offered again only
+// where the engine's own enumeration says there is still a park to answer.
+const PARK_UNRESOLVED =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "What became of it is not known: the answer was sent and nothing here read a reply, " +
+  "so the assistant may have carried the action out and may never have received the " +
+  "answer at all. Nothing was re-sent and nothing was cancelled. Press Confirmations " +
+  "to read what is still waiting — a park still listed there is one no answer " +
+  "resolved, and its controls come back with it; one that has gone was answered.";
+
+// **A row that is no longer the live one, said rather than left looking answerable**
+// (#1536). `spent` is per park and one park is on screen twice — a turn that parks
+// renders its confirmation with the answer, and the recovery listing renders the same
+// park again with the *same* token — so answering either leaves the other holding a
+// token `answerConfirmation` returns early on. An enabled control that submits nothing
+// is the silent refusal this surface spends the most words preventing, so the pair is
+// disabled and the row says why.
+const PARK_ANSWERED =
+  "That park has been answered from this page, so this row is no longer the live one. " +
+  "Press Confirmations to read what is still waiting.";
+
+// Which sentence a row carries, from the three facts that decide it and from no
+// fourth — and it is a function so that the *token* is not one of them: ADR-0177 §8
+// has the front end render the continuation nowhere, so nothing that computes a text
+// node takes one.
+function parkWords(waiting, answered, stranded) {
+  if (waiting) {
+    return PARK_WAITING;
+  }
+  if (!answered) {
+    return "";
+  }
+  return stranded ? PARK_UNRESOLVED : PARK_ANSWERED;
+}
+
 function offerApproval(item, token) {
+  // **The listing is what gives a token back, and the act never does** (#1536).
+  // `answerConfirmation` claims the token before its request goes out and returns it
+  // only where the gateway answered; an answer whose reply was never read resolves
+  // nothing, so returning the token on the strength of that act would let a second
+  // `resume` go out on a continuation the first may already have resolved — which
+  // raises `UnknownContinuationError`, reaches this page as `assistant-declined`, and
+  // renders as "The hub received the request and declined it". ADR-0084 §7 refuses that
+  // reading in terms: an unresolvable token is "never a denial".
+  //
+  // A row is built from `pending_confirmations`, or from a `Confirmation` a turn just
+  // returned, and both are the engine's own statement that this park is still
+  // answerable — `_resolve_park` records the answer and evicts the binding under one
+  // lock the enumeration also takes, so a park observed pending is one no resume had
+  // resolved. That is a read rather than a guess, which is what ADR-0139 §4 asks for:
+  // "the state is never inferred from the unresolved act, and where this surface cannot
+  // read it, the user's next call can."
+  if (unresolved.delete(token)) {
+    spent.delete(token);
+  }
   const approve = document.createElement("button");
   approve.type = "button";
   approve.textContent = "Yes, do it";
   const decline = document.createElement("button");
   decline.type = "button";
   decline.textContent = "No";
+  // The way out of a wait this page will not bound (#1536), built here rather than
+  // shipped in `index.html` for `offerStopWaiting`'s reason: it belongs to a request
+  // and not to the surface, and there is one of these per row.
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.textContent = "Stop waiting";
+  stop.hidden = true;
+  const said = document.createElement("p");
+  said.className = "hint";
   // **One answer per park, enforced here rather than discovered at the hub.** A
   // second `resume` on a token the first already resolved raises
   // `UnknownContinuationError`, which ADR-0084 §7 makes emphatically *not* a denial —
@@ -1114,20 +1238,52 @@ function offerApproval(item, token) {
   // Both are disabled because either one submits, and both come back where the
   // request failed and the row survives to be answered again — `ask` disables its own
   // button for the same window and for the same reason.
+  //
+  // **What this row is, said and enabled in one place** so the pair, the sentence and
+  // the way out cannot get out of step with each other — `askWaiting`'s device, one
+  // surface over. The enabled state is derived from `spent` rather than held beside it,
+  // which is what closes #1536's residual: a row whose token is still spent renders
+  // disabled and says so, wherever it came from and whichever path left it that way.
+  //
+  // **Which of the two things a spent token means is read off the two sets**, so a row
+  // rendered long afterwards — by a listing read, or by a turn that parked again — says
+  // the same thing as the row the answer went out from.
+  const settle = (waiting) => {
+    const answered = spent.has(token);
+    approve.disabled = waiting || answered;
+    decline.disabled = waiting || answered;
+    const stranded = unresolved.has(token);
+    stop.hidden = !waiting;
+    said.textContent = parkWords(waiting, answered, stranded);
+    said.hidden = said.textContent === "";
+  };
+  let stopping = null;
+  // **It aborts and it announces, and it sends nothing** — `abandonAsk`'s own rule, and
+  // for its reason: the abort is what makes the pending `fetch` settle, so the promise
+  // the row is waiting on stops being one that never resolves, and a control that
+  // quietly re-sent the answer would be the silent retry ADR-0168 §9 forbids wearing a
+  // button's clothes.
+  stop.addEventListener("click", () => {
+    if (stopping !== null) {
+      stopping.abort();
+    }
+  });
   const answer = async (approved) => {
-    approve.disabled = true;
-    decline.disabled = true;
+    stopping = new AbortController();
+    settle(true);
     try {
-      await answerConfirmation(token, approved);
+      await answerConfirmation(token, approved, stopping);
     } finally {
-      approve.disabled = false;
-      decline.disabled = false;
+      settle(false);
     }
   };
   approve.addEventListener("click", () => answer(true));
   decline.addEventListener("click", () => answer(false));
   item.appendChild(approve);
   item.appendChild(decline);
+  item.appendChild(stop);
+  item.appendChild(said);
+  settle(false);
 }
 
 // The one recovery route (ADR-0177 §8). A browser that has been closed and reopened,
@@ -1206,6 +1362,23 @@ async function readPending(quiet) {
 // it resolved, so a spent token is one the listing will never hand back.
 const spent = new Set();
 
+// The subset of those whose answer produced no reply at all (#1536).
+//
+// **A second set rather than a flag on `spent`**, because the two record different
+// facts and only one of them may ever be undone: `spent` is the guard that stops one
+// park being answered twice, and this is the part of it whose outcome ADR-0177 §7's
+// fourth clause makes **not known** — "the request was sent and no response was read".
+// A token in both is one the page must neither submit again on its own motion nor
+// declare resolved, and `offerApproval` is where the listing's evidence turns the first
+// of those into an answerable row again.
+//
+// Held in page state and in no browser storage, compared and never read, and bounded by
+// the parks answered in one page's life — `spent`'s own properties, for `spent`'s own
+// reasons. A reload starts both empty, which is correct: recovery is
+// `pending_confirmations`, and a park it hands back after a reload is one the engine
+// still holds.
+const unresolved = new Set();
+
 // One answer, relayed. The page conveys consent and rules on nothing (ADR-0042 §6):
 // a refusal comes back as an ordinary outcome whose step was denied, not as a fault,
 // and it is rendered where every other turn's result is rendered.
@@ -1213,7 +1386,7 @@ const spent = new Set();
 // The listing is read again afterwards, quietly, because answering one park is the
 // only thing that changes what is waiting — and re-reading is also how the page gets
 // fresh tokens for whatever is left rather than keeping the ones it has.
-async function answerConfirmation(token, approved) {
+async function answerConfirmation(token, approved, stopping) {
   if (spent.has(token)) {
     return;
   }
@@ -1231,8 +1404,31 @@ async function answerConfirmation(token, approved) {
   const chosenAt = chose;
   let body = null;
   try {
-    body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations");
+    body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations", stopping);
   } catch (_) {
+    // **The owner's own act, which is not the gateway having gone** (#1536). `ask`'s
+    // catch keeps the same distinction and for the same reason: the gateway may be
+    // perfectly alive at the other end of a socket that stopped carrying, and a
+    // rejected `fetch` this page provoked says nothing about it either way.
+    //
+    // The token is **not** given back here. ADR-0139 §4 forbids inferring the state
+    // from the unresolved act, and giving it back would be inferring the most
+    // dangerous of the three — that the answer did not land — on an act that may
+    // have. It is recorded as unresolved instead, and `offerApproval` gives it back
+    // where the listing says the park is still there.
+    //
+    // **The tidy-up is started and not waited on**, which is the difference that
+    // matters to the row: `readPending` reaches the same unbounded `relay`, so
+    // awaiting it here would let one stalled read hold this pair disabled all over
+    // again — the failure being closed, one ordering over. It runs far enough to clear
+    // this panel's fault before the sentence below is written, which is why the
+    // sentence comes after it.
+    if (stopping.signal.aborted) {
+      unresolved.add(token);
+      readPending(false);
+      fault(PARK_UNRESOLVED, "confirmations");
+      return;
+    }
     // The gateway is gone. Nothing was answered as far as this page can tell, so the
     // continuation is given back and the row stays answerable.
     spent.delete(token);
@@ -1318,6 +1514,19 @@ const RE_ENTRY =
 function sessionLost(body, said) {
   if (body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {
     forgetHeaderHalf();
+    // **The stream goes with the session, and it goes first** (#1542). `stopWatching`
+    // below changes what the page says and what the owner can press; this ends the
+    // request those two describe, without which re-entry opens a second stream beside
+    // a first the gateway is still writing to. `releaseStream` carries the reading of
+    // ADR-0182 §7's third clause that puts it here rather than there.
+    //
+    // Before the half is gone rather than after would be the same act; after it is
+    // deliberate, so that the rejection this provokes reaches `watchDeliveries`' own
+    // `finally` — which spends any held re-arm — with `headerHalf()` already null, and
+    // `rearm` refuses on that. A re-arm firing into a session that has just ended
+    // would be the page re-establishing a stream of its own motion, which §7 permits
+    // on `visibilitychange` and `online` and on nothing else.
+    releaseStream();
     stopWatching();
     showBootstrap(said ? `${RE_ENTRY} ${said}` : RE_ENTRY);
     return true;
@@ -2065,6 +2274,35 @@ function rearm(because) {
 // the gateway named is explained in the notifications panel beside it; this argument
 // is for the one ending the gateway did not name, because the page reached it on its
 // own (#1442). Omitting it leaves the line as it was before that case existed.
+// End the request behind the stream this page is reading, if it is reading one
+// (#1542).
+//
+// **Session loss is the caller and it is the only one**, which is why this is not part
+// of `stopWatching`. Every ordinary ending — the gateway's terminal value, a refusal, a
+// body that stopped, either of `readDeliveries`' two deadlines — is reached from inside
+// that function with the request already over, and `stopWatching` is the line and the
+// control rather than the socket. A session that has ended is the one case where the
+// page's record and the request disagree, and the request is what has to be settled:
+// ADR-0182 §7 counts a `fetch` still pending as a stream this page holds, so re-entry
+// with one outstanding re-establishes while holding one.
+//
+// **It ends a stream and opens none**, which is the clause §7 turns on: nothing reached
+// from here re-establishes anything, and what opens the next stream is the owner's own
+// re-entry through `showConsole`.
+//
+// Idempotent, and safe on a stream that has already finished — `abort` on a settled
+// request is a no-op. The record is cleared before the abort so that a rejection
+// landing in `readDeliveries`' catch finds this stream already released.
+function releaseStream() {
+  const open = streaming;
+  if (open === null) {
+    return;
+  }
+  streaming = null;
+  open.released = true;
+  open.reader.abort();
+}
+
 function stopWatching(because) {
   watching = false;
   deliveryState(
@@ -2215,6 +2453,12 @@ async function watchDeliveries(because) {
 // held, once, which is the owner's own act being honoured rather than a loop.
 async function readDeliveries(half) {
   const reader = new AbortController();
+  // This stream, reachable from outside so that a session that ended can end it
+  // (#1542). Registered before anything is armed and cleared in the `finally`, so the
+  // window in which something can release it is exactly the window in which there is
+  // something to release.
+  const open = { reader, released: false };
+  streaming = open;
   // Null until this stream's head says otherwise, and never carried over from another
   // stream: see `KEEP_ALIVE_HEADER`.
   let cadence = null;
@@ -2330,6 +2574,17 @@ async function readDeliveries(half) {
     // aborts are kept apart from each other for the same reason — a stream that went
     // quiet broke a cadence the gateway stated, and one that never had a head broke
     // nothing the gateway ever said, so WENT_SILENT's sentence would be false of it.
+    //
+    // **And a stream this page released is a third ending, told apart from both**
+    // (#1542). `sessionLost` has already forgotten the header half, stopped watching
+    // and put the re-entry sentence on screen, so there is nothing left here to say —
+    // and ADR-0182 §6 rules where it is said as well as that it is said, keeping this
+    // ending out of the fault surface entirely. A `GATEWAY_GONE` written here would be
+    // a wrong explanation for an ending this page performed, and it would land in a
+    // panel `showBootstrap` has just hidden.
+    if (open.released) {
+      return;
+    }
     if (stalled) {
       stopWatching(NO_HEAD);
       fault(DELIVERY_STREAM_STALLED, "notifications");
@@ -2341,17 +2596,30 @@ async function readDeliveries(half) {
       fault(GATEWAY_GONE, "notifications");
     }
   } finally {
+    // Only where this stream is still the one on record: a release has already cleared
+    // it, and clearing it again would drop the registration of whatever opened next.
+    if (streaming === open) {
+      streaming = null;
+    }
     window.clearTimeout(deadline);
   }
 }
 
 // --- the conversation surface (ADR-0175 §6) ----------------------------------
 
-async function relay(half, path, payload, panelId) {
+// **`stopping` is the owner's, and it is the only clock this function knows about**
+// (#1536). One caller — a park's answer — hands the owner a control that ends its wait,
+// and passes the controller behind it here; every other caller passes none, and
+// `undefined` is what `fetch` reads as no signal at all. Nothing here arms a deadline:
+// `resume` rides the gateway's turn budget (ADR-0177 §9) and that figure reaches the
+// browser in nothing, so a page-side one would be a second number able to disagree with
+// it. The page keeps one clock and it is the delivery stream's.
+async function relay(half, path, payload, panelId, stopping) {
   const response = await fetch(path, {
     method: "POST",
     headers: admitted(half, true),
     body: JSON.stringify(payload),
+    signal: stopping === undefined ? undefined : stopping.signal,
   });
   const body = await readBody(response);
   if (response.ok) {
