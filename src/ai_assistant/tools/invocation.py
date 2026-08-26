@@ -422,8 +422,16 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     )
 
 
-def _expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
-    """Describe this seam's own deadline expiring."""
+def expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
+    """Describe this seam's own deadline expiring.
+
+    Public because the deadline is no longer opened in one place: ADR-0194 §3 puts
+    the spend admission inside the same window, so an expiry can land before the
+    callable is ever created and the frame that observes it there needs the same
+    classification this one gives. ``timeout`` is the figure the **caller** stated
+    rather than whatever remained of it, so the message names the budget the caller
+    set (ADR-0029 §4).
+    """
     return ToolResult(
         outcome=definition.interrupted_outcome,
         failure=ToolFailure(
@@ -498,7 +506,7 @@ def _interruption(
         msg = f"tool {definition.id!r} absorbed the cancellation of its invoking task"
         raise asyncio.CancelledError(msg)
     if deadline.expired():
-        return _expiry_failure(definition, timeout)
+        return expiry_failure(definition, timeout)
     return None
 
 
@@ -536,6 +544,7 @@ async def run_prepared_call(
     *,
     definition: ToolDefinition,
     timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+    stated: timedelta | None = None,
 ) -> ToolResult:
     """Await ``running`` under this seam's deadline and classify the result.
 
@@ -570,7 +579,14 @@ async def run_prepared_call(
             callable's shape **once** and before any claim, and having called
             nothing.
         definition: The registry's own declaration, used for classification.
-        timeout: How long to wait; already checked by the caller.
+        timeout: How long to wait; already checked by the caller. Since ADR-0194
+            §3 this may be **what is left** of the caller's budget after the spend
+            admission consumed part of it, rather than the whole of it.
+        stated: The figure an expiry message names, defaulting to ``timeout``.
+            Passed where the two differ, so a user reads the deadline they set
+            rather than the remainder the callable happened to be handed — the
+            classification is unaffected either way, because what makes an expiry
+            an expiry is this deadline having fired.
 
     Returns:
         The classified outcome.
@@ -579,6 +595,7 @@ async def run_prepared_call(
         CancelledError: If the invoking task was cancelled from outside.
     """
     entered_with = _pending_cancellations()
+    named = timeout if stated is None else stated
     deadline = asyncio.timeout(timeout.total_seconds())
     try:
         async with deadline:
@@ -593,11 +610,11 @@ async def run_prepared_call(
         # Python's own `TimeoutError` arrives here too, and is *not* special:
         # what makes an expiry an expiry is this deadline having fired, which
         # only `_interruption` can say.
-        return _interruption(definition, timeout, deadline, entered_with) or internal_failure(
+        return _interruption(definition, named, deadline, entered_with) or internal_failure(
             definition, exc
         )
 
-    interrupted = _interruption(definition, timeout, deadline, entered_with)
+    interrupted = _interruption(definition, named, deadline, entered_with)
     if interrupted is not None:
         return interrupted
 
@@ -616,6 +633,7 @@ __all__ = [
     "ResolvedImplementation",
     "ToolImplementation",
     "checked_pairing",
+    "expiry_failure",
     "internal_failure",
     "resolved_implementation",
     "run_bound_call",

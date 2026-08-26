@@ -112,7 +112,9 @@ async def test_an_unconfigured_deployment_registers_no_send_email() -> None:
     callable that would transmit. Checked rather than trusted, because the factory
     is one argument away from including it.
     """
-    registry = build_default_registry(memory=FakeMemoryStore(), ledger=FakeAuditTrail())
+    registry = build_default_registry(
+        memory=FakeMemoryStore(), ledger=FakeAuditTrail(), gate=FakeAuditTrail()
+    )
 
     assert await registry.get(SEND_EMAIL_ID) is None
     assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}

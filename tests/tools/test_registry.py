@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from tool_invoker_contract import InvocableToolRegistry
     from tool_registry_contract import PopulatableToolRegistry
 
-    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.protocols import InvocationLedger, SpendGate
     from ai_assistant.core.types import ToolDefinition
     from ai_assistant.tools.invocation import BoundImplementation
 
@@ -55,11 +55,15 @@ class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
 
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
-        return InMemoryToolRegistry(ledger=FakeAuditTrail())
+        return InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
     @pytest.fixture
     def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
-        return lambda ledger: InMemoryToolRegistry(ledger=ledger)
+        return lambda ledger: InMemoryToolRegistry(ledger=ledger, gate=FakeAuditTrail())
+
+    @pytest.fixture
+    def admitting(self) -> Callable[[SpendGate], InvocableToolRegistry]:
+        return lambda gate: InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=gate)
 
 
 def a_registry(
@@ -73,7 +77,7 @@ def a_registry(
     rather than defaulted because a ledger-free invoker would be a structurally
     valid ``ToolInvoker`` that acts without claiming; see that constructor.
     """
-    return InMemoryToolRegistry(tools, ledger=FakeAuditTrail())
+    return InMemoryToolRegistry(tools, ledger=FakeAuditTrail(), gate=FakeAuditTrail())
 
 
 # --- construction -------------------------------------------------------

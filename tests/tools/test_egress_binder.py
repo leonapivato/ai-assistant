@@ -109,7 +109,7 @@ class _Harness:
 
     def __init__(self, *, canonicalises: tuple[()] | None = None) -> None:
         """Wire a seam over an empty registry, an empty table and an empty store."""
-        self.registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
+        self.registry = InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
         self.table = RegistrationTable()
         self.records = _Records()
         self.seam = EgressBindingSeam(
@@ -317,7 +317,7 @@ def test_the_registry_hands_back_a_detached_original() -> None:
     ADR-0152 §1's registry-original comparison — the caller's tampered definition
     and the "original" would be the same object and could never differ.
     """
-    registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
+    registry = InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=FakeAuditTrail())
     registry.register(SEND_EMAIL, _refuses)
 
     first = registry.original(SEND_EMAIL.id)

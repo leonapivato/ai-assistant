@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         MemoryStore,
         OutboundTransport,
         Secrets,
+        SpendGate,
     )
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.tools.egress_binder import ConnectionRecords
@@ -422,6 +423,7 @@ def build_default_registry(
     now: Clock = _utcnow,
     egress: EgressIntegration | None = None,
     ledger: InvocationLedger,
+    gate: SpendGate,
 ) -> InMemoryToolRegistry:
     """Return the populated one-object registry+invoker the composition root wires (ADR-0048 §3).
 
@@ -449,6 +451,13 @@ def build_default_registry(
             there and so required here, because the consume is unconditional. The
             composition root supplies the one object it also wires as
             ``AuditTrail`` and ``InvocationCompleter`` (ADR-0192 §9).
+        gate: The ``SpendGate`` the returned invoker admits through, before the
+            claim (ADR-0194 §3), passed straight to ``InMemoryToolRegistry`` —
+            required there and so required here, because the admission is
+            unconditional. The composition root supplies the **same** object it
+            wires as ``AuditTrail``, ``InvocationCompleter`` and ``SpendLedger``:
+            all four read the same rows, and two holders keyed by them could
+            disagree about a total (ADR-0194 §5).
         egress: The one configured egress integration, or ``None`` where a
             deployment configured none. **Conditional contents, and ADR-0048 §3
             permits them**: it fixes that "which tools exist, and the
@@ -472,7 +481,7 @@ def build_default_registry(
     ]
     if egress is not None:
         tools.append((egress.definition, egress.implementation))
-    return InMemoryToolRegistry(tools, ledger=ledger)
+    return InMemoryToolRegistry(tools, ledger=ledger, gate=gate)
 
 
 __all__ = [

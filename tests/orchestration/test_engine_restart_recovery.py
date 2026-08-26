@@ -249,7 +249,7 @@ def _make_engine(
     tool = _egress_tool() if egress else _confirmable_tool()
     # The seam claims through the **same** trail the runner records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker([(tool, _succeeds)], ledger=trail)
+    invoker = FakeToolInvoker([(tool, _succeeds)], ledger=trail, gate=trail)
     runner = StepRunner(
         plans=plans,
         registry=invoker,

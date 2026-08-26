@@ -85,6 +85,7 @@ from ai_assistant.permissions import (
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
 )
+from ai_assistant.permissions.spend import SpendConfiguration
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.readers import CalendarReader, EmailReader
 from ai_assistant.secret_store import KeyringSecretStore
@@ -639,7 +640,27 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "memory.db", embedder=embedder, traces_sink=traces
         )
         opened.append(memory.close)
-        trail = SqliteAuditTrail(path=directory / "audit.db")
+        # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
+        # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
+        # values and never a `Settings` read, so this is the one place the two
+        # meet — and `timezone` is read *with* them because it is what selects the
+        # calendar period every total and every admission is decided over. A reader
+        # counting only four cannot implement the period rule.
+        #
+        # **One object satisfies `SpendGate`, `SpendLedger` and ADR-0192's ledger
+        # seam**, because all three read the same rows: two holders keyed by them
+        # could disagree about a total, which is the failure ADR-0016 §7 named for
+        # two registries one seam over.
+        trail = SqliteAuditTrail(
+            path=directory / "audit.db",
+            spend=SpendConfiguration(
+                currency=settings.world_spend_currency,
+                day_ceiling=settings.world_spend_day_ceiling,
+                month_ceiling=settings.world_spend_month_ceiling,
+                allowance=settings.world_spend_unknown_allowance,
+                zone=settings.timezone,
+            ),
+        )
         opened.append(trail.close)
         # Durable plan/execution state, so a parked AWAITING_APPROVAL step survives
         # a restart and can be recovered through the façade (ADR-0049, ADR-0052; #318).
@@ -935,7 +956,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # (ADR-0192 §1), so a second handle would refuse every claim under a ruling
         # the runner had just recorded — and two tables keyed by one decision could
         # diverge, which is the split ADR-0029 §8 refuses one seam over.
-        tools = build_default_registry(memory=memory, egress=egress, ledger=trail)
+        #
+        # **And the gate face of that same object** (ADR-0194 §3, §5): the invoker
+        # is admitted through the holder that reads the rows the ledger writes, and
+        # is handed the gate and never the `SpendLedger` — an invoker able to read a
+        # totals projection has acquired a permissions-owned history it has no use
+        # for, which is ADR-0029 §1's argument one seam over. The engine below gets
+        # the ledger face and never the gate, for the mirror reason.
+        tools = build_default_registry(memory=memory, egress=egress, ledger=trail, gate=trail)
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read

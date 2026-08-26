@@ -432,7 +432,7 @@ class Harness:
         # claim, because §1 has the ledger require the decision it is passed to
         # equal the one the store holds under that id.
         self.invoker = FakeToolInvoker(
-            [(definition, _succeeds) for definition in tools], ledger=self.trail
+            [(definition, _succeeds) for definition in tools], ledger=self.trail, gate=self.trail
         )
         self.ids = iter(f"{id_prefix}-{n}" for n in range(1, 100))
         ticks = clock()

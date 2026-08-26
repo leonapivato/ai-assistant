@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
     from types import GetSetDescriptorType
 
-    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.protocols import InvocationLedger, SpendGate
     from ai_assistant.core.types import (
         FrozenJson,
         PermissionDecision,
@@ -165,6 +165,7 @@ class FakeToolInvoker:
         tools: Iterable[tuple[ToolDefinition, FakeToolImplementation]] = (),
         *,
         ledger: InvocationLedger,
+        gate: SpendGate,
     ) -> None:
         """Create an invoker holding ``tools``.
 
@@ -180,6 +181,16 @@ class FakeToolInvoker:
                 production rejects — the same call twice under one spendable
                 ``ALLOW``. :func:`ai_assistant.testing.invoker_over` builds the
                 pair a consumer's fixture wants.
+            gate: The ``SpendGate`` every invocation is admitted by, before the
+                claim (ADR-0194 §3), and **never** a ``SpendLedger``.
+
+                **Keyword-only and required**, for ``ledger``'s reason: ADR-0194
+                §11 requires the canonical fake to reproduce the admission, and a
+                fake that could be built without a gate would let a consumer's test
+                pass behaviour production rejects — a call reaching the world with
+                no ceiling consulted. ``FakeAuditTrail`` is a ``SpendGate`` and,
+                built with no ceiling, admits everything unconditionally, which is
+                what :func:`invoker_over` hands over.
 
         Raises:
             ToolRegistrationError: If ``tools`` contains two definitions sharing
@@ -187,6 +198,7 @@ class FakeToolInvoker:
         """
         self._bindings: dict[str, _Binding] = {}
         self._ledger = ledger
+        self._gate = gate
         self.invocations: list[ToolCall] = []
         for tool, implementation in tools:
             self.register(tool, implementation)
@@ -208,6 +220,18 @@ class FakeToolInvoker:
         (ADR-0192 §2).
         """
         return self._ledger
+
+    @property
+    def gate(self) -> SpendGate:
+        """The ``SpendGate`` this seam admits through.
+
+        Read-only, and public for the reason :attr:`ledger` is: ADR-0194 §5 makes
+        the composition root the sole wirer, and its test asserts the invoker was
+        handed the gate face of the one store rather than a second holder over the
+        same rows — which cannot be written against a private attribute without the
+        access itself becoming the thing under test.
+        """
+        return self._gate
 
     def register(
         self, tool: ToolDefinition, implementation: FakeToolImplementation = succeeds, /
@@ -267,12 +291,19 @@ class FakeToolInvoker:
         See :meth:`~ai_assistant.core.protocols.ToolInvoker.invoke` for the
         contract; every rule it states is reproduced here.
 
-        Where this fake holds a ledger, the claim is appended after those three
-        checks and immediately before the callable, and a completion follows on
-        every exit past it (ADR-0192 §1, §3). This fake binds one callable shape,
-        so it has no callable-shape pairing check to place — that check is
-        `tools/`-internal (ADR-0152 §10) and its ordering against the claim is
-        pinned where it lives.
+        The claim is appended after those three checks and immediately before the
+        callable, and a completion follows on every exit past it (ADR-0192 §1, §3).
+        This fake binds one callable shape, so it has no callable-shape pairing
+        check to place — that check is `tools/`-internal (ADR-0152 §10) and its
+        ordering against the claim is pinned where it lives.
+
+        **The spend admission sits between them** (ADR-0194 §3): the gate is
+        consulted after the three checks and before the claim, is handed the
+        ``ToolCost`` on the revalidated copy, shares the caller's one deadline with
+        the callable, and its handle is released in a ``finally`` on every path. A
+        refused call reaches no callable, appends no claim and appends no
+        completion, and the gate's own exception is what leaves — unwrapped and
+        unannotated, so ADR-0194 §4's payload-free rule survives this seam.
 
         Raises:
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
@@ -287,6 +318,10 @@ class FakeToolInvoker:
             AuditError: If the claim append failed with anything that is not an
                 ``AssistantError``. A failure of the **completion** append is
                 absorbed instead and reaches the operator as a diagnostic.
+            SpendCeilingError: If the gate refuses because a configured ceiling
+                would be crossed (ADR-0194 §4). The gate's own instance, unchanged.
+            SpendUndeterminedError: If the gate refuses because the spend could not
+                be reduced to a number. Likewise.
             CancelledError: If the invoking task is cancelled from outside.
         """
         duration = _checked_timeout(timeout)
@@ -314,32 +349,58 @@ class FakeToolInvoker:
             )
             raise ToolBindingError(msg)
 
-        async def act() -> ToolResult:
+        async def act(remaining: timedelta) -> ToolResult:
             # Recorded **after** the claim is accepted and immediately before the
             # callable, because this list is what a consumer's test reads to prove
-            # that nothing was accepted when a call was refused (ADR-0192 §1). A
-            # call the ledger refused reached no callable, so it belongs here as
-            # little as one the three checks refused.
+            # that nothing was accepted when a call was refused (ADR-0192 §1,
+            # ADR-0194 §3). A call the ledger or the gate refused reached no
+            # callable, so it belongs here as little as one the three checks
+            # refused.
             self.invocations.append(checked)
-            # `duration`, not the caller's object — see `_checked_timeout`.
-            return await self._run(binding, checked, duration)
+            # `remaining`, not the caller's object — see `_checked_timeout`. It is
+            # what is left of `duration` after the admission, because ADR-0194 §3
+            # makes the two one window.
+            return await self._run(binding, checked, remaining, stated=duration)
 
-        return await _consumed_call(
-            ledger=self._ledger,
+        async def consume(remaining: timedelta) -> ToolResult:
+            return await _consumed_call(
+                ledger=self._ledger,
+                definition=binding.definition,
+                decision=checked.decision,
+                act=lambda: act(remaining),
+            )
+
+        # **The gate, and then the claim** (ADR-0194 §3, ADR-0192 §1). The estimate
+        # is read off the revalidated, detached copy and never off the argument.
+        return await _admitted_call(
+            gate=self._gate,
+            estimate=checked.request.tool.cost,
             definition=binding.definition,
-            decision=checked.decision,
-            act=act,
+            timeout=duration,
+            act=consume,
         )
 
-    async def _run(self, binding: _Binding, call: ToolCall, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4); wrapping it outside would cancel the invoker mid-await
+    async def _run(
+        self,
+        binding: _Binding,
+        call: ToolCall,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4); wrapping it outside would cancel the invoker mid-await
+        *,
+        stated: timedelta | None = None,
+    ) -> ToolResult:
         """Await the callable under the deadline and classify what came back.
 
         The interruption state is read from the task and the deadline on *every*
         exit, the normal return included: a callable that catches its
         cancellation and returns a value would otherwise be reported
         ``SUCCEEDED`` after a cancelled turn, or after outrunning its deadline.
+
+        ``timeout`` is what is **left** of the caller's budget after the admission
+        (ADR-0194 §3); ``stated`` is the whole of it, and names the figure an expiry
+        message carries so a user reads the deadline they set.
         """
         entered_with = _pending_cancellations()
+        named = timeout if stated is None else stated
         deadline = asyncio.timeout(timeout.total_seconds())
         try:
             async with deadline:
@@ -351,11 +412,11 @@ class FakeToolInvoker:
                 raise
             return _internal(binding.definition, exc)
         except Exception as exc:
-            return _interruption(binding.definition, timeout, deadline, entered_with) or _internal(
+            return _interruption(binding.definition, named, deadline, entered_with) or _internal(
                 binding.definition, exc
             )
 
-        interrupted = _interruption(binding.definition, timeout, deadline, entered_with)
+        interrupted = _interruption(binding.definition, named, deadline, entered_with)
         if interrupted is not None:
             return interrupted
 
@@ -462,14 +523,22 @@ def invoker_over(
 
     Args:
         tools: ``(definition, callable)`` pairs to register immediately.
-        trail: The trail to claim through; a fresh one is opened where none is
-            given.
+        trail: The trail to claim through **and admit through** — one object as
+            both faces, as the composition root wires it (ADR-0192 §2, ADR-0194
+            §5). A fresh one is opened where none is given, and a fresh one carries
+            no ceiling, so it admits every call. Pass a ``FakeAuditTrail`` built
+            with a currency and a ceiling where the ceiling is what a test is
+            about.
 
     Returns:
         The invoker, and the trail behind it.
     """
     behind = FakeAuditTrail() if trail is None else trail
-    return FakeToolInvoker(tools, ledger=behind), behind
+    # One object as both faces, which is what the composition root does (ADR-0194
+    # §5): two holders over the same rows could disagree about a total. A trail
+    # built with no ceiling admits everything unconditionally (ADR-0194 §1, §3),
+    # so a fixture that cares about the ceiling passes a configured `trail`.
+    return FakeToolInvoker(tools, ledger=behind, gate=behind), behind
 
 
 async def authorised(trail: FakeAuditTrail, call: ToolCall) -> ToolCall:
@@ -804,6 +873,48 @@ async def _claimed(
         msg = "the invocation ledger could not append the claim"
         raise AuditError(msg) from error
     raise error
+
+
+async def _admitted_call(
+    *,
+    gate: SpendGate,
+    estimate: ToolCost,
+    definition: ToolDefinition,
+    timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4, ADR-0194 §3)
+    act: Callable[[timedelta], Awaitable[ToolResult]],
+) -> ToolResult:
+    """Admit this invocation, run ``act`` in what is left of ``timeout``, release.
+
+    ADR-0194 §3, re-implemented here rather than imported for the reason
+    everything in this module is: the fake may not import ``ai_assistant.tools``.
+    The admission is awaited **inside** the caller's deadline and ``act`` is given
+    the remainder of that same deadline, so the two are one window rather than two.
+
+    A refusal leaves as the gate raised it — nothing here catches, wraps or
+    annotates one, which is what keeps ADR-0194 §4's payload-free rule true at the
+    seam that could undo it.
+    """
+    loop = asyncio.get_running_loop()
+    expires_at = loop.time() + timeout.total_seconds()
+    try:
+        async with asyncio.timeout_at(expires_at):
+            handle = await gate.admit_invocation(estimate=estimate)
+    except TimeoutError:
+        # ADR-0029 §4's existing rule, unchanged: `invoke` was entered and
+        # suspended in its own pre-call work, and nothing states which await the
+        # expiry landed in (ADR-0034 §1). No claim was appended and no handle
+        # exists, so there is nothing to complete and nothing to release.
+        return _expired(definition, timeout)
+    try:
+        remaining = expires_at - loop.time()
+        if remaining <= 0:
+            return _expired(definition, timeout)
+        return await act(timedelta(seconds=remaining))
+    finally:
+        # Synchronous, so unwinding under a cancellation cannot lose it, and it
+        # raises nothing — a `finally` that raised would replace the call's own
+        # outcome with a book-keeping failure (ADR-0194 §5).
+        gate.release_admission(handle)
 
 
 async def _consumed_call(

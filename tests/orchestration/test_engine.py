@@ -33,7 +33,7 @@ from ai_assistant.core.errors import (
     TraceStoreError,
     UnknownConversationError,
 )
-from ai_assistant.core.protocols import AuditTrail, InvocationLedger
+from ai_assistant.core.protocols import AuditTrail, InvocationLedger, SpendGate
 from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
@@ -153,14 +153,16 @@ if TYPE_CHECKING:
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
 
-class ConsumingTrail(AuditTrail, InvocationLedger, Protocol):
+class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, Protocol):
     """Both faces of the **one** audit object (ADR-0192 §2).
 
     The composition root wires a single store as ``AuditTrail``,
     ``InvocationLedger`` and ``InvocationCompleter``, handing each consumer the
     face its job needs. A harness that wires the runner and the seam has to name
     both at once — the runner records rulings through the trail, the seam claims
-    through the ledger, and they must be the same object or every claim is refused.
+    through the ledger, the seam is **admitted** through the gate, and they must
+    be the same object or every claim is refused and the ceiling is decided over
+    rows a second holder cannot see (ADR-0194 §5).
     Declared here for the reason ``InvocableToolRegistry`` is declared in the
     invoker suite: a variable annotated with one Protocol does not statically
     satisfy the other, and a cast would hide the very identity being asserted.
@@ -431,7 +433,7 @@ class Harness:
         # The seam claims through the **same** trail the runner records rulings
         # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
         self.invoker = FakeToolInvoker(
-            [(definition, _succeeds) for definition in tools], ledger=self.trail
+            [(definition, _succeeds) for definition in tools], ledger=self.trail, gate=self.trail
         )
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
