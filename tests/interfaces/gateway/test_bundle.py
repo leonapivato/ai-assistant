@@ -1887,6 +1887,99 @@ def test_the_page_holds_a_stream_from_the_request_and_not_from_its_first_value()
     assert 'el("watch-button").hidden = watching;' in _functions(script)["deliveryState"]
 
 
+def test_a_session_that_ended_ends_the_delivery_stream_and_not_only_its_line() -> None:
+    """#1542, and it is ADR-0182 §7's third clause rather than tidiness.
+
+    §7 has the page hold "at most one delivery stream at a time" and re-establish one
+    "only while it holds none — one the gateway ended with ADR-0175 §4's terminal value,
+    or one whose connection failed". ``sessionLost`` performs §6's re-entry, and before
+    this it changed the page's record and the line beside the button and left the
+    request open: the owner pasted a fresh value, ``showConsole`` called
+    ``watchDeliveries``, and a **second** stream opened beside a first the gateway was
+    still writing to.
+
+    The cost is counted at the gateway, which is why it cannot be waited out: ADR-0175
+    §4 writes each delivery "to **every** delivery stream open at the moment it
+    returned", forbids the gateway to de-duplicate, and gives each stream one of
+    ``gateway_max_browser_connections``. And the ``409`` limb does not close itself —
+    ``cookie-half-mismatch`` is answered for a session that is still **live**, so §7's
+    fourth clause ends nothing and the duplicate runs for that session's whole life.
+    """
+    functions = _functions(_code("app.js"))
+    lost = functions["sessionLost"]
+    release = functions["releaseStream"]
+    read = functions["readDeliveries"]
+
+    # The request, not just the record of it: the controller is reachable from outside
+    # the function that made it.
+    assert "const open = { reader, released: false };" in read
+    assert "streaming = open;" in read
+    assert read.index("streaming = open;") < read.index("await fetch(")
+    assert "open.reader.abort();" in release
+    # Ended before the line that describes it, and by the one condition that means the
+    # session is gone.
+    assert lost.index("releaseStream();") < lost.index("stopWatching();")
+    assert lost.index("releaseStream();") < lost.index("showBootstrap(")
+    assert (
+        'if (body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {' in lost
+    )
+    # And it ends a stream and opens none, which is the clause §7 turns on: a release
+    # that re-established one would be the page taking motion §7 gives to two events.
+    for opening in ("watchDeliveries", "fetch(", "setTimeout", "rearm("):
+        assert opening not in release, opening
+
+
+def test_a_stream_the_page_released_is_not_reported_as_the_gateway_having_gone() -> None:
+    """The third ending ``readDeliveries``' catch has to tell apart, added by #1542.
+
+    Two were already there and are kept apart from each other for a stated reason: a
+    stream that went quiet broke a cadence the gateway stated, and one that never had a
+    head broke nothing the gateway ever said. A stream this page *released* broke
+    nothing either, and it is not the gateway having gone — ``sessionLost`` has already
+    said what happened, in the surface ADR-0182 §6 rules it must be said in ("presented
+    as re-entry rather than as a fault. It is not rendered in the page's fault
+    surface").
+
+    A ``GATEWAY_GONE`` written here would be a wrong explanation for an ending the page
+    performed, and it would land in a panel ``showBootstrap`` has just hidden.
+    """
+    read = _functions(_code("app.js"))["readDeliveries"]
+    caught = read[read.index("} catch (_) {") :]
+
+    assert caught.index("if (open.released) {") < caught.index("if (stalled) {")
+    assert caught.index("if (open.released) {") < caught.index("fault(GATEWAY_GONE,")
+    assert caught.index("if (open.released) {") < caught.index("stopWatching(")
+    # The registration is given up by whichever of the two ends first, and never by the
+    # other one's ending: a `finally` that cleared it unconditionally would drop the
+    # record of whatever stream opened next.
+    assert "if (streaming === open) {" in read
+
+
+def test_the_page_holds_one_record_of_the_stream_and_releases_it_in_one_place() -> None:
+    """``streaming`` is the request and ``watching`` is what the page says about it, and
+    #1542 is what happens when the second is changed without the first.
+
+    So the record is written in exactly the two places that can be true of it — taken
+    where the stream opens, given up where it ends — and released from exactly one, the
+    one condition under which the page's record and the request can disagree.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert len(re.findall(r"(?<!let )streaming = open;", script)) == 1
+    assert len(re.findall(r"(?<!let )streaming = null;", script)) == 2
+    assert {name for name, body in functions.items() if "streaming" in body} == {
+        "releaseStream",
+        "readDeliveries",
+    }
+    assert {name for name, body in functions.items() if "releaseStream();" in body} == {
+        "sessionLost"
+    }
+    # `watching` is still moved by `stopWatching` alone, so releasing a stream cannot
+    # leave the page saying it is watching one.
+    assert "watching" not in functions["releaseStream"]
+
+
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:
     """The guard is the whole of what keeps a tab switch from costing anything: a
     healthy page re-arms nothing, and a page with no session half re-arms nothing
@@ -2451,6 +2544,17 @@ def relayed_statuses() -> set[int]:
         _relay_fault(AssistantError("no")).status,
         _relay_fault(ValueError("bad")).status,
     }
+
+
+def _constant(script: str, name: str) -> str:
+    """One top-level ``const NAME = ...;`` as its source text.
+
+    Asked for by name so that a sentence is checked where it is *declared*, which
+    searching the whole file cannot: a phrase counted anywhere would be satisfied by any
+    of the thirty other messages this page carries.
+    """
+    opened = script.index(f"\nconst {name} =")
+    return script[opened : script.index(";\n", opened)]
 
 
 def _timeouts(script: str) -> list[str]:
@@ -3776,10 +3880,24 @@ def test_the_answer_supplies_approved_and_nothing_else() -> None:
     Read off the request body the page actually writes, which is where a third member
     would appear.
     """
-    body = _functions(_code("app.js"))["answerConfirmation"]
+    script = _code("app.js")
+    body = _functions(script)["answerConfirmation"]
 
-    assert 'relay(half, "/confirmation/resume", { token, approved }, "confirmations")' in body
+    assert (
+        'relay(half, "/confirmation/resume", { token, approved }, "confirmations", stopping)'
+        in body
+    )
+    # The fifth argument is a controller and not a figure: it carries the owner's own
+    # act into ``fetch`` and reaches no request body. ``resume`` "is given the same
+    # budget a turn is given at this surface" (§9), so a page that supplied one would be
+    # supplying a second number able to disagree with ``_TURN_BUDGET`` — and one that
+    # armed a deadline of its own would abandon a healthy resumed turn that was thinking.
     assert "timeout" not in body
+    assert "AbortSignal" not in script
+    assert (
+        "signal: stopping === undefined ? undefined : stopping.signal,"
+        in _functions(script)["relay"]
+    )
 
 
 def test_pending_confirmations_is_the_pages_one_recovery_route() -> None:
@@ -3896,10 +4014,17 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     button across the same window and for the same reason.
     """
     functions = _functions(_code("app.js"))
+    offer = functions["offerApproval"]
 
-    assert functions["offerApproval"].count("disabled = true") == 2
-    assert functions["offerApproval"].count("disabled = false") == 2
-    assert "} finally {" in functions["offerApproval"]
+    # Both controls take one state, computed in one place, so the pair cannot get out of
+    # step with itself — and the state is *derived* from ``spent`` rather than written
+    # beside it, which is what makes a row that is no longer answerable render as one
+    # wherever it came from (#1536).
+    assert "const answered = spent.has(token);" in offer
+    assert offer.count("disabled = waiting || answered;") == 2
+    assert "} finally {" in offer
+    assert offer.count("settle(true);") == 1
+    assert offer.count("settle(false);") == 2
     # **And the guarantee is per park rather than per row**, because one park is on
     # screen twice: a turn that parks renders its confirmation with the answer, and the
     # recovery listing renders the same park again — carrying the *same* token, since
@@ -3910,7 +4035,9 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     assert "if (spent.has(token)) {" in answering
     assert "spent.add(token);" in answering
     # Given back on both refusal paths, because neither resolved the park: a row the
-    # gateway could not answer stays answerable.
+    # gateway could not answer stays answerable. There are exactly two, and the third
+    # ending — an answer whose reply was never read — is deliberately not one of them
+    # (:func:`test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act`).
     assert answering.count("spent.delete(token);") == 2
 
 
@@ -3934,3 +4061,186 @@ def test_a_stalled_tidy_up_cannot_silently_refuse_another_parks_answer() -> None
     assert "} finally {" not in body
     assert body.index("spent.add(token);") < body.index("await readPending(true);")
     assert body.index('relay(half, "/confirmation/resume"') < body.index("await readPending(true);")
+
+
+def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock() -> None:
+    """The decision #1536 asks a taker to make, pinned where changing it would have to
+    pass this test: an automatic deadline on a park's answer is **declined**, and the
+    remedy is the control ``ask`` already uses.
+
+    **The argument is the one #1500 settled, and ADR-0177 §9 is what carries it here.**
+    §9 gives ``resume`` "the same budget a turn is given at this surface" — no
+    ``Settings`` field, no second figure — and that budget is ``server.py``'s
+    ``_TURN_BUDGET``, which reaches the browser in no header, no value and no setting. A
+    page-side deadline would be a second number able to disagree with it, and one short
+    enough to be useful would abandon a healthy resumed turn that was thinking and
+    announce that its outcome was not known.
+
+    ``HEAD_DEADLINE_MILLISECONDS`` does not transfer either, for the reason it does not
+    transfer to an ask: it is defensible because it covers "a round trip and an
+    in-process table read, and nothing else", and a ``/confirmation/resume`` head is
+    written after the whole resumed turn.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    # Still one clock, and still the delivery stream's.
+    assert len(_timeouts(script)) == 1
+    assert "setInterval" not in script
+    assert "AbortSignal" not in script
+    for name in ("relay", "answerConfirmation", "offerApproval", "parkWords"):
+        body = functions[name]
+        for clock in ("setTimeout", "HEAD_DEADLINE_MILLISECONDS", "SILENT_CADENCES", "cadence"):
+            assert clock not in body, (name, clock)
+    # What ends the wait is a control, built beside the pair it hands back.
+    offer = functions["offerApproval"]
+    assert 'stop.textContent = "Stop waiting";' in offer
+    assert "stopping.abort();" in offer
+    assert "stopping = new AbortController();" in offer
+    # It aborts and it sends nothing: a control that re-sent the answer would be the
+    # silent retry ADR-0168 §9 forbids, wearing a button's clothes.
+    handler = offer[offer.index('stop.addEventListener("click"') :]
+    assert "answerConfirmation(" not in handler[: handler.index("\n  });")]
+
+
+def test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act() -> None:
+    """The consent question #1536 says a taker has to answer, and the answer is no.
+
+    ADR-0177 §7's fourth clause makes an answer whose reply was never read an outcome
+    that is **not known** — "the request was sent and no response was read" — and
+    ADR-0139 §4 forbids the surface inferring the state from the unresolved act, in
+    either direction. Handing the token back on the strength of that act infers the
+    most dangerous of the three: that the answer did not land.
+
+    And the page is where the cost falls. A second ``resume`` on a token the first
+    already resolved raises ``UnknownContinuationError``; ``_relay_fault`` renders every
+    ``AssistantError`` as ``assistant-declined``, which this page reads as "The hub
+    received the request and declined it" — a denial announced for an action that ran,
+    which ADR-0084 §7 refuses in terms ("never a denial").
+    """
+    body = _functions(_code("app.js"))["answerConfirmation"]
+    caught = body[body.index("} catch (_) {") :]
+
+    assert "if (stopping.signal.aborted) {" in caught
+    stopped = caught[caught.index("if (stopping.signal.aborted) {") :]
+    abandoned = stopped[: stopped.index("\n    }\n")]
+    assert "unresolved.add(token);" in abandoned
+    assert "spent.delete(token);" not in abandoned
+    # And it is not the gateway having gone either, which is the branch below it: a
+    # `fetch` this page aborted says nothing about the gateway at the other end.
+    assert caught.index("if (stopping.signal.aborted) {") < caught.index("fault(GATEWAY_GONE,")
+    assert "unresolved" not in _functions(_code("app.js"))["relay"]
+
+
+def test_the_listing_is_what_hands_an_abandoned_parks_token_back() -> None:
+    """Where the token *does* come back, and why that is a read rather than a guess.
+
+    ADR-0084 §7 names the remedy for a token the engine cannot resolve — "The remedy is
+    ``pending_confirmations()``" — and ADR-0177 §8 makes that read this surface's one
+    recovery route. ADR-0139 §4 supplies the principle: "the state is never inferred
+    from the unresolved act, and where this surface cannot read it, the user's next call
+    can."
+
+    A row is built from that listing, or from a ``Confirmation`` a turn just returned,
+    and both are the engine's own statement that the park is still answerable —
+    ``_resolve_park`` records the answer and evicts the binding under the one lock
+    ``_pending_confirmations`` also takes, so a park observed pending is one no resume
+    had resolved.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    offer = functions["offerApproval"]
+
+    assert "if (unresolved.delete(token)) {\n    spent.delete(token);\n  }" in offer
+    # Before a control is built from it, so nothing renders off the state it corrects.
+    assert offer.index("unresolved.delete(token)") < offer.index("settle(false);")
+    assert offer.index("unresolved.delete(token)") < offer.index('document.createElement("button")')
+    # Two writes and no third: taken where an answer was abandoned, given up where the
+    # listing says the park survived it.
+    assert len(re.findall(r"unresolved\.add\(", script)) == 1
+    assert len(re.findall(r"unresolved\.delete\(", script)) == 1
+    # Read as a use rather than as a mention, because ``_functions`` attributes the
+    # declaration itself — it sits between two functions — to whichever one precedes it.
+    assert {name for name, body in functions.items() if "unresolved." in body} == {
+        "offerApproval",
+        "answerConfirmation",
+    }
+
+
+def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing() -> None:
+    """#1536's residual, which is worse than the disabled pair it was found beside.
+
+    ``pending_confirmations`` "reuses that entry's token rather than minting a second"
+    for a binding it already holds, so pressing **Confirmations** renders the park again
+    with the **same** token — and ``answerConfirmation`` returns early on
+    ``spent.has(token)``. An enabled pair over a spent token therefore submits nothing
+    at all, which is the silent refusal this surface spends the most words preventing.
+
+    Closed at the render rather than at one path into it: the pair's enabled state is
+    computed from ``spent``, so every route that leaves a token spent renders the row
+    the same way and says which of the two things it means.
+    """
+    script = _code("app.js")
+    offer = _functions(script)["offerApproval"]
+    words = _functions(script)["parkWords"]
+
+    assert offer.rstrip().endswith("settle(false);\n}")
+    assert "const answered = spent.has(token);" in offer
+    assert "const stranded = unresolved.has(token);" in offer
+    assert "said.textContent = parkWords(waiting, answered, stranded);" in offer
+    assert 'said.hidden = said.textContent === "";' in offer
+    # Total over the three states a row can be in, and it takes no token: ADR-0177 §8
+    # has the front end render the continuation nowhere.
+    assert "token" not in words
+    assert words.count("return") == 3
+
+
+def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> None:
+    """ADR-0139 §4's exactly three, at the surface ADR-0177 §7's fourth clause adds a
+    third producer of.
+
+    A row that simply came back enabled would be announcing by omission that nothing
+    happened, and one that said "the gateway did not answer" would be announcing a
+    transport failure the page did not observe. So the sentence says the outcome is not
+    known, says what was *not* done — nothing re-sent, nothing cancelled — and names the
+    act that settles it, which is the read ADR-0084 §7 calls the remedy.
+
+    The three sentences are distinct because the states are: an answer that is out, one
+    whose fate is unknown, and a row whose park was answered from this page.
+    """
+    script = _code("app.js")
+
+    unresolved = _constant(script, "PARK_UNRESOLVED")
+    assert "not known" in unresolved
+    assert "Nothing was re-sent and nothing was cancelled." in unresolved
+    assert "Press Confirmations" in unresolved
+    # It does not promise the answer did not land, and does not promise it did.
+    assert "may have carried the action out" in unresolved
+    assert "may never have received the " in unresolved
+    # And the wait says there is no deadline, rather than implying one.
+    waiting = _constant(script, "PARK_WAITING")
+    assert "puts no deadline on it" in waiting
+    answered = _constant(script, "PARK_ANSWERED")
+    assert "no longer the live one" in answered
+    assert len({unresolved, waiting, answered}) == 3
+
+
+def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
+    """The failure being closed, one ordering over.
+
+    ``readPending`` reaches the same unbounded ``relay``, so awaiting it on the
+    abandoned path would let one stalled read hold the pair disabled exactly as the
+    stalled answer did — #1536 rebuilt inside its own fix. It is started and not waited
+    on, and it runs far enough to clear this panel's fault before the sentence is
+    written, which is why the sentence comes after it.
+
+    ``readPending``'s own unbounded ``relay`` is otherwise left alone, and that is the
+    third question #1536 asks: it disables no control and claims no token, so a listing
+    read that never settles strands nothing — the previous list stays on screen and the
+    button that asked for it is still pressable.
+    """
+    body = _functions(_code("app.js"))["answerConfirmation"]
+
+    assert "await readPending(false);" not in body
+    assert "readPending(false);" in body
+    assert body.index("readPending(false);") < body.index('fault(PARK_UNRESOLVED, "confirmations")')
