@@ -57,6 +57,7 @@ from recipient_builders import (
     BOB,
     EXPIRES,
     OTHER_ACCOUNT,
+    SHARED_CLOCK,
     TOOL,
     MovableClock,
     account_member,
@@ -123,16 +124,28 @@ class RecipientGrantsContract:
     :class:`RecipientGrantStoreContract` inherits rather than repeats them.
     """
 
-    @pytest.fixture
+    @pytest.fixture(autouse=True)
     def clock(self) -> MovableClock:
-        """The clock the subject evaluates liveness against.
+        """The clock the subject evaluates liveness against, reset for this case.
+
+        **Autouse**, and that is load-bearing rather than convenience: the reset is
+        what makes one shared object behave per-case, and a case that did not
+        request the clock would otherwise inherit whatever the last liveness case
+        left it reading. Autouse also puts the reset before the subject fixture,
+        which no longer depends on it.
 
         Concrete rather than abstract: a suite that let each implementation bring
         its own clock could not state the interval boundary at all, and every
         liveness case would be racing the suite's own runtime instead of asserting
         a comparison.
+
+        It is :data:`~recipient_builders.SHARED_CLOCK` rather than a fresh object,
+        and that constant carries the reason: a subject fixture that took *this*
+        fixture could not be evaluated by ``tests/core/test_protocol_triad.py``,
+        so the canonical fakes would go unbound. Resetting here is what makes one
+        object behave per-case.
         """
-        return MovableClock()
+        return SHARED_CLOCK.reset()
 
     @pytest.fixture
     def grants(self, clock: MovableClock) -> RecipientGrants:
