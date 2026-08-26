@@ -475,6 +475,22 @@ def appended(captured: Sequence[Mapping[str, Any]]) -> list[dict[str, object]]:
     ]
 
 
+class NameRaises(type):
+    """A metaclass that refuses to be named, raising an ``Exception`` when asked.
+
+    ``fault_class_of`` guards the ``__name__`` read precisely because "total" has
+    to mean it: a metaclass may override the access and raise, and either would
+    otherwise take down the diagnostic together with the fault it was recording.
+    """
+
+    def __getattribute__(cls, name: str) -> object:
+        """Raise on ``__name__`` and behave normally on everything else."""
+        if name == "__name__":
+            msg = "the metaclass refuses to be named"
+            raise RuntimeError(msg)
+        return super().__getattribute__(name)
+
+
 async def _settled(cycles: int = 4) -> None:
     """Let the loop deliver whatever is pending, without sleeping on a clock.
 
@@ -1452,6 +1468,45 @@ class ToolInvokerContract:
         }
         assert sentinel not in repr(captured), "no route carries a Tier 1 name into the log"
 
+    async def test_a_class_name_that_cannot_be_read_becomes_the_reserved_literal(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """``fault_class_of``'s totality is what ADR-0192 §3 relies on, so it is pinned.
+
+        The suite already covers a name outside the identifier pattern; this is
+        the other arm — an exception whose ``__name__`` **access** raises an
+        ``Exception``. It yields the same reserved literal, and it neither takes
+        the diagnostic down nor changes what ``invoke`` returns. An implementation
+        that validated ordinary names but let that access failure escape would
+        replace a successful call's result with a bookkeeping failure, which is
+        the one outcome §3 calls worse than an incomplete record.
+
+        **No case asserts a literal where the ``__name__`` read raises a
+        ``BaseException`` that is not an ``Exception``**, and none may:
+        ``fault_class_of`` lets that one propagate by design, so a test demanding
+        the literal would demand the widening ADR-0119 refuses (ADR-0192 §9).
+        """
+        unnameable = NameRaises("Unnameable", (RuntimeError,), {})
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = unnameable("the store would not write")
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 7}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.output == {"unread": 7}, "the diagnostic never changes what invoke returns"
+        assert appended(captured) == [
+            {
+                "operation": COMPLETION,
+                "fault_class": UNREPRESENTABLE_FAULT_CLASS,
+                "outcome": ToolOutcome.SUCCEEDED,
+            }
+        ]
+
     async def test_a_collaborators_cancellation_on_the_completion_path_is_absorbed(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
     ) -> None:
@@ -1508,6 +1563,51 @@ class ToolInvokerContract:
         assert caught.value.__cause__ is invented
         assert spy.calls == []
         assert await rows(trail) == []
+
+    async def test_a_collaborators_cancellation_on_the_claim_path_propagates_when_one_is_pending(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The other side of the discriminator, on the path the mirror case owns.
+
+        Told apart by the ``Task.cancelling()`` **count** and by nothing else —
+        never by the exception's class, never by its identity, and never by where
+        in the body it surfaced (ADR-0192 §1, §3). With the count **increased** a
+        cancellation request really did reach this task, so the ``CancelledError``
+        is what leaves and ADR-0029 §4's classification of a genuinely cancelled
+        call is untouched. An implementation that always translated a claim-side
+        collaborator cancellation to ``AuditError`` would pass the unmoved-count
+        case beside this one and lose a real concurrent shutdown.
+
+        The executor's half of this pair — that it commits ``interrupted_outcome``
+        here and ``FAILED`` on the unmoved-count case — is `orchestration`'s and
+        is owed by the group that owns the executor (ADR-0192 §9).
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        invented = asyncio.CancelledError("the ledger invented one")
+        ledger.claim.error = invented
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+            await ledger.claim.entered.wait()
+            task.cancel()
+            await _settled()
+            ledger.claim.hold.set()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await task
+
+        assert not isinstance(caught.value, AuditError)
+        assert caught.value.__cause__ is invented
+        assert task.cancelled()
+        assert spy.calls == [], "the callable is never entered"
+        assert ledger.completion.calls == 0
+        assert appended(captured) == [{"operation": CLAIM}], "a cancellation is not a fault class"
 
     @pytest.mark.parametrize("member", ["claim", "completion"])
     async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
@@ -1663,7 +1763,13 @@ class ToolInvokerContract:
     @pytest.mark.parametrize("timing", ["before-the-commit", "after-the-commit"])
     @pytest.mark.parametrize(
         "branch",
-        ["absorbed-exception", "invented-cancellation", "torn-down", "external-cancellation"],
+        [
+            "absorbed-exception",
+            "invented-cancellation",
+            "torn-down",
+            "external-cancellation",
+            "external-cancellation-meeting-an-invented-one",
+        ],
     )
     async def test_the_commit_state_split_holds_on_every_completion_failure_branch(
         self,
@@ -1690,13 +1796,20 @@ class ToolInvokerContract:
             "invented-cancellation": asyncio.CancelledError("the ledger invented one"),
             "torn-down": KeyboardInterrupt(),
             "external-cancellation": RuntimeError("the store would not write"),
+            # The discriminator's other side: a collaborator's `CancelledError`
+            # while an external one **is** propagating is not absorbed. An
+            # implementation that always absorbs a completion-path cancellation
+            # would lose a real concurrent shutdown (ADR-0192 §3, ADR-0060 §1).
+            "external-cancellation-meeting-an-invented-one": asyncio.CancelledError(
+                "the ledger invented one"
+            ),
         }
         trail = FakeAuditTrail()
         ledger = DrivenLedger(trail)
         ledger.completion.error = errors[branch]
         ledger.completion.commits = timing == "after-the-commit"
         invoker = consuming(ledger)
-        cancelled = branch == "external-cancellation"
+        cancelled = branch.startswith("external-cancellation")
         implementation = Slow() if cancelled else Spy(output={"unread": 1})
         invoker.register(read_only("inbox"), implementation)
         call = call_for(read_only("inbox"))
