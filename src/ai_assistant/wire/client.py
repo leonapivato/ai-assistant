@@ -113,6 +113,7 @@ if TYPE_CHECKING:
         ObservationReport,
         PermissionDecision,
         Question,
+        RecordedInvocation,
         ReplyChunk,
         SecretValue,
         SourceGrant,
@@ -1295,6 +1296,74 @@ class HubClient:
                 published to this client, and the horizon setting itself.
         """
         return await self._call("export_reads")  # type: ignore[no-any-return]
+
+    # --- the trail's two invocation reads (ADR-0192 §4) --------------------
+    #
+    # Hand-written for the two pairs above's reason, unchanged: the server is
+    # reflected off the Protocol and this class is not.
+
+    async def recent_invocations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecordedInvocation, ...]:
+        """One page of what this system did on an authorisation (ADR-0192 §4).
+
+        **Not a connection method**, so no :meth:`_refuse_off_loopback` and no entry
+        in ``wire/server.py``'s ``CONNECTION_METHODS``. That is the mechanism's own
+        default, and the only decision withholding anything from the remote listener
+        is ADR-0151 §13, whose ground is a **Tier 0 credential**. A
+        :class:`~ai_assistant.core.types.RecordedInvocation` carries none, and by
+        ADR-0192 §2's own exclusion no content either: the row restates nothing its
+        decision fixes, carries no argument value, no payload, no output, no failure
+        message and no digest of any of them, and the join adds a tool identifier, a
+        capability and a boolean that every ``recent_decisions`` row already crosses
+        this hop carrying.
+
+        ``limit`` is refused when it is **not strictly positive**, locally and
+        before a frame is sent (ADR-0192 §4), which is the clause
+        ``AssistantEngineContract`` holds all three implementations to — a client
+        shipping ``limit=0`` to the hub would be exactly the silently more
+        permissive implementation ADR-0085 §9 forbids.
+
+        Args:
+            limit: How many rows this page holds.
+
+        Returns:
+            The page, newest first, ties broken by the row's ``id`` ascending — the
+            first ``limit`` rows of :meth:`export_invocations`. **A row is an act
+            begun on an authorisation and never a statement that the tool callable
+            was entered** (ADR-0192 §4), one attempt is up to two rows, and the
+            absence of either half from a bounded page is a fact about the page.
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_invocations", limit=limit)  # type: ignore[no-any-return]
+
+    async def export_invocations(self) -> tuple[RecordedInvocation, ...]:
+        """Every invocation row the trail holds (ADR-0192 §4).
+
+        **No local refusal to add**, because the method takes no argument — the
+        shape :meth:`export_decisions` already has. This is the read discharging
+        ADR-0004 §6's portability obligation for **this row kind**; the decision
+        export discharges it for the decision rows and, after ADR-0192 §2, for those
+        alone, so a caller wanting the whole trail composes the two.
+
+        **Unlike ``export_reads`` this store prunes nothing**, so what comes back is
+        a history rather than a horizon (#108).
+
+        Returns:
+            Every invocation row, sorted hub-side, joined hub-side.
+
+        Raises:
+            OversizedValueError: Raised by the hub, and arriving as a typed error
+                frame, if the whole trail exceeds the contract limit — never a
+                truncated artifact (ADR-0192 §4). The remedy is
+                ``hub_max_frame_bytes``, the number the connect reply already
+                published to this client.
+        """
+        return await self._call("export_invocations")  # type: ignore[no-any-return]
 
 
 class HubEngineClient(HubClient):

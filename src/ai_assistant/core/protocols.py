@@ -8586,6 +8586,177 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the trail's two invocation reads (ADR-0192 §4) ---------------------
+    #
+    # **A third pair over the same store, and the row kind is what is new.** The
+    # decision pair above answers what was *decided*; these two answer what the
+    # system *did* on an authorisation — a claim written before the callable and a
+    # completion written after it (ADR-0192 §§1-2). They read
+    # :meth:`AuditTrail.recent_invocations` and :meth:`AuditTrail.export_invocations`
+    # and nothing else.
+    #
+    # **The two row kinds are two operations returning two sequences** (ADR-0192
+    # §4). No operation here returns a mixed sequence, neither
+    # :meth:`recent_decisions` nor :meth:`export_decisions` widens to carry a
+    # :class:`~ai_assistant.core.types.ToolInvocation` or a
+    # :class:`~ai_assistant.core.types.RecordedInvocation`, and ADR-0186 §8's clauses
+    # bind every row these two return, unchanged and in full.
+    #
+    # **ADR-0188's hub-down egress record is not returned by either** (ADR-0192 §4).
+    # It is neither row kind, it is rendered through no operation ADR-0192 decides,
+    # it is listed among no row of these listings, and it is counted in no bound
+    # stated over them.
+
+    async def recent_invocations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecordedInvocation, ...]:
+        """What the system did on an authorisation, newest first (ADR-0192 §4).
+
+        The bounded half of the pair, reading
+        :meth:`AuditTrail.recent_invocations`. It **relays**: no composition, no
+        filter by tool, by outcome or by window, no projection, no enrichment and no
+        summary, and no read of any other store. The join to the decision is the
+        **store's**, taken inside one atomic operation, which is what lets this stay
+        a relay — an engine pairing rows with decisions itself would have an
+        ``await`` between the two reads and a ``clear()`` able to land in it
+        (ADR-0192 §2, §4).
+
+        **Bounded and complete are two operations rather than one**, on
+        :meth:`recent_decisions`' reasoning exactly (ADR-0186 §1, ADR-0192 §4): a
+        single method whose ``limit`` could be omitted to mean *everything* would
+        make the unbounded read of a Tier 1 store the default shape of the listing
+        and would destroy the prefix property below.
+
+        **The order is this operation's own guarantee, over a list it has
+        materialised** (ADR-0192 §4): the row's ``recorded_at`` **descending**, ties
+        broken by the row's ``id`` **ascending**. ``recent_invocations(limit=n)``
+        returns the first ``n`` of the sequence :meth:`export_invocations` returns
+        over the same trail state.
+
+        **What a surface owes a row it renders is ADR-0192 §4**, stated once over "a
+        surface" so that every adapter inherits it. For **every** row: the row's kind
+        — claim or completion — the instant it was recorded, and the tool identifier
+        and capability the value itself carries. For a **completion** also the
+        outcome, the failure kind where the row *carries one*, and the incurred cost
+        **including that the cost is unknown** where the basis is ``UNKNOWN``. Where
+        the outcome is not ``SUCCEEDED`` and the row carries no ``failure_kind``, the
+        floor is met by rendering **that no kind was reported** — neither a kind the
+        surface chose nor a blank, and the row and the field both stay. Nothing is
+        omitted, truncated, summarised, sampled or counted in place of, and a surface
+        that cannot render one whole renders **fewer of them**.
+
+        **Every value rendered comes from the row in hand** (ADR-0192 §4). No
+        surface joins two operations' answers, reads a store, calls a second
+        operation to complete a row, or infers a missing half.
+
+        **A row is an act the system *began* on that authorisation** — a call it
+        claimed and then attempted — and never a statement that the tool callable
+        was entered (ADR-0192 §4, ADR-0034 §1). The claim is written *before* the
+        callable, and ADR-0192 §1's cancellation clause has a path where the claim
+        lands, its completion is written, and the callable is provably never entered.
+
+        **One state establishes entry and is the one a surface may say most about**:
+        a completion whose outcome is ``SUCCEEDED`` is the tool reporting an outcome
+        back through the seam. Where such a row also carries ``egress_call`` true, a
+        surface may say the egress call was **attempted and reported success** — on
+        no other row and in no other state. It may **not** say the call was *sent*:
+        ADR-0031 §4 bounds ``SUCCEEDED`` to a validated callable return, an unexpired
+        deadline and no increase in the cancellation count, none of which is a
+        transmission.
+
+        **No surface says or implies that anything was read, received, delivered,
+        seen or acted on** by any recipient, on any row, in any state (ADR-0192 §4).
+        And **no surface names a recipient, an account, an endpoint or a
+        destination** on an invocation row: ``egress_call`` states that the call was
+        an egress call and states nothing about whose bytes went where — the
+        recipients are :meth:`recent_decisions`' to render under ADR-0186 §7's floor.
+
+        **One attempt appears as up to two rows and is presented as the two rows it
+        is** (ADR-0192 §4). A claim renders as a call begun and a completion as how a
+        call finished; a claim is never rendered as *pending*, *open*, *in flight*,
+        *awaiting an outcome*, or as having "no completion yet", because no row
+        carries that fact and the clause above forbids the join that would establish
+        it. A surface rendering both kinds together states each row's kind and
+        renders neither in the other's vocabulary, and presents no decision row as a
+        transmission, no invocation row as a ruling, and no joined pair as a single
+        record.
+
+        **A page's silence is a fact about the page** (ADR-0192 §4). No surface
+        derives a count of calls, attempted or completed, from anything but the rows
+        it holds; the absence of a completion, or of a claim, from a bounded page is
+        a fact about the page.
+
+        Args:
+            limit: The most rows to return. Refused when it is **not an integer**,
+                when it is a ``bool``, and when it is outside ``[1, 2**63)`` —
+                locally and before any I/O, in every implementation (ADR-0192 §4).
+                That is :meth:`recent_decisions`' bound for its reason:
+                ``AuditTrail.recent_invocations`` itself refuses zero, and ADR-0085
+                §9 forbids either implementation from being silently more permissive.
+                There is deliberately no ``offset``.
+
+        Returns:
+            Up to ``limit`` rows, newest first, ties broken by ``id`` ascending —
+            the first ``limit`` of :meth:`export_invocations`' sequence.
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            AuditError: If the trail cannot be read, or holds a row it could not
+                pair with the decision that row names.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        ...
+
+    async def export_invocations(self) -> tuple[RecordedInvocation, ...]:
+        """Every invocation row, in the same order (ADR-0192 §4, ADR-0004 §6).
+
+        The unbounded half, reading :meth:`AuditTrail.export_invocations`, and the
+        surface that discharges ADR-0004 §6's portability obligation **for this row
+        kind** — :meth:`export_decisions` does it for the decision rows and, after
+        ADR-0192 §2, for those alone. The obligation is met by the pair, and there is
+        no single whole-trail export. It relays on :meth:`recent_invocations`' terms:
+        nothing composed, filtered, projected, enriched or summarised, and no other
+        store read.
+
+        **The order is this operation's own guarantee**, over a list it has
+        materialised — ``recorded_at`` descending, ties broken by ``id`` ascending
+        (ADR-0192 §4). ``AuditTrail.export_invocations`` promises
+        ``recent_invocations``' order, and this contract owes the sort regardless:
+        two implementations handing back the same rows in different orders would
+        satisfy every other clause here while giving two users two different accounts
+        of one history.
+
+        **Complete or refused, never truncated.** It takes no argument and is
+        subject to ADR-0085 §8c's payload limit exactly as :meth:`export_decisions`
+        is (ADR-0192 §4). A trail whose canonical encoding exceeds the limit raises
+        :class:`~ai_assistant.core.errors.OversizedValueError` carrying the limit and
+        the measured size; no implementation truncates the artifact, samples it, or
+        returns a partial export without saying so. The remedy is
+        ``hub_max_frame_bytes``, the setting the connect reply already carries to the
+        client. **The projection is bounded by construction** and does not make that
+        ceiling worse: a :class:`~ai_assistant.core.types.RecordedInvocation` is one
+        small row, two identifiers and a boolean, where a
+        :class:`~ai_assistant.core.types.PermissionDecision` carries a whole
+        ``ToolDefinition`` and an egress binding (ADR-0192 §4, ADR-0186 §3).
+
+        **A row this returns is read under :meth:`recent_invocations`' floor and
+        bars**, and an artifact written from them is a **faithful copy**: no key is
+        added, renamed or annotated for presentation, so the array re-validates as
+        ``tuple[RecordedInvocation, ...]``, whose models set ``extra="forbid"``.
+
+        Returns:
+            Every invocation row the trail holds, ordered by ``recorded_at``
+            descending with ties broken by ``id`` ascending —
+            :meth:`recent_invocations`' order, applied to the whole trail.
+
+        Raises:
+            AuditError: If the trail cannot be read, or holds a row it could not
+                pair with the decision that row names.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

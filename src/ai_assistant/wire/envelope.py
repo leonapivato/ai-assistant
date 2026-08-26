@@ -333,7 +333,52 @@ from ai_assistant.wire.errors import (
 #: ``METHODS`` and ``CONNECTION_METHODS`` already produce, ADR-0151 §13 being the
 #: only decision that withholds anything and a ``SourceReadRecord`` carrying none of
 #: the Tier 0 credential that is its ground.
-PROTOCOL_VERSION: Final[int] = 14
+#:
+#: **15 since ADR-0192 §4**, which adds two methods to the promoted
+#: ``AssistantEngine`` surface — ``recent_invocations``, the bounded listing of what
+#: this system did on an authorisation, and ``export_invocations``, the whole-trail
+#: read that discharges ADR-0004 §6's portability obligation for that **row kind**.
+#: ADR-0124 §9's **first** limb again, on 12's and 14's reasoning exactly: the rule
+#: reaches "any change to the promoted surface's method set", and ``wire.surface``'s
+#: ``METHODS`` is derived from the Protocol, so a version 15 client sending
+#: ``export_invocations`` to a version 14 hub is refused there — the half-finished
+#: upgrade §3 wants legible at the handshake rather than arriving as an unexplained
+#: error inside a call. ADR-0192 §9 states the obligation in the deciding ADR and
+#: puts it on the **surface group** — "the one that lands them" — rather than
+#: leaving a lane to discover it here.
+#:
+#: **The method set moves from thirty-six to thirty-eight**, and ADR-0177 §1's
+#: browser enumeration does **not** move: it stands at thirty, because it counts
+#: what a browser may reach rather than what the promoted surface carries, and its
+#: enumeration is **closed** over the methods it does not name. ADR-0192 §4 reaches
+#: the same conclusion from the other side, deciding "which adapters render these
+#: operations" as the surface group's and promoting no browser operation.
+#:
+#: **The second limb is reached too, and one bump discharges both grounds**, which
+#: ADR-0192 §9 says in terms: ``ToolResult`` gained ``incurred_cost`` in the paired
+#: lane, and "a bump is owed at the surface group whether or not the field reached
+#: the wire earlier — ADR-0124 §9's obligation is on whoever moves the set". That is
+#: why this entry does not carry 12's and 14's "no ``core`` type changes" sentence:
+#: ``ToolInvocation`` and ``RecordedInvocation`` are **new promoted types** rather
+#: than new wire declarations, reaching this surface by being named in a return
+#: annotation (ADR-0085 §5's closure is what carries them, as it carried
+#: ``Warrant`` at 13), and ``ToolResult`` is a type a version 14 peer already knew
+#: without the field. A version 14 peer and a version 15 peer do not interoperate,
+#: and no lane adds a shim to make them: ADR-0084 §3's exact-match handshake is the
+#: mechanism and the refusal naming both versions is the intended outcome.
+#:
+#: **Nothing else under** ``wire/`` **changes for it but the client's two methods**,
+#: as at 12 and at 14 and for that entry's reason. The connect exchange gains no
+#: member, no frame's encoding changes, no :class:`FrameKind` is added.
+#: ``METHODS``, ``STREAMING_METHODS``, both adapters and the error mapping are all
+#: derived from the Protocol; ``wire/client.py`` is hand-written, so its two
+#: forwarding methods are the one edit. Neither method joins ``wire/server.py``'s
+#: ``CONNECTION_METHODS``, so both listeners carry both — by the default those two
+#: constants already produce, ADR-0151 §13 being the only decision that withholds
+#: anything and its ground a Tier 0 credential a ``RecordedInvocation`` carries
+#: none of. The row carries no content at all: ADR-0192 §2 keeps every argument
+#: value, payload, output, failure message and digest of any of them off it.
+PROTOCOL_VERSION: Final[int] = 15
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
