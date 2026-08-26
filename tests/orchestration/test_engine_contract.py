@@ -111,18 +111,21 @@ from ai_assistant.testing import (
     FakeTraceSink,
 )
 from ai_assistant.testing.grants import source_grant
+from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine, SourceReadTrail
     from ai_assistant.core.types import (
         CurrentContext,
+        EgressBinding,
         FrozenJson,
         Goal,
         MemoryRecord,
         SourceGrant,
     )
+    from ai_assistant.tools.invocation import BoundImplementation
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
@@ -138,6 +141,12 @@ _GRANTABLE = _SOURCE
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
+
+
+#: Either invoker ``_wire`` may bind — the canonical fake, or `tools/`'s own
+#: registry. Both satisfy ``ToolRegistry`` and ``ToolInvoker``, which is the whole
+#: of what the wiring below needs of one.
+type InvocableSeam = FakeToolInvoker | InMemoryToolRegistry
 
 
 class ConsumingTrail(AuditTrail, InvocationLedger, SpendGate, SpendLedger, Protocol):
@@ -265,6 +274,27 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
+class _SucceedsBound:
+    """An **egress-shaped** registration that does nothing and succeeds.
+
+    ``_succeeds`` above satisfies the ordinary callable shape, which is all the
+    canonical fake binds. `tools/`'s own registry performs a fourth check the fake
+    has no equivalent of — the callable-shape pairing ADR-0148 §4 requires, which
+    refuses an egress-authorised call bound to a callable that takes no binding
+    (ADR-0152 §10). So a subject wired with the **real** invoker over the parking
+    fixture's egress tool needs this shape rather than that one.
+    """
+
+    async def invoke_bound(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+        egress_binding: EgressBinding,
+    ) -> None:
+        """Accept the binding the ruling fixed, and succeed with no output."""
+
+
 def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subject in
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -275,6 +305,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     provisioner: FakeConnectionProvisioner | None = None,
     trail: ConsumingTrail | None = None,
     reads: SourceReadTrail | None = None,
+    real_invoker: bool = False,
+    closers: Sequence[Callable[[], Awaitable[None]]] = (),
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -309,7 +341,20 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     confirmable = _confirmable()
     # The seam claims through the **same** trail the runner records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
-    invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [], ledger=audit, gate=audit)
+    bound = [(confirmable, _succeeds)] if parks else []
+    egress_bound: list[tuple[ToolDefinition, BoundImplementation]] = (
+        [(confirmable, _SucceedsBound())] if parks else []
+    )
+    # ``real_invoker`` binds `tools/`'s own registry instead of the canonical fake.
+    # The two are contract-equivalent by the shared suite, so no case needs it to
+    # exercise ``invoke``'s rules — what it buys is the composition ADR-0194 §11's
+    # shutdown clause is about, where the object that admits and the object the
+    # façade closes have to be one and the same all the way down.
+    invoker: InvocableSeam = (
+        InMemoryToolRegistry(egress_bound, ledger=audit, gate=audit)
+        if real_invoker
+        else FakeToolInvoker(bound, ledger=audit, gate=audit)
+    )
     # The egress binding seam, wired only where the suite needs a park: ADR-0178
     # §3's clause binds every producer of a ``ConfirmationEgress``, and a subject
     # parking a non-egress call would leave it vacuous here.
@@ -362,6 +407,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     )
     return Engine(
         composing=_composing(),
+        closers=closers,
         loop=loop,
         runner=runner,
         plans=plans,

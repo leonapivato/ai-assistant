@@ -13,16 +13,16 @@ So the subject here is the **composition root's own engine**, built by
 the real holder, the real closers, the real drain — rather than a hand-assembled
 approximation of one.
 
-**The tracked operation is the spend read itself**, and that is the point rather
-than a convenience. What the clause asks is whether shutdown waits for outstanding
-work on this connection before closing it; ``spend_totals`` is a tracked engine
-operation reaching the same holder through the same wedged read, so it exercises
-exactly that. Reaching the read through a *tool invocation* instead would
-additionally require a planner, a ruling and a whole turn — none of which is what
-this clause is about, and each of which would be a way for the case to fail for a
-reason that is not the one under test. The invocation seam's own half of §11 —
-the deadline, through ``ToolInvoker.invoke`` — is driven in
-``tests/tools/test_registry_spend_deadline.py``.
+**§11's clause itself is discharged elsewhere, and this is its root-level
+counterpart.** That clause names a read "reached through ``ToolInvoker.invoke``",
+and ``tests/orchestration/test_engine_spend_shutdown.py`` drives exactly that — a
+resumed confirmation whose step reaches the real invoker and the real gate, parked
+inside its admission, with shutdown started on top of it. What that case cannot
+say is anything about the **composition root**, because it wires its own engine:
+whether ``build_engine`` puts this holder among the façade's closers at all, and
+whether the operation this change added to the tracked set is drained before it,
+are facts about ``app/composition.py`` and are what this module pins. The two are
+complementary; neither is the other's substitute.
 
 Refs: ADR-0194 §11; ADR-0042 §2; ADR-0083 §4; ADR-0054.
 """
@@ -80,7 +80,7 @@ def _park_the_worker(trail: SqliteAuditTrail) -> ThreadSuspension:
 async def test_shutdown_waits_for_the_wedged_spend_read_before_it_closes_anything(
     tmp_path: Path,
 ) -> None:
-    """ADR-0042 §2's ordering, over the connection ADR-0194 §5 gives four faces.
+    """ADR-0042 §2's ordering, at the root that actually wires the closer.
 
     "A tracked task orphaned by a cancelled call is still using a connection
     ``close()`` would shut, so **nothing is closed until every tracked task has
@@ -113,14 +113,19 @@ async def test_shutdown_waits_for_the_wedged_spend_read_before_it_closes_anythin
     await parked.reached()
 
     closing = asyncio.ensure_future(engine.aclose())
-    await asyncio.sleep(_SETTLE)
-    assert not closing.done(), (
-        "nothing is closed until every tracked task has completed (ADR-0042 §2); "
-        "a shutdown that returned here would have shut a connection still in use"
-    )
-    assert not reading.done()
+    try:
+        await asyncio.sleep(_SETTLE)
+        assert not closing.done(), (
+            "nothing is closed until every tracked task has completed (ADR-0042 §2); "
+            "a shutdown that returned here would have shut a connection still in use"
+        )
+        assert not reading.done()
+    finally:
+        # Released whatever the assertions did, so a failure is a failed test rather
+        # than a parked worker occupying the default executor until
+        # `ThreadSuspension`'s own emergency timeout (#376).
+        parked.release()
 
-    parked.release()
     await asyncio.wait_for(closing, _WAITING)
     totals = await asyncio.wait_for(reading, _WAITING)
 
