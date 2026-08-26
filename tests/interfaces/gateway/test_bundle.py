@@ -3898,9 +3898,10 @@ def test_the_answer_supplies_approved_and_nothing_else() -> None:
     script = _code("app.js")
     body = _functions(script)["answerConfirmation"]
 
-    assert (
-        'relay(half, "/confirmation/resume", { token, approved }, "confirmations", stopping)'
-        in body
+    assert re.search(
+        r'relay\(\s*half,\s*"/confirmation/resume",\s*\{ token, approved \},\s*'
+        r'"confirmations",\s*stopping,\s*noticed,?\s*\)',
+        body,
     )
     # The fifth argument is a controller and not a figure: it carries the owner's own
     # act into ``fetch`` and reaches no request body. ``resume`` "is given the same
@@ -4087,7 +4088,7 @@ def test_a_stalled_tidy_up_cannot_silently_refuse_another_parks_answer() -> None
     assert "} finally {" not in body
     assert "await readPending(" not in body
     assert body.index("spent.add(token);") < body.index("readPending(true);")
-    assert body.index('relay(half, "/confirmation/resume"') < body.index("readPending(true);")
+    assert body.index('"/confirmation/resume"') < body.index("readPending(true);")
 
 
 def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock() -> None:
@@ -4189,7 +4190,10 @@ def test_the_listing_is_what_hands_an_abandoned_parks_token_back() -> None:
     assert offer.index("unresolved.delete(token)") < offer.index('document.createElement("button")')
     # Two writes and no third: taken where an answer was abandoned, given up where the
     # listing says the park survived it.
-    assert len(re.findall(r"unresolved\.add\(", script)) == 1
+    # Two writes: the two endings that read no reply at all, and the refusal the gateway
+    # answered whose condition ADR-0177 §7's third clause still makes not known. One
+    # delete: the listing saying the park survived.
+    assert len(re.findall(r"unresolved\.add\(", script)) == 2
     assert len(re.findall(r"unresolved\.delete\(", script)) == 1
     # Read as a use rather than as a mention, because ``_functions`` attributes the
     # declaration itself — it sits between two functions — to whichever one precedes it.
@@ -4352,3 +4356,79 @@ def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> Non
     elsewhere = _constant(script, "PARK_ELSEWHERE")
     assert "already on its way" in elsewhere
     assert "not the live control" in elsewhere
+
+
+def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> None:
+    """Round 5's blocker, and it is ADR-0177 §7's third clause read as written.
+
+    Which of ADR-0139 §4's three an act gets is read "from ADR-0168 §9's distinction and
+    from nothing else: a request the hub received and declined is **known not to have
+    landed**; a transport failure between the gateway and the hub is **not known**". A
+    ``502 hub-unreachable`` is the second — ``_relay_fault`` raises it from a
+    ``TransportError`` the wire client can raise *after* the call was delivered, so the
+    hub may have run the action with only the reply lost. Releasing the continuation
+    there lets a second ``resume`` go out on a token the first resolved, which
+    ADR-0084 §7 makes emphatically not a denial and the gateway relays as
+    ``assistant-declined``.
+
+    ``relay`` hands its caller the body it already read rather than widening its return,
+    because ``null`` means "refused, condition already on screen" at every other call
+    site and re-reading all of them is its own change (#1619).
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    relay = functions["relay"]
+    answering = functions["answerConfirmation"]
+
+    # Told only where the caller asked to be, and only for a refusal — a successful
+    # response returns above this.
+    assert "if (noticed !== undefined) {" in relay
+    assert "noticed(body, response.status);" in relay
+    assert relay.index("refused(panelId, body, response.status);") < relay.index("noticed(")
+    # And exactly one caller asks. Every other entry point reaching `relay` is unchanged
+    # by this, which is the whole reason it is a callback.
+    # And exactly one call site passes it, asserted over the *shape* rather than over
+    # the identifier: "noticed by" is owner-facing text this file renders for a
+    # notification's producer, so a name search counts two unrelated functions.
+    # Two: ``relay``'s own trailing parameter, and the single call site that fills it.
+    assert len(re.findall(r"\bnoticed\b\s*\)", script)) == 2
+    assert "async function relay(half, path, payload, panelId, stopping, noticed) {" in script
+    assert "const noticed = (named, status) => {" in answering
+    # The conditions the page already records as unknown are the ones that keep it.
+    assert "if (refusal !== null && UNKNOWN_FAULTS.has(refusal.named.fault)) {" in answering
+    kept = answering[answering.index("if (refusal !== null") :]
+    unknown = kept[: kept.index("\n    }\n")]
+    assert "unresolved.add(token);" in unknown
+    assert "spent.delete(token);" not in unknown
+    assert answering.index("UNKNOWN_FAULTS.has(") < answering.index("spent.delete(token);")
+
+
+def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
+    """Round 5's second finding: a row is re-rendered long after the ending, so the
+    sentence it carries cannot be the one that names what happened.
+
+    ``parkWords`` is reached by every later transition — the park's other row answering,
+    a listing read, the registry refreshing — and it has no record of *why* the answer
+    went unread. A stranded arm returning "You stopped waiting" therefore attributed a
+    connection failure to an act the owner did not take, which is the class of wrong
+    explanation ``abandonAsk`` keeps three sentences apart for the ask.
+
+    So the division is: what happened is said once, at the ending, in the fault line
+    beside the row — three sentences, each naming its own cause — and what is still true
+    is what the row carries.
+    """
+    script = _code("app.js")
+    words = _functions(script)["parkWords"]
+
+    assert "return stranded ? PARK_NOT_KNOWN : PARK_ANSWERED;" in words
+    neutral = _constant(script, "PARK_NOT_KNOWN")
+    assert "not known" in neutral
+    assert neutral.rstrip().endswith("PARK_ROUTE_BACK")
+    # Cause-neutral: none of the three endings' own openings appears in it.
+    for attributed in ("You stopped waiting", "connection carrying", "between itself and"):
+        assert attributed not in neutral, attributed
+    # And the three that *do* name a cause reach the owner through the fault slot only,
+    # never through a row that outlives the ending.
+    for named in ("PARK_UNRESOLVED", "PARK_LOST", "PARK_HUB_UNREAD"):
+        assert named not in words, named
+        assert named in _functions(script)["answerConfirmation"], named
