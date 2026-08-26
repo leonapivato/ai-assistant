@@ -400,21 +400,42 @@ review-codex-both-start base="":
 # One deadline across both waits, not one each, so `timeout` means what it says.
 # Both are attempted whatever the first returns: a lane told only "adversarial is
 # still running" learns nothing about the lens it is also owed, and the second
-# wait costs nothing once the shared deadline has passed. The worst status wins,
-# so a 0 is never reported for a pair that is not both recorded.
+# wait costs nothing once the shared deadline has passed.
+#
+# The status reported is the one that DEMANDS THE MOST, ranked by what the caller
+# must do about it and not by the numeric order or by arrival — "the last non-zero
+# wins" would report a 3 for a pair whose adversarial lens exited 4, telling a
+# lane to keep polling a lens that is not running. The ranking is:
+#
+#   0  both recorded, nothing to do
+#   3  neither has failed, one is not finished — ask again
+#   4  one has no round in flight — start it, or read why it stopped
+#   *  the call itself was wrong (usage, or a malformed poll interval)
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # Block up to `timeout`s on BOTH lenses' rounds for HEAD's tree, then report them
 review-codex-both-wait timeout="540" base="":
     #!/usr/bin/env bash
     set -euo pipefail
+    rank() {
+        case "$1" in
+        0) echo 0 ;;
+        3) echo 1 ;;
+        4) echo 2 ;;
+        *) echo 3 ;;
+        esac
+    }
     deadline=$(( $(date +%s) + $1 ))
     status=0
     for persona in adversarial architecture; do
         remaining=$(( deadline - $(date +%s) ))
         [ "$remaining" -lt 0 ] && remaining=0
+        this=0
         scripts/codex-review.sh --wait "$persona" "$2" --timeout "$remaining" ||
-            status=$?
+            this=$?
+        if [ "$(rank "$this")" -gt "$(rank "$status")" ]; then
+            status="$this"
+        fi
     done
     exit "$status"
 
