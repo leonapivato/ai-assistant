@@ -36,7 +36,9 @@ from ai_assistant.core.types import ToolCall, ToolDefinition
 from ai_assistant.tools.consume import consumed_call
 from ai_assistant.tools.invocation import (
     BoundImplementation,
+    ResolvedImplementation,
     checked_pairing,
+    resolved_implementation,
     run_prepared_call,
 )
 
@@ -156,6 +158,10 @@ class _Binding:
 
     definition: ToolDefinition
     implementation: BoundImplementation
+    #: The callable's shape, decided here at registration rather than per call, so
+    #: that invocation reads nothing off an object it did not write and a refused
+    #: claim never reaches implementation-controlled code (ADR-0192 §1).
+    resolved: ResolvedImplementation
 
 
 class InMemoryToolRegistry:
@@ -290,7 +296,14 @@ class InMemoryToolRegistry:
             ValidationError: If the definition violates the type's own rules,
                 which a ``__dict__`` write can leave it doing.
         """
-        binding = _Binding(_revalidated(tool), implementation)
+        # The shape is decided **here**, once. Asking the object at invocation
+        # time would run its own `__getattribute__` before the claim, so a call
+        # the ledger then refused would already have reached its code; asked here
+        # it runs at composition time, under no authorisation at all. Anything it
+        # raises leaves `register`, which is the honest place for it.
+        binding = _Binding(
+            _revalidated(tool), implementation, resolved_implementation(implementation)
+        )
 
         previous = self._spent.get(binding.definition.id)
         if previous is None:
@@ -461,7 +474,7 @@ class InMemoryToolRegistry:
         # rather than a coroutine, because obtaining a coroutine means *calling*
         # the registration — and nothing makes one a native `async def`, so a
         # plain function's body would have run before the claim was appended.
-        entering = checked_pairing(binding.implementation, checked)
+        entering = checked_pairing(binding.resolved, checked)
 
         async def act() -> ToolResult:
             # `duration`, not the caller's object: the deadline is opened after
