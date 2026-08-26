@@ -105,7 +105,10 @@ def countable(amount: Decimal) -> bool:
         ``True`` where it is finite, below ``1E15`` in absolute value, and needs
         at most nine fractional digits.
     """
-    return amount.is_finite() and value_scale(amount) >= _FINEST and abs(amount) < _TOO_LARGE
+    # ``copy_abs`` and not ``abs``: the latter rounds to the ambient precision
+    # and traps under a hostile context, which ADR-0194 §1 forbids a
+    # classification from depending on. Comparison is exact and context-free.
+    return amount.is_finite() and value_scale(amount) >= _FINEST and amount.copy_abs() < _TOO_LARGE
 
 
 def canonical(amount: Decimal) -> Decimal:
@@ -240,7 +243,11 @@ def _edge(day: date, zone: ZoneInfo, span: tuple[datetime, datetime]) -> datetim
     """
     low, high = span
     try:
-        return min(max(datetime(day.year, day.month, day.day, tzinfo=zone, fold=0), low), high)
+        civil = datetime(day.year, day.month, day.day, tzinfo=zone, fold=0)
+        # Converted to UTC before anything is compared to it or added to it:
+        # arithmetic on a zone-aware value moves its *wall clock*, so a
+        # representability check made on one asks about a different instant.
+        return min(max(civil.astimezone(UTC), low), high)
     except OverflowError, ValueError, OSError:
         return low if day.year <= _YEAR_ONE else high
 

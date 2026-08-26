@@ -145,7 +145,11 @@ def is_countable(amount: Decimal) -> bool:
         return False
     if effective_exponent(amount) < -AMOUNT_SCALE:
         return False
-    return abs(amount) < AMOUNT_CEILING
+    # ``copy_abs`` and not ``abs``: the latter is an arithmetic operation that
+    # rounds to the ambient precision, so under a hostile context it traps on
+    # exactly the values this predicate exists to classify (ADR-0194 §1's
+    # context-independence clause). Comparison itself is exact and context-free.
+    return amount.copy_abs() < AMOUNT_CEILING
 
 
 def reduced(amount: Decimal) -> Decimal:
