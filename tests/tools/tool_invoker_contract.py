@@ -3452,3 +3452,61 @@ class ToolInvokerContract:
             "the callable kept its own window: the append that delayed it is not "
             "bounded by the deadline and does not shorten what the call is given"
         )
+
+    async def test_a_granted_admission_is_released_when_an_unrecorded_claim_is_refused(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0194 §3: released "after the failure that prevented" the completion.
+
+        The gate **granted**, so a reservation is standing; ADR-0192 §1's claim then
+        refuses, so no callable runs and no completion is owed. An invoker that
+        released only after a returned result or a cancelled callable passes every
+        other release clause here and strands the reservation — after which the
+        projected total of every later admission counts a call that never happened,
+        and the ceiling refuses work the user authorised.
+
+        The condition is the real one rather than a scripted knob: the decision is
+        simply never recorded, which is what ADR-0192 §1 refuses a claim on.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        spy = Spy()
+        invoker.register(tool(), spy)
+
+        with pytest.raises(UnrecordedAuthorisationError):
+            await invoker.invoke(call_for(tool()), timeout=PATIENT)
+
+        assert gate.estimates == [tool().cost], "the gate was consulted before the claim"
+        assert len(gate.released) == 1, "the reservation the grant took was retired"
+        assert gate.outstanding == [], "no reservation nobody holds a handle for"
+        assert spy.calls == [], "the callable was never reached"
+
+    async def test_a_granted_admission_is_released_when_a_spent_claim_is_refused(
+        self, admitting: Callable[[SpendGate], InvocableToolRegistry]
+    ) -> None:
+        """The other of ADR-0192 §1's two refusals, which arrives by a different route.
+
+        There the trail held no matching decision; here it holds one that has already
+        been spent. An implementation catching a single class would pass the case
+        above and strand the reservation on this one — so both are driven, and the
+        assertion is over the **delta** across the second call rather than over the
+        totals, since the first one legitimately took and released a reservation of
+        its own.
+        """
+        gate = RecordingGate()
+        invoker = admitting(gate)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        trail = trail_of(invoker)
+        call = call_for(tool())
+
+        first = await invoked(invoker, trail, call, timeout=PATIENT)
+        assert first.outcome is ToolOutcome.SUCCEEDED
+        already = len(gate.released)
+
+        with pytest.raises(AuthorisationSpentError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert len(gate.released) == already + 1, "the second grant's reservation was retired too"
+        assert gate.outstanding == []
+        assert len(spy.calls) == 1, "the refused call reached no callable"

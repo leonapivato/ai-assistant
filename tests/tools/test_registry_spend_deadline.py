@@ -12,6 +12,12 @@ conforming is a lane that writes only cooperative-fake fixtures, inherits ADR-00
 absorption without noticing, and leaves a reader of its tests believing the deadline
 is a hard bound."
 
+**What shutdown does is *not* here.** ADR-0042 §2 makes shutdown the façade's
+ordered drain-then-close, so §11's shutdown half is driven through the engine that
+owns that ordering, in ``tests/app/test_composition_spend_shutdown.py``. A bare
+``SqliteAuditTrail.close`` mid-read is the resource race that ordering exists to
+prevent, and calling it shutdown would be describing the wrong act.
+
 **Why here and not beside the store.** ``tests/permissions/test_sqlite_spend.py``
 already pins the same fact at ``admit_invocation`` — the paired lane's half, since
 the absorption is the store's. What that lane could not write is the half through
@@ -129,28 +135,24 @@ async def test_this_holders_wedged_read_outlives_the_deadline_invoke_was_given(
     assert result is not None
 
 
-async def test_shutdown_reaching_this_holder_mid_read_returns_without_waiting(
+async def test_a_backend_failure_under_that_read_never_reaches_tools_as_its_own_type(
     wedged: tuple[InMemoryToolRegistry, SqliteAuditTrail, ThreadSuspension],
 ) -> None:
-    """The second half §11 names: **what happens to the connection at shutdown**.
+    """ADR-0194 §4: "a backend exception is translated rather than propagated".
 
-    Stated rather than asserted as a bound, for the same reason the deadline case
-    above is: what is not conforming is a lane that leaves a reader believing
-    something the implementation does not do.
+    The failure is produced the way a real one arrives — from underneath, out of
+    the ``sqlite3`` worker — rather than by raising a chosen class at the member.
+    The connection is closed while the worker is parked inside the read, so the
+    read meets a closed database when it is released, which is a genuine backend
+    exception and not one this case authored.
 
-    What this holder does is close **without waiting**. ``SqliteAuditTrail.close``
-    is ``suppress(sqlite3.Error)`` around ``conn.close()`` and takes no lock, so a
-    shutdown arriving while the worker is parked inside a read returns straight
-    away and the parked worker finds a closed connection when it is released. That
-    is safe in the running system because ADR-0083 §4 has the engine **drain**
-    every tracked operation to quiescence before it closes anything — the ordering
-    is the façade's, not the store's — and it is stated here because the store on
-    its own does not enforce it.
-
-    What matters at *this* seam is the half that is enforced, and it is asserted:
-    the store's own error type never reaches ``tools/``. ADR-0194 §4 requires a
-    backend exception to be translated rather than propagated, and a closed
-    connection is exactly such a backend exception arriving from underneath.
+    **This is not shutdown**, and is deliberately not called that: ``close`` takes
+    no lock, so a bare one mid-read is the resource race ADR-0042 §2's ordered
+    drain exists to prevent. What §11 asks about shutdown is driven through the
+    façade that owns that ordering, in
+    ``tests/app/test_composition_spend_shutdown.py``. What is here is the seam
+    property alone — that ``tools/`` never sees a store's own error type, whatever
+    the store's own error happens to be.
     """
     registry, trail, parked = wedged
     definition = tool(cost=_COST)
@@ -158,16 +160,13 @@ async def test_shutdown_reaching_this_holder_mid_read_returns_without_waiting(
     call = call_for(definition)
     await trail.record(call.decision)
 
-    # Patient, so what the call comes back as is the *store's* answer rather than
-    # ADR-0029 §4's classification of an expiry — the case above owns that half.
+    # Patient, so what comes back is the *store's* answer rather than ADR-0029 §4's
+    # classification of an expiry — the case above owns that half.
     running = asyncio.ensure_future(registry.invoke(call, timeout=timedelta(seconds=30)))
     await parked.reached()
-
-    closing = asyncio.get_running_loop().run_in_executor(None, trail.close)
-    await asyncio.wait_for(closing, _WAITING)
-    assert not running.done(), "the read is still parked; only the connection went away"
-
+    await asyncio.get_running_loop().run_in_executor(None, trail.close)
     parked.release()
+
     with pytest.raises(SpendUndeterminedError) as caught:
         await asyncio.wait_for(running, _WAITING)
 
