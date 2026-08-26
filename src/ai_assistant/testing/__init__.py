@@ -64,6 +64,8 @@ from ai_assistant.testing.permissions import (
     FakeIdentifierSpace,
     FakeInvocationCompleter,
     FakeInvocationLedger,
+    FakeSpendGate,
+    FakeSpendLedger,
 )
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
@@ -175,6 +177,8 @@ __all__ = [
     "FakeSourceGrants",
     "FakeSourceReadRecorder",
     "FakeSourceReadTrail",
+    "FakeSpendGate",
+    "FakeSpendLedger",
     "FakeStreamingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",

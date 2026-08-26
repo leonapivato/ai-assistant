@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast, get_args
+from uuid import uuid4
 
 import structlog
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -45,6 +46,8 @@ from ai_assistant.core.errors import (
     DuplicateDecisionError,
     InvalidCompletionError,
     InvalidResolutionError,
+    SpendCeilingError,
+    SpendUndeterminedError,
     UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
@@ -54,6 +57,9 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     RecordedInvocation,
+    SpendAdmissionHandle,
+    SpendPeriod,
+    SpendTotal,
     ToolCost,
     ToolFailureKind,
     ToolInvocation,
@@ -62,10 +68,23 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.permissions._transactions import transaction
 from ai_assistant.permissions.identifiers import IdentifierFactory, ProcessIdentifiers
+from ai_assistant.permissions.spend import (
+    DeclaredFault,
+    PeriodBounds,
+    Reservations,
+    SpendArithmeticError,
+    SpendConfiguration,
+    declared_contribution,
+    exact_projection,
+    exact_sum,
+    period_bounds,
+    reported_contribution,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
     from contextlib import AbstractContextManager
+    from decimal import Decimal
 
 _log = structlog.get_logger(__name__)
 
@@ -536,6 +555,7 @@ class SqliteAuditTrail:
         path: Path | str,
         now: Callable[[], datetime] = _utc_now,
         identifiers: IdentifierFactory | None = None,
+        spend: SpendConfiguration | None = None,
     ) -> None:
         """Open (or create) the trail at ``path``.
 
@@ -554,6 +574,12 @@ class SqliteAuditTrail:
                 it. **No caller supplies an instant** (ADR-0192 §1): a store that
                 enforced a window against a number the party being bounded chose
                 would enforce nothing.
+            spend: What ADR-0194 §5 has the composition root read and inject —
+                the reporting currency, the two ceilings, the unknown-price
+                allowance and the zone the calendar periods are computed in.
+                **Explicit values, never a ``Settings`` read** (ADR-0194 §11).
+                Defaults to an unconfigured ceiling, which refuses nothing and
+                states no total.
             identifiers: The factory each row's ``id`` is minted from. Defaults to
                 the process's own, so two stores in one process never mint from
                 independent sequences (ADR-0192 §2). Injected so a suite can force
@@ -568,6 +594,14 @@ class SqliteAuditTrail:
             identifiers if identifiers is not None else ProcessIdentifiers()
         )
         self._lock = asyncio.Lock()
+        self._spend = spend if spend is not None else SpendConfiguration()
+        # Its own lock: ADR-0194 §3 serialises admissions against each other and
+        # deliberately not against the appends, so a completion can land while an
+        # admission reads and an admission never sits in front of a write.
+        self._spend_lock = asyncio.Lock()
+        self._reservations = Reservations()
+        self._handle_nonce = uuid4().hex
+        self._handle_ordinal = 0
         self._conn = self._setup()
 
     def _setup(self) -> sqlite3.Connection:
@@ -1634,6 +1668,231 @@ class SqliteAuditTrail:
             self._identifiers.reserve([claim.id for claim in claims])
             return claims
 
+    # --- the spend ceiling (ADR-0194) --------------------------------------
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Admit this invocation and reserve its declared contribution, or refuse.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendGate.admit_invocation`.
+
+        **Its critical section is its own**, and deliberately not the lock the
+        appends take (ADR-0194 §3). The admission is not atomic with ADR-0192's
+        claim and does not pretend to be: what it serialises is *itself*, so the
+        Nth concurrent invocation sees the N-1 reservations already taken, while a
+        completion appended by a call already in flight can still land while an
+        admission is reading. Sharing one lock would make the second impossible and
+        would put an admission's store read in front of every write.
+
+        Raises:
+            SpendCeilingError: If a configured ceiling would be crossed.
+            SpendUndeterminedError: On ADR-0194 §4's six grounds, in that section's
+                order. Every backend failure is translated here, so ``tools/``
+                never meets an :class:`AuditError` through this seam.
+        """
+        if not self._spend.bounded:
+            # ADR-0194 §3's short-circuit: no clock, no store, no arithmetic, no
+            # reservation, and nothing that can refuse.
+            return self._mint_handle()
+        contribution = declared_contribution(estimate, self._spend)
+        if isinstance(contribution, DeclaredFault):
+            # Grounds 1 and 2: facts about the call, decided before any I/O.
+            raise SpendUndeterminedError(_undetermined(contribution.value))
+        async with self._spend_lock:
+            self._reservations.apply_pending()
+            instant = self._spend_reading()
+            periods = self._periods(instant)
+            rows = await self._spend_rows(periods)
+            measured = {bounds.period: _measurable(bounds, rows, self._spend) for bounds in periods}
+            _refuse_unmeasurable(measured, self._spend)
+            return self._compare_and_reserve(periods, measured, contribution)
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Drop the reservation ``handle`` names. Never waits, never raises.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendGate.release_admission`. It
+        touches no store and takes no lock, so an invocation whose callable has
+        already returned never queues in its ``finally`` behind another
+        invocation's store I/O. The reservation is resolved **here** and only its
+        application is deferred to the next admission's critical section.
+        """
+        named = getattr(handle, "handle", None)
+        if isinstance(named, str):
+            self._reservations.release(named)
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Return one total per period, in ``SpendPeriod``'s fixed order.
+
+        Structurally implements
+        :meth:`~ai_assistant.core.protocols.SpendLedger.spend_totals`. **One clock
+        reading and one row snapshot**: the rows for both periods come back from a
+        single statement, so the pair is always one a snapshot could have produced
+        and a completion appended mid-read cannot land between two aggregations.
+
+        It takes no lock. It reads no reservation — those bound what may be
+        *admitted* and are not spend — so nothing here needs to exclude an
+        admission, and a totals read never queues behind a wedged one.
+
+        Raises:
+            SpendUndeterminedError: Only where the values cannot be produced at
+                all — a store read that failed, or an injected clock that raised.
+                A trapped sum leaves its periods indeterminate instead.
+        """
+        instant = self._spend_reading()
+        periods = self._periods(instant)
+        rows = await self._spend_rows(periods)
+        priced = self._spend.currency is not None
+        return tuple(
+            _stated(bounds, _measurable(bounds, rows, self._spend) if priced else None, self._spend)
+            for bounds in periods
+        )
+
+    # --- the spend ceiling's own helpers ------------------------------------
+
+    def _periods(self, instant: datetime) -> tuple[PeriodBounds, ...]:
+        """Return both periods containing ``instant``, from that **one** reading.
+
+        One instant and not one per period: a gate taking its day from one read
+        and its month from another can project a total no instant permits.
+        """
+        try:
+            return tuple(period_bounds(instant, self._spend, period) for period in SpendPeriod)
+        except (SpendArithmeticError, OverflowError, ValueError, OSError) as exc:
+            raise SpendUndeterminedError(
+                _undetermined(f"the period could not be computed: {exc}")
+            ) from exc
+
+    def _spend_reading(self) -> datetime:
+        """Take the one guarded clock reading a spend decision is made on.
+
+        A clock that raises refuses with ``SpendUndeterminedError`` — ADR-0029
+        §5's fail-closed reading of the same measurement — and never propagates
+        its own type, because ADR-0194 §5 closes this seam's ``Exception`` set at
+        two classes. A ``BaseException`` that is not an ``Exception`` propagates
+        unchanged.
+        """
+        try:
+            return self._clock()
+        except Exception as exc:
+            raise SpendUndeterminedError(_undetermined(f"the clock raised: {exc}")) from exc
+
+    async def _spend_rows(self, periods: Sequence[PeriodBounds]) -> Sequence[_SpendRow]:
+        """Read every row either period could hold, as one snapshot."""
+        low = min(bounds.start for bounds in periods)
+        high = max(bounds.end for bounds in periods)
+        try:
+            return await _run_to_completion(self._spend_rows_sync, low, high)
+        except Exception as exc:
+            raise SpendUndeterminedError(
+                _undetermined(f"the store could not be read: {exc}")
+            ) from exc
+
+    def _spend_rows_sync(self, low: datetime, high: datetime) -> Sequence[_SpendRow]:
+        """Return the rows in ``[low, high)`` with whether each claim is completed.
+
+        **One statement**, so the completion flag and the row set are one
+        observation. The flag is a correlated ``EXISTS`` over the whole table and
+        not over the window, because a claim recorded before midnight can be
+        completed after it and is not open.
+        """
+        with self._transaction("read the spend rows", immediate=False) as conn:
+            return [
+                (_as_projected(row[:-1]), bool(row[-1]))
+                for row in conn.execute(_SPEND_ROWS, (_sort_key(low), _sort_key(high)))
+            ]
+
+    def _compare_and_reserve(
+        self,
+        periods: Sequence[PeriodBounds],
+        measured: Mapping[SpendPeriod, Sequence[Decimal] | None],
+        contribution: Decimal,
+    ) -> SpendAdmissionHandle:
+        """Compare against every configured ceiling, then reserve and mint.
+
+        The comparison is against the projection — accounted, plus every
+        outstanding reservation whichever period it was taken in, plus this call's
+        own declaration — and refuses **strictly above** a ceiling, so a projection
+        exactly equal to one is admitted. The mint sits on the far side of it: a
+        refusal consults the injected factory not at all, so a raising factory
+        cannot turn a refusal into a cancellation.
+        """
+        outstanding = self._reservations.outstanding()
+        crossings: list[str] = []
+        for bounds in periods:
+            ceiling = self._spend.ceiling_for(bounds.period)
+            amounts = measured[bounds.period]
+            if ceiling is None or amounts is None:
+                continue
+            try:
+                accounted = exact_sum(amounts)
+                projected = exact_projection(accounted, [*outstanding, contribution])
+            except SpendArithmeticError as exc:
+                raise SpendUndeterminedError(
+                    _undetermined(f"the arithmetic trapped: {exc}")
+                ) from exc
+            if projected > ceiling:
+                crossings.append(
+                    f"{bounds.period.value}: {projected} projected against a ceiling of "
+                    f"{ceiling} {self._spend.currency}, with {accounted} accounted"
+                )
+        if crossings:
+            raise SpendCeilingError(
+                "the invocation was refused: it would cross a configured spend "
+                f"ceiling — {'; '.join(crossings)}"
+            )
+        key = self._reservations.reserve(contribution)
+        try:
+            handle = self._mint_handle()
+        except BaseException:
+            # No reservation nobody can release: a cancellation delivered between
+            # the reserve and the mint propagates unchanged, and does not take the
+            # reservation's only key with it (ADR-0194 §3).
+            self._reservations.discard(key)
+            raise
+        self._reservations.bind(key, handle.handle)
+        return handle
+
+    def _mint_handle(self) -> SpendAdmissionHandle:
+        """Return a handle no value this holder has ever delivered equals.
+
+        The injected factory supplies **opacity** and nothing more: a candidate the
+        type refuses, one this holder has already delivered, and a factory raising
+        an ``Exception`` are each replaced by a value generated here. None of the
+        three reaches the caller and none costs the call. A ``CancelledError`` from
+        the factory is a cancellation delivered inside ``admit_invocation`` and
+        propagates unchanged, which is why the guard is over ``Exception`` alone.
+
+        Distinctness is over this holder's **lifetime** and over the *validated*
+        value: ``Identifier`` strips, so ``"h"`` and ``" h "`` are one handle, and a
+        re-minted retired value would let a stale release drop a live reservation.
+        """
+        delivered = self._reservations.delivered
+        candidate: SpendAdmissionHandle | None = None
+        try:
+            candidate = SpendAdmissionHandle.model_validate({"handle": self._identifiers()})
+        except Exception:
+            candidate = None
+        if candidate is None or candidate.handle in delivered:
+            candidate = self._generated_handle()
+        delivered.add(candidate.handle)
+        return candidate
+
+    def _generated_handle(self) -> SpendAdmissionHandle:
+        """Return this holder's own next handle, distinct by construction.
+
+        A per-holder nonce and an ordinal rather than a bare draw: ADR-0045 §4
+        already rules that an unlikely collision is not a property to rely on, and
+        this value's whole job is to be unlike every other one this holder has
+        handed out. The ``delivered`` check is what closes the remaining case, a
+        generated value the *factory* had produced earlier.
+        """
+        while True:
+            self._handle_ordinal += 1
+            text = f"{self._handle_nonce}-{self._handle_ordinal}"
+            if text not in self._reservations.delivered:
+                return SpendAdmissionHandle(handle=text)
+
     # --- erasure ----------------------------------------------------------
 
     async def clear(self) -> int:
@@ -1683,6 +1942,124 @@ class SqliteAuditTrail:
         """Close the underlying database connection."""
         with contextlib.suppress(sqlite3.Error):
             self._conn.close()
+
+
+#: One row the spend read returns: the row itself, and whether a completion names
+#: it. The flag is meaningless on a completion and is read only for a claim.
+type _SpendRow = tuple[ToolInvocation, bool]
+
+#: Every row either spend period could hold, with whether each claim is completed.
+#: **One statement**, so the two facts are one observation: a claim recorded before
+#: a boundary can be completed after it, so the ``EXISTS`` is over the whole table
+#: while the rows are over the window.
+_SPEND_ROWS = (
+    "SELECT i.data, i.id, i.decision_id, i.recorded_at_us, i.completes, i.outcome, "
+    "EXISTS(SELECT 1 FROM invocations c WHERE c.completes = i.id) "
+    "FROM invocations i WHERE i.recorded_at_us >= ? AND i.recorded_at_us < ?"
+)
+
+
+def _undetermined(because: str) -> str:
+    """Compose ADR-0194 §4's payload-free message for an unmeasurable spend.
+
+    It names which ground applied and nothing about the call: no argument value,
+    no recipient, no account, no tool output and no digest of any of them. The
+    error travels further than the call did.
+    """
+    return f"the invocation was refused: the spend could not be reduced to a number — {because}"
+
+
+def _measurable(
+    bounds: PeriodBounds, rows: Iterable[_SpendRow], config: SpendConfiguration
+) -> Sequence[Decimal] | None:
+    """Return what each row in ``bounds`` contributes, or ``None`` if it cannot be told.
+
+    A period is **indeterminate** where an open claim falls in it — a claim states
+    that an act may have happened and does not state what it cost — or where a
+    completion reports a cost this mechanism may not add: an ``UNKNOWN`` basis or
+    a foreign currency with no allowance configured, or an amount that is not
+    countable. It is a state of one period, and it is recomputed from the rows
+    every time rather than persisted as a flag.
+
+    Every completion in the period counts, including the one whose reported cost
+    carried the total past a ceiling and one whose outcome is ``INDETERMINATE``:
+    no row is excluded because a refusal followed it, because the act may not have
+    happened, or because the figure is inconvenient.
+    """
+    amounts: list[Decimal] = []
+    for row, completed in rows:
+        if not bounds.contains(row.recorded_at):
+            continue
+        if row.completes is None:
+            if not completed:
+                return None
+            continue
+        if row.incurred_cost is None:  # pragma: no cover - ToolInvocation forbids it
+            return None
+        contribution = reported_contribution(row.incurred_cost, config)
+        if contribution is None:
+            return None
+        amounts.append(contribution)
+    return amounts
+
+
+def _refuse_unmeasurable(
+    measured: Mapping[SpendPeriod, Sequence[Decimal] | None], config: SpendConfiguration
+) -> None:
+    """Refuse where a period carrying its **own** ceiling cannot be measured.
+
+    ADR-0194 §2's per-period narrowing: a period nobody set a ceiling for is a
+    reporting figure and enforces nothing, so with only a day ceiling set a month
+    that cannot be measured refuses nothing. It does not need to — a period
+    contains its days, so an unmeasurable row in the *current* day makes that day
+    indeterminate too. What the narrowing excludes is exactly the case where the
+    unmeasurable row is in an earlier day of the same month, which is a bound the
+    user never stated refusing work they authorised.
+
+    Where both configured periods are indeterminate at once the message names
+    both, in ``SpendPeriod``'s fixed order: neither takes precedence, and naming
+    only the day would tell a user to wait until tomorrow when the month cannot be
+    measured either.
+    """
+    unmeasured = [
+        period.value
+        for period in SpendPeriod
+        if measured[period] is None and config.ceiling_for(period) is not None
+    ]
+    if unmeasured:
+        raise SpendUndeterminedError(
+            _undetermined(f"these periods cannot be measured: {', '.join(unmeasured)}")
+        )
+
+
+def _stated(
+    bounds: PeriodBounds, amounts: Sequence[Decimal] | None, config: SpendConfiguration
+) -> SpendTotal:
+    """Build the ``SpendTotal`` for one period, indeterminacy included.
+
+    ``accounted`` is absent in exactly two states and ``currency`` tells them
+    apart: absent currency means none is configured and no sum was attempted;
+    present currency means the period is indeterminate. A trapped sum lands in the
+    second, because the other period's figure is still computable and ADR-0194 §5
+    permits this member exactly one raised class and only where it can produce no
+    value at all.
+    """
+    accounted: Decimal | None = None
+    if config.currency is not None and amounts is not None:
+        try:
+            accounted = exact_sum(amounts)
+        except SpendArithmeticError:
+            accounted = None
+    return SpendTotal(
+        period=bounds.period,
+        period_start=bounds.start,
+        period_end=bounds.end,
+        start_offset=bounds.start_offset,
+        end_offset=bounds.end_offset,
+        ceiling=config.ceiling_for(bounds.period) if config.currency is not None else None,
+        currency=config.currency,
+        accounted=accounted,
+    )
 
 
 def _revalidated(decision: PermissionDecision) -> PermissionDecision:
