@@ -32,7 +32,7 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 import pytest
 import structlog.testing
@@ -64,7 +64,14 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import APPEND_FAILED, CLAIM, COMPLETION, FakeAuditTrail
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import (
+        Awaitable,
+        Callable,
+        Coroutine,
+        Mapping,
+        MutableMapping,
+        Sequence,
+    )
 
     from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import FrozenJson, ToolInvocation, ToolResult
@@ -1781,10 +1788,20 @@ class ToolInvokerContract:
         an ``Exception`` leaves the classifier by design, and ADR-0192 §3 gives it
         no exemption: it "is governed by this section's own clauses on a
         ``BaseException`` raised there … everything else propagating unchanged with
-        no diagnostic standing in for it". So it is **not** swallowed behind the
+        **no diagnostic standing in for it**". So it is **not** swallowed behind the
         append's own failure — the call does not return a ``ToolResult``, and the
         claim path does not answer with the ``AuditError`` it would give an
         ordinary ``Exception``.
+
+        **And no diagnostic is written at all.** §3 says of that exception that "it
+        leaves the emitting frame", which is false of an implementation that
+        catches it inside the emitter, omits the class field and writes the record
+        anyway — and that record is exactly the one standing in for the exception
+        §3 forbids. An earlier draft of this suite asserted the omitted-field
+        shape here; it was asserting the construct the clause rules out. The
+        omitted-field shape is still right where the *append's own* failure is a
+        ``BaseException`` no class can be read from — that case is next — and the
+        two are told apart by which exception the classifier was asked about.
 
         The class that leaves is not asserted: on the completion path this runs
         inside a retained append, which is the one thing §3 declines to state.
@@ -1826,11 +1843,97 @@ class ToolInvokerContract:
             "nor translated, nor replaced by the failure of annotating it"
         )
         assert returned is None
-        assert appended(captured) == [
-            {"operation": CLAIM}
-            if member == "claim"
-            else {"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED}
-        ], "the field is omitted, not filled with a literal"
+        assert appended(captured) == [], (
+            "the exception leaves the emitting frame, so no diagnostic stands in for it"
+        )
+
+    async def test_a_raising_log_processor_costs_the_diagnostic_and_nothing_else(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """A broken *emitter* is not the classifier ADR-0192 §3 governs.
+
+        §3's subject throughout is what may be **read off an exception and
+        rendered** — the fault class, the field omitted where none can be read,
+        the ``BaseException`` the name read raises and the clauses that dispose of
+        it. It says nothing at all about the pipeline the rendered fields are then
+        handed to, and ADR-0004 §5 and ADR-0119 likewise govern what a diagnostic
+        may *carry* rather than what happens when the sink behind it is
+        misconfigured. So the guard this case requires around the **emission** is
+        not the guard §3 puts on the **classify**; the two are separable because
+        they are about different things.
+
+        **What an unguarded emitter costs.** Since the classifier's own failure is
+        routed to the append path for disposition (§3), an exception the *emitter*
+        raises would be routed there too — and would then stand in for the append
+        failure it was being emitted about. On the claim path the caller is told
+        the claim failed because a log sink did: an ``AuditError`` whose cause is
+        the sink's exception, with the ledger's own failure nowhere in the chain.
+        On the completion path it is absorbed in that failure's place, so a
+        propagating cancellation carries the sink's exception as its cause instead
+        of the append's. Neither is a fault of the *call*, and reporting a
+        completed act as failed because a disk was full is precisely what §3 calls
+        worse than an incomplete record — the fail-open ADR-0034 §1 exists to
+        prevent.
+
+        So an ``Exception`` from the pipeline costs the **diagnostic** and nothing
+        else: the append's own failure stays intact for the path to dispose of by
+        its own rules, and a successful ``ToolResult`` still reaches the caller.
+
+        The processor is configured rather than the module logger patched, because
+        a shared suite has two subjects in two modules and only the pipeline is
+        common to both. ``capture_logs`` cannot serve here at all — it *replaces*
+        the chain, which is the thing under test.
+        """
+
+        class BrokenSinkError(Exception):
+            """What a misconfigured processor raises on the way to its sink."""
+
+        def refuse(_logger: object, _name: str, _event: MutableMapping[str, Any]) -> NoReturn:
+            msg = "the log pipeline is broken"
+            raise BrokenSinkError(msg)
+
+        async def under_a_broken_sink(
+            member: str, error: Exception
+        ) -> tuple[FakeAuditTrail, ToolResult | None, BaseException | None]:
+            trail = FakeAuditTrail()
+            ledger = DrivenLedger(trail)
+            getattr(ledger, member).error = error
+            invoker = consuming(ledger)
+            invoker.register(read_only("inbox"), Spy(output={"unread": 3}))
+            call = call_for(read_only("inbox"))
+            await trail.record(call.decision)
+
+            configured = structlog.get_config()
+            structlog.configure(processors=[refuse])
+            try:
+                return trail, await invoker.invoke(call, timeout=PATIENT), None
+            except BaseException as exc:  # the case below decides what it means
+                return trail, None, exc
+            finally:
+                structlog.configure(**configured)
+
+        # The claim path reports a fault, and the fault it reports is the ledger's.
+        refused = RuntimeError("the store would not write the claim")
+        _, returned, raised = await under_a_broken_sink("claim", refused)
+        assert returned is None
+        assert isinstance(raised, AuditError)
+        assert raised.__cause__ is refused, (
+            "the diagnostic's own failure never stands in for the append failure "
+            "the operator is being told about"
+        )
+
+        # The completion path returns the result the tool already produced.
+        trail, returned, raised = await under_a_broken_sink(
+            "completion", RuntimeError("the store would not write the completion")
+        )
+        assert raised is None
+        assert returned is not None
+        assert returned.outcome is ToolOutcome.SUCCEEDED
+        assert returned.output == {"unread": 3}, "a broken log sink does not fail a completed act"
+        open_after = await trail.open_invocations(
+            decision_id=call_for(read_only("inbox")).decision.id
+        )
+        assert len(open_after) == 1, "the completion was refused, so the claim is left open"
 
     @pytest.mark.parametrize("member", ["claim", "completion"])
     async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
