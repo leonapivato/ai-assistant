@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    fault_class_of,
 )
 
 if TYPE_CHECKING:
@@ -235,31 +236,61 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> Ente
     return partial(implementation, call.request.parameters, idempotency_key=call.idempotency_key)
 
 
-def _class_name(exc: BaseException) -> str:
-    """``type(exc).__name__``, or the reserved literal where the read fails.
+#: What names an invented cancellation, as a **literal** rather than a read. A
+#: ``CancelledError`` reaches :func:`internal_failure` only from the branch that
+#: has already established none was requested (ADR-0029 §4, ADR-0031 §2), so what
+#: happened is fully described without asking a tool-controlled class for its
+#: name — and asking would put an attacker-controlled string in a message for no
+#: gain over this one.
+_INVENTED_CANCELLATION = "CancelledError"
+
+
+def _fault_class(exc: BaseException) -> str:
+    """Name the exception's class, totally, and with nothing the tool controls.
 
     **Read once, and total, because this runs after the claim.** Both the
-    diagnostic and the failure message below need the class, and a metaclass that
-    raises on the ``__name__`` access would otherwise leave this frame in place of
-    the ``ToolResult`` — so ADR-0192 §3 would get no completion for a claim it had
-    already appended, a known-failed act permanently spending its authorisation,
-    and ADR-0029 §3's rule that a broken tool becomes a *result* rather than an
-    exception would not hold for the one class of tool most likely to break it.
+    diagnostic and the failure message below need the class, and an unguarded
+    read would leave this frame in place of the ``ToolResult`` — so ADR-0192 §3
+    would get no completion for a claim it had already appended, a known-failed
+    act permanently spending its authorisation, and ADR-0029 §3's rule that a
+    broken tool becomes a *result* rather than an exception would not hold for the
+    one class of tool most likely to break it.
 
-    The guard stops at ``Exception`` for exactly the reason
-    :func:`~ai_assistant.core.types.fault_class_of` does: a ``CancelledError``
-    raised *by the name read* is delivered onward (ADR-0060 §1). The literal it
-    falls back to is ``core``'s own shape for a class no name can be read from,
-    not one invented here.
+    **The classifier is ``core``'s**, not a second one written here:
+    :func:`~ai_assistant.core.types.fault_class_of` guards the ``__name__`` access,
+    rejects a name that is not a plain identifier, and answers with
+    :data:`~ai_assistant.core.types.UNREPRESENTABLE_FAULT_CLASS` for both. That
+    matters twice over — an unguarded access takes the result down, and a name is
+    as attacker-controlled as a message, so a class called
+    ``recipient@example.com`` would otherwise be copied verbatim into
+    ``ToolFailure.message`` and into a log ADR-0004 §5 rules Tier 2 only.
+
+    Two things it cannot do from inside ``core`` are done here.
+
+    **A ``CancelledError`` from the name read is swallowed, not delivered.**
+    ``fault_class_of`` deliberately lets one out, because at *its* callers the
+    ``Task.cancelling()`` count is read afterwards and decides. Here it is already
+    decided: every branch reaching :func:`internal_failure` has established that
+    no cancellation was requested, and the read is synchronous, so none can be
+    delivered between the two. One raised by a hostile metaclass is therefore
+    invented with nothing cancelled — ADR-0031 §2's case, which ADR-0029 §4 makes
+    ``INTERNAL`` rather than a cancellation. Letting it out would report a
+    cancellation nobody asked for *and* leave the claim open. Every other
+    ``BaseException`` still propagates: a process being torn down is not a
+    refusal, and the open claim is the honest state for it (ADR-0192 §3).
+
+    **The result is required to be an exact ``str``.** ``fault_class_of`` hands
+    back the name it validated, and a metaclass may return a ``str`` *subclass*
+    that passes both the type check and the pattern and then runs its own
+    ``__format__`` when the message is built — after the claim, with the same
+    consequence as the raising read. An exact built-in string cannot.
     """
     try:
-        name = type(exc).__name__
-    # A blind `except Exception` on purpose — see above. `BaseException` is
-    # deliberately not caught. (`BLE` is not enabled in this tree and `RUF100`
-    # fails the gate on an unused directive, so the reason stays a comment.)
-    except Exception:
+        fault = fault_class_of(exc) if isinstance(exc, Exception) else _INVENTED_CANCELLATION
+    except asyncio.CancelledError:
         return UNREPRESENTABLE_FAULT_CLASS
-    return name if isinstance(name, str) else UNREPRESENTABLE_FAULT_CLASS
+    # `type(...) is str` and not `isinstance`: the subclass is the thing refused.
+    return fault if type(fault) is str else UNREPRESENTABLE_FAULT_CLASS
 
 
 def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
@@ -273,7 +304,7 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     integration, accepted because the alternative is a disclosure on the failure
     path of every tool nobody thought about.
     """
-    fault = _class_name(exc)
+    fault = _fault_class(exc)
     with contextlib.suppress(Exception):
         # Guarded because this runs **after** the claim: a configured processor
         # that raises would otherwise leave this frame in place of the
