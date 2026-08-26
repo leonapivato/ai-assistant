@@ -358,11 +358,21 @@ _artifact_for_tree() {
 # reviewed one. What `--start` adds is detachment and a bounded confirmation that
 # the round is really running before it hands the terminal back.
 #
-# The base is passed on as the ref THIS invocation resolved rather than as the
-# empty string the caller may have given, so the child cannot resolve a different
-# `origin/main` from a fetch that lands between the two. Resolving a ref to the
-# same ref is what the child's own defaulting would have produced anyway; what is
-# removed is the window in which it would not have.
+# The child is handed the RESOLVED BASE COMMIT, not the ref this invocation was
+# given. A ref is mutable, and re-resolving it in the child is not the same
+# computation: a fetch landing in the window between the parent's `git merge-base`
+# and the child's would give the child a different base, hence a different loop
+# key, hence a different lock, marker and artifact path from the ones the parent
+# is watching. The parent would poll its own key until the grace expired and
+# report a failure, while the paid round ran on to completion and recorded a
+# perfectly good artifact somewhere the parent never looked.
+#
+# Passing the commit closes that window by construction — `git merge-base <commit>
+# HEAD` is that commit, since it is already an ancestor — so the child's range is
+# the parent's range and not merely one resolved the same way a moment later.
+# Nothing reads the artifact's `base=` field (`ship` selects on `base_sha`), so
+# recording the commit there rather than the ref costs nothing and is the more
+# precise provenance for a round whose base was pinned before it was launched.
 _mode_start() {
     # Zero is refused rather than accepted as "do not wait". `--start`'s whole
     # contract is that it returns once the round has claimed its loop, so a
@@ -391,6 +401,31 @@ _mode_start() {
         echo "--start is unavailable on the bypass path (CODEX_REVIEW_NO_SANDBOX=1," >&2
         echo "  or GITHUB_ACTIONS=true): it keeps no in-flight state, so a detached" >&2
         echo "  round there could not be waited on. Run the round in the foreground:" >&2
+        echo "  scripts/codex-review.sh ${persona} ${base}" >&2
+        exit 2
+    fi
+
+    # And refused for the same reason where there is no `flock` to take. Without
+    # it `_claim_persona` claims nothing (the pre-#142 degradation this script
+    # keeps deliberately), so two `--start`s would each launch a round, each
+    # observe its own token in the marker they take turns overwriting, and both
+    # report success — two concurrent rounds of one persona writing one artifact,
+    # one thread and one snapshot. The foreground form carries the same
+    # degradation and is left alone, because it is bounded by the operator running
+    # one command at a time; `--start` returns immediately and is precisely the
+    # affordance that makes two easy to launch by accident. Refusing here is the
+    # same trade the bypass refusal above makes, and it costs nothing that the
+    # foreground round does not still provide.
+    #
+    # Not closed with a `mkdir`/PID lockfile instead: this file's `_lock_session`
+    # states why at length — such a lock survives its owner and needs a
+    # stale-timeout heuristic that either wedges the loop or breaks mutual
+    # exclusion, which is worse than declining the mode.
+    if [[ "$serialized" -eq 0 ]]; then
+        echo "--start is unavailable without 'flock': two detached rounds of one" >&2
+        echo "  persona could not be prevented, and both would write the same" >&2
+        echo "  artifact, thread and disposition snapshot (ADR-0015, issue #142)." >&2
+        echo "  Run the round in the foreground instead:" >&2
         echo "  scripts/codex-review.sh ${persona} ${base}" >&2
         exit 2
     fi
@@ -476,11 +511,11 @@ _mode_start() {
     # redirection binds to the command it is written on.
     if command -v setsid >/dev/null 2>&1; then
         CODEX_REVIEW_DETACHED_LOG="$log_file" CODEX_REVIEW_START_TOKEN="$start_token" \
-            setsid --fork "${BASH:-bash}" "$self" "$persona" "$base" \
+            setsid --fork "${BASH:-bash}" "$self" "$persona" "$base_sha" \
             >"$log_file" 2>&1 </dev/null {start_lock_fd}>&- &
     else
         CODEX_REVIEW_DETACHED_LOG="$log_file" CODEX_REVIEW_START_TOKEN="$start_token" \
-            nohup "${BASH:-bash}" "$self" "$persona" "$base" \
+            nohup "${BASH:-bash}" "$self" "$persona" "$base_sha" \
             >"$log_file" 2>&1 </dev/null {start_lock_fd}>&- &
     fi
 
@@ -617,10 +652,13 @@ _mode_wait() {
             live=1
         elif [[ "$serialized" -eq 0 && -n "$r_pid" ]] && kill -0 "$r_pid" 2>/dev/null; then
             # No lock to read: the unserialized fallback (#142) takes none, so the
-            # marker's own pid is the liveness signal there. It is NOT consulted
-            # where the lock is available, because a recycled pid would report a
-            # finished round as running forever, and a lock cannot be wrong that
-            # way. The bypass path has neither, and is reported below.
+            # marker's own pid is the liveness signal there. Such a round is
+            # always a FOREGROUND one, since `--start` refuses without `flock`,
+            # which is exactly the round this arm exists to let a cut-off caller
+            # pick up. It is NOT consulted where the lock is available, because a
+            # recycled pid would report a finished round as running forever, and a
+            # lock cannot be wrong that way. The bypass path has neither, and is
+            # reported below.
             live=1
         fi
 
