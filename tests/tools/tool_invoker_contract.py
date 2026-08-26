@@ -2142,6 +2142,107 @@ class ToolInvokerContract:
             "the completion is written, so the claim does not stay open"
         )
 
+    async def test_a_log_processor_that_cancels_this_task_is_not_answered_with_a_result(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The count is sampled around the append; the emission sits after that sample.
+
+        A diagnostic's processor is arbitrary code, and it can cancel the invoking
+        task and then raise. Swallowing the raise is right — an emitter's failure
+        stands in for nothing — but the *request* it left behind is real: the
+        loop will deliver it, and ADR-0192 §1's branch turns on the
+        ``Task.cancelling()`` count whoever moved it. A seam still holding the
+        sample it took before the emission answers a cancelled call with an
+        ordinary ``AuditError`` and leaves a request nobody honoured, which is the
+        swallowing ADR-0060 §1 says a method never does.
+
+        So the count is re-read after the emission, and the call leaves as a
+        cancellation carrying the append's own failure as its cause.
+        """
+
+        def cancel_then_raise(
+            _logger: object, _name: str, _event: MutableMapping[str, Any]
+        ) -> NoReturn:
+            running = asyncio.current_task()
+            assert running is not None
+            running.cancel()
+            raise asyncio.CancelledError
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        refused = RuntimeError("the store would not write the claim")
+        ledger.claim.error = refused
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy())
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        configured = structlog.get_config()
+        structlog.configure(processors=[cancel_then_raise])
+        try:
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await invoker.invoke(call, timeout=PATIENT)
+        finally:
+            structlog.configure(**configured)
+            asyncio.current_task().uncancel()  # type: ignore[union-attr]  # inside a running task
+
+        assert caught.value.__cause__ is refused, (
+            "the cancellation carries the append's own failure, not the emitter's"
+        )
+
+    @pytest.mark.parametrize("member", ["claim", "completion"])
+    async def test_a_ledger_that_raises_before_returning_a_coroutine_is_disposed_of_normally(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], member: str
+    ) -> None:
+        """Nothing makes a conforming ledger method a native ``async def``.
+
+        ``InvocationLedger`` declares ``async def``, but a plain function
+        returning a coroutine satisfies the Protocol structurally — and such a
+        function can raise **before** it returns anything to await. A seam that
+        calls it in its own frame and only then hands the coroutine to the
+        shielded task misses that raise entirely: it never becomes the captured
+        value the disposition rules read, so on the claim path it reaches the
+        caller untranslated instead of as the ``AuditError`` ADR-0192 §1 requires,
+        and on the completion path it replaces a ``ToolResult`` the tool had
+        already produced and leaves the claim open, which §3 calls worse than an
+        incomplete record.
+
+        The failure is identical in kind to one the coroutine raises, so the two
+        must be answered identically — and this case is the one that says so.
+        """
+
+        class Eager:
+            """A structurally conforming ledger that fails before it is awaited."""
+
+            def __init__(self, inner: FakeAuditTrail) -> None:
+                self.inner = inner
+
+            def claim_invocation(self, *, decision: PermissionDecision) -> Any:
+                if member == "claim":
+                    msg = "the ledger failed before it returned a coroutine"
+                    raise RuntimeError(msg)
+                return self.inner.claim_invocation(decision=decision)
+
+            def complete_invocation(self, **kwargs: Any) -> Any:
+                if member == "completion":
+                    msg = "the ledger failed before it returned a coroutine"
+                    raise RuntimeError(msg)
+                return self.inner.complete_invocation(**kwargs)
+
+        trail = FakeAuditTrail()
+        invoker = consuming(Eager(trail))
+        invoker.register(read_only("inbox"), Spy(output={"unread": 5}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        if member == "claim":
+            with pytest.raises(AuditError) as caught:
+                await invoker.invoke(call, timeout=PATIENT)
+            assert isinstance(caught.value.__cause__, RuntimeError)
+        else:
+            result = await invoker.invoke(call, timeout=PATIENT)
+            assert result.output == {"unread": 5}, "a completion failure never changes the result"
+
     @pytest.mark.parametrize("member", ["claim", "completion"])
     async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], member: str

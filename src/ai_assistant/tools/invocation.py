@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import structlog
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ToolBindingError
+from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import (
     UNREPRESENTABLE_FAULT_CLASS,
     ToolFailure,
@@ -58,11 +58,11 @@ if TYPE_CHECKING:
     #: runtime would buy three imports nothing else in this module needs.
     EntersCallable = Callable[[], Coroutine[Any, Any, FrozenJson]]
 
-    #: The bound egress method a registration carries, read off the object **once
-    #: at registration** (:func:`resolved_implementation`). Spelled with an
-    #: ellipsis because it is called only through ``functools.partial`` below,
-    #: which supplies the keywords :class:`EgressToolImplementation` declares.
-    EgressCallable = Callable[..., Coroutine[Any, Any, FrozenJson]]
+    #: What a registration will enter, read off the object **once at
+    #: registration** (:func:`resolved_implementation`). Spelled with an ellipsis
+    #: because it is called only through ``functools.partial`` below, which
+    #: supplies whichever keywords the resolved shape declares.
+    EnteredCallable = Callable[..., Coroutine[Any, Any, FrozenJson]]
 
 _log = structlog.get_logger(__name__)
 
@@ -171,15 +171,18 @@ class ResolvedImplementation:
     callable for the life of the process and refuses a different one under a used
     id; this holds the shape of that callable to the same standard.
 
-    Exactly one field is set, which is what makes the pairing check below a
-    two-way branch on the registry's own record rather than a question for the
-    object.
+    **One callable and a flag, rather than one field per shape.** A record with a
+    field for each admits a state with neither set — which is exactly what an
+    object carrying a non-callable ``invoke_bound`` would produce, and it would
+    only be discovered at the point of entry, after the claim. There is no such
+    state here: the pairing check below is a two-way branch on the registry's own
+    record, and both branches have something to enter.
     """
 
-    #: The bound egress method, where the registration satisfied the egress shape.
-    egress: EgressCallable | None
-    #: The plain callable, where it did not.
-    ordinary: ToolImplementation | None
+    #: What will be entered: the bound egress method, or the registration itself.
+    enter: EnteredCallable
+    #: Whether :attr:`enter` takes the authorised ``EgressBinding`` (ADR-0148 §4).
+    egress: bool
 
 
 def resolved_implementation(implementation: BoundImplementation) -> ResolvedImplementation:
@@ -189,11 +192,35 @@ def resolved_implementation(implementation: BoundImplementation) -> ResolvedImpl
         implementation: The callable being registered.
 
     Returns:
-        The shape, with exactly one field set.
+        The callable to enter and whether it takes the authorised binding.
+
+    Raises:
+        ToolRegistrationError: If the object satisfies neither shape — it is not
+            callable and carries no callable ``invoke_bound``. Refused here rather
+            than at the point of entry, because there it would be a fault raised
+            after the claim (ADR-0192 §1).
     """
     if isinstance(implementation, EgressToolImplementation):
-        return ResolvedImplementation(egress=implementation.invoke_bound, ordinary=None)
-    return ResolvedImplementation(egress=None, ordinary=implementation)
+        bound = implementation.invoke_bound
+        # `runtime_checkable` tests for the attribute's **presence** and nothing
+        # else, so an ordinary callable carrying an `invoke_bound` that is not a
+        # method — a property returning `None`, a data attribute — reports as
+        # egress. Taking that on trust would store a shape with no callable in it
+        # and fail at the point of entry, after the claim. It is not an egress
+        # binding, so it is not treated as one.
+        if callable(bound):
+            return ResolvedImplementation(enter=bound, egress=True)
+    # Typed as `object` so the check is over the *value*: the annotation is not
+    # the enforcement, and this argument reaches here from a composition root the
+    # type checker may never have seen (ADR-0026 §2's rule for a clock reading).
+    ordinary: object = implementation
+    if not callable(ordinary):
+        msg = (
+            "the object registered satisfies neither tool shape: it is not callable "
+            "and carries no callable 'invoke_bound', so there would be nothing to invoke"
+        )
+        raise ToolRegistrationError(msg)
+    return ResolvedImplementation(enter=ordinary, egress=False)
 
 
 def checked_pairing(resolved: ResolvedImplementation, call: ToolCall) -> EntersCallable:
@@ -272,7 +299,7 @@ def checked_pairing(resolved: ResolvedImplementation, call: ToolCall) -> EntersC
         ToolBindingError: If the callable's shape and the call's binding disagree.
     """
     authorised = call.request.egress_binding
-    if resolved.egress is not None:
+    if resolved.egress:
         if authorised is None:
             msg = (
                 f"tool {call.request.tool.id!r} is bound to an egress callable and this call "
@@ -281,7 +308,7 @@ def checked_pairing(resolved: ResolvedImplementation, call: ToolCall) -> EntersC
             )
             raise ToolBindingError(msg)
         return partial(
-            resolved.egress,
+            resolved.enter,
             call.request.parameters,
             idempotency_key=call.idempotency_key,
             egress_binding=authorised,
@@ -293,8 +320,7 @@ def checked_pairing(resolved: ResolvedImplementation, call: ToolCall) -> EntersC
             f"was authorised (ADR-0148 §4)"
         )
         raise ToolBindingError(msg)
-    assert resolved.ordinary is not None  # noqa: S101 — exactly one field is set
-    return partial(resolved.ordinary, call.request.parameters, idempotency_key=call.idempotency_key)
+    return partial(resolved.enter, call.request.parameters, idempotency_key=call.idempotency_key)
 
 
 #: What names an invented cancellation, as a **literal** rather than a read. A

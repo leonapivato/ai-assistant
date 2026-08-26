@@ -296,44 +296,46 @@ class InMemoryToolRegistry:
             ValidationError: If the definition violates the type's own rules,
                 which a ``__dict__`` write can leave it doing.
         """
+        definition = _revalidated(tool)
+
+        previous = self._spent.get(definition.id)
+        if previous is not None:
+            # **Answered before anything is resolved.** Deciding the shape reads
+            # `invoke_bound` off the object, and an identical re-registration must
+            # be idempotent — a composition root may run twice — so a second read
+            # must not be part of finding out that there is nothing to do.
+            if definition.id not in self._live:
+                msg = (
+                    f"tool id {definition.id!r} was deregistered and cannot be reused: "
+                    "deregistration is revocation, so a definition rebound to a spent id "
+                    "could be substituted for the one a permission decision approved"
+                )
+                raise ToolRegistrationError(msg)
+
+            if previous.definition != definition:
+                msg = (
+                    f"tool id {definition.id!r} is already registered with a different "
+                    "definition; tool metadata is a security control, so it cannot be "
+                    "overwritten in place"
+                )
+                raise ToolRegistrationError(msg)
+
+            if previous.implementation is not implementation:
+                msg = (
+                    f"tool id {definition.id!r} is already bound to a different "
+                    "implementation; rebinding the callable would leave the approved "
+                    "declaration in place while other code ran behind it"
+                )
+                raise ToolRegistrationError(msg)
+            return
+
         # The shape is decided **here**, once. Asking the object at invocation
         # time would run its own `__getattribute__` before the claim, so a call
         # the ledger then refused would already have reached its code; asked here
-        # it runs at composition time, under no authorisation at all. Anything it
-        # raises leaves `register`, which is the honest place for it.
-        binding = _Binding(
-            _revalidated(tool), implementation, resolved_implementation(implementation)
-        )
-
-        previous = self._spent.get(binding.definition.id)
-        if previous is None:
-            self._live[binding.definition.id] = binding
-            self._spent[binding.definition.id] = binding
-            return
-
-        if binding.definition.id not in self._live:
-            msg = (
-                f"tool id {binding.definition.id!r} was deregistered and cannot be reused: "
-                "deregistration is revocation, so a definition rebound to a spent id "
-                "could be substituted for the one a permission decision approved"
-            )
-            raise ToolRegistrationError(msg)
-
-        if previous.definition != binding.definition:
-            msg = (
-                f"tool id {binding.definition.id!r} is already registered with a different "
-                "definition; tool metadata is a security control, so it cannot be "
-                "overwritten in place"
-            )
-            raise ToolRegistrationError(msg)
-
-        if previous.implementation is not binding.implementation:
-            msg = (
-                f"tool id {binding.definition.id!r} is already bound to a different "
-                "implementation; rebinding the callable would leave the approved "
-                "declaration in place while other code ran behind it"
-            )
-            raise ToolRegistrationError(msg)
+        # it runs at composition time, under no authorisation at all.
+        binding = _Binding(definition, implementation, resolved_implementation(implementation))
+        self._live[definition.id] = binding
+        self._spent[definition.id] = binding
 
     def deregister(self, tool_id: str) -> bool:
         """Revoke a tool, spending its id for good.

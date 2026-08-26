@@ -39,6 +39,7 @@ from tool_invoker_contract import (
 from ai_assistant.core.errors import (
     AuthorisationSpentError,
     ToolBindingError,
+    ToolRegistrationError,
     UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
@@ -252,6 +253,120 @@ async def test_a_refused_claim_reaches_no_code_the_implementation_owns() -> None
     )
     assert object.__getattribute__(watchful, "calls") == 0
     assert await rows(trail) == []
+
+
+class OneRead:
+    """An **egress** callable whose ``invoke_bound`` may be read exactly once."""
+
+    def __init__(self) -> None:
+        """Allow one read."""
+        object.__setattr__(self, "reads", 0)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "invoke_bound":
+            reads = object.__getattribute__(self, "reads")
+            if reads:
+                msg = "the shape may be read only once"
+                raise RuntimeError(msg)
+            object.__setattr__(self, "reads", reads + 1)
+        return object.__getattribute__(self, name)
+
+    async def invoke_bound(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+        egress_binding: EgressBinding,
+    ) -> FrozenJson:
+        """Succeed."""
+        return None
+
+
+def test_an_identical_re_registration_resolves_nothing_a_second_time() -> None:
+    """Idempotency has to survive the shape being decided at registration.
+
+    A composition root may run twice, so re-registering the *same* definition and
+    the *same* object is contracted to do nothing (ADR-0016 §5). Deciding the
+    callable's shape reads ``invoke_bound`` off that object — arbitrary code —
+    so resolving before finding out there is nothing to do would run it again,
+    and an object that tolerates one read would refuse the second.
+
+    The duplicate is therefore answered from the registry's own record, before
+    anything is read.
+    """
+    implementation = OneRead()
+    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=FakeAuditTrail())
+    assert object.__getattribute__(implementation, "reads") == 1
+
+    registry.register(tool(), implementation)
+
+    assert object.__getattribute__(implementation, "reads") == 1, (
+        "the identical registration is answered from the record, reading nothing again"
+    )
+
+
+class NotQuiteEgress:
+    """An ordinary callable carrying a **non-callable** ``invoke_bound``.
+
+    ``runtime_checkable`` resolves the member through ``inspect.getattr_static``,
+    which finds the **property object** and asks no further, so this reports as an
+    ``EgressToolImplementation`` while being an ordinary tool. (A plain
+    ``invoke_bound = None`` would not: since 3.12 a ``None``-valued member fails
+    the check outright, which is why the property is what this drives.)
+    """
+
+    def __init__(self) -> None:
+        """Record nothing yet."""
+        self.calls = 0
+
+    @property
+    def invoke_bound(self) -> None:
+        """Present, and not a method."""
+        return None
+
+    async def __call__(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+    ) -> FrozenJson:
+        """Record the entry and succeed."""
+        self.calls += 1
+        return None
+
+
+async def test_a_presence_only_egress_shape_is_bound_as_the_ordinary_callable() -> None:
+    """Presence is not a callable, and the difference must not surface after the claim.
+
+    An implementation whose ``invoke_bound`` is a data attribute or a property
+    returning ``None`` satisfies the structural check and has nothing to enter. A
+    seam that stored that shape on trust would discover it at the point of entry
+    — after the claim — where ADR-0192 §1 permits no fault at all and ADR-0029
+    computes no outcome for one. So callability decides: this is an ordinary
+    callable, it is entered as one, and the call succeeds.
+    """
+    trail = FakeAuditTrail()
+    implementation = NotQuiteEgress()
+    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=trail)
+    call = call_for(tool())
+    await trail.record(call.decision)
+
+    result = await registry.invoke(call, timeout=PATIENT)
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert implementation.calls == 1, "the ordinary shape is what was entered"
+    assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+
+def test_an_object_satisfying_neither_shape_is_refused_at_registration() -> None:
+    """And where nothing is callable, the refusal is a registration error.
+
+    The alternative is a binding with nothing to enter, whose failure would land
+    after the claim. ADR-0016 §5 owns what may be bound to an id; this is that
+    question answered where it belongs.
+    """
+    with pytest.raises(ToolRegistrationError, match="neither tool shape"):
+        InMemoryToolRegistry([(tool(), object())], ledger=FakeAuditTrail())  # type: ignore[list-item]  # the refusal is the subject
 
 
 class Shifty:
