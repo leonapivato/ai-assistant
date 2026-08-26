@@ -803,6 +803,13 @@ forbids.
 > - a deadline expiry and a delivered cancellation each discard a reported cost with
 >   the classification they pre-empt, and the row records `UNKNOWN`;
 > - a returned JSON mapping carrying an `incurred_cost` key is output, not a report;
+> - a `ReportedOutput` subclass **counting** its field accesses, whose second access
+>   to either field raises and whose third returns a different value, is read
+>   **exactly once per field**: the completion carries the first captured values, no
+>   exception escapes, and the assertion is on the access count rather than only on
+>   the outcome — a matrix of hostile *first* accesses alone is satisfiable by an
+>   implementation that reads `ReportedOutput.output` a second time when it builds
+>   the `ToolResult`, which is the path §2's single-read clause exists to close;
 > - a callable that **swallowed a delivered cancellation** and returned an envelope
 >   has **neither** field accessor entered: the first interruption check answers, and
 >   a case proving the accessors were not called is what holds that order in place;
