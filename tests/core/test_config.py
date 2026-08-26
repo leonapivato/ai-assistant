@@ -966,6 +966,15 @@ def test_every_integer_setting_is_discovered() -> None:
         # whose whole point is that "was this source read after I revoked it" has an
         # answer reports one attempt however many happened.
         "source_read_trail_max_rows",
+        # ADR-0193 §1's ceiling on outstanding standing recipient grants, and the
+        # same `bool` argument once more with a twist worth naming:
+        # `recipient_grant_max_outstanding=True` is a ceiling of one, which admits
+        # the user's first standing grant and refuses every one after it — a
+        # deployment that looks configured and quietly declines route (b) from the
+        # second recipient on. Zero is a *meaningful* value here (it declines route
+        # (b) outright), which is exactly why a flag arriving as one must not be
+        # mistaken for a deliberate setting.
+        "recipient_grant_max_outstanding",
     }
 
 
