@@ -326,6 +326,49 @@ def test_the_second_measurement_leaks_no_exception_either() -> None:
     assert isinstance(refusal.value.__cause__, RuntimeError)
 
 
+class UnprintableError(ValueError):
+    """A ``ValueError`` that cannot be rendered.
+
+    Pydantic renders whatever a validator raises, so an error whose ``__str__``
+    raises escapes as *that* exception — which is how a ``RuntimeError`` gets out
+    of a validator even when everything raised is nominally a ``ValueError``.
+    """
+
+    def __str__(self) -> str:
+        """Raise rather than render."""
+        msg = "str() is not available"
+        raise RuntimeError(msg)
+
+
+class HostileClass:
+    """A value whose very ``isinstance`` check raises an unrenderable error.
+
+    ``isinstance`` against a concrete type reads ``__class__`` when the instance's
+    real type does not match, and against an ABC it reads it unconditionally, so
+    this is the one point in a measurement where caller-controlled code runs.
+    """
+
+    @property  # type: ignore[misc]  # a read-only, raising __class__ is the point
+    def __class__(self) -> Any:
+        """Raise an error that cannot be printed."""
+        raise UnprintableError("boom")
+
+
+def test_a_value_whose_isinstance_check_raises_is_still_an_ordinary_refusal() -> None:
+    """§1's fourth clause, at the one point a measurement runs caller code.
+
+    Re-raising every ``ValueError`` a measurement meets is not enough, because
+    an unrenderable one escapes as its own ``__str__``'s exception when pydantic
+    formats the error — a ``RuntimeError`` arriving out of construction for a
+    value the ceiling was supposed to refuse politely. The refusal therefore
+    carries a constant message and keeps the original only as ``__cause__``,
+    where nothing renders it.
+    """
+    with pytest.raises(ValidationError, match="could not be measured") as refusal:
+        step({"a": HostileClass()})
+    assert refusal.value.error_count() == 1
+
+
 def test_a_base_exception_propagates_unchanged() -> None:
     """ADR-0029 §3, restated by §1: a ``BaseException`` is never converted."""
     with pytest.raises(KeyboardInterrupt):

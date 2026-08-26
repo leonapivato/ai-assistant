@@ -3921,19 +3921,21 @@ def _presents_as_container(value: object) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
 
 
-def _faithful_json_depth(value: object, limit: int) -> int:
-    """Return how deeply ``value`` nests containers, as validation will read it.
+def _faithful_json_depth(value: object, limit: int) -> int | None:
+    """Return how deeply ``value`` nests containers, or ``None`` if it cannot be read.
 
     Breadth-first with an explicit frontier, stopping once past ``limit``: the
     measurement allocates no Python stack frame per level, so it holds at any
     ``sys.getrecursionlimit()`` and completes before anything recursive is
     entered (ADR-0196 §2).
 
-    Raises:
-        ValueError: If ``value``, or anything nested in it, presents as a mapping
-            or a non-``str`` sequence whose contents cannot be obtained the way
-            validation will obtain them. Guessing at such a value is what lets an
-            input choose the depth it is measured at.
+    ``None`` means ``value``, or something nested in it, presents as a mapping or
+    a non-``str`` sequence whose contents cannot be obtained the way validation
+    will obtain them. Guessing at such a value is what lets an input choose the
+    depth it is measured at, so it is reported as unmeasurable rather than
+    measured — and reported by a **return** rather than by an exception, so that
+    :func:`_refuse_deep_json` can treat every exception raised anywhere in here as
+    foreign (see its own note).
     """
     depth = 0
     frontier: list[object] = [value]
@@ -3946,11 +3948,7 @@ def _faithful_json_depth(value: object, limit: int) -> int:
                 holds_container = True
                 children.extend(nested)
             elif _presents_as_container(item):
-                msg = (
-                    "this value nests a mapping or sequence whose contents cannot be read "
-                    "the way they are validated, so its nesting depth cannot be measured"
-                )
-                raise ValueError(msg)
+                return None
         if not holds_container:
             break
         depth += 1
@@ -3958,7 +3956,7 @@ def _faithful_json_depth(value: object, limit: int) -> int:
     return depth
 
 
-def _refuse_deep_json(value: object, measure: Callable[[object, int], int]) -> None:
+def _refuse_deep_json(value: object, measure: Callable[[object, int], int | None]) -> None:
     """Refuse ``value`` if ``measure`` finds it nested past :data:`_MAX_JSON_DEPTH`.
 
     The refusal is a plain ``ValueError`` and not a named error, for the reason
@@ -3967,22 +3965,37 @@ def _refuse_deep_json(value: object, measure: Callable[[object, int], int]) -> N
     field, and every holder already handles that. A named error would give
     callers a second shape to catch for a refusal they already catch.
 
-    No ``Exception`` other than that ``ValueError`` escapes a measurement — an
-    enumeration that raises becomes an ordinary construction refusal rather than
-    a ``RuntimeError`` arriving from inside a validator. A ``BaseException``
-    propagates unchanged, as everywhere else in this repository (ADR-0029 §3).
+    **No ``Exception`` other than one of these three refusals escapes a
+    measurement**, which is stronger than "no exception other than a
+    ``ValueError``" and is what §1's fourth clause needs. A measurement touches
+    caller-controlled code at exactly one point — ``isinstance`` against
+    :class:`~collections.abc.Mapping` and :class:`~collections.abc.Sequence`
+    reads the instance's ``__class__``, which a hostile value can make raise —
+    and re-raising a ``ValueError`` raised there would let a foreign one
+    through. That is not academic: an exception whose own ``__str__`` raises
+    escapes as *that* exception when pydantic renders the error, so a
+    ``RuntimeError`` arrives out of a validator. Hence a constant message and no
+    interpolation of anything the value supplied. The original is kept as
+    ``__cause__``, where nothing renders it.
+
+    A ``BaseException`` propagates unchanged, as everywhere else in this
+    repository (ADR-0029 §3).
 
     Raises:
-        ValueError: If ``value`` nests past the ceiling, or if its depth cannot
-            be measured at all.
+        ValueError: If ``value`` nests past the ceiling, if its contents cannot be
+            read the way validation reads them, or if measuring it raised.
     """
     try:
         depth = measure(value, _MAX_JSON_DEPTH)
-    except ValueError:
-        raise
     except Exception as exc:
-        msg = f"this value's nesting depth could not be measured, so it cannot be stored: {exc}"
+        msg = "this value's nesting depth could not be measured, so it cannot be stored"
         raise ValueError(msg) from exc
+    if depth is None:
+        msg = (
+            "this value nests a mapping or sequence whose contents cannot be read "
+            "the way they are validated, so its nesting depth cannot be measured"
+        )
+        raise ValueError(msg)
     if depth > _MAX_JSON_DEPTH:
         msg = (
             f"this value nests containers deeper than {_MAX_JSON_DEPTH}, "
