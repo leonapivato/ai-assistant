@@ -636,10 +636,18 @@ def _diagnose(
     return unclassifiable
 
 
-def _chained(error: BaseException, unclassifiable: BaseException | None) -> None:
-    """Keep a diagnostic's own failure on the record without letting it decide the exit."""
-    if unclassifiable is not None and error.__context__ is None:
-        error.__context__ = unclassifiable
+def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
+    """Return the exception this path must dispose of, keeping the other as context.
+
+    See `ai_assistant.tools.consume` for the reasoning: a ``BaseException`` the
+    class read raised is governed by ADR-0192 §3's own clauses on one raised on
+    that path, not exempted from them and not swallowed.
+    """
+    if unclassifiable is None:
+        return error
+    if unclassifiable.__context__ is None:
+        unclassifiable.__context__ = error
+    return unclassifiable
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,7 +699,7 @@ async def _complete(
         return _Appended(None, cancelled)
     error = appended
 
-    _chained(error, _diagnose(COMPLETION, error, completion.outcome))
+    error = _disposed(error, _diagnose(COMPLETION, error, completion.outcome))
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -741,7 +749,7 @@ async def _claimed(
         )
 
     error = appended
-    _chained(error, _diagnose(CLAIM, error))
+    error = _disposed(error, _diagnose(CLAIM, error))
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error

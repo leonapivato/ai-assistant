@@ -64,7 +64,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import APPEND_FAILED, CLAIM, COMPLETION, FakeAuditTrail
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import FrozenJson, ToolInvocation, ToolResult
@@ -555,6 +555,34 @@ async def invoked(
     if await trail.get(call.decision.id) is None:
         await trail.record(call.decision)
     return await invoker.invoke(call, timeout=timeout)
+
+
+class SynchronousFactory:
+    """A registration that is **not** a native ``async def``.
+
+    Nothing makes one: the callable shape is satisfied by any object returning an
+    awaitable, so a plain function's body runs at the **call**, before the
+    coroutine it hands back is ever awaited. That is what makes ADR-0192 §1's "the
+    claim is appended immediately before the callable is entered" a statement about
+    *calling* and not only about awaiting — an implementation that obtains the
+    coroutine in order to hold it across the claim has already run this body.
+    """
+
+    def __init__(self) -> None:
+        """Record nothing yet."""
+        self.entered = 0
+
+    def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> Coroutine[Any, Any, FrozenJson]:
+        """Run the synchronous half **now**, and return the awaitable half."""
+        self.entered += 1
+        recorded = dict(parameters)
+
+        async def _acting() -> FrozenJson:
+            return recorded.get("to")
+
+        return _acting()
 
 
 class ToolInvokerContract:
@@ -1212,6 +1240,38 @@ class ToolInvokerContract:
         assert completion.outcome is ToolOutcome.SUCCEEDED
         assert await trail.open_invocations(decision_id=call.decision.id) == []
 
+    @pytest.mark.parametrize("refusal", ["unrecorded", "spent"])
+    async def test_a_refused_claim_never_calls_the_registration(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], refusal: str
+    ) -> None:
+        """ "Before the callable is entered" is about **calling**, not only awaiting.
+
+        A registration is not required to be a native ``async def``, so obtaining
+        its coroutine in order to hold one across the claim already runs whatever
+        it does synchronously. An implementation that does so passes every case
+        driven by an ``async def`` double and then performs a side effect under an
+        authorisation the ledger went on to refuse — as spent, or as one the trail
+        never recorded — which is the single thing ADR-0192 §1 exists to prevent.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        factory = SynchronousFactory()
+        invoker.register(tool(), factory)
+        call = call_for(tool())
+
+        if refusal == "spent":
+            await trail.record(call.decision)
+            await invoker.invoke(call, timeout=PATIENT)
+            assert factory.entered == 1, "the first act reaches the registration"
+
+        expected = AuthorisationSpentError if refusal == "spent" else UnrecordedAuthorisationError
+        with pytest.raises(expected):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert factory.entered == (1 if refusal == "spent" else 0), (
+            "a refused claim calls the registration no further"
+        )
+
     @pytest.mark.parametrize(
         "wiring",
         ["unbound-id", "substituted-definition", "unauthorised", "malformed-parameters"],
@@ -1710,6 +1770,58 @@ class ToolInvokerContract:
         assert spy.calls == [], "the callable is never entered"
         assert ledger.completion.calls == 0
         assert appended(captured) == [{"operation": CLAIM}], "a cancellation is not a fault class"
+
+    @pytest.mark.parametrize("member", ["claim", "completion"])
+    async def test_a_class_name_read_that_raises_a_base_exception_is_not_absorbed(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], member: str
+    ) -> None:
+        """``fault_class_of``'s guard stops at ``Exception``, and §3 does not widen it.
+
+        A metaclass whose ``__name__`` access raises a ``BaseException`` that is not
+        an ``Exception`` leaves the classifier by design, and ADR-0192 §3 gives it
+        no exemption: it "is governed by this section's own clauses on a
+        ``BaseException`` raised there … everything else propagating unchanged with
+        no diagnostic standing in for it". So it is **not** swallowed behind the
+        append's own failure — the call does not return a ``ToolResult``, and the
+        claim path does not answer with the ``AuditError`` it would give an
+        ordinary ``Exception``.
+
+        The class that leaves is not asserted: on the completion path this runs
+        inside a retained append, which is the one thing §3 declines to state.
+        """
+
+        class Unnameable(type):
+            """Refuses to be named, with a ``BaseException`` the guard lets pass."""
+
+            def __getattribute__(cls, name: str) -> object:
+                if name == "__name__":
+                    raise KeyboardInterrupt
+                return super().__getattribute__(name)
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        getattr(ledger, member).error = Unnameable("Hostile", (RuntimeError,), {})("boom")
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 1}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        returned: ToolResult | None = None
+        raised: BaseException | None = None
+        with structlog.testing.capture_logs() as captured:
+            try:
+                returned = await invoker.invoke(call, timeout=PATIENT)
+            except BaseException as exc:
+                raised = exc
+
+        assert raised is not None, "the classifier's own failure is not absorbed"
+        assert not isinstance(raised, AuditError), "and is not translated into one"
+        assert returned is None
+        assert appended(captured) == [
+            {"operation": CLAIM}
+            if member == "claim"
+            else {"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED}
+        ], "the field is omitted, not filled with a literal"
 
     @pytest.mark.parametrize("member", ["claim", "completion"])
     async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
