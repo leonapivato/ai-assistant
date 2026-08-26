@@ -23,6 +23,7 @@ other, and it refuses both mismatches before the deadline opens.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -244,12 +245,20 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     integration, accepted because the alternative is a disclosure on the failure
     path of every tool nobody thought about.
     """
-    _log.warning(
-        "tool_implementation_raised",
-        tool_id=definition.id,
-        # The type, never the instance: rendering the exception is the leak.
-        error_type=type(exc).__name__,
-    )
+    with contextlib.suppress(Exception):
+        # Guarded because this runs **after** the claim: a configured processor
+        # that raises would otherwise leave this frame in place of the
+        # ``ToolResult``, and ADR-0192 §3 would get no completion for a claim it
+        # had already appended — a known-failed act permanently spending its
+        # authorisation, with the tool's failure lost as data. ADR-0029 §3 makes
+        # a broken tool a result rather than an exception, and a broken log sink
+        # does not undo that. Only an ``Exception`` is dropped.
+        _log.warning(
+            "tool_implementation_raised",
+            tool_id=definition.id,
+            # The type, never the instance: rendering the exception is the leak.
+            error_type=type(exc).__name__,
+        )
     return ToolResult(
         outcome=ToolOutcome.FAILED,
         failure=ToolFailure(

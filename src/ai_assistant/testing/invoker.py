@@ -103,16 +103,35 @@ def _checked_timeout(timeout: object) -> timedelta:
     instantly-expired deadline, because expiry is delivered at an await point
     and a callable acting before its first ``await`` would already have acted.
 
+    **A plain ``timedelta`` is returned, never the caller's object**, for the
+    reason `ai_assistant.tools.registry` states at length: ``isinstance`` admits a
+    subclass, and the duration is read after the claim has landed, where an
+    overridden ``total_seconds`` raising would leave a claim open with no
+    completion and returning ``inf`` would disable the deadline.
+
+    Returns:
+        A plain ``timedelta`` of the same duration.
+
     Raises:
-        ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
+        ValueError: If ``timeout`` is not a strictly positive ``timedelta``, or is
+            one whose duration cannot be read and enforced.
     """
     if not isinstance(timeout, timedelta):
         msg = f"timeout must be a timedelta, got {type(timeout).__name__}"
         raise ValueError(msg)
-    if timeout <= timedelta(0):
-        msg = f"timeout must be strictly positive, got {timeout}"
+    try:
+        duration = timedelta(seconds=timeout.total_seconds())
+    except Exception as exc:
+        # Anything the duration read or the reconstruction raises — an overridden
+        # `total_seconds` failing, a non-numeric return, `inf`, a value outside
+        # `timedelta`'s range — is a deadline this seam could not enforce, and
+        # that is the refusal this guard exists to make (ADR-0029 §4).
+        msg = "timeout must be a timedelta whose duration can be read and enforced"
+        raise ValueError(msg) from exc
+    if duration <= timedelta(0):
+        msg = f"timeout must be strictly positive, got {duration}"
         raise ValueError(msg)
-    return timeout
+    return duration
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +291,7 @@ class FakeToolInvoker:
                 absorbed instead and reaches the operator as a diagnostic.
             CancelledError: If the invoking task is cancelled from outside.
         """
-        _checked_timeout(timeout)
+        duration = _checked_timeout(timeout)
 
         try:
             checked = ToolCall.model_validate(call.model_dump())
@@ -304,7 +323,8 @@ class FakeToolInvoker:
             # call the ledger refused reached no callable, so it belongs here as
             # little as one the three checks refused.
             self.invocations.append(checked)
-            return await self._run(binding, checked, timeout)
+            # `duration`, not the caller's object — see `_checked_timeout`.
+            return await self._run(binding, checked, duration)
 
         return await _consumed_call(
             ledger=self._ledger,

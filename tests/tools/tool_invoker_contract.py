@@ -828,6 +828,59 @@ class ToolInvokerContract:
             await invoker.invoke(call_for(tool()), timeout=bad)  # type: ignore[arg-type]  # the guard is the subject  # type: ignore[arg-type]
         assert spy.calls == []
 
+    @pytest.mark.parametrize(
+        "duration",
+        ["raises", float("inf"), "not a number"],
+        ids=["read-raises", "infinite", "non-numeric"],
+    )
+    async def test_a_timedelta_whose_duration_cannot_be_enforced_claims_nothing(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], duration: object
+    ) -> None:
+        """``isinstance`` admits a subclass, and the deadline is opened after the claim.
+
+        ``checked_timeout``-style guards accept anything ``isinstance`` calls a
+        ``timedelta``, so a subclass overriding ``total_seconds`` passes them —
+        and the seam reads that duration *later*, opening ``asyncio.timeout``
+        after the claim has landed. A read that raises there escapes with a claim
+        open, no completion written and no ``ToolResult`` at all, which is
+        precisely the exit ADR-0192 §3 makes total over; one returning ``inf``
+        disables the deadline ADR-0029 §4 says there always is, in the one method
+        whose contract is that there is one.
+
+        So the duration is read where the refusal belongs — before the claim,
+        where ADR-0034 §1 already puts a rejected deadline: no callable entered,
+        **no claim appended**, and no row on the trail to reconcile. The three
+        arms are the three ways the read goes wrong, and the assertion that
+        matters in each is the same one: the ledger was never asked.
+        """
+
+        class Hostile(timedelta):
+            """A positive duration by every check that does not read it."""
+
+            def total_seconds(self) -> float:
+                if duration == "raises":
+                    msg = "the duration refuses to be read"
+                    raise RuntimeError(msg)
+                return duration  # type: ignore[return-value]  # the guard is the subject
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(read_only("inbox"), spy)
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with pytest.raises(ValueError, match="timeout"):
+            await invoker.invoke(call, timeout=Hostile(seconds=30))
+
+        assert spy.calls == [], "the callable is never entered"
+        assert ledger.claim.calls == 0, (
+            "a deadline this seam could not enforce is refused before the claim, "
+            "so there is no open invocation to reconcile"
+        )
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
     async def test_a_tool_that_suppresses_its_cancellation_outlives_its_deadline(
         self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
@@ -1934,6 +1987,31 @@ class ToolInvokerContract:
             decision_id=call_for(read_only("inbox")).decision.id
         )
         assert len(open_after) == 1, "the completion was refused, so the claim is left open"
+
+        # And the same holds of the *tool-failure* diagnostic, which runs after
+        # the claim: a broken sink there would leave this frame in place of the
+        # `ToolResult`, so §3 would get no completion for a claim already
+        # appended — a known-failed act permanently spending its authorisation,
+        # with the tool's failure lost as data (ADR-0029 §3).
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        invoker.register(read_only("inbox"), Raiser(RuntimeError("upstream said no")))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        configured = structlog.get_config()
+        structlog.configure(processors=[refuse])
+        try:
+            failed = await invoker.invoke(call, timeout=PATIENT)
+        finally:
+            structlog.configure(**configured)
+
+        assert failed.outcome is ToolOutcome.FAILED
+        assert failed.failure is not None
+        assert failed.failure.kind is ToolFailureKind.INTERNAL
+        assert await trail.open_invocations(decision_id=call.decision.id) == [], (
+            "the completion is written, so the claim does not stay open"
+        )
 
     @pytest.mark.parametrize("member", ["claim", "completion"])
     async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
