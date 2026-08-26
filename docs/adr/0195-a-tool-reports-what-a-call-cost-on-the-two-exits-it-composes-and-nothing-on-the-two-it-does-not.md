@@ -1,6 +1,6 @@
 # 195. A tool reports what a call cost on the two exits it composes, and nothing on the two it does not
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - **Decides `core/types.py` and `core/errors.py` surface and implements none of it
   (golden rule 5).** It adds **one** `core/types.py` model, `ReportedOutput`, and
