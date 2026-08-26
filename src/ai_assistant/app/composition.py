@@ -81,6 +81,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
     SqliteAuditTrail,
+    SqliteRecipientGrantStore,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -640,6 +641,32 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "memory.db", embedder=embedder, traces_sink=traces
         )
         opened.append(memory.close)
+        # ADR-0193's standing recipient grants — a Tier 1 store beside the two
+        # below, holding what the user made *standing* about sending where the
+        # source-grant store holds what they authorised about *reading*. The two
+        # may not be joined (ADR-0097 §7, ADR-0193 §13), which is why they are two
+        # files and two objects rather than two tables in one.
+        #
+        # **Built before the trail**, because the trail resolves a route-(b)
+        # ``authorised_by`` against it and takes it as a constructor dependency.
+        #
+        # **One object, passed three times**: as a ``RecipientGrantResolution`` to
+        # the trail, as a ``RecipientGrants`` to the policy, and — once a surface
+        # offers the establishing act (ADR-0193 §13 defers which) — whole to
+        # whatever performs it. Structural typing is what makes that sound, and the
+        # narrowing is the *annotation on each consumer* rather than anything done
+        # here: what the trail cannot do is name ``covering`` or ``record``, and
+        # what the policy cannot do is name ``record``.
+        #
+        # The ceiling is the operator's configuration and reaches the constructor
+        # with no default of its own: ``Settings`` carries ADR-0193 §1's shipped 64,
+        # and a second default here would be a figure a deployment could not see it
+        # was getting. Zero is admitted and means the deployment declines route (b).
+        recipient_grants = SqliteRecipientGrantStore(
+            path=directory / "recipient_grants.db",
+            max_outstanding=settings.recipient_grant_max_outstanding,
+        )
+        opened.append(recipient_grants.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -653,6 +680,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # two registries one seam over.
         trail = SqliteAuditTrail(
             path=directory / "audit.db",
+            recipient_grants=recipient_grants,
             # **The clock is injected here**, which ADR-0194 §5 names alongside the
             # five settings as this root's own obligation. Left to the store's
             # default it would be a clock this layer neither chose nor could
@@ -1078,6 +1106,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 confirm_at_reversibility=settings.confirm_at_reversibility,
                 deny_at_risk=settings.deny_at_risk,
                 deny_at_reversibility=settings.deny_at_reversibility,
+                # The **query face** of the store above and never the store
+                # (ADR-0193 §7): a policy handed the whole thing is one ``record``
+                # call away from authorising the send it is ruling on, and the
+                # annotation on its constructor is what removes the capability.
+                # Wiring it here is what makes ADR-0148 §3's route (b) reachable at
+                # all; until a surface offers the establishing act (§13) the store
+                # is empty, so every ruling is the one it was before.
+                grants=recipient_grants,
             ),
             trail=trail,
             executor=StepExecutor(plans=plans, registry=tools, invoker=tools),
