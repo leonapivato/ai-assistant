@@ -362,6 +362,20 @@ _mode_start() {
         exit 2
     fi
 
+    # The bypass path keeps no state under `.review/session` — no in-flight lock
+    # and no round marker (ADR-0025 §1) — so a round started there could be
+    # neither observed nor attributed to a tree, and `--start` would be handing
+    # back a handle to nothing. Refused rather than degraded, because the only
+    # caller of this path is CI, which runs one round in the foreground and has
+    # nothing to poll with.
+    if [[ "$bypass" -eq 1 ]]; then
+        echo "--start is unavailable on the bypass path (CODEX_REVIEW_NO_SANDBOX=1," >&2
+        echo "  or GITHUB_ACTIONS=true): it keeps no in-flight state, so a detached" >&2
+        echo "  round there could not be waited on. Run the round in the foreground:" >&2
+        echo "  scripts/codex-review.sh ${persona} ${base}" >&2
+        exit 2
+    fi
+
     mkdir -p "$session_dir"
 
     # Refused here as well as in the round, so the caller reads the reason on its
@@ -518,13 +532,12 @@ _mode_wait() {
         live=0
         if _lock_held; then
             live=1
-        elif [[ ("$serialized" -eq 0 || "$bypass" -eq 1) && -n "$r_pid" ]] &&
-            kill -0 "$r_pid" 2>/dev/null; then
-            # No lock to read: the unserialized fallback (#142) takes none, and
-            # neither does the bypass path. The marker's own pid is then the
-            # liveness signal. It is NOT consulted where the lock is available,
-            # because a recycled pid would report a finished round as running
-            # forever, and the lock cannot be wrong that way.
+        elif [[ "$serialized" -eq 0 && -n "$r_pid" ]] && kill -0 "$r_pid" 2>/dev/null; then
+            # No lock to read: the unserialized fallback (#142) takes none, so the
+            # marker's own pid is the liveness signal there. It is NOT consulted
+            # where the lock is available, because a recycled pid would report a
+            # finished round as running forever, and a lock cannot be wrong that
+            # way. The bypass path has neither, and is reported below.
             live=1
         fi
 
@@ -548,6 +561,11 @@ _mode_wait() {
             echo "no '${persona}' round is in flight for HEAD's tree ${tree:0:12}, and" >&2
             echo "  no artifact covers it." >&2
             echo "  start one:  scripts/codex-review.sh --start ${persona}" >&2
+            if [[ "$bypass" -eq 1 ]]; then
+                echo "  (this invocation is on the bypass path, which keeps no in-flight" >&2
+                echo "   state — a round running under it cannot be observed at all, only" >&2
+                echo "   its finished artifact can.)" >&2
+            fi
             exit 4
         fi
 
@@ -1191,9 +1209,12 @@ fi
 # two lines of it; and never removed on exit, because a marker whose round is
 # gone is exactly what tells `--wait` the round died rather than finished.
 #
-# Written on the bypass path too, where `_claim_persona` did not run and so did
-# not drop an earlier round's marker: this write replaces it whole, and
-# `started_at` is what identifies the round it describes.
+# NOT written on the bypass path, which creates no state under `.review/session`
+# at all (ADR-0025 §1, pinned by `test_the_bypass_path_keeps_no_session`). That
+# path takes no in-flight lock either, so there would be nothing to pair the
+# marker with; `--start` refuses there rather than pretending otherwise, and
+# `--wait` still reports a *finished* bypass round, because an artifact is found
+# by its recorded tree and not by any of this.
 _write_round_marker() {
     local tmp="${round_file}.partial.$$"
     mkdir -p "$session_dir"
@@ -1203,7 +1224,9 @@ _write_round_marker() {
         "$loop_id" "$(date +%s)" "${CODEX_REVIEW_DETACHED_LOG:-}" >>"$tmp"
     mv "$tmp" "$round_file"
 }
-_write_round_marker
+if [[ "$bypass" -eq 0 ]]; then
+    _write_round_marker
+fi
 
 # The disposition snapshot for this reviewed state, and the most recent snapshot
 # from an earlier round of this same loop+persona. The prior snapshot is what a

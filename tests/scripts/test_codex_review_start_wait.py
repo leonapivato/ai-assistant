@@ -411,3 +411,34 @@ def test_a_malformed_poll_interval_is_refused_before_it_spins(tmp_path: Path) ->
 
     assert result.returncode == USAGE
     assert "CODEX_REVIEW_WAIT_INTERVAL" in result.stderr
+
+
+def test_start_is_refused_on_the_bypass_path(tmp_path: Path) -> None:
+    """That path keeps no in-flight state, so there would be nothing to wait on.
+
+    ADR-0025 §1: the bypass is a cold one-shot that creates nothing under
+    `.review/session` — no lock and no round marker. `--start` refuses rather than
+    handing back a handle to a round nothing can observe or attribute to a tree.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = _run(repo, _env(tmp_path, GITHUB_ACTIONS="true"), "--start", "adversarial", "main")
+
+    assert result.returncode == USAGE
+    assert "--start is unavailable on the bypass path" in result.stderr
+    assert not (repo / ".review" / "session").exists()
+
+
+def test_wait_still_reports_a_finished_bypass_round(tmp_path: Path) -> None:
+    """An artifact is selected by its recorded tree, which every path records."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_review(repo, tmp_path, GITHUB_ACTIONS="true")
+
+    env = _env(tmp_path, GITHUB_ACTIONS="true")
+    result = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "0")
+
+    assert result.returncode == RECORDED, result.stderr
+    assert _fields(result.stdout)["verdict"] == "APPROVE"
+    assert not (repo / ".review" / "session").exists()
