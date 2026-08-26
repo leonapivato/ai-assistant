@@ -1064,11 +1064,17 @@ def _coverage_subject(request: ActionRequest) -> _CoverageSubject | None:
     request that cannot be read as one at all is answered the same way, which is
     the fail-closed direction — no grant, so the disclosure floor stands and the
     user is asked (ADR-0193 §1's fail-closed clause, §7's floors).
+
+    **Which is why the binding read is inside the guard with everything else.**
+    ``request.__dict__.pop("egress_binding")`` leaves a frozen model with no such
+    attribute at all, and a read of one before the ``try`` would leave this seam as
+    an ``AttributeError`` — a builtin out of the lookup whose documented answer to
+    an unreadable request is "covered by nothing".
     """
-    binding = request.egress_binding
-    if binding is None:
-        return None
     try:
+        binding = request.egress_binding
+        if binding is None:
+            return None
         return _CoverageSubject(
             tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
             account=BoundAccount.model_validate(field_state(BoundAccount, binding.account)),
