@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from action_policy_contract import ActionPolicyContract
 from permission_builders import action, decision, ruling, tool
-from recipient_builders import ALICE, BOB, NOW, TOOL, binding, member, request
+from recipient_builders import ALICE, BOB, ENDPOINT, NOW, TOOL, binding, member, request
 
+from ai_assistant.core.config import Settings
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
@@ -420,6 +422,42 @@ async def test_an_unreadable_seam_yields_no_allow_and_no_cached_answer() -> None
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
     assert ruled.authorised_subject is None
+
+
+async def test_a_seam_fault_is_logged_without_the_request_it_was_ruling_on(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fault line names the seam and the class, and carries no Tier 1 value.
+
+    Round 1's adversarial finding, and it is about the *renderer* rather than
+    about the event dict. ``core.logging`` renders through
+    ``structlog.dev.ConsoleRenderer``, whose default exception formatter is
+    ``rich``'s with ``show_locals=True``, so an ``exc_info=True`` on this line
+    writes the ruling frame's locals into the log — and ``request`` carries the
+    recipient addresses, the connected account and the transport endpoint.
+    ``redact_sensitive`` cannot reach any of it: it runs **before** the renderer
+    and over the event dict's keys, and a rendered traceback is neither
+    (ADR-0004 §5).
+
+    Asserted over the **rendered output**, never over
+    ``structlog.testing.capture_logs`` — that fixture replaces the processor
+    chain, so a "does not leak" test written against it passes while the real
+    emission path leaks. ``tests/core/test_logging.py`` pins that trap directly.
+    """
+    configure_logging(Settings())
+    grants = FakeRecipientGrants([recipient_grant(member(ALICE), grant_id="g-1")])
+    policy = ThresholdActionPolicy(grants=grants)
+    grants.fail_covering()
+    capsys.readouterr()
+
+    ruled = await policy.decide(request(binding(ALICE)))
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    out = capsys.readouterr().out
+    assert "recipient_grant_seam_unreadable" in out
+    assert "RecipientGrantError" in out
+    assert ALICE not in out
+    assert ENDPOINT not in out
 
 
 async def test_a_partly_covered_destination_set_draws_one_confirmation_about_all_of_it() -> None:
