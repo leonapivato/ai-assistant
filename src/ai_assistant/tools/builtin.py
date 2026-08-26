@@ -421,7 +421,7 @@ def build_default_registry(
     memory: MemoryStore,
     now: Clock = _utcnow,
     egress: EgressIntegration | None = None,
-    ledger: InvocationLedger | None = None,
+    ledger: InvocationLedger,
 ) -> InMemoryToolRegistry:
     """Return the populated one-object registry+invoker the composition root wires (ADR-0048 §3).
 
@@ -445,9 +445,9 @@ def build_default_registry(
             Injectable so a test is deterministic.
         ledger: The ``InvocationLedger`` the returned invoker claims and
             completes through (ADR-0192 §1, §3), passed straight to
-            :class:`~ai_assistant.tools.registry.InMemoryToolRegistry` — see that
-            constructor for why it is defaulted and why the default is not the
-            wiring. The composition root supplies the one object it also wires as
+            :class:`~ai_assistant.tools.registry.InMemoryToolRegistry` — required
+            there and so required here, because the consume is unconditional. The
+            composition root supplies the one object it also wires as
             ``AuditTrail`` and ``InvocationCompleter`` (ADR-0192 §9).
         egress: The one configured egress integration, or ``None`` where a
             deployment configured none. **Conditional contents, and ADR-0048 §3

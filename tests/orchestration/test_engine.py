@@ -17,7 +17,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import pytest
 from pydantic import SecretStr
@@ -33,6 +33,7 @@ from ai_assistant.core.errors import (
     TraceStoreError,
     UnknownConversationError,
 )
+from ai_assistant.core.protocols import AuditTrail, InvocationLedger
 from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
@@ -137,7 +138,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail, EgressBinder, SourceReadTrail
+    from ai_assistant.core.protocols import EgressBinder, SourceReadTrail
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
@@ -150,6 +151,20 @@ if TYPE_CHECKING:
     )
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
+
+
+class ConsumingTrail(AuditTrail, InvocationLedger, Protocol):
+    """Both faces of the **one** audit object (ADR-0192 §2).
+
+    The composition root wires a single store as ``AuditTrail``,
+    ``InvocationLedger`` and ``InvocationCompleter``, handing each consumer the
+    face its job needs. A harness that wires the runner and the seam has to name
+    both at once — the runner records rulings through the trail, the seam claims
+    through the ledger, and they must be the same object or every claim is refused.
+    Declared here for the reason ``InvocableToolRegistry`` is declared in the
+    invoker suite: a variable annotated with one Protocol does not statically
+    satisfy the other, and a cast would hide the very identity being asserted.
+    """
 
 
 def _composing() -> ComposingStage:
@@ -401,7 +416,7 @@ class Harness:
         trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
         binder: EgressBinder | None = None,
-        trail: AuditTrail | None = None,
+        trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
@@ -411,9 +426,13 @@ class Harness:
         # a store that persists a serialised payload and rebuilds it, and a fake
         # holding objects has no bytes for a shared case to seed". The default stays
         # the canonical fake, which is what every other case here wants.
-        self.trail: AuditTrail = FakeAuditTrail() if trail is None else trail
+        self.trail: ConsumingTrail = FakeAuditTrail() if trail is None else trail
         # One object as both registry and invoker, as ADR-0029 §8 requires.
-        self.invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
+        # The seam claims through the **same** trail the runner records rulings
+        # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
+        self.invoker = FakeToolInvoker(
+            [(definition, _succeeds) for definition in tools], ledger=self.trail
+        )
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
         # The capture/lifecycle stage over the *same* memory store, as the

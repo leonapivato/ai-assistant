@@ -51,6 +51,7 @@ from ai_assistant.core.types import (
     ToolResult,
     fault_class_of,
 )
+from ai_assistant.testing.permissions import FakeAuditTrail
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
@@ -145,7 +146,7 @@ class FakeToolInvoker:
         self,
         tools: Iterable[tuple[ToolDefinition, FakeToolImplementation]] = (),
         *,
-        ledger: InvocationLedger | None = None,
+        ledger: InvocationLedger,
     ) -> None:
         """Create an invoker holding ``tools``.
 
@@ -154,14 +155,13 @@ class FakeToolInvoker:
             ledger: The ``InvocationLedger`` :meth:`invoke` claims and completes
                 through (ADR-0192 §1, §3), and **never** an ``AuditTrail``.
 
-                **Keyword-only and defaulted, for the reason
-                ``InMemoryToolRegistry``'s is**: the composition root always
-                supplies one in production, and what the default buys is an
-                arrangement for a consumer's test about something else — an
-                executor fixture driving the deadline or the classification has no
-                authorisation recorded anywhere and no consume to observe. An
-                invoker holding none appends nothing and refuses nothing on the
-                ground that an authorisation is spent.
+                **Keyword-only and required, for the reason
+                ``InMemoryToolRegistry``'s is**: ADR-0192 §9 requires the canonical
+                fake to reproduce the consume, and a fake that could be built
+                without a ledger would let a consumer's test pass behaviour
+                production rejects — the same call twice under one spendable
+                ``ALLOW``. :func:`ai_assistant.testing.invoker_over` builds the
+                pair a consumer's fixture wants.
 
         Raises:
             ToolRegistrationError: If ``tools`` contains two definitions sharing
@@ -172,6 +172,24 @@ class FakeToolInvoker:
         self.invocations: list[ToolCall] = []
         for tool, implementation in tools:
             self.register(tool, implementation)
+
+    @property
+    def ledger(self) -> InvocationLedger:
+        """The ``InvocationLedger`` this seam claims and completes through.
+
+        Read-only, and public because two callers legitimately need to *see* which
+        object was wired: ADR-0192 §9's composition test, which asserts the invoker
+        was handed the ledger face of the one audit store and not a second one over
+        the same file, and a conformance subclass arranging the authorisations its
+        calls carry. Neither can be written against a private attribute without the
+        access itself becoming the thing under test.
+
+        It hands out the collaborator, never a wider face: what a holder gets is
+        exactly what this seam was given, which can neither record a
+        ``PermissionDecision``, nor read one, nor export, nor ``clear``
+        (ADR-0192 §2).
+        """
+        return self._ledger
 
     def register(
         self, tool: ToolDefinition, implementation: FakeToolImplementation = succeeds, /
@@ -287,8 +305,6 @@ class FakeToolInvoker:
             self.invocations.append(checked)
             return await self._run(binding, checked, timeout)
 
-        if self._ledger is None:
-            return await act()
         return await _consumed_call(
             ledger=self._ledger,
             definition=binding.definition,
@@ -388,6 +404,101 @@ def _internal(definition: ToolDefinition, exc: BaseException) -> ToolResult:
     )
 
 
+class AdmittingLedger:
+    """An ``InvocationLedger`` that records an authorisation it has not seen before.
+
+    **For a consumer's test that drives the seam without the runner in front of
+    it.** ADR-0192 §1 has ``claim_invocation`` require the decision it is passed to
+    equal the one the store holds under that id, and it is ``StepRunner`` that puts
+    it there — recording the ruling immediately before executing under it. A test
+    about the *executor* has no runner, so every call would be refused
+    ``UnrecordedAuthorisationError`` for a reason that has nothing to do with what
+    it is testing.
+
+    So this stands in for that one act and for nothing else: it records a decision
+    on first sight, then delegates to the real :class:`FakeAuditTrail` behind it.
+    **Every rule of the consume is still the real one** — a second act under one
+    spendable authorisation is still refused ``AuthorisationSpentError``, an open
+    claim still refuses the next, and the append order is still the store's. A test
+    that wants the unrecorded refusal itself passes a plain trail instead.
+    """
+
+    def __init__(self, trail: FakeAuditTrail | None = None) -> None:
+        """Admit authorisations into ``trail``, or into a fresh one."""
+        self.trail = FakeAuditTrail() if trail is None else trail
+
+    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
+        """Record ``decision`` if the trail has not got it, then claim under it."""
+        if await self.trail.get(decision.id) is None:
+            await self.trail.record(decision)
+        return await self.trail.claim_invocation(decision=decision)
+
+    async def complete_invocation(
+        self,
+        *,
+        claim_id: str,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None = None,
+    ) -> ToolInvocation:
+        """Complete ``claim_id``, exactly as the trail behind this would."""
+        return await self.trail.complete_invocation(
+            claim_id=claim_id,
+            outcome=outcome,
+            incurred_cost=incurred_cost,
+            failure_kind=failure_kind,
+        )
+
+
+def invoker_over(
+    tools: Iterable[tuple[ToolDefinition, FakeToolImplementation]] = (),
+    *,
+    trail: FakeAuditTrail | None = None,
+) -> tuple[FakeToolInvoker, FakeAuditTrail]:
+    """Build a ``FakeToolInvoker`` and the trail it claims through.
+
+    The arrangement a consumer's fixture wants since ADR-0192 §1 made the consume
+    unconditional: the invoker holds the trail's **ledger** face, and the test
+    holds the trail so it can record the authorisations its calls carry.
+
+    Pass ``trail`` where the consumer already has one — a runner records every
+    decision into its own trail before executing, so handing the seam that same
+    object is what production does and is what keeps a consumer's test on the
+    production path rather than around it.
+
+    Args:
+        tools: ``(definition, callable)`` pairs to register immediately.
+        trail: The trail to claim through; a fresh one is opened where none is
+            given.
+
+    Returns:
+        The invoker, and the trail behind it.
+    """
+    behind = FakeAuditTrail() if trail is None else trail
+    return FakeToolInvoker(tools, ledger=behind), behind
+
+
+async def authorised(trail: FakeAuditTrail, call: ToolCall) -> ToolCall:
+    """Record ``call``'s decision in ``trail``, and return the call unchanged.
+
+    What ``StepRunner`` does in front of every execution, available to a test that
+    drives the seam directly. ADR-0192 §1 has the ledger require the decision it is
+    passed to equal the one the store holds under that id, so a call whose
+    authorisation was never recorded is refused ``UnrecordedAuthorisationError``
+    before the callable — correctly, and unhelpfully for a test about something
+    else.
+
+    Args:
+        trail: The trail the invoker claims through.
+        call: The authorised call about to be invoked.
+
+    Returns:
+        ``call``, so this reads inline at the invocation site.
+    """
+    await trail.record(call.decision)
+    return call
+
+
 # --- the consume (ADR-0192 §1, §3) ------------------------------------------
 #
 # A parallel implementation of `ai_assistant.tools.consume`, written here for the
@@ -432,7 +543,9 @@ async def _captured(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation
         return exc
 
 
-async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation | BaseException:
+async def _driven(
+    coro: Coroutine[Any, Any, ToolInvocation],
+) -> tuple[ToolInvocation | BaseException, bool]:
     """Drive one ledger append to its outcome, absorbing every cancellation.
 
     The loop is what makes the absorption robust rather than single-shot: a
@@ -458,8 +571,22 @@ async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation |
         coro: The unawaited ledger call.
 
     Returns:
-        The stored row, or the failure the append raised.
+        The stored row or the failure the append raised, and **whether a
+        cancellation was delivered into this frame while it was in flight**.
+
+        That second fact is reported rather than inferred from
+        ``Task.cancelling()``, and the two are not the same question. The count's
+        *delta* tells a collaborator's invented ``CancelledError`` from an external
+        one (ADR-0031 §2) — a classification of something the ledger **returned**.
+        A cancellation the event loop **delivered here** is external whatever the
+        delta says: a caller already carrying a request when ``invoke`` was entered
+        moves the count by nothing, and ADR-0192 §1 still requires that "a
+        cancellation delivered while the append is in flight is absorbed, the
+        task's result is observed, and the cancellation is **then re-raised**".
+        Reading the delta alone would swallow it, which is the one thing ADR-0060
+        §1 says a method never does.
     """
+    absorbed = False
     task = asyncio.ensure_future(_captured(coro))
     while not task.done():
         try:
@@ -468,26 +595,51 @@ async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation |
             # here and its outcome is still readable below.
             await asyncio.wait({task})
         except asyncio.CancelledError:
+            absorbed = True
             continue
     if task.cancelled():
         msg = "the ledger append cancelled its own task"
-        return asyncio.CancelledError(msg)
-    return task.result()
+        return asyncio.CancelledError(msg), absorbed
+    return task.result(), absorbed
 
 
-def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None = None) -> None:
+def _diagnose(
+    operation: str, error: BaseException, outcome: ToolOutcome | None = None
+) -> BaseException | None:
     """Report an append failure in enumerated fields only (ADR-0192 §3).
 
     Three fields exhaust it: the operation, always; the fault class, where the
     exception is an ``Exception``; and the outcome, where the operation is a
     completion. No instance, no message, no cause chain and no identifier.
+
+    **It never raises**, for the reason `ai_assistant.tools.consume` states at
+    length: ``fault_class_of`` guards the ``__name__`` read against ``Exception``
+    and deliberately not ``BaseException``, so a hostile metaclass can raise one
+    out of the classifier — and one escaping here would carry past the disposition
+    below and decide the call's exit. The field is **omitted**, which is §3's own
+    shape for an exception no class can be read from, and the classifier's failure
+    is handed back to the path's rules.
+
+    Returns:
+        The ``BaseException`` the class read raised, where one did.
     """
     fields: dict[str, object] = {"operation": operation}
+    unclassifiable: BaseException | None = None
     if isinstance(error, Exception):
-        fields["fault_class"] = fault_class_of(error)
+        try:
+            fields["fault_class"] = fault_class_of(error)
+        except BaseException as exc:
+            unclassifiable = exc
     if outcome is not None:
         fields["outcome"] = outcome
     _log.warning(APPEND_FAILED, **fields)
+    return unclassifiable
+
+
+def _chained(error: BaseException, unclassifiable: BaseException | None) -> None:
+    """Keep a diagnostic's own failure on the record without letting it decide the exit."""
+    if unclassifiable is not None and error.__context__ is None:
+        error.__context__ = unclassifiable
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,7 +678,7 @@ async def _complete(
             external cancellation is propagating is not absorbed.
     """
     entered_with = _pending_cancellations()
-    appended = await _driven(
+    appended, absorbed = await _driven(
         ledger.complete_invocation(
             claim_id=claim.id,
             outcome=completion.outcome,
@@ -534,12 +686,12 @@ async def _complete(
             failure_kind=completion.failure_kind,
         )
     )
-    cancelled = _pending_cancellations() > entered_with
+    cancelled = absorbed or _pending_cancellations() > entered_with
     if not isinstance(appended, BaseException):
         return _Appended(None, cancelled)
     error = appended
 
-    _diagnose(COMPLETION, error, completion.outcome)
+    _chained(error, _diagnose(COMPLETION, error, completion.outcome))
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -570,8 +722,8 @@ async def _claimed(
     (ADR-0060 §1), and nothing here writes a compensating delete or a marker.
     """
     entered_with = _pending_cancellations()
-    appended = await _driven(ledger.claim_invocation(decision=decision))
-    cancelled = _pending_cancellations() > entered_with
+    appended, absorbed = await _driven(ledger.claim_invocation(decision=decision))
+    cancelled = absorbed or _pending_cancellations() > entered_with
 
     if not isinstance(appended, BaseException):
         claim = appended
@@ -589,7 +741,7 @@ async def _claimed(
         )
 
     error = appended
-    _diagnose(CLAIM, error)
+    _chained(error, _diagnose(CLAIM, error))
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error
@@ -633,7 +785,12 @@ async def _consumed_call(
         )
         if appended.failure is None:
             raise
-        raise _cancellation(str(cancellation), appended.failure) from appended.failure
+        # Re-raised **as itself**, never rendered: ``Task.cancel`` accepts an
+        # arbitrary message object, so ``str(cancellation)`` would run a
+        # ``__str__`` this seam does not own — one that can raise and reach the
+        # caller in place of the externally delivered cancellation (ADR-0060 §1).
+        cancellation.__cause__ = appended.failure
+        raise
 
     appended = await _complete(
         ledger,
@@ -659,7 +816,10 @@ __all__ = [
     "APPEND_FAILED",
     "CLAIM",
     "COMPLETION",
+    "AdmittingLedger",
     "FakeToolImplementation",
     "FakeToolInvoker",
+    "authorised",
+    "invoker_over",
     "succeeds",
 ]

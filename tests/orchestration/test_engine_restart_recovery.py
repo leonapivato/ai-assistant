@@ -247,7 +247,9 @@ def _make_engine(
     # every case above this one is about the *recovery* path rather than the egress
     # one, and a binder they did not ask for would change what their rows hold.
     tool = _egress_tool() if egress else _confirmable_tool()
-    invoker = FakeToolInvoker([(tool, _succeeds)])
+    # The seam claims through the **same** trail the runner records rulings into
+    # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
+    invoker = FakeToolInvoker([(tool, _succeeds)], ledger=trail)
     runner = StepRunner(
         plans=plans,
         registry=invoker,

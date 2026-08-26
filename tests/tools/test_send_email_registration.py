@@ -63,7 +63,13 @@ from ai_assistant.core.types import (
     parameter_violations,
 )
 from ai_assistant.orchestration.selection import Preference, eligible_candidates, select
-from ai_assistant.testing import FakeByteChannel, FakeMemoryStore, FakeOutboundTransport
+from ai_assistant.testing import (
+    FakeAuditTrail,
+    FakeByteChannel,
+    FakeMemoryStore,
+    FakeOutboundTransport,
+    authorised,
+)
 from ai_assistant.tools import (
     CURRENT_TIME,
     RECALL_MEMORY,
@@ -178,7 +184,8 @@ async def test_a_configured_deployment_registers_the_tool_and_binds_it_to_one_ac
     agree, and what the design buys is that they cannot disagree.
     """
     integration, _ = await _configured()
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
 
     assert await registry.get(SEND_EMAIL_ID) == SEND_EMAIL
     assert SEND_EMAIL.capability in await registry.capabilities()
@@ -212,7 +219,8 @@ async def test_an_unconfigured_deployment_holds_neither_half() -> None:
     default here, it is what keeps ADR-0152 §8's mis-registration refusal
     reachable.
     """
-    registry = build_default_registry(memory=FakeMemoryStore())
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), ledger=trail)
 
     assert {tool.id for tool in await registry.all_tools()} == {CURRENT_TIME.id, RECALL_MEMORY.id}
     assert egress_registrations(None).registration(SEND_EMAIL_ID) is None
@@ -255,7 +263,8 @@ async def test_a_send_with_no_connected_account_is_refused_not_answered_none() -
     declaration while giving the seam an empty table, because a composition root
     cannot produce it.
     """
-    registry = build_default_registry(memory=FakeMemoryStore())
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), ledger=trail)
     registry.register(SEND_EMAIL, _never_called)
     seam = _seam(None, registry)
 
@@ -289,7 +298,8 @@ async def test_selection_reaches_the_registered_tool_when_it_is_the_one_capable_
     not that it wins a contest.
     """
     integration, _ = await _configured()
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
 
     candidates: Sequence[ToolDefinition] = await registry.find(SEND_EMAIL.capability)
     assert [tool.id for tool in candidates] == [SEND_EMAIL_ID]
@@ -321,7 +331,8 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     """
     channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
     seam = _seam(integration, registry)
 
     parameters = arguments()
@@ -333,7 +344,8 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     assert bound is not None
 
     result = await registry.invoke(
-        _authorised(dict(bound.parameters), bound.binding), timeout=TIMEOUT
+        await authorised(trail, _authorised(dict(bound.parameters), bound.binding)),
+        timeout=TIMEOUT,
     )
 
     assert result.outcome is ToolOutcome.SUCCEEDED
@@ -371,7 +383,8 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     """
     channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
     seam = _seam(integration, registry)
     parameters: Mapping[str, FrozenJson] = {
         "to": "Alice@Example.Invalid",
@@ -391,7 +404,8 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     assert [span.index for span in recipients] == [None]
 
     result = await registry.invoke(
-        _authorised(dict(bound.parameters), bound.binding), timeout=TIMEOUT
+        await authorised(trail, _authorised(dict(bound.parameters), bound.binding)),
+        timeout=TIMEOUT,
     )
 
     assert result.outcome is ToolOutcome.SUCCEEDED
@@ -410,7 +424,8 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
     a Tier 2 failure text.
     """
     integration, ring = await _configured()
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
     seam = _seam(integration, registry)
 
     parameters = arguments()
@@ -422,7 +437,9 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
     assert bound is not None
     moved = bound.binding.model_copy(update={"transport_endpoint": "smtps://elsewhere.invalid:465"})
 
-    result = await registry.invoke(_authorised(dict(bound.parameters), moved), timeout=TIMEOUT)
+    result = await registry.invoke(
+        await authorised(trail, _authorised(dict(bound.parameters), moved)), timeout=TIMEOUT
+    )
 
     assert result.outcome is ToolOutcome.FAILED
     assert result.failure is not None
@@ -446,12 +463,16 @@ async def test_an_egress_callable_reached_without_a_binding_is_refused() -> None
     and no destination set has nothing to hold itself to.
     """
     integration, ring = await _configured()
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
 
+    # Deliberately unrecorded: ADR-0192 §1 places this check **above** the claim,
+    # so the refusal must not depend on the trail holding the authorisation.
     with pytest.raises(ToolBindingError, match="no egress binding"):
         await registry.invoke(_authorised(arguments(), None), timeout=TIMEOUT)
 
     assert ring.reads == []
+    assert await trail.export_invocations() == [], "a seam fault appends no invocation row"
 
 
 async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
@@ -463,7 +484,8 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
     ordinary tool will do: the fault is in the pairing, not in the tool.
     """
     integration, _ = await _configured()
-    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration, ledger=trail)
 
     # A binding with no spans, because ``current_time`` takes no arguments and
     # ADR-0150 §4 makes a span name one the call carries. The account and the
@@ -489,3 +511,5 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
 
     with pytest.raises(ToolBindingError, match="takes no egress binding"):
         await registry.invoke(ToolCall(request=request, decision=decision), timeout=TIMEOUT)
+
+    assert await trail.export_invocations() == [], "a seam fault appends no invocation row"

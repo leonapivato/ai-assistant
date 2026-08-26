@@ -76,7 +76,9 @@ def test_the_two_declarations_are_well_formed_and_local() -> None:
 
 async def test_build_default_registry_advertises_both_capabilities() -> None:
     """Selection can find each tool by the capability it advertises."""
-    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at)
+    registry = build_default_registry(
+        memory=FakeMemoryStore(now=_at), now=_at, ledger=FakeAuditTrail()
+    )
 
     assert await registry.capabilities() == ("recall_memory", "report_current_time")
     ids = [definition.id for definition in await registry.all_tools()]
@@ -242,13 +244,18 @@ async def test_recall_memory_rejects_an_unexpected_argument() -> None:
 
 
 def _runner(
-    registry: object, *, allow_everything: bool = False
+    registry: object, trail: FakeAuditTrail, *, allow_everything: bool = False
 ) -> tuple[StepRunner, FakePlanStore]:
     """Wire the real StepRunner/StepExecutor over the real registry and fakes.
 
     The registry is the *same* object as the invoker (ADR-0029 §8): one binding
     selects and acts. The policy allows the tool under test — the default fake
     confirms at ``MEDIUM``, so ``recall_memory`` needs ``confirm_at=None``.
+
+    ``trail`` is the **same object** the registry claims through (ADR-0192 §9's
+    wiring clause), so these cases run the production sequence end to end: the
+    runner records the ruling, and the seam then claims the authorisation it just
+    recorded. A second trail here would refuse every claim.
     """
     plans = FakePlanStore(now=_at)
     policy = FakeActionPolicy(confirm_at=None) if allow_everything else FakeActionPolicy()
@@ -256,7 +263,7 @@ def _runner(
         plans=plans,
         registry=registry,  # type: ignore[arg-type]  # the real InMemoryToolRegistry
         policy=policy,
-        trail=FakeAuditTrail(),
+        trail=trail,
         executor=StepExecutor(plans=plans, registry=registry, invoker=registry, now=_at),  # type: ignore[arg-type]
         now=_at,
         id_factory=iter(f"d-{n}" for n in range(1, 100)).__next__,
@@ -280,8 +287,9 @@ async def _execution_for(plans: FakePlanStore, step: PlanStep) -> ExecutionState
 
 async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     """The capability the tool advertises drives selection -> execute (ADR-0048)."""
-    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at)
-    runner, plans = _runner(registry)  # LOW risk: the default policy allows it
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at, ledger=trail)
+    runner, plans = _runner(registry, trail)  # LOW risk: the default policy allows it
     step = PlanStep(id="step-1", intent="what time is it", capability="report_current_time")
     state = await _execution_for(plans, step)
 
@@ -334,8 +342,9 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     statement about the arguments rather than about selection.
     """
     spy = _CountingCurrentTime()
-    registry = InMemoryToolRegistry([(CURRENT_TIME, spy)])
-    runner, plans = _runner(registry)
+    trail = FakeAuditTrail()
+    registry = InMemoryToolRegistry([(CURRENT_TIME, spy)], ledger=trail)
+    runner, plans = _runner(registry, trail)
     step = PlanStep(
         id="step-1",
         intent="what time is it",
@@ -372,9 +381,10 @@ async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
             ),
         )
     )
-    registry = build_default_registry(memory=store, now=_at)
+    trail = FakeAuditTrail()
+    registry = build_default_registry(memory=store, now=_at, ledger=trail)
     # MEDIUM risk, so the default fake would confirm; allow it to prove execution.
-    runner, plans = _runner(registry, allow_everything=True)
+    runner, plans = _runner(registry, trail, allow_everything=True)
     step = PlanStep(
         id="step-1",
         intent="when is the meeting",

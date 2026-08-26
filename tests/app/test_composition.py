@@ -501,7 +501,7 @@ async def test_build_engine_hands_the_invoker_the_ledger_face_of_the_one_trail(
         # Compared as objects: the two names are annotated with the two *faces*,
         # which is the whole point of the clause, so a typed identity check is the
         # one thing a static checker calls non-overlapping.
-        ledger: object = tools._ledger
+        ledger: object = tools.ledger
         assert ledger is engine._runner._trail, (
             "the invoker claims through the same object the runner records decisions into"
         )

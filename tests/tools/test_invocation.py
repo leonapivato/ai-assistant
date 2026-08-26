@@ -19,13 +19,13 @@ from tool_invoker_contract import PATIENT, Raiser, Spy, call_for, tool
 from ai_assistant.core.errors import ToolRegistrationError
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
 from ai_assistant.core.types import ToolFailureKind
-from ai_assistant.testing import succeeds
+from ai_assistant.testing import FakeAuditTrail, authorised, succeeds
 from ai_assistant.tools.registry import InMemoryToolRegistry, checked_timeout
 
 
 def test_one_object_presents_both_faces() -> None:
     """ADR-0029 §1: not two objects that happen to agree."""
-    registry = InMemoryToolRegistry()
+    registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
 
     assert isinstance(registry, ToolRegistry)
     assert isinstance(registry, ToolInvoker)
@@ -36,7 +36,7 @@ def test_one_object_presents_both_faces() -> None:
 
 async def test_re_registering_the_same_definition_and_callable_is_idempotent() -> None:
     """So a composition root may run twice without special-casing."""
-    registry = InMemoryToolRegistry([(tool(), succeeds)])
+    registry = InMemoryToolRegistry([(tool(), succeeds)], ledger=FakeAuditTrail())
 
     registry.register(tool(), succeeds)
 
@@ -49,18 +49,19 @@ async def test_rebinding_a_different_callable_under_a_bound_id_is_refused() -> N
     declaration.
     """
     original = Spy()
-    registry = InMemoryToolRegistry([(tool(), original)])
+    trail = FakeAuditTrail()
+    registry = InMemoryToolRegistry([(tool(), original)], ledger=trail)
 
     with pytest.raises(ToolRegistrationError, match="implementation"):
         registry.register(tool(), Spy())
 
-    await registry.invoke(call_for(tool()), timeout=PATIENT)
+    await registry.invoke(await authorised(trail, call_for(tool())), timeout=PATIENT)
     assert len(original.calls) == 1, "the original callable is still the bound one"
 
 
 async def test_a_deregistered_tool_is_no_longer_invocable() -> None:
     """The biconditional holds in both directions across revocation."""
-    registry = InMemoryToolRegistry([(tool(), Spy())])
+    registry = InMemoryToolRegistry([(tool(), Spy())], ledger=FakeAuditTrail())
 
     registry.deregister("smtp")
 
@@ -77,12 +78,13 @@ async def test_the_seams_log_carries_no_content_the_seam_did_not_author() -> Non
     Tier 1 leak it cannot see. Nothing downstream would catch this, so an
     untested rule here is an unenforced one.
     """
+    trail = FakeAuditTrail()
     registry = InMemoryToolRegistry(
-        [(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))]
+        [(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))], ledger=trail
     )
 
     with structlog.testing.capture_logs() as logs:
-        result = await registry.invoke(call_for(tool()), timeout=PATIENT)
+        result = await registry.invoke(await authorised(trail, call_for(tool())), timeout=PATIENT)
 
     assert result.failure is not None
     assert result.failure.kind is ToolFailureKind.INTERNAL

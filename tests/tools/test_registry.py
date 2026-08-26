@@ -23,16 +23,18 @@ from tool_registry_contract import ToolRegistryContract, tool
 
 from ai_assistant.core.errors import ToolRegistrationError
 from ai_assistant.core.types import Reversibility, RiskLevel
-from ai_assistant.testing import succeeds
+from ai_assistant.testing import FakeAuditTrail, succeeds
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from tool_invoker_contract import InvocableToolRegistry
     from tool_registry_contract import PopulatableToolRegistry
 
     from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.types import ToolDefinition
+    from ai_assistant.tools.invocation import BoundImplementation
 
 
 class TestInMemoryToolRegistryContract(ToolRegistryContract):
@@ -40,7 +42,7 @@ class TestInMemoryToolRegistryContract(ToolRegistryContract):
 
     @pytest.fixture
     def registry(self) -> PopulatableToolRegistry:
-        return InMemoryToolRegistry()
+        return a_registry()
 
 
 class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
@@ -53,11 +55,25 @@ class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
 
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
-        return InMemoryToolRegistry()
+        return InMemoryToolRegistry(ledger=FakeAuditTrail())
 
     @pytest.fixture
     def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
         return lambda ledger: InMemoryToolRegistry(ledger=ledger)
+
+
+def a_registry(
+    tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = (),
+) -> InMemoryToolRegistry:
+    """A registry over a fresh trail.
+
+    Every case below is about **registration** — the lifecycle ADR-0016 §5 keeps
+    off both Protocols — and none of them invokes, so the ledger the constructor
+    requires since ADR-0192 §1 is an argument nothing here reads. It is required
+    rather than defaulted because a ledger-free invoker would be a structurally
+    valid ``ToolInvoker`` that acts without claiming; see that constructor.
+    """
+    return InMemoryToolRegistry(tools, ledger=FakeAuditTrail())
 
 
 # --- construction -------------------------------------------------------
@@ -65,7 +81,7 @@ class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
 
 async def test_constructor_registers_in_order() -> None:
     """The convenience path is the registration path, not a second one."""
-    registry = InMemoryToolRegistry(
+    registry = a_registry(
         [(tool("smtp"), succeeds), (tool("cal", capability="create_event"), succeeds)]
     )
 
@@ -75,7 +91,7 @@ async def test_constructor_registers_in_order() -> None:
 def test_constructor_refuses_two_definitions_sharing_an_id() -> None:
     """A composition root must not be able to smuggle in a conflict at build time."""
     with pytest.raises(ToolRegistrationError):
-        InMemoryToolRegistry(
+        a_registry(
             [
                 (tool(risk_level=RiskLevel.CRITICAL), succeeds),
                 (tool(risk_level=RiskLevel.LOW), succeeds),
@@ -88,7 +104,7 @@ def test_constructor_refuses_two_definitions_sharing_an_id() -> None:
 
 async def test_registering_an_identical_definition_is_idempotent() -> None:
     """So a composition root may run twice without special-casing."""
-    registry = InMemoryToolRegistry([(tool(), succeeds)])
+    registry = a_registry([(tool(), succeeds)])
 
     registry.register(tool(), succeeds)
 
@@ -97,7 +113,7 @@ async def test_registering_an_identical_definition_is_idempotent() -> None:
 
 async def test_conflicting_redefinition_is_refused() -> None:
     """Metadata is a security control: CRITICAL must not become LOW in place."""
-    registry = InMemoryToolRegistry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
+    registry = a_registry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
 
     with pytest.raises(ToolRegistrationError, match="smtp"):
         registry.register(tool(risk_level=RiskLevel.LOW), succeeds)
@@ -114,7 +130,7 @@ async def test_a_deregistered_id_cannot_be_reused() -> None:
     approves a REVERSIBLE send, an IRREVERSIBLE definition takes the name, and
     both the approval_ref and the bound_tool id still read as consistent.
     """
-    registry = InMemoryToolRegistry([(tool(reversibility=Reversibility.RECOVERABLE), succeeds)])
+    registry = a_registry([(tool(reversibility=Reversibility.RECOVERABLE), succeeds)])
     assert registry.deregister("smtp") is True
 
     with pytest.raises(ToolRegistrationError, match="deregistered"):
@@ -132,7 +148,7 @@ def test_an_identical_definition_cannot_resurrect_a_spent_id() -> None:
     original registration — which is exactly what a composition root re-running
     does.
     """
-    registry = InMemoryToolRegistry([(tool(), succeeds)])
+    registry = a_registry([(tool(), succeeds)])
     registry.deregister("smtp")
 
     with pytest.raises(ToolRegistrationError):
@@ -140,7 +156,7 @@ def test_an_identical_definition_cannot_resurrect_a_spent_id() -> None:
 
 
 def test_deregistering_an_absent_tool_reports_false() -> None:
-    registry = InMemoryToolRegistry([(tool(), succeeds)])
+    registry = a_registry([(tool(), succeeds)])
 
     assert registry.deregister("nope") is False
     assert registry.deregister("smtp") is True
@@ -148,7 +164,7 @@ def test_deregistering_an_absent_tool_reports_false() -> None:
 
 
 async def test_a_deregistered_tool_leaves_the_capability_vocabulary() -> None:
-    registry = InMemoryToolRegistry([(tool(), succeeds)])
+    registry = a_registry([(tool(), succeeds)])
 
     registry.deregister("smtp")
 
@@ -170,7 +186,7 @@ async def test_a_definition_that_could_not_be_constructed_is_refused() -> None:
     smuggled = tool()
     object.__setattr__(smuggled, "side_effecting", False)
 
-    registry = InMemoryToolRegistry()
+    registry = a_registry()
 
     with pytest.raises(ValidationError):
         registry.register(smuggled, succeeds)
@@ -186,7 +202,7 @@ async def test_a_tampered_definition_is_refused_under_an_already_bound_id() -> N
     the tampered definition succeeds — what refuses it is that the id is already
     bound to a different definition. The next test pins what that leaves open.
     """
-    registry = InMemoryToolRegistry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
+    registry = a_registry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
 
     tampered = tool(risk_level=RiskLevel.CRITICAL)
     object.__setattr__(tampered, "risk_level", RiskLevel.LOW)
@@ -212,7 +228,7 @@ async def test_a_tampered_definition_under_a_fresh_id_is_accepted() -> None:
     tampered = tool("fresh", risk_level=RiskLevel.CRITICAL)
     object.__setattr__(tampered, "risk_level", RiskLevel.LOW)
 
-    registry = InMemoryToolRegistry()
+    registry = a_registry()
     registry.register(tampered, succeeds)
 
     stored = await registry.get("fresh")
@@ -223,7 +239,7 @@ async def test_a_tampered_definition_under_a_fresh_id_is_accepted() -> None:
 async def test_mutating_the_definition_passed_in_does_not_reach_the_registry() -> None:
     """The detached half of §4's postcondition, on the way in."""
     original = tool(risk_level=RiskLevel.CRITICAL)
-    registry = InMemoryToolRegistry([(original, succeeds)])
+    registry = a_registry([(original, succeeds)])
 
     object.__setattr__(original, "risk_level", RiskLevel.LOW)
 

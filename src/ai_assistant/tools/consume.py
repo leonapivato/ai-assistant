@@ -104,7 +104,9 @@ async def _captured(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation
         return exc
 
 
-async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation | BaseException:
+async def _driven(
+    coro: Coroutine[Any, Any, ToolInvocation],
+) -> tuple[ToolInvocation | BaseException, bool]:
     """Drive one ledger append to its outcome, absorbing every cancellation.
 
     The loop is what makes the absorption robust rather than single-shot: a
@@ -130,8 +132,22 @@ async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation |
         coro: The unawaited ledger call.
 
     Returns:
-        The stored row, or the failure the append raised.
+        The stored row or the failure the append raised, and **whether a
+        cancellation was delivered into this frame while it was in flight**.
+
+        That second fact is reported rather than inferred from
+        ``Task.cancelling()``, and the two are not the same question. The count's
+        *delta* tells a collaborator's invented ``CancelledError`` from an external
+        one (ADR-0031 §2) — a classification of something the ledger **returned**.
+        A cancellation the event loop **delivered here** is external whatever the
+        delta says: a caller already carrying a request when ``invoke`` was entered
+        moves the count by nothing, and ADR-0192 §1 still requires that "a
+        cancellation delivered while the append is in flight is absorbed, the
+        task's result is observed, and the cancellation is **then re-raised**".
+        Reading the delta alone would swallow it, which is the one thing ADR-0060
+        §1 says a method never does.
     """
+    absorbed = False
     task = asyncio.ensure_future(_captured(coro))
     while not task.done():
         try:
@@ -140,14 +156,17 @@ async def _driven(coro: Coroutine[Any, Any, ToolInvocation]) -> ToolInvocation |
             # here and its outcome is still readable below.
             await asyncio.wait({task})
         except asyncio.CancelledError:
+            absorbed = True
             continue
     if task.cancelled():
         msg = "the ledger append cancelled its own task"
-        return asyncio.CancelledError(msg)
-    return task.result()
+        return asyncio.CancelledError(msg), absorbed
+    return task.result(), absorbed
 
 
-def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None = None) -> None:
+def _diagnose(
+    operation: str, error: BaseException, outcome: ToolOutcome | None = None
+) -> BaseException | None:
     """Report an append failure to the operator, in enumerated fields only.
 
     **Three fields exhaust it** (ADR-0192 §3): the ledger operation, always; the
@@ -163,13 +182,50 @@ def _diagnose(operation: str, error: BaseException, outcome: ToolOutcome | None 
     identifier** either — not the claim's, not the decision's, not the step's —
     because ``DurableIdentifier`` is a non-blank string a caller minted and
     ADR-0031 §5 records that such a value is not contractually log-safe.
+
+    **This never raises, and that is load-bearing rather than defensive.**
+    ``fault_class_of`` guards its ``__name__`` read against ``Exception`` and
+    deliberately not ``BaseException``, "so a ``CancelledError`` raised *by the
+    name read* is delivered onward as ADR-0060 §1 requires" — so a hostile
+    metaclass can raise one out of the classifier. Letting it leave *this* frame
+    would carry it past the disposition below and decide the call's exit: on the
+    claim path a failure whose count was unmoved would leave as a
+    ``CancelledError`` instead of the ``AuditError`` ADR-0192 §1 requires, so the
+    executor would record a call that provably never ran as interrupted; on the
+    completion path it would discard a ``ToolResult`` the tool had already
+    produced, which §3 calls the one outcome worse than an incomplete record. So
+    the field is **omitted** — which is §3's own shape for an exception no class
+    can be read from, not a literal invented for the position — and the
+    classifier's own failure is handed back to the path's rules.
+
+    Returns:
+        The ``BaseException`` the class read raised, where one did, for the caller
+        to attach as context. ``None`` otherwise.
     """
     fields: dict[str, object] = {"operation": operation}
+    unclassifiable: BaseException | None = None
     if isinstance(error, Exception):
-        fields["fault_class"] = fault_class_of(error)
+        try:
+            fields["fault_class"] = fault_class_of(error)
+        except BaseException as exc:
+            unclassifiable = exc
     if outcome is not None:
         fields["outcome"] = outcome
     _log.warning(APPEND_FAILED, **fields)
+    return unclassifiable
+
+
+def _chained(error: BaseException, unclassifiable: BaseException | None) -> None:
+    """Keep a diagnostic's own failure on the record without letting it decide the exit.
+
+    :func:`_diagnose` hands back the ``BaseException`` its class read raised, where
+    one did. It is attached to the append's failure as that exception's context, so
+    it survives on the chain a caller can walk — and it changes nothing about which
+    branch below is taken, which is the whole point of returning it rather than
+    raising it.
+    """
+    if unclassifiable is not None and error.__context__ is None:
+        error.__context__ = unclassifiable
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +302,7 @@ async def _complete(
             conversion ADR-0029 §3 forbids.
     """
     entered_with = pending_cancellations()
-    appended = await _driven(
+    appended, absorbed = await _driven(
         ledger.complete_invocation(
             claim_id=claim.id,
             outcome=completion.outcome,
@@ -254,12 +310,12 @@ async def _complete(
             failure_kind=completion.failure_kind,
         )
     )
-    cancelled = pending_cancellations() > entered_with
+    cancelled = absorbed or pending_cancellations() > entered_with
     if not isinstance(appended, BaseException):
         return _Appended(None, cancelled)
     error = appended
 
-    _diagnose(COMPLETION, error, completion.outcome)
+    _chained(error, _diagnose(COMPLETION, error, completion.outcome))
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -314,8 +370,8 @@ async def _claimed(
             call and does not leave as one (ADR-0192 §1).
     """
     entered_with = pending_cancellations()
-    appended = await _driven(ledger.claim_invocation(decision=decision))
-    cancelled = pending_cancellations() > entered_with
+    appended, absorbed = await _driven(ledger.claim_invocation(decision=decision))
+    cancelled = absorbed or pending_cancellations() > entered_with
 
     if not isinstance(appended, BaseException):
         claim = appended
@@ -336,7 +392,7 @@ async def _claimed(
         )
 
     error = appended
-    _diagnose(CLAIM, error)
+    _chained(error, _diagnose(CLAIM, error))
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error
@@ -403,7 +459,15 @@ async def consumed_call(
         )
         if appended.failure is None:
             raise
-        raise _cancellation(str(cancellation), appended.failure) from appended.failure
+        # The caught cancellation is re-raised **as itself**, never rendered and
+        # never replaced. ``Task.cancel`` accepts an arbitrary message object, so
+        # ``str(cancellation)`` runs a ``__str__`` this seam does not own — one
+        # that can raise, and would then reach the caller in place of the
+        # externally delivered cancellation, which is the conversion ADR-0060 §1
+        # and ADR-0192 §3 both refuse. Attaching the cause preserves the append's
+        # failure without touching the exception's identity.
+        cancellation.__cause__ = appended.failure
+        raise
 
     appended = await _complete(
         ledger,

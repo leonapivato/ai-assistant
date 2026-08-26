@@ -86,7 +86,7 @@ from typing import Any
 import pytest
 from packaging.requirements import Requirement
 
-from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing import FakeAuditTrail, FakeMemoryStore
 from ai_assistant.tools.builtin import build_default_registry
 from ai_assistant.tools.send_email import SEND_EMAIL_ID
 
@@ -559,7 +559,7 @@ async def test_an_unconfigured_deployment_has_no_tool_that_can_reach_the_transpo
     and its registration come from one value, so there is no state in which one
     exists without the other.
     """
-    registry = build_default_registry(memory=FakeMemoryStore())
+    registry = build_default_registry(memory=FakeMemoryStore(), ledger=FakeAuditTrail())
 
     assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
 
