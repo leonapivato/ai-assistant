@@ -833,29 +833,35 @@ class ToolInvokerContract:
         ["raises", float("inf"), "not a number"],
         ids=["read-raises", "infinite", "non-numeric"],
     )
-    async def test_a_timedelta_whose_duration_cannot_be_enforced_claims_nothing(
+    async def test_a_timedelta_subclasss_overrides_never_decide_the_deadline(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], duration: object
     ) -> None:
         """``isinstance`` admits a subclass, and the deadline is opened after the claim.
 
-        ``checked_timeout``-style guards accept anything ``isinstance`` calls a
-        ``timedelta``, so a subclass overriding ``total_seconds`` passes them —
-        and the seam reads that duration *later*, opening ``asyncio.timeout``
-        after the claim has landed. A read that raises there escapes with a claim
-        open, no completion written and no ``ToolResult`` at all, which is
-        precisely the exit ADR-0192 §3 makes total over; one returning ``inf``
-        disables the deadline ADR-0029 §4 says there always is, in the one method
-        whose contract is that there is one.
+        A guard that validates the caller's object and hands the same object on
+        accepts anything ``isinstance`` calls a ``timedelta``, and the seam then
+        reads the duration *later* — opening ``asyncio.timeout`` after the claim
+        has landed. A ``total_seconds`` that raises there escapes with a claim
+        open, no completion written and no ``ToolResult`` at all, which is exactly
+        the exit ADR-0192 §3 makes total over; one returning ``inf`` disables the
+        deadline ADR-0029 §4 says there always is, in the one method whose
+        contract is that there is one.
 
-        So the duration is read where the refusal belongs — before the claim,
-        where ADR-0034 §1 already puts a rejected deadline: no callable entered,
-        **no claim appended**, and no row on the trail to reconcile. The three
-        arms are the three ways the read goes wrong, and the assertion that
-        matters in each is the same one: the ledger was never asked.
+        So the duration is taken **before** the claim and from the base class's
+        own fields, which a subclass cannot shadow. The three arms are three ways
+        an override could decide something, and the assertion is the same in each:
+        it decided nothing. The call runs normally, under its true 30 seconds,
+        with the claim appended once and completed — no refusal invented, and no
+        open row left behind.
+
+        Refusing the value would also be a defensible design, and is a worse one:
+        a plain ``timedelta`` is a valid deadline whatever a subclass says about
+        it, and rejecting the whole subclass would make ``invoke`` refuse durations
+        it can enforce exactly.
         """
 
         class Hostile(timedelta):
-            """A positive duration by every check that does not read it."""
+            """A real 30 seconds by every field, and a liar about all of them."""
 
             def total_seconds(self) -> float:
                 if duration == "raises":
@@ -866,20 +872,50 @@ class ToolInvokerContract:
         trail = FakeAuditTrail()
         ledger = DrivenLedger(trail)
         invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 2}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        result = await invoker.invoke(call, timeout=Hostile(seconds=30))
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert result.output == {"unread": 2}
+        assert ledger.claim.calls == 1
+        assert ledger.completion.calls == 1
+        assert await trail.open_invocations(decision_id=call.decision.id) == [], (
+            "the deadline is the base class's, so nothing raises after the claim"
+        )
+
+    async def test_a_timedelta_subclass_that_is_not_positive_is_still_refused(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """And the positivity check reads the snapshot, not the subclass.
+
+        The companion to the case above: taking the duration from the base fields
+        must not become a way *past* the guard. A subclass reporting itself
+        positive through an overridden comparison is still zero, and is refused
+        before the claim exactly as a plain ``timedelta(0)`` is.
+        """
+
+        class Optimistic(timedelta):
+            """Claims to be longer than anything it is compared with."""
+
+            def __le__(self, other: timedelta) -> bool:
+                return False
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        invoker = consuming(ledger)
         spy = Spy()
         invoker.register(read_only("inbox"), spy)
         call = call_for(read_only("inbox"))
         await trail.record(call.decision)
 
         with pytest.raises(ValueError, match="timeout"):
-            await invoker.invoke(call, timeout=Hostile(seconds=30))
+            await invoker.invoke(call, timeout=Optimistic(0))
 
         assert spy.calls == [], "the callable is never entered"
-        assert ledger.claim.calls == 0, (
-            "a deadline this seam could not enforce is refused before the claim, "
-            "so there is no open invocation to reconcile"
-        )
-        assert await trail.open_invocations(decision_id=call.decision.id) == []
+        assert ledger.claim.calls == 0, "a refused deadline leaves no open invocation"
 
     async def test_a_tool_that_suppresses_its_cancellation_outlives_its_deadline(
         self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
@@ -922,6 +958,54 @@ class ToolInvokerContract:
         assert result.failure is not None
         assert result.failure.kind is ToolFailureKind.INTERNAL
         assert result.failure.kind.retryable is False
+
+    async def test_a_tool_whose_exception_refuses_to_be_named_is_still_an_internal_result(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0029 §3's rule has to survive the class the tool chose.
+
+        A broken tool becomes a ``ToolResult``, not an exception — and the seam
+        builds that result by naming the exception's class. The name is read from
+        an object the *tool* controls: a metaclass may override the ``__name__``
+        access and raise. Unguarded, that read escapes **after** the claim, so
+        ``invoke`` raises the metaclass's exception, ADR-0192 §3 gets no
+        completion for a claim it already appended, and a known-failed act
+        permanently spends its authorisation with the failure lost as data.
+
+        So the class is read once and totally, and where no name comes back the
+        result carries ``core``'s own reserved literal — the same shape ADR-0192
+        §3 gives a fault class that cannot be represented, rather than one
+        invented for the position. The completion is written either way, which is
+        the assertion that matters: the claim does not stay open.
+        """
+
+        class Unnameable(type):
+            """Refuses to be named, with an ``Exception`` the guard catches."""
+
+            def __getattribute__(cls, name: str) -> object:
+                if name == "__name__":
+                    msg = "the metaclass refuses to be named"
+                    raise RuntimeError(msg)
+                return super().__getattribute__(name)
+
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        hostile = Unnameable("Hostile", (RuntimeError,), {})("upstream said no")
+        invoker.register(read_only("inbox"), Raiser(hostile))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert result.failure.message == (
+            f"{UNREPRESENTABLE_FAULT_CLASS} escaped tool {read_only('inbox').id!r}"
+        )
+        assert await trail.open_invocations(decision_id=call.decision.id) == [], (
+            "the completion is written, so the claim does not stay open"
+        )
 
     async def test_the_exceptions_own_text_never_reaches_the_failure_message(
         self, invoker: InvocableToolRegistry, trail: FakeAuditTrail

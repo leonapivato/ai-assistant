@@ -43,6 +43,7 @@ from ai_assistant.core.errors import (
     ToolRegistrationError,
 )
 from ai_assistant.core.types import (
+    UNREPRESENTABLE_FAULT_CLASS,
     CostBasis,
     ToolCall,
     ToolCost,
@@ -103,31 +104,27 @@ def _checked_timeout(timeout: object) -> timedelta:
     instantly-expired deadline, because expiry is delivered at an await point
     and a callable acting before its first ``await`` would already have acted.
 
-    **A plain ``timedelta`` is returned, never the caller's object**, for the
-    reason `ai_assistant.tools.registry` states at length: ``isinstance`` admits a
+    **A plain ``timedelta`` is returned, rebuilt from the base class's own
+    descriptors and never the caller's object**, for the reason
+    `ai_assistant.tools.registry` states at length: ``isinstance`` admits a
     subclass, and the duration is read after the claim has landed, where an
     overridden ``total_seconds`` raising would leave a claim open with no
     completion and returning ``inf`` would disable the deadline.
 
     Returns:
-        A plain ``timedelta`` of the same duration.
+        A plain ``timedelta`` of exactly the same duration.
 
     Raises:
-        ValueError: If ``timeout`` is not a strictly positive ``timedelta``, or is
-            one whose duration cannot be read and enforced.
+        ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
     """
     if not isinstance(timeout, timedelta):
         msg = f"timeout must be a timedelta, got {type(timeout).__name__}"
         raise ValueError(msg)
-    try:
-        duration = timedelta(seconds=timeout.total_seconds())
-    except Exception as exc:
-        # Anything the duration read or the reconstruction raises — an overridden
-        # `total_seconds` failing, a non-numeric return, `inf`, a value outside
-        # `timedelta`'s range — is a deadline this seam could not enforce, and
-        # that is the refusal this guard exists to make (ADR-0029 §4).
-        msg = "timeout must be a timedelta whose duration can be read and enforced"
-        raise ValueError(msg) from exc
+    duration = timedelta(
+        days=timedelta.days.__get__(timeout),
+        seconds=timedelta.seconds.__get__(timeout),
+        microseconds=timedelta.microseconds.__get__(timeout),
+    )
     if duration <= timedelta(0):
         msg = f"timeout must be strictly positive, got {duration}"
         raise ValueError(msg)
@@ -414,13 +411,31 @@ def _expired(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
     )
 
 
+def _class_name(exc: BaseException) -> str:
+    """``type(exc).__name__``, or the reserved literal where the read fails.
+
+    Total, and read after the claim: see `ai_assistant.tools.invocation`. A
+    metaclass raising on the name access would otherwise leave the frame in place
+    of the ``ToolResult``, with a claim appended and no completion owed to it.
+    The guard stops at ``Exception``, so a ``CancelledError`` raised by the read
+    is delivered onward (ADR-0060 §1).
+    """
+    try:
+        name = type(exc).__name__
+    # A blind `except Exception` on purpose — `BaseException` is deliberately not
+    # caught.
+    except Exception:
+        return UNREPRESENTABLE_FAULT_CLASS
+    return name if isinstance(name, str) else UNREPRESENTABLE_FAULT_CLASS
+
+
 def _internal(definition: ToolDefinition, exc: BaseException) -> ToolResult:
     """Describe a broken tool without quoting it — never ``str(exc)`` (ADR-0029 §3)."""
     return ToolResult(
         outcome=ToolOutcome.FAILED,
         failure=ToolFailure(
             kind=ToolFailureKind.INTERNAL,
-            message=f"{type(exc).__name__} escaped tool {definition.id!r}",
+            message=f"{_class_name(exc)} escaped tool {definition.id!r}",
         ),
     )
 
