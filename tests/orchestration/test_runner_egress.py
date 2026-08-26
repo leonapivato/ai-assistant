@@ -286,9 +286,11 @@ class _Harness:
     ) -> None:
         """Wire the stage over canonical fakes and the binder under test."""
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
-        self.invoker = FakeToolInvoker([(tool, _succeeds)])
         self.policy = policy if policy is not None else _RecordingPolicy()
         self.trail = trail if trail is not None else FakeAuditTrail()
+        # The seam claims through the **same** trail the runner records rulings
+        # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
+        self.invoker = FakeToolInvoker([(tool, _succeeds)], ledger=self.trail)
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.runner = StepRunner(
             plans=self.plans,

@@ -17,7 +17,12 @@ from tool_invoker_contract import PATIENT, Spy, ToolInvokerContract, call_for, t
 
 from ai_assistant.core.errors import UnrecordedAuthorisationError
 from ai_assistant.core.types import ToolOutcome
-from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker
+from ai_assistant.testing import (
+    FakeAuditTrail,
+    FakeToolInvoker,
+    authorised,
+    invoker_over,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,7 +37,7 @@ class TestFakeToolInvokerContract(ToolInvokerContract):
 
     @pytest.fixture
     def invoker(self) -> InvocableToolRegistry:
-        return FakeToolInvoker()
+        return FakeToolInvoker(ledger=FakeAuditTrail())
 
     @pytest.fixture
     def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
@@ -44,9 +49,9 @@ async def test_fake_records_the_calls_it_accepted() -> None:
     what reached the seam, and on nothing having reached it when a call was
     refused.
     """
-    invoker = FakeToolInvoker([(tool(), Spy())])
+    invoker, trail = invoker_over([(tool(), Spy())])
 
-    result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+    result = await invoker.invoke(await authorised(trail, call_for(tool())), timeout=PATIENT)
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert [each.request.tool.id for each in invoker.invocations] == ["smtp"]
@@ -54,10 +59,12 @@ async def test_fake_records_the_calls_it_accepted() -> None:
 
 async def test_the_default_implementation_succeeds_with_no_output() -> None:
     """Arranging a binding is one argument when the test is not about the tool."""
-    invoker = FakeToolInvoker()
+    invoker, trail = invoker_over()
     invoker.register(tool())
 
-    result = await invoker.invoke(call_for(tool()), timeout=timedelta(seconds=5))
+    result = await invoker.invoke(
+        await authorised(trail, call_for(tool())), timeout=timedelta(seconds=5)
+    )
 
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output is None

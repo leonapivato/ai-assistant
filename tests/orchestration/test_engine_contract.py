@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import pytest
 from assistant_engine_contract import (
@@ -49,6 +49,7 @@ from assistant_engine_contract import (
     seeded_trail,
 )
 
+from ai_assistant.core.protocols import AuditTrail, InvocationLedger
 from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
@@ -104,7 +105,7 @@ from ai_assistant.testing.grants import source_grant
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import AssistantEngine, AuditTrail, SourceReadTrail
+    from ai_assistant.core.protocols import AssistantEngine, SourceReadTrail
     from ai_assistant.core.types import (
         CurrentContext,
         FrozenJson,
@@ -127,6 +128,20 @@ _GRANTABLE = _SOURCE
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
+
+
+class ConsumingTrail(AuditTrail, InvocationLedger, Protocol):
+    """Both faces of the **one** audit object (ADR-0192 §2).
+
+    The composition root wires a single store as ``AuditTrail``,
+    ``InvocationLedger`` and ``InvocationCompleter``, handing each consumer the
+    face its job needs. A harness that wires the runner and the seam has to name
+    both at once — the runner records rulings through the trail, the seam claims
+    through the ledger, and they must be the same object or every claim is refused.
+    Declared here for the reason ``InvocableToolRegistry`` is declared in the
+    invoker suite: a variable annotated with one Protocol does not statically
+    satisfy the other, and a cast would hide the very identity being asserted.
+    """
 
 
 def _composing() -> ComposingStage:
@@ -246,7 +261,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     grants: Sequence[SourceGrant] = (),
     grant_clock: Callable[[], datetime] | None = None,
     provisioner: FakeConnectionProvisioner | None = None,
-    trail: AuditTrail | None = None,
+    trail: ConsumingTrail | None = None,
     reads: SourceReadTrail | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
@@ -277,10 +292,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     plans = FakePlanStore(now=lambda: AT)
-    audit: AuditTrail = FakeAuditTrail() if trail is None else trail
+    audit: ConsumingTrail = FakeAuditTrail() if trail is None else trail
     read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
-    invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [])
+    # The seam claims through the **same** trail the runner records rulings into
+    # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
+    invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [], ledger=audit)
     # The egress binding seam, wired only where the suite needs a park: ADR-0178
     # §3's clause binds every producer of a ``ConfirmationEgress``, and a subject
     # parking a non-egress call would leave it vacuous here.

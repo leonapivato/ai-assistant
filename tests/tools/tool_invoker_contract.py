@@ -91,6 +91,11 @@ class InvocableToolRegistry(ToolRegistry, ToolInvoker, Protocol):
         """Bind a declaration and the callable that satisfies it."""
         ...
 
+    @property
+    def ledger(self) -> InvocationLedger:
+        """The ledger this seam claims through, which the suite arranges."""
+        ...
+
 
 # --- builders -----------------------------------------------------------
 
@@ -137,6 +142,30 @@ def natural(tool_id: str = "upsert") -> ToolDefinition:
 def keyed(tool_id: str = "smtp", window: timedelta = timedelta(hours=24)) -> ToolDefinition:
     """A tool whose repeats are deduplicated by key inside ``window``."""
     return tool(tool_id, idempotency=Idempotency.KEYED, idempotency_window=window)
+
+
+def gated(tool_id: str = "inbox", window: timedelta = timedelta(hours=24)) -> ToolDefinition:
+    """A ``KEYED`` tool that is **not** side-effecting, so it is not spendable.
+
+    The class the key cases below need since ADR-0192 §1 made a claim the consume:
+    the key is derived from ``idempotency is KEYED`` alone
+    (``ToolCall.idempotency_key``), while *spendability* is "side-effecting **and**
+    not ``NATURAL``". So this tool derives a key exactly as ``keyed()`` does and
+    §1 refuses no repetition under it — which is the read ADR-0016 §3 gates, and
+    the only class under which "the same call twice" is still a thing ``invoke``
+    will do.
+
+    A **spendable** ``KEYED`` tool's repeat is governed by §1's conjunction
+    instead, and is pinned where that conjunction is — not here.
+    """
+    return tool(
+        tool_id,
+        capability="read_email",
+        side_effecting=False,
+        reversibility=Reversibility.REVERSIBLE,
+        idempotency=Idempotency.KEYED,
+        idempotency_window=window,
+    )
 
 
 def call_for(
@@ -502,18 +531,77 @@ async def _settled(cycles: int = 4) -> None:
         await asyncio.sleep(0)
 
 
+async def invoked(
+    invoker: InvocableToolRegistry,
+    trail: FakeAuditTrail,
+    call: ToolCall,
+    *,
+    timeout: timedelta = PATIENT,  # noqa: ASYNC109 — relayed to the seam, which owns it
+) -> ToolResult:
+    """Record ``call``'s authorisation if the trail has not got it, then invoke.
+
+    What ``StepRunner`` does in front of every execution, and what ADR-0192 §1 now
+    makes a precondition of reaching the callable at all: the ledger requires the
+    decision it is passed to equal the one the store holds under that id, so an
+    unrecorded authorisation is refused before the tool. The cases *about* that
+    refusal call ``invoke`` directly; every case about something else goes through
+    here.
+
+    **Recorded once per decision, not once per call.** A trail refuses a second
+    ``record`` under one id, and a decision legitimately backs more than one act
+    where ADR-0192 §1 admits one — so this mirrors the runner, which records the
+    ruling once and may then execute under it again.
+    """
+    if await trail.get(call.decision.id) is None:
+        await trail.record(call.decision)
+    return await invoker.invoke(call, timeout=timeout)
+
+
 class ToolInvokerContract:
     """Behaviour every ``ToolInvoker`` implementation must exhibit."""
 
     @pytest.fixture
-    def invoker(self) -> InvocableToolRegistry:
-        """Return an empty invoker under test."""
+    def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
+        """Return a factory building an empty invoker over ``ledger``.
+
+        A factory rather than a built subject, because half the consume cases need
+        the ledger *wrapped* — held on a barrier, made to fail, made to fail after
+        it committed — and an invoker is handed its ledger at construction.
+        """
         raise NotImplementedError
+
+    @pytest.fixture
+    def invoker(self) -> InvocableToolRegistry:
+        """The subject, and it is **ledger-bearing** like every other invoker.
+
+        Since ADR-0192 §1 made the consume unconditional there is no ledger-free
+        ``ToolInvoker`` to be had, so this suite has one subject rather than an
+        ordinary one beside a consuming one — a second, non-conforming fixture
+        would leave the ordinary subject unbound by the new obligations while they
+        were pinned on a different object.
+
+        Overridden by each binding subclass and **taking no other fixture**, which
+        is what lets ``tests/core/test_protocol_triad.py`` evaluate it and see the
+        canonical fake come out (CONTRIBUTING, "Adding a Protocol"). The trail is
+        read back off the subject rather than injected beside it, for the same
+        reason the composition root wires one object: two would leave the seam
+        claiming against a store the test never recorded into.
+        """
+        raise NotImplementedError
+
+    @pytest.fixture
+    def trail(self, invoker: InvocableToolRegistry) -> FakeAuditTrail:
+        """The trail the subject claims through, read back off the subject."""
+        ledger = invoker.ledger
+        assert isinstance(ledger, FakeAuditTrail), (
+            "this suite arranges authorisations through the trail the subject holds"
+        )
+        return ledger
 
     # --- §1: one registry, two faces ------------------------------------
 
     async def test_the_invocable_set_is_exactly_all_tools(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The biconditional, asserted as set equality rather than exhorted.
 
@@ -526,7 +614,11 @@ class ToolInvokerContract:
         declared = {each.id for each in await invoker.all_tools()}
         invocable = set()
         for each in await invoker.all_tools():
-            result = await invoker.invoke(call_for(each), timeout=PATIENT)
+            # A decision id apiece: two tools authorised under one id is not a
+            # trail this store could hold, and since ADR-0192 §1 the seam reads it.
+            result = await invoked(
+                invoker, trail, call_for(each, decision_id=f"d-{each.id}"), timeout=PATIENT
+            )
             assert result.outcome is ToolOutcome.SUCCEEDED
             invocable.add(each.id)
 
@@ -534,15 +626,17 @@ class ToolInvokerContract:
 
         unregistered = tool("never-registered")
         with pytest.raises(ToolBindingError):
-            await invoker.invoke(call_for(unregistered), timeout=PATIENT)
+            await invoked(invoker, trail, call_for(unregistered), timeout=PATIENT)
 
-    async def test_an_unbound_id_is_refused(self, invoker: InvocableToolRegistry) -> None:
+    async def test_an_unbound_id_is_refused(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
         """Nothing is bound, so there is nothing to invoke."""
         with pytest.raises(ToolBindingError, match="smtp"):
-            await invoker.invoke(call_for(tool()), timeout=PATIENT)
+            await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
     async def test_a_tampered_but_still_valid_definition_is_refused(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """ADR-0018 §4's named gap, closing here.
 
@@ -558,13 +652,13 @@ class ToolInvokerContract:
         downgraded = call_for(tool(risk_level=RiskLevel.LOW))
 
         with pytest.raises(ToolBindingError):
-            await invoker.invoke(downgraded, timeout=PATIENT)
+            await invoked(invoker, trail, downgraded, timeout=PATIENT)
         assert spy.calls == [], "the callable must not be reached"
 
     # --- §2: refused again at the seam ----------------------------------
 
     async def test_parameters_swapped_after_construction_are_refused(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """``frozen=True`` does not survive a ``__dict__`` write.
 
@@ -584,10 +678,12 @@ class ToolInvokerContract:
         call.__dict__["request"] = swapped
 
         with pytest.raises(ToolBindingError):
-            await invoker.invoke(call, timeout=PATIENT)
+            await invoked(invoker, trail, call, timeout=PATIENT)
         assert spy.calls == []
 
-    async def test_a_replaced_decision_is_refused(self, invoker: InvocableToolRegistry) -> None:
+    async def test_a_replaced_decision_is_refused(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
         """A decision about a different payload cannot authorise this one."""
         spy = Spy()
         invoker.register(tool(), spy)
@@ -596,11 +692,11 @@ class ToolInvokerContract:
         call.__dict__["decision"] = other.decision
 
         with pytest.raises(ToolBindingError):
-            await invoker.invoke(call, timeout=PATIENT)
+            await invoked(invoker, trail, call, timeout=PATIENT)
         assert spy.calls == []
 
     async def test_a_substituted_definition_is_refused(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The declaration on the call is rewritten after it was authorised."""
         spy = Spy()
@@ -610,11 +706,11 @@ class ToolInvokerContract:
         object.__setattr__(call.request.tool, "risk_level", RiskLevel.LOW)
 
         with pytest.raises(ToolBindingError):
-            await invoker.invoke(call, timeout=PATIENT)
+            await invoked(invoker, trail, call, timeout=PATIENT)
         assert spy.calls == []
 
     async def test_a_malformed_parameter_mutation_is_a_binding_error_from_revalidation(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The **order** of the checks, which only a malformed mutation distinguishes.
 
@@ -640,7 +736,7 @@ class ToolInvokerContract:
         call.__dict__["request"] = malformed
 
         with pytest.raises(ToolBindingError) as caught:
-            await invoker.invoke(call, timeout=PATIENT)
+            await invoked(invoker, trail, call, timeout=PATIENT)
 
         assert isinstance(caught.value.__cause__, ValidationError), (
             "a malformed mutation must be rejected by revalidation, not by the digest"
@@ -650,12 +746,12 @@ class ToolInvokerContract:
     # --- §4: the deadline -----------------------------------------------
 
     async def test_a_side_effecting_non_natural_tool_that_times_out_is_indeterminate(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """ADR-0014 §4's case, reached through a deadline rather than a crash."""
         invoker.register(tool(), Slow())
 
-        result = await invoker.invoke(call_for(tool()), timeout=BRIEF)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=BRIEF)
 
         assert result.outcome is ToolOutcome.INDETERMINATE
         assert result.failure is not None
@@ -664,12 +760,12 @@ class ToolInvokerContract:
 
     @pytest.mark.parametrize("definition", [read_only(), natural()], ids=["read-only", "natural"])
     async def test_a_read_only_or_natural_tool_that_times_out_is_failed(
-        self, invoker: InvocableToolRegistry, definition: ToolDefinition
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, definition: ToolDefinition
     ) -> None:
         """A read changed nothing; a ``NATURAL`` repeat does the same thing again."""
         invoker.register(definition, Slow())
 
-        result = await invoker.invoke(call_for(definition), timeout=BRIEF)
+        result = await invoked(invoker, trail, call_for(definition), timeout=BRIEF)
 
         assert result.outcome is ToolOutcome.FAILED
         assert result.failure is not None
@@ -694,11 +790,11 @@ class ToolInvokerContract:
         invoker.register(tool(), spy)
 
         with pytest.raises(ValueError, match="timeout"):
-            await invoker.invoke(call_for(tool()), timeout=bad)  # type: ignore[arg-type]
+            await invoker.invoke(call_for(tool()), timeout=bad)  # type: ignore[arg-type]  # the guard is the subject  # type: ignore[arg-type]
         assert spy.calls == []
 
     async def test_a_tool_that_suppresses_its_cancellation_outlives_its_deadline(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The cooperative limit, deterministically (ADR-0029 §4).
 
@@ -710,7 +806,7 @@ class ToolInvokerContract:
         stubborn = Stubborn()
         invoker.register(tool(), stubborn)
 
-        running = asyncio.ensure_future(invoker.invoke(call_for(tool()), timeout=BRIEF))
+        running = asyncio.ensure_future(invoked(invoker, trail, call_for(tool()), timeout=BRIEF))
         await stubborn.entered.wait()
         await asyncio.sleep(BRIEF.total_seconds() * 5)
 
@@ -725,14 +821,14 @@ class ToolInvokerContract:
     # --- §3: an exception escaping the tool ------------------------------
 
     async def test_a_raising_tool_becomes_an_internal_result(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """Integration authors raise; a seam that let that propagate would leave
         the step durably ``RUNNING`` with nothing recording why.
         """
         invoker.register(tool(), Raiser(RuntimeError("upstream said no")))
 
-        result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
         assert result.outcome is ToolOutcome.FAILED
         assert result.failure is not None
@@ -740,7 +836,7 @@ class ToolInvokerContract:
         assert result.failure.kind.retryable is False
 
     async def test_the_exceptions_own_text_never_reaches_the_failure_message(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The message-leak rule (§3), which nothing downstream would catch.
 
@@ -752,7 +848,7 @@ class ToolInvokerContract:
         """
         invoker.register(tool(), Raiser(RuntimeError("recipient alice@example.com rejected")))
 
-        result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
         assert result.failure is not None
         assert "alice@example.com" not in result.failure.message
@@ -761,7 +857,7 @@ class ToolInvokerContract:
 
     @pytest.mark.parametrize("value", [{"a", "set"}, float("nan")], ids=["set", "nan"])
     async def test_a_return_value_frozen_json_refuses_becomes_internal(
-        self, invoker: InvocableToolRegistry, value: object
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, value: object
     ) -> None:
         """A tool whose return value will not validate is broken, and saying so
         is more useful than storing something unserialisable — or than letting a
@@ -769,14 +865,14 @@ class ToolInvokerContract:
         """
         invoker.register(tool(), Returner(value))
 
-        result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
         assert result.outcome is ToolOutcome.FAILED
         assert result.failure is not None
         assert result.failure.kind is ToolFailureKind.INTERNAL
 
     async def test_a_tools_own_timeout_error_inside_the_deadline_is_internal(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """``TIMED_OUT`` means *this* deadline expired, established not inferred.
 
@@ -790,25 +886,25 @@ class ToolInvokerContract:
         """
         invoker.register(tool(), Raiser(TimeoutError("the upstream's own deadline")))
 
-        result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
         assert result.failure is not None
         assert result.failure.kind is ToolFailureKind.INTERNAL
         assert result.outcome is ToolOutcome.FAILED
 
     async def test_a_base_exception_propagates_rather_than_becoming_a_result(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """A guard whose own failure modes bypass its failure path enforces nothing."""
         invoker.register(tool(), Raiser(KeyboardInterrupt()))
 
         with pytest.raises(KeyboardInterrupt):
-            await invoker.invoke(call_for(tool()), timeout=PATIENT)
+            await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
     # --- §4: cancellation, classified by provenance ----------------------
 
     async def test_a_cancelled_error_the_tool_invents_is_an_internal_result(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """Nothing about the exception's type says where it came from.
 
@@ -820,7 +916,7 @@ class ToolInvokerContract:
         """
         invoker.register(tool(), Raiser(asyncio.CancelledError()))
 
-        result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
 
         assert result.outcome is ToolOutcome.FAILED
         assert result.failure is not None
@@ -833,7 +929,7 @@ class ToolInvokerContract:
         "definition", [tool(), read_only()], ids=["side-effecting", "read-only"]
     )
     async def test_an_external_cancellation_propagates_on_both_branches(
-        self, invoker: InvocableToolRegistry, definition: ToolDefinition
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, definition: ToolDefinition
     ) -> None:
         """The seam does not convert a real cancellation into a result.
 
@@ -846,7 +942,9 @@ class ToolInvokerContract:
         slow = Slow()
         invoker.register(definition, slow)
 
-        running = asyncio.ensure_future(invoker.invoke(call_for(definition), timeout=PATIENT))
+        running = asyncio.ensure_future(
+            invoked(invoker, trail, call_for(definition), timeout=PATIENT)
+        )
         await slow.entered.wait()
         running.cancel()
 
@@ -854,7 +952,7 @@ class ToolInvokerContract:
             await running
 
     async def test_a_tool_that_absorbs_its_deadline_is_not_reported_successful(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The deadline is read from the timeout, not inferred from an exception.
 
@@ -867,7 +965,7 @@ class ToolInvokerContract:
         swallower = Swallower()
         invoker.register(tool(), swallower)
 
-        result = await invoker.invoke(call_for(tool()), timeout=BRIEF)
+        result = await invoked(invoker, trail, call_for(tool()), timeout=BRIEF)
 
         assert swallower.swallowed, "the fixture must actually absorb the cancellation"
         assert result.outcome is ToolOutcome.INDETERMINATE
@@ -875,7 +973,7 @@ class ToolInvokerContract:
         assert result.failure.kind is ToolFailureKind.TIMED_OUT
 
     async def test_a_tool_that_absorbs_an_external_cancellation_still_cancels_the_call(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """A cancelled task must not be answered with a result.
 
@@ -887,7 +985,7 @@ class ToolInvokerContract:
         swallower = Swallower()
         invoker.register(tool(), swallower)
 
-        running = asyncio.ensure_future(invoker.invoke(call_for(tool()), timeout=PATIENT))
+        running = asyncio.ensure_future(invoked(invoker, trail, call_for(tool()), timeout=PATIENT))
         await swallower.entered.wait()
         running.cancel()
 
@@ -906,6 +1004,7 @@ class ToolInvokerContract:
     async def test_a_caller_that_absorbed_an_earlier_cancellation_is_not_treated_as_cancelled(
         self,
         invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
         implementation: FakeToolImplementation,
         expected: ToolOutcome,
     ) -> None:
@@ -928,7 +1027,7 @@ class ToolInvokerContract:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
                 pass  # absorbed, and deliberately not `uncancel()`-ed
-            result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+            result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
             return result.outcome
 
         running = asyncio.ensure_future(caller())
@@ -940,13 +1039,13 @@ class ToolInvokerContract:
     # --- §5: the key is the authorisation --------------------------------
 
     async def test_a_keyed_tool_receives_the_decision_id_as_its_key(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """Derived, not minted: there is no caller field to fill in wrongly."""
         spy = Spy()
         invoker.register(keyed(), spy)
 
-        await invoker.invoke(call_for(keyed(), decision_id="d-42"), timeout=PATIENT)
+        await invoked(invoker, trail, call_for(keyed(), decision_id="d-42"), timeout=PATIENT)
 
         assert [key for _, key in spy.calls] == ["d-42"]
 
@@ -954,50 +1053,58 @@ class ToolInvokerContract:
         "definition", [tool(), natural()], ids=["idempotency-none", "idempotency-natural"]
     )
     async def test_a_tool_that_is_not_keyed_receives_no_key(
-        self, invoker: InvocableToolRegistry, definition: ToolDefinition
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, definition: ToolDefinition
     ) -> None:
         """A key is meaningless to a tool that made no guarantee about one."""
         spy = Spy()
         invoker.register(definition, spy)
 
-        await invoker.invoke(call_for(definition), timeout=PATIENT)
+        await invoked(invoker, trail, call_for(definition), timeout=PATIENT)
 
         assert [key for _, key in spy.calls] == [None]
 
     async def test_the_key_is_identical_across_retries_of_one_call(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """There is deliberately no attempt counter: a key that varied per
         attempt would defeat the guarantee at exactly the moment it is needed.
         """
         spy = Spy()
-        invoker.register(keyed(), spy)
-        call = call_for(keyed(), decision_id="d-7")
+        # Not spendable, so ADR-0192 §1 refuses no repetition and the *key* is
+        # what this case is left testing — which is what it was always about.
+        invoker.register(gated(), spy)
+        call = call_for(gated(), decision_id="d-7")
 
-        await invoker.invoke(call, timeout=PATIENT)
-        await invoker.invoke(call, timeout=PATIENT)
+        await invoked(invoker, trail, call, timeout=PATIENT)
+        await invoked(invoker, trail, call, timeout=PATIENT)
 
         assert [key for _, key in spy.calls] == ["d-7", "d-7"]
 
     async def test_two_decisions_about_identical_parameters_derive_different_keys(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """A fresh authorisation is a fresh action, not a duplicate of the old one."""
         spy = Spy()
         invoker.register(keyed(), spy)
         payload = {"to": "someone@example.com"}
 
-        await invoker.invoke(
-            call_for(keyed(), parameters=payload, decision_id="d-1"), timeout=PATIENT
+        await invoked(
+            invoker,
+            trail,
+            call_for(keyed(), parameters=payload, decision_id="d-1"),
+            timeout=PATIENT,
         )
-        await invoker.invoke(
-            call_for(keyed(), parameters=payload, decision_id="d-2"), timeout=PATIENT
+        await invoked(
+            invoker,
+            trail,
+            call_for(keyed(), parameters=payload, decision_id="d-2"),
+            timeout=PATIENT,
         )
 
         assert [key for _, key in spy.calls] == ["d-1", "d-2"]
 
     async def test_the_key_is_reproducible_from_the_decision_alone_after_a_restart(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The property that makes the key worth anything.
 
@@ -1008,19 +1115,19 @@ class ToolInvokerContract:
         round-trip rather than reusing the object.
         """
         spy = Spy()
-        invoker.register(keyed(), spy)
-        before = call_for(keyed(), decision_id="d-99")
-        await invoker.invoke(before, timeout=PATIENT)
+        invoker.register(gated(), spy)
+        before = call_for(gated(), decision_id="d-99")
+        await invoked(invoker, trail, before, timeout=PATIENT)
 
         reloaded = PermissionDecision.model_validate(before.decision.model_dump(mode="json"))
         after = ToolCall(request=before.request, decision=reloaded)
-        await invoker.invoke(after, timeout=PATIENT)
+        await invoked(invoker, trail, after, timeout=PATIENT)
 
         assert after.idempotency_key == before.idempotency_key
         assert [key for _, key in spy.calls] == ["d-99", "d-99"]
 
     async def test_a_keyed_tool_deduplicates_inside_its_window_and_acts_again_outside_it(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The tool's half of ADR-0029 §5's two-sided obligation.
 
@@ -1030,13 +1137,15 @@ class ToolInvokerContract:
         """
         window = timedelta(hours=1)
         deduplicating = KeyedTool(window)
-        invoker.register(keyed(window=window), deduplicating)
-        call = call_for(keyed(window=window), decision_id="d-5")
+        # The non-spendable ``KEYED`` class: a repeat under one decision is what
+        # this case is about, and ADR-0192 §1 admits one only here.
+        invoker.register(gated(window=window), deduplicating)
+        call = call_for(gated(window=window), decision_id="d-5")
 
-        first = await invoker.invoke(call, timeout=PATIENT)
-        inside = await invoker.invoke(call, timeout=PATIENT)
+        first = await invoked(invoker, trail, call, timeout=PATIENT)
+        inside = await invoked(invoker, trail, call, timeout=PATIENT)
         deduplicating.now = AT + window + timedelta(seconds=1)
-        outside = await invoker.invoke(call, timeout=PATIENT)
+        outside = await invoked(invoker, trail, call, timeout=PATIENT)
 
         assert first.output == inside.output == 1
         assert outside.output == 2
@@ -1045,14 +1154,17 @@ class ToolInvokerContract:
     # --- success ---------------------------------------------------------
 
     async def test_a_successful_call_returns_its_output_and_the_tools_arguments(
-        self, invoker: InvocableToolRegistry
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
     ) -> None:
         """The happy path, and that the callable receives what was authorised."""
         spy = Spy(output={"message_id": "m-1"})
         invoker.register(tool(), spy)
 
-        result = await invoker.invoke(
-            call_for(tool(), parameters={"to": "someone@example.com"}), timeout=PATIENT
+        result = await invoked(
+            invoker,
+            trail,
+            call_for(tool(), parameters={"to": "someone@example.com"}),
+            timeout=PATIENT,
         )
 
         assert result.outcome is ToolOutcome.SUCCEEDED
@@ -1061,16 +1173,6 @@ class ToolInvokerContract:
         assert spy.calls == [({"to": "someone@example.com"}, None)]
 
     # --- ADR-0192 §1: the claim, and where it sits ------------------------
-
-    @pytest.fixture
-    def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
-        """Return a factory building an empty invoker over ``ledger``.
-
-        A factory rather than a built subject, because half the cases below need
-        the ledger *wrapped* — held on a barrier, made to fail, made to fail after
-        it committed — and an invoker is handed its ledger at construction.
-        """
-        raise NotImplementedError
 
     async def test_a_call_claims_before_the_callable_and_completes_after(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]

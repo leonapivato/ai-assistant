@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     SecretScope,
     parameter_violations,
 )
+from ai_assistant.testing import FakeAuditTrail
 from ai_assistant.testing.cancellation import LoopSuspension
 from ai_assistant.testing.egress import _canonical_smtp as fake_canonical
 from ai_assistant.tools import egress_binder as seam_module
@@ -108,7 +109,7 @@ class _Harness:
 
     def __init__(self, *, canonicalises: tuple[()] | None = None) -> None:
         """Wire a seam over an empty registry, an empty table and an empty store."""
-        self.registry = InMemoryToolRegistry()
+        self.registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
         self.table = RegistrationTable()
         self.records = _Records()
         self.seam = EgressBindingSeam(
@@ -316,7 +317,7 @@ def test_the_registry_hands_back_a_detached_original() -> None:
     ADR-0152 §1's registry-original comparison — the caller's tampered definition
     and the "original" would be the same object and could never differ.
     """
-    registry = InMemoryToolRegistry()
+    registry = InMemoryToolRegistry(ledger=FakeAuditTrail())
     registry.register(SEND_EMAIL, _refuses)
 
     first = registry.original(SEND_EMAIL.id)

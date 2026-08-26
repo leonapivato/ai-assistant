@@ -576,7 +576,13 @@ def build_world(
     # ``RegisteredDefinitions`` (ADR-0029 §8, ADR-0152 §1) — the composition root's
     # wiring, and the reason a binding is compared against the registry original
     # rather than against a second table that must agree with it.
-    registry = build_default_registry(memory=store, now=lambda: NOW, egress=integration)
+    # Opened here rather than beside the plan store below, because the seam claims
+    # through the **same** trail this arm records its rulings into (ADR-0192 §9's
+    # wiring clause) and so needs it before the registry is built.
+    trail = FakeAuditTrail()
+    registry = build_default_registry(
+        memory=store, now=lambda: NOW, egress=integration, ledger=trail
+    )
     binder = EgressBindingSeam(
         definitions=registry,
         registrations=egress_registrations(integration),
@@ -584,7 +590,6 @@ def build_world(
     )
 
     plans = FakePlanStore(now=lambda: NOW)
-    trail = FakeAuditTrail()
     decisions = count(1)
     runner = StepRunner(
         plans=plans,

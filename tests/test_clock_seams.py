@@ -263,7 +263,9 @@ async def _engine(now: Clock) -> None:
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE)
     writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     plans = FakePlanStore(now=lambda: _AWARE)
-    invoker = FakeToolInvoker([])
+    # No call in this arm reaches the seam; the ledger is the collaborator
+    # ADR-0192 §1 makes unconditional, and nothing here reads it.
+    invoker = FakeToolInvoker([], ledger=FakeAuditTrail())
     await Engine(
         composing=_composing(),
         loop=LearningLoop(

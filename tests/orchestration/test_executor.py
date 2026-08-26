@@ -53,7 +53,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration import StepExecutor
-from ai_assistant.testing import FakePlanStore, FakeToolInvoker
+from ai_assistant.testing import AdmittingLedger, FakePlanStore, FakeToolInvoker
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -457,7 +457,7 @@ async def test_the_claim_names_the_tool_and_the_decision_that_authorised_it() ->
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Blocking()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     call = call_for(tool(), decision_id="d-99", execution_id=state.id)
     task = asyncio.create_task(
         executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
@@ -495,7 +495,7 @@ async def test_a_binding_refusal_is_committed_failed_and_not_re_driven() -> None
     state = await a_claimed_execution(store)
     implementation = Spy()
     # Registered under a different id, so the call names an unbound tool.
-    seam = FakeToolInvoker([(tool("other"), implementation)])
+    seam = FakeToolInvoker([(tool("other"), implementation)], ledger=AdmittingLedger())
 
     final = await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -515,7 +515,7 @@ async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -
     """``StepFailure.message`` is Tier 2 text bound for a log (ADR-0004 §5)."""
     store = FakePlanStore()
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool("other"), Spy())])
+    seam = FakeToolInvoker([(tool("other"), Spy())], ledger=AdmittingLedger())
 
     await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -533,7 +533,7 @@ async def test_a_success_is_committed_with_its_output() -> None:
     """``SUCCEEDED`` → ``output`` and ``finished_at``."""
     store = FakePlanStore()
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
+    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))], ledger=AdmittingLedger())
 
     await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -554,7 +554,7 @@ async def test_a_failure_is_committed_with_its_message() -> None:
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Raiser()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
 
     await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -582,7 +582,7 @@ async def test_a_live_deadline_expiry_reaches_indeterminate() -> None:
     """
     store = FakePlanStore()
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Blocking())])
+    seam = FakeToolInvoker([(tool(), Blocking())], ledger=AdmittingLedger())
 
     await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=BRIEF
@@ -607,7 +607,7 @@ async def test_a_read_only_deadline_expiry_reaches_failed() -> None:
     """The other half of the same rule: a read that timed out changed nothing."""
     store = FakePlanStore()
     state = await a_claimed_execution(store, capability="read_email")
-    seam = FakeToolInvoker([(read_only(), Blocking())])
+    seam = FakeToolInvoker([(read_only(), Blocking())], ledger=AdmittingLedger())
 
     await executor_over(store, seam).execute(
         state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=BRIEF
@@ -642,7 +642,7 @@ async def test_a_cancelled_call_is_committed_and_the_cancellation_re_raised(
     store = FakePlanStore()
     state = await a_claimed_execution(store, capability=definition.capability)
     implementation = Blocking()
-    seam = FakeToolInvoker([(definition, implementation)])
+    seam = FakeToolInvoker([(definition, implementation)], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(
             state, step_id=STEP, call=call_for(definition, execution_id=state.id), timeout=PATIENT
@@ -682,7 +682,7 @@ async def test_the_transition_lands_before_a_repeat_cancellation_escapes() -> No
     store = HoldingPlanStore()
     state = await a_claimed_execution(store)
     implementation = Blocking()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(
             state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -718,7 +718,7 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     """
     store = HoldingPlanStore()
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
+    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(
             state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -758,7 +758,7 @@ async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> Non
     store = FakePlanStore()
     state = await a_claimed_execution(store, capability="read_email")
     implementation = Spy()
-    seam = FakeToolInvoker([(read_only(), implementation)])
+    seam = FakeToolInvoker([(read_only(), implementation)], ledger=AdmittingLedger())
     call = call_for(read_only(), execution_id=state.id)
     call.__dict__["request"] = None
 
@@ -788,7 +788,7 @@ async def test_a_claim_that_lands_as_the_cancellation_arrives_is_still_closed() 
     store = LateCancellingPlanStore()
     state = await a_claimed_execution(store, capability="read_email")
     implementation = Spy()
-    seam = FakeToolInvoker([(read_only(), implementation)])
+    seam = FakeToolInvoker([(read_only(), implementation)], ledger=AdmittingLedger())
 
     task = asyncio.create_task(
         executor_over(store, seam).execute(
@@ -819,7 +819,7 @@ async def test_a_call_authorised_for_another_step_claims_nothing() -> None:
     store = FakePlanStore()
     state = await a_claimed_execution(store, capability="read_email")
     implementation = Spy()
-    seam = FakeToolInvoker([(read_only(), implementation)])
+    seam = FakeToolInvoker([(read_only(), implementation)], ledger=AdmittingLedger())
 
     with pytest.raises(ToolBindingError, match="different plan step"):
         await executor_over(store, seam).execute(
@@ -850,7 +850,7 @@ async def test_a_call_authorised_for_another_execution_claims_nothing() -> None:
     store = FakePlanStore()
     state = await a_claimed_execution(store, capability="read_email")
     implementation = Spy()
-    seam = FakeToolInvoker([(read_only(), implementation)])
+    seam = FakeToolInvoker([(read_only(), implementation)], ledger=AdmittingLedger())
 
     with pytest.raises(ToolBindingError, match="different execution"):
         await executor_over(store, seam).execute(
@@ -887,7 +887,9 @@ async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() ->
     store = HoldingPlanStore(hold_claim=True)
     state = await a_claimed_execution(store, capability="read_email")
     innocuous, dangerous = Spy(), Spy()
-    seam = FakeToolInvoker([(read_only(), innocuous), (tool(), dangerous)])
+    seam = FakeToolInvoker(
+        [(read_only(), innocuous), (tool(), dangerous)], ledger=AdmittingLedger()
+    )
     call = call_for(read_only(), execution_id=state.id)
     substitute = call_for(tool(), decision_id="d-2", execution_id=state.id)
 
@@ -1186,7 +1188,7 @@ async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() ->
     store = HoldingPlanStore(hold_claim=True)
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(
             state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -1210,33 +1212,37 @@ async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() ->
     assert implementation.calls == [], "the tool was never reached"
 
 
-async def test_a_cancellation_requested_after_the_claim_still_reaches_the_tool() -> None:
-    """There is no gap between the claim and the callable for one to land in.
+async def test_a_cancellation_requested_before_invoke_lands_on_the_claim_append() -> None:
+    """The window ADR-0192 §1 opened, and the answer it rules for it.
 
-    A cancellation requested while the executor is *running* — here by the
-    injected clock, the last thing called before ``invoke`` — sets the task's
-    pending flag rather than raising, and a directly awaited coroutine does not
-    suspend. So ``invoke``'s body runs, the seam reaches the callable without an
-    await of its own, and the ``CancelledError`` is delivered at the **tool's**
-    first suspension: the callable was entered.
+    This case used to assert the opposite, and the reversal is the ADR's rather
+    than a regression. It read: "there is no gap between the claim and the
+    callable for one to land in" — true while ``invoke`` awaited the callable
+    directly and suspended nowhere before it, so a cancellation requested by the
+    injected clock was delivered at the **tool's** first suspension and the
+    callable had been entered.
 
-    What the executor then sees is an ordinary result, not a cancellation, and
-    that is ADR-0031 §2's provenance rule rather than an accident. The seam reads
-    a *delta* on ``Task.cancelling()`` captured across the call, so a cancellation
-    requested before it was entered is not this call's; the seam rules the
-    absorbed error ``INTERNAL`` and returns. The step is therefore committed
-    ``FAILED`` — nothing ambiguous is recorded — and the executor's cancellation
-    handler is never reached.
+    Since ADR-0192 §1 the seam appends a claim through its ledger immediately
+    before the callable, and that append **is** a suspension point. So the pending
+    cancellation is delivered there. §1 rules the outcome in terms: the append is
+    driven as a retained, shielded await, its outcome is observed before the
+    cancellation is propagated, and "where the claim landed and the call is then
+    cancelled before the callable is entered, ``invoke`` appends the completion
+    carrying the outcome ADR-0029 §4 computes for that cancellation, and
+    re-raises". The callable is therefore **never entered**, and the step is
+    committed ``interrupted_outcome`` — ``INDETERMINATE`` for this side-effecting,
+    non-``NATURAL`` tool, which ADR-0034 §1 assigns and #234 still owns.
 
-    Both halves are pinned because both are load-bearing: the callable *was*
-    reached, so ``INDETERMINATE`` would be honest if the handler had run; and in
-    this window it does not run at all, so no side-effecting tool acquires a
-    false ambiguity here.
+    **What is new is that the record tells the two apart**, which is the durable
+    reachability fact #234 asked for and §1 gives: the trail holds one claim,
+    completed, for an act that provably did not run — where a cancellation
+    *before* the claim would have left no invocation row at all.
     """
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Blocking()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    ledger = AdmittingLedger()
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=ledger)
 
     def cancelling_clock() -> datetime:
         current = asyncio.current_task()
@@ -1244,13 +1250,23 @@ async def test_a_cancellation_requested_after_the_claim_still_reaches_the_tool()
         current.cancel()
         return AT
 
-    await executor_over(store, seam, now=cancelling_clock).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
-    )
-
-    assert implementation.calls == 1, "the callable was entered before the error landed"
-    step = await stored_step(store, state)
-    assert step.status is StepStatus.FAILED, "no false ambiguity is recorded in this window"
+    outcome: object = None
+    try:
+        outcome = await executor_over(store, seam, now=cancelling_clock).execute(
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        )
+    except BaseException as exc:
+        outcome = exc
+    print("OUTCOME", type(outcome).__name__)
+    step_probe = await stored_step(store, state)
+    print("STEP", step_probe.status)
+    assert implementation.calls == 0, "the cancellation lands on the claim, before the callable"
+    rows = [each.invocation for each in await ledger.trail.export_invocations()]
+    assert len(rows) == 2, "one claim, and the completion §1 owes for this exit"
+    (completion,) = [row for row in rows if row.completes is not None]
+    assert completion.outcome is ToolOutcome.INDETERMINATE
+    assert completion.failure_kind is None, "no kind is synthesised from a cancellation"
+    assert await ledger.trail.open_invocations(decision_id="d-1") == []
 
 
 async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> None:
@@ -1268,7 +1284,7 @@ async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> Non
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
 
     def unreadable() -> datetime:
         """A clock whose reading the guard refuses: naive, so not localizable."""
@@ -1298,7 +1314,7 @@ async def test_a_cancellation_absorbed_while_closing_unstarted_outranks_the_caus
     """
     store = HoldingPlanStore()
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Spy())])
+    seam = FakeToolInvoker([(tool(), Spy())], ledger=AdmittingLedger())
 
     def unreadable() -> datetime:
         return datetime(2026, 7, 20, 12, 0)  # noqa: DTZ001 — naive, so the guard refuses it
@@ -1334,7 +1350,7 @@ async def test_a_rejected_unstarted_close_is_raised_not_logged_away() -> None:
     store = HoldingPlanStore(rejects=True)
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     store.release.set()
 
     def unreadable() -> datetime:
@@ -1364,7 +1380,7 @@ async def test_a_cancelled_reason_survives_a_rejected_unstarted_close() -> None:
     store = HoldingPlanStore(rejects=True)
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     store.release.set()
 
     def cancelled_clock() -> datetime:
@@ -1389,7 +1405,7 @@ async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
 
     def exploding() -> datetime:
         msg = "the clock's provider is unreachable"
@@ -1415,7 +1431,7 @@ async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> No
     """
     store = HoldingPlanStore(rejects=True)
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
+    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(
             state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
@@ -1436,7 +1452,7 @@ async def test_a_commit_failure_with_nothing_absorbed_is_still_a_planning_error(
     """The rule above is about a *conflict*, not about hiding store faults."""
     store = HoldingPlanStore(rejects=True)
     state = await a_claimed_execution(store)
-    seam = FakeToolInvoker([(tool(), Spy())])
+    seam = FakeToolInvoker([(tool(), Spy())], ledger=AdmittingLedger())
     store.release.set()
 
     with pytest.raises(PlanningError, match="rejected"):
@@ -1457,7 +1473,7 @@ async def test_classification_reads_the_trusted_binding_not_the_callers_object()
     state = await a_claimed_execution(store)
     call = call_for(tool(), execution_id=state.id)
     implementation = Mutating(call)
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
     task = asyncio.create_task(
         executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
     )
@@ -1490,7 +1506,7 @@ async def test_a_timeout_the_seam_would_refuse_leaves_no_claim(bad: object) -> N
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     implementation = Spy()
-    seam = FakeToolInvoker([(tool(), implementation)])
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=AdmittingLedger())
 
     with pytest.raises(ValueError, match="timeout"):
         await executor_over(store, seam).execute(

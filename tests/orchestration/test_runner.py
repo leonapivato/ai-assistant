@@ -425,9 +425,15 @@ class Harness:
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
         # One object as both registry and invoker, as ADR-0029 §8 requires of
         # the wiring — the same binding selects and acts.
-        self.invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.trail = trail if trail is not None else FakeAuditTrail()
+        # The seam claims through the **same** trail the runner records rulings
+        # into (ADR-0192 §9's wiring clause). A second one would refuse every
+        # claim, because §1 has the ledger require the decision it is passed to
+        # equal the one the store holds under that id.
+        self.invoker = FakeToolInvoker(
+            [(definition, _succeeds) for definition in tools], ledger=self.trail
+        )
         self.ids = iter(f"{id_prefix}-{n}" for n in range(1, 100))
         ticks = clock()
         self.runner = StepRunner(

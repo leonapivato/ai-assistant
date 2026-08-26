@@ -178,7 +178,7 @@ class InMemoryToolRegistry:
         self,
         tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = (),
         *,
-        ledger: InvocationLedger | None = None,
+        ledger: InvocationLedger,
     ) -> None:
         """Create a registry, optionally registering ``tools`` in order.
 
@@ -194,16 +194,16 @@ class InMemoryToolRegistry:
                 so no decision write, no history read and no erasure reaches
                 `tools/` through this seam (ADR-0192 §2).
 
-                **Keyword-only and defaulted, and the default is not the wiring.**
-                The composition root always supplies one and a wiring test pins
-                that (ADR-0192 §9), so no deployed invoker is ever without it.
-                What the default buys is an arrangement for a test about
-                something else — a fixture driving the binding checks, the
-                deadline or the classification has no authorisation to record and
-                no consume to observe, and requiring it to open a trail would put
-                the whole of ADR-0192 into every such fixture in the tree. An
-                invoker holding none appends nothing and refuses nothing on the
-                ground that an authorisation is spent.
+                **Keyword-only and required, with no default.** ADR-0192 §1's
+                consume is unconditional, so an invoker that could be built
+                without a ledger would be a structurally valid ``ToolInvoker``
+                that executes an act without claiming it — a fail-open
+                configuration reachable by omitting an argument, and one a
+                consumer's test could then pass against behaviour production
+                rejects. There is no ledger-free mode and no branch that skips
+                the consume; a test arranges a ledger with the decision its call
+                carries, exactly as the runner records one before every
+                execution.
 
         Raises:
             ToolRegistrationError: If ``tools`` contains two definitions sharing
@@ -214,6 +214,24 @@ class InMemoryToolRegistry:
         self._ledger = ledger
         for tool, implementation in tools:
             self.register(tool, implementation)
+
+    @property
+    def ledger(self) -> InvocationLedger:
+        """The ``InvocationLedger`` this seam claims and completes through.
+
+        Read-only, and public because two callers legitimately need to *see* which
+        object was wired: ADR-0192 §9's composition test, which asserts the invoker
+        was handed the ledger face of the one audit store and not a second one over
+        the same file, and a conformance subclass arranging the authorisations its
+        calls carry. Neither can be written against a private attribute without the
+        access itself becoming the thing under test.
+
+        It hands out the collaborator, never a wider face: what a holder gets is
+        exactly what this seam was given, which can neither record a
+        ``PermissionDecision``, nor read one, nor export, nor ``clear``
+        (ADR-0192 §2).
+        """
+        return self._ledger
 
     def register(self, tool: ToolDefinition, implementation: BoundImplementation, /) -> None:
         """Bind ``tool`` and the callable that satisfies it to its id, permanently.
@@ -420,8 +438,6 @@ class InMemoryToolRegistry:
             return await run_prepared_call(running, definition=binding.definition, timeout=timeout)
 
         try:
-            if self._ledger is None:
-                return await act()
             return await consumed_call(
                 ledger=self._ledger,
                 definition=binding.definition,
