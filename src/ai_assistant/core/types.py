@@ -8962,6 +8962,390 @@ class RecordedInvocation(BaseModel):
     )
 
 
+# --- the world's price: what a period cost, and what it may still cost ---------
+# ADR-0194. A ceiling is decided before the act, over calendar periods in the
+# user's zone, and an unknown price is never zero. Three names here and no more:
+# the enum, the total, and the opaque handle a reservation is retired by.
+
+
+#: The magnitude bound on a **source** amount (ADR-0194 §1), strict. Ten to the
+#: fifteenth in any real currency's major unit exceeds any plausible monthly
+#: ceiling by orders of magnitude, and bounding it is what makes §2's exact
+#: arithmetic computable rather than aspirational: unbounded, two amounts a
+#: validator would accept have an exact sum needing more coefficient digits than
+#: ``decimal.MAX_PREC`` admits, so the computation exhausts memory instead of
+#: trapping and the outcome depends on the machine.
+_SPEND_AMOUNT_CEILING: Final = Decimal("1E15")
+
+#: The scale bound on a **source** amount (ADR-0194 §1): at most this many
+#: fractional digits *of value*. Nine carries every currency's minor unit and
+#: every nano-unit price a metered API quotes.
+_SPEND_AMOUNT_SCALE: Final = 9
+
+#: The strict bound on a ``SpendTotal`` offset (ADR-0194 §5). The widest offsets
+#: the tz database carries are well inside it; a whole day is not.
+_A_DAY: Final = timedelta(hours=24)
+
+#: Neither bound governs a computed **total** (ADR-0194 §1, §5): the predicate is
+#: over inputs, and a sum over rows nothing bounds may honestly exceed either.
+
+
+def _effective_exponent(amount: Decimal) -> int:
+    """Return the scale ``amount``'s *value* needs, ignoring trailing zeros.
+
+    ADR-0194 §1 makes countability "a test on the number and not on its
+    representation", and §2 carries the same rule into the arithmetic: a zero
+    coefficient contributes nothing whatever its exponent, and a value's trailing
+    zeros below its last significant digit do not enlarge the context that must be
+    sized to hold it. Without this ``Decimal("0E-999999999999999999")`` — countable,
+    numerically zero — would demand a precision no machine can allocate.
+
+    Read from ``as_tuple()`` and never from ``decimal.getcontext()``: no ambient
+    precision, rounding mode or trap setting changes the answer or makes this
+    raise (ADR-0194 §1).
+    """
+    sign, digits, exponent = amount.as_tuple()
+    del sign
+    if not isinstance(exponent, int):  # 'n', 'N' or 'F' — a non-finite value
+        msg = f"a non-finite Decimal has no effective exponent, got {amount!r}"
+        raise ValueError(msg)
+    if not any(digits):
+        return 0
+    trailing = 0
+    for digit in reversed(digits):
+        if digit:
+            break
+        trailing += 1
+    return exponent + trailing
+
+
+def _is_countable_spend_amount(amount: Decimal) -> bool:
+    """Report whether ``amount`` is countable under ADR-0194 §1.
+
+    All three of: finite; absolute value **strictly** below
+    :data:`_SPEND_AMOUNT_CEILING`; and a value expressible with at most
+    :data:`_SPEND_AMOUNT_SCALE` fractional digits. ``Decimal("1.0000000000")`` is
+    countable because its *value* is ``1``.
+
+    **Context-independent by construction.** Everything it reads comes from the
+    amount's own ``as_tuple()``, so an implementation calling it inside a hostile
+    ambient context — a precision of ten, with traps armed — gets the same answer
+    and no ``decimal`` exception (ADR-0194 §1).
+
+    This governs every amount the mechanism *reads*: a configured ceiling, the
+    allowance, a declared ``ToolCost.amount`` and a reported one. It governs no
+    result: a computed total is a sum over rows nothing bounds and is never
+    refused on it.
+    """
+    if not amount.is_finite():
+        return False
+    if _effective_exponent(amount) < -_SPEND_AMOUNT_SCALE:
+        return False
+    return abs(amount) < _SPEND_AMOUNT_CEILING
+
+
+def _is_canonical_spend_total(amount: Decimal) -> bool:
+    """Report whether ``amount`` is ADR-0194 §2's **one** representation of a total.
+
+    The exact value at its minimal non-negative scale, with a sign that is never
+    negative: as many fractional digits as the value needs and no more, never a
+    positive exponent, and ``Decimal("0")`` rather than ``Decimal("-0")`` for a
+    zero total. Stated over ``as_tuple()``: the sign is 0, the exponent is between
+    ``-_SPEND_AMOUNT_SCALE`` and 0 inclusive, and where the exponent is negative the
+    last digit is non-zero.
+
+    So ``Decimal("2")`` and ``Decimal("20")`` pass while ``Decimal("2.0")``,
+    ``Decimal("2E+1")`` and ``Decimal("-0")`` do not. ``Decimal("2E+0")`` is not a
+    case: it and ``Decimal("2")`` are one representation — ``as_tuple()`` returns
+    ``(0, (2,), 0)`` for both — so no rule can separate them and this one does not
+    try.
+
+    It exists because two conforming implementations summing the same rows in any
+    order must state the same **bytes** on the wire: ADR-0087 §4's relation is
+    indistinguishability rather than ``==``, and ``Decimal("2.0")`` and
+    ``Decimal("2")`` compare equal while ``as_tuple()`` tells them apart.
+    """
+    if not amount.is_finite():
+        return False
+    sign, digits, exponent = amount.as_tuple()
+    if sign != 0 or not isinstance(exponent, int):
+        return False
+    if exponent > 0 or exponent < -_SPEND_AMOUNT_SCALE:
+        return False
+    return exponent == 0 or digits[-1] != 0
+
+
+class SpendPeriod(StrEnum):
+    """The calendar periods a spend ceiling is stated over (ADR-0194 §1).
+
+    Exactly two, and **no ordering semantics**: neither takes precedence over the
+    other, both bind independently and simultaneously where both are configured,
+    and a call is refused where it would cross either. The declaration order here
+    is the fixed order every surface states them in — ``SpendLedger.spend_totals``'
+    tuple, a refusal naming two periods, and the CLI's rendering — so that two
+    conforming implementations state the same facts in the same sequence.
+
+    A rolling window is the more precise instrument and the wrong one for this
+    quantity: what a user has in mind when they cap spend is a bill, and bills
+    arrive on calendar boundaries. The cost of the calendar is exactly one thing —
+    a month ceiling admits a spike on the last day of a month and the same spike on
+    the first day of the next — and :attr:`CALENDAR_DAY` is the rate limit that
+    pays for it.
+    """
+
+    CALENDAR_DAY = "calendar_day"
+    CALENDAR_MONTH = "calendar_month"
+
+
+class SpendAdmissionHandle(BaseModel):
+    """The opaque key to one admission's reservation (ADR-0194 §5).
+
+    ``SpendGate.admit_invocation`` returns one on every grant and
+    ``SpendGate.release_admission`` retires the reservation it names. It is
+    **opaque**: a caller neither parses it, orders it, nor derives a period, an
+    amount or a tool from it, and no implementation encodes one in it.
+
+    **It reaches no record, no surface and no wire frame** — it lives between the
+    invoker and the gate for the duration of one call — so nothing here promotes a
+    new value onto ADR-0085's surface, and no adapter, engine or client ever holds
+    one.
+
+    A model and not a bare ``str`` because it crosses a subsystem boundary —
+    ``tools/`` holds it, ``permissions/`` mints and resolves it — and because
+    :data:`Identifier` refuses the blank string that would satisfy "a handle is
+    present" while naming nothing. :class:`ContinuationToken` is the same shape for
+    the same reasons one seam over, and this copies it rather than inventing a
+    second convention.
+
+    **Distinctness is tested on the validated value, not on what a factory
+    returned** (ADR-0194 §3). :data:`Identifier` strips, so ``"h"`` and ``" h "``
+    are two raw strings and one handle; a holder checking uniqueness before
+    construction would hold two reservations under one key.
+
+    Attributes:
+        handle: The gate-private handle, opaque to every caller.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handle: Identifier = Field(description="The gate-private handle, opaque to every caller.")
+
+
+class SpendTotal(BaseModel):
+    """What one calendar period has cost, and what it was allowed to (ADR-0194 §5).
+
+    One of these per :class:`SpendPeriod`, returned by
+    ``SpendLedger.spend_totals`` in that enum's fixed order, whatever is
+    configured.
+
+    **No zone name crosses this boundary, and that is the decision rather than an
+    omission.** Carrying the IANA zone the boundaries were computed in would make
+    acceptance and rendering depend on the *consumer's* installed ``tzdata``: the
+    value would carry a zone *name* and not the rule-set that named it, so a hub on
+    one revision and a client on another — over a zone whose transitions were
+    revised, of which ``Asia/Gaza`` is the live example — would disagree about the
+    boundaries of the same civil day. ADR-0016 §2 forbids exactly that of a
+    ``core/types.py`` semantic. The resolved **offsets** are the whole of what a
+    renderer needs: it prints each bound as that bound plus that bound's own
+    offset and labels it with that offset, resolving no zone and reading no
+    ``tzdata``. Two offsets rather than one because a period containing a
+    transition has different offsets at its two ends.
+
+    What is given up is stated: a reader of a ``SpendTotal`` alone cannot name the
+    zone, only the offsets. The surface that wants the name has it —
+    ``Settings.timezone`` is the producer's own configuration — and no lane infers
+    a zone back out of an offset, which is many-to-one and would be a guess.
+
+    **Every invariant below is decidable from the value alone** (ADR-0016 §2's
+    intrinsic test: computable from the type's own declaration, the same answer for
+    every consumer). In particular this model does **not** re-derive ADR-0194 §1's
+    period boundaries and compare: the tempting stronger validator would reject a
+    ``CALENDAR_DAY`` carrying a month's bounds, which this one admits, and the
+    correspondence to §1's rule is checked at the **producer**, which is the only
+    place that can compare against the rule rather than against a second
+    implementation of it.
+
+    **The two amounts carry different numeric invariants and they are not one
+    rule.** A :attr:`ceiling` is an *input* — exactly what §1 admits as a
+    configured ceiling — so it keeps whatever scale the user wrote. An
+    :attr:`accounted` total is a *result*, so it carries §2's one representation
+    rather than merely a value compatible with it, and is deliberately unbounded in
+    magnitude.
+
+    Attributes:
+        period: Which calendar period this states.
+        period_start: The period's inclusive start instant.
+        period_end: The period's **exclusive** end instant. Equal to
+            :attr:`period_start` on a zero-length period, which ADR-0194 §1's
+            skipped-civil-date case produces and this model must accept.
+        start_offset: The UTC offset in force at :attr:`period_start`, as the
+            producer resolved it.
+        end_offset: The UTC offset in force at :attr:`period_end`. Different from
+            :attr:`start_offset` on a period containing a transition, which is the
+            case a single offset would have misrendered.
+        ceiling: The configured ceiling for this period, or ``None`` where none is
+            configured. Non-``None`` only where :attr:`currency` is.
+        currency: The configured reporting currency, or ``None`` where none is.
+            It is the discriminator for :attr:`accounted`'s absence.
+        accounted: The sum of the reported per-invocation costs on the completion
+            rows falling in this period, or ``None``. ``None`` in exactly two
+            states, which :attr:`currency` tells apart: with ``currency`` absent no
+            currency is configured and no total was computed; with ``currency``
+            present the period is **indeterminate** — an open claim in it, or a
+            reported cost this mechanism may not add. No third meaning is assigned
+            to the absence, and "the total is zero" never reaches it, because zero
+            spend is ``Decimal("0")`` and is representable.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    period: SpendPeriod = Field(description="Which calendar period this states.")
+    period_start: UtcInstant = Field(description="The period's inclusive start instant.")
+    period_end: UtcInstant = Field(description="The period's exclusive end instant.")
+    start_offset: timedelta = Field(
+        description="The UTC offset in force at ``period_start``, as the producer resolved it."
+    )
+    end_offset: timedelta = Field(
+        description="The UTC offset in force at ``period_end``, as the producer resolved it."
+    )
+    ceiling: Decimal | None = Field(
+        default=None, description="The configured ceiling for this period; None where unset."
+    )
+    currency: EncodableText | None = Field(
+        default=None, description="ISO-4217 alphabetic code; None where none is configured."
+    )
+    accounted: Decimal | None = Field(
+        default=None,
+        description=(
+            "The sum of the reported costs in this period; None where no currency "
+            "is configured or the period is indeterminate."
+        ),
+    )
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_is_iso_4217_shaped(cls, value: str | None) -> str | None:
+        """Require exactly three uppercase ASCII letters, without normalising.
+
+        ``ToolCost.currency``'s rule and not a second one (ADR-0194 §1, §5).
+        :data:`EncodableText` is the base this layers on and is **not** the whole of
+        it: that admits ``""`` and ``"usd"``, and a ``SpendTotal`` carrying either
+        would state a currency §1 refuses as configuration and a renderer would
+        print it.
+        """
+        if value is None:
+            return None
+        if len(value) != _CURRENCY_CODE_LENGTH or not (
+            value.isascii() and value.isupper() and value.isalpha()
+        ):
+            msg = f"currency must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("ceiling")
+    @classmethod
+    def _ceiling_is_a_configurable_amount(cls, value: Decimal | None) -> Decimal | None:
+        """Require exactly what ADR-0194 §1 admits as a configured ceiling.
+
+        Finite, greater than or equal to zero, and **countable**. It is the value
+        the user configured and nothing computes it, so §2's one-representation
+        rule — which governs results — does not reach it: a configured
+        ``Decimal("2.0")`` ceiling is admitted and carried as written.
+        """
+        if value is None:
+            return None
+        if not value.is_finite():
+            msg = f"a ceiling must be finite, got {value!r}"
+            raise ValueError(msg)
+        if value < 0:
+            msg = f"a ceiling must not be negative, got {value!r}"
+            raise ValueError(msg)
+        if not _is_countable_spend_amount(value):
+            msg = (
+                f"a ceiling must be countable — below {_SPEND_AMOUNT_CEILING} and to at most "
+                f"{_SPEND_AMOUNT_SCALE} fractional digits (ADR-0194 §1), got {value!r}"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("accounted")
+    @classmethod
+    def _accounted_is_a_canonical_total(cls, value: Decimal | None) -> Decimal | None:
+        """Require ADR-0194 §2's one representation of a computed total.
+
+        A model accepting a second spelling would accept a value this mechanism
+        cannot produce and would put bytes on the wire no conforming implementation
+        states. This subsumes the two invariants a reader would otherwise reach for
+        — non-negativity, and at most :data:`_SPEND_AMOUNT_SCALE` fractional digits,
+        which holds because every row contributing to it carries at most that many
+        — and it is deliberately **not** bounded in magnitude, because §1's
+        predicate governs inputs and a total is a result.
+        """
+        if value is None:
+            return None
+        if not value.is_finite():
+            msg = f"an accounted total must be finite, got {value!r}"
+            raise ValueError(msg)
+        if not _is_canonical_spend_total(value):
+            msg = (
+                "an accounted total must carry ADR-0194 §2's one representation — "
+                f"non-negative, at its minimal non-negative scale, got {value!r}"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("start_offset", "end_offset")
+    @classmethod
+    def _offset_is_within_a_day(cls, value: timedelta) -> timedelta:
+        """Require an offset strictly within ±24 hours, at whatever resolution it has.
+
+        **Seconds included, and not rounded to a minute.** ``core/clock.py``
+        already accounts for the historical offsets the tz database carries, naming
+        ``Asia/Manila``'s ``-15:56:08`` and ``America/Metlakatla``'s ``+15:13:42``
+        as the widest; a whole-minute rule would make a ``SpendTotal`` unable to
+        state the offset actually in force for a reading ``checked_clock`` accepts,
+        leaving the producer to leak a validation failure, round the offset, or
+        fail to return the value it owes.
+        """
+        if not -_A_DAY < value < _A_DAY:
+            msg = f"a UTC offset must be strictly within ±24 hours, got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _bounds_and_absences_agree(self) -> SpendTotal:
+        """Check the cross-field rules, each decidable from the value alone.
+
+        The bounds are ordered — ``period_start`` strictly before ``period_end``,
+        or equal on ADR-0194 §1's zero-length period, which is a value this model
+        must accept. Each bound **plus its own offset** lands inside ``datetime``'s
+        range, which is what makes the required rendering total: a renderer performs
+        exactly those two additions, and without this the range and ordering rules
+        admit a value it cannot print. And ``currency`` discriminates both
+        absences, so neither amount may stand without it.
+        """
+        if self.period_start > self.period_end:
+            msg = f"a period ends before it starts: {self.period_start!r} > {self.period_end!r}"
+            raise ValueError(msg)
+        for name, bound, offset in (
+            ("period_start", self.period_start, self.start_offset),
+            ("period_end", self.period_end, self.end_offset),
+        ):
+            try:
+                bound + offset
+            except (OverflowError, ValueError) as exc:
+                msg = f"{name} plus its own offset is not representable: {exc}"
+                raise ValueError(msg) from exc
+        if self.currency is None:
+            if self.ceiling is not None:
+                msg = "a ceiling states an amount in a currency, so it needs one"
+                raise ValueError(msg)
+            if self.accounted is not None:
+                msg = "an accounted total states an amount in a currency, so it needs one"
+                raise ValueError(msg)
+        return self
+
+
 class ContinuationToken(BaseModel):
     """An opaque handle to a parked step (ADR-0042 §4).
 
