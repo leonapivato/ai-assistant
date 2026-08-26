@@ -44,8 +44,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
-from pydantic import ValidationError
-
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
 from ai_assistant.core.types import (
@@ -60,7 +58,9 @@ from ai_assistant.core.types import (
     RiskLevel,
     ToolCost,
     ToolDefinition,
+    describe_untrusted,
 )
+from ai_assistant.testing._detachment import field_state
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
@@ -323,12 +323,21 @@ class _RecipientGrantLog:
         The snapshot is taken by **revalidating** rather than by copying, which is
         ADR-0193 §1's "detached, validated snapshot", and it is rebuilt from the
         instance's field state rather than from ``model_dump()`` for
-        ``_GrantLog.append``'s reason: ``model_dump`` is an ordinary overridable
-        method, so a subclass could return a mapping that does not describe itself
-        — a one-recipient instance whose dump says two — and the store would then
-        append a *wider grant than the one it was handed*. ``__dict__`` is where
-        pydantic keeps validated field state, read through
-        ``object.__getattribute__`` so the read itself dispatches no user code.
+        ``SqliteRecipientGrantStore._revalidated``'s reason: ``model_dump`` is an
+        ordinary overridable method, so a subclass could return a mapping that does
+        not describe itself — a one-recipient instance whose dump says two — and the
+        log would then append a *wider grant than the one it was handed*.
+        ``field_state`` is that read, and it is the durable store's, shared rather
+        than spelled a second way.
+
+        **And the snapshot is detached recursively**, which a mapping of the
+        instance's own ``__dict__`` is not: it would still hold the caller's
+        ``tool``, ``account`` and ``CanonicalDestination`` objects, and this log
+        *retains* what it appends. A caller rewriting
+        ``destination.__dict__["canonical"]`` after ``append`` returned would then
+        change the history the fake has already recorded — which is the widening
+        ADR-0193 §1's clause exists to deny, on a double whose whole job is to hold
+        the durable store to it.
 
         **Every check and the append are one operation**, with no ``await``
         between them. That is where the atomicity ADR-0193 §1 requires is
@@ -344,12 +353,16 @@ class _RecipientGrantLog:
                 count above the ceiling, or if it revokes and fails any of §1's
                 invariants.
         """
+        fields = dict(object.__getattribute__(grant, "__dict__"))
         try:
-            snapshot = RecipientGrant.model_validate(
-                dict(object.__getattribute__(grant, "__dict__"))
-            )
-        except ValidationError as exc:
-            msg = f"recipient grant {grant.id!r} is not a valid record: {exc}"
+            snapshot = RecipientGrant.model_validate(field_state(RecipientGrant, grant))
+        except ValueError as exc:
+            # `describe_untrusted` on the cause as well as on the id: `field_state`
+            # re-raises a `ValueError` the caller's own code raised, and a hostile
+            # `__str__` on it would replace this refusal with whatever it threw —
+            # from inside the `except` block that exists to report it.
+            named = describe_untrusted(fields.get("id"))
+            msg = f"recipient grant {named} is not a valid record: {describe_untrusted(exc)}"
             raise InvalidRecipientGrantError(msg) from exc
         if any(held.id == snapshot.id for held in self._records):
             msg = (
