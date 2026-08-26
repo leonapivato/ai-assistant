@@ -415,14 +415,23 @@ class SqliteRecipientGrantStore:
 
         Raises:
             RecipientGrantError: If the database cannot be opened or initialised.
-            ValueError: If ``max_outstanding`` is negative. A negative ceiling
-                names no bound and would refuse every granting write for a reason
-                no message explains, which is why zero is admitted and this is not.
+            ValueError: If ``max_outstanding`` is not a non-negative ``int``. A
+                negative ceiling names no bound and would refuse every granting
+                write for a reason no message explains, which is why zero is
+                admitted and this is not. **And the type is checked, which a
+                comparison alone does not do**: this is a cap, and a value that is
+                not an integer can *disable* it rather than merely mis-size it —
+                ``len(outstanding) >= float("nan")`` is false for every count, so a
+                store built with one admits granting records without limit while
+                every message still names a ceiling. ``type(...) is not int`` and
+                not ``isinstance``, so a ``bool`` — which is an ``int`` and is
+                nobody's ceiling — is refused with the rest.
         """
-        if max_outstanding < 0:
+        if type(max_outstanding) is not int or max_outstanding < 0:
             msg = (
-                f"max_outstanding must not be negative, got {max_outstanding}; zero is "
-                f"meaningful (it declines route (b)) and a negative names no ceiling"
+                f"max_outstanding must be a non-negative int, got "
+                f"{describe_untrusted(max_outstanding)}; zero is meaningful (it declines "
+                f"route (b)) and a negative names no ceiling"
             )
             raise ValueError(msg)
         self._path = path if path == ":memory:" else str(Path(path))
