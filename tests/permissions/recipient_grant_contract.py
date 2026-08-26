@@ -428,6 +428,25 @@ class RecipientGrantsContract:
         assert found is not None
         assert found.id == "g-newer"
 
+    async def test_a_request_that_cannot_be_read_is_covered_by_nothing(
+        self, grants: RecipientGrants
+    ) -> None:
+        """An unreadable request is answered, never raised at (ADR-0193 §1, §7).
+
+        ``request.__dict__.pop("egress_binding")`` leaves a frozen model with no
+        such attribute at all — the same ``__dict__`` bypass every other case here
+        uses, pointed at a field's *absence* rather than its value. A seam that
+        read the field outside its guard would answer this with an
+        ``AttributeError``, past every fail-closed branch: the answer owed is "no
+        grant covers it", which leaves the disclosure floor standing and the user
+        asked.
+        """
+        await self.given(grants, recipient_grant(member(ALICE), grant_id="g-1"))
+        asked = request(binding(ALICE))
+        asked.__dict__.pop("egress_binding")
+
+        assert await grants.covering(asked) is None
+
     # --- §1: the answer is a detached snapshot ------------------------------
 
     async def test_a_returned_grant_is_detached_from_the_store(

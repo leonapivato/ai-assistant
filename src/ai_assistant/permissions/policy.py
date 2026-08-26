@@ -341,15 +341,24 @@ class ThresholdActionPolicy:
         traceback is neither. What an operator needs from this line is that the
         seam could not be read and what refused; ``tool_id`` is Tier 2 and the
         class name names no value (ADR-0004 §5).
+
+        **And the id is read before the await, not inside the handler** (ADR-0065).
+        A lookup suspends, and a frozen model is rewritable through ``__dict__``, so
+        a caller can replace ``request.tool`` while the seam is out — and a handler
+        composing its line from ``request.tool.id`` at that point leaves as whatever
+        that read raised, from inside the branch that exists to make this failure
+        fail *closed*. ``decide`` reads the declaration once for the same reason and
+        rules on that value throughout.
         """
         if self._grants is None:  # pragma: no cover — the caller has already checked
             return None
+        tool_id = request.tool.id
         try:
             return await self._grants.covering(request)
         except RecipientGrantError as exc:
             _log.warning(
                 "recipient_grant_seam_unreadable",
-                tool_id=request.tool.id,
+                tool_id=tool_id,
                 outcome="confirm",
                 refused_by=type(exc).__name__,
                 reason="a policy that cannot check a standing grant asks the user instead",

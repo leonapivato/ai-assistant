@@ -8,7 +8,8 @@ own, and that the thresholds are the user's while the floors are not.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from typing import TYPE_CHECKING, Any, final
 
 import pytest
 from action_policy_contract import ActionPolicyContract
@@ -16,6 +17,7 @@ from permission_builders import action, decision, ruling, tool
 from recipient_builders import ALICE, BOB, ENDPOINT, NOW, TOOL, binding, member, request
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import RecipientGrantError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     CostBasis,
@@ -36,8 +38,10 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import ActionPolicy
-    from ai_assistant.core.types import RecipientGrant
+    from ai_assistant.core.types import ActionRequest, RecipientGrant
 
 
 class TestThresholdActionPolicyContract(ActionPolicyContract):
@@ -493,6 +497,53 @@ async def test_a_policy_with_no_seam_is_unchanged_by_any_of_this() -> None:
     policy = ThresholdActionPolicy()
 
     ruled = await policy.decide(request(binding(ALICE)))
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert ruled.authorised_by is None
+    assert ruled.authorised_subject is None
+
+
+@final
+class _YieldingFaultySeam:
+    """A ``RecipientGrants`` that suspends and *then* refuses.
+
+    ``FakeRecipientGrants.fail_covering`` refuses without ever suspending, so a
+    policy that read the request inside its failure handler passes every case
+    written against it. The interval is the point here: the request is rewritten
+    while this seam is out, and the handler must still fail closed.
+    """
+
+    def __init__(self, rewrite: Callable[[], None]) -> None:
+        """Take the rewrite to perform at the suspension this seam creates."""
+        self._rewrite = rewrite
+
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
+        """Suspend, let the caller's request be rewritten, then refuse."""
+        del request
+        await asyncio.sleep(0)
+        self._rewrite()
+        msg = "the recipient-grant store could not be read"
+        raise RecipientGrantError(msg)
+
+
+async def test_a_seam_fault_fails_closed_even_where_the_request_was_rewritten() -> None:
+    """ADR-0065 on the failure branch, which is the one that must not raise.
+
+    A seam fault is answered ``CONFIRM`` (ADR-0193 §1's fail-closed clause), and
+    the handler that answers it composes a log line. Reading ``request.tool.id``
+    there reads the caller's object *after* a suspension — so a caller who
+    replaces ``request.tool`` while the seam is out turns the fail-closed branch
+    into whatever that read raised, out of the very code that exists to keep the
+    ruling safe.
+    """
+    subject = request(binding(ALICE))
+
+    def _rewrite() -> None:
+        subject.__dict__["tool"] = None
+
+    policy = ThresholdActionPolicy(grants=_YieldingFaultySeam(_rewrite))
+
+    ruled = await policy.decide(subject)
 
     assert ruled.outcome is PermissionOutcome.CONFIRM
     assert ruled.authorised_by is None
