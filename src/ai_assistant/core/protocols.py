@@ -2671,6 +2671,58 @@ class ToolInvoker(Protocol):
         error out of a method whose contract is that it answers a question,
         after the executor has already committed its ``→ RUNNING`` claim.
 
+        **A fourth check follows those three, and then the claim** (ADR-0192 §1).
+        An implementation that pairs a call with a callable shape — an *egress*
+        callable that must be handed the binding the ruling fixed, against an
+        ordinary one that must not be — checks that pairing here, **before** the
+        claim, because it reads the registry's callable and not the call alone, so
+        the three above do not subsume it. Where that check lives is
+        `tools/`-internal and is contracted nowhere (ADR-0152 §10); *that it
+        precedes the claim* is contracted here.
+
+        **The claim is the consume, and it sits immediately before the callable.**
+        ``invoke`` appends it through the :class:`InvocationLedger` it holds,
+        passing the whole ``PermissionDecision`` the call carries and not its id
+        alone, and a call whose claim is refused does not reach the callable. An
+        implementation **holds an** :class:`InvocationLedger` **and never an**
+        :class:`AuditTrail`: the ledger can neither record a decision, nor read
+        one, nor export, nor ``clear``, so no decision write, no history read and
+        no erasure reaches `tools/` through this seam (ADR-0192 §2).
+
+        **After the claim, ``invoke`` performs no check that can raise a seam
+        fault.** That is stated as a **property, not a list**, and it is what makes
+        the completion obligation below total: every exit reached past the claim
+        has an outcome ADR-0029 §§3-4 compute, so none of them needs one invented.
+        A lane adding a check moves it above the claim rather than teaching the
+        completion a new outcome.
+
+        **Once a claim is appended, a completion is attempted on every exit this
+        method observes** — a returned ``ToolResult``, an expired deadline, a
+        cancellation — carrying the outcome ADR-0029 §§3-4 already compute for it,
+        the ``failure_kind`` the result carried (transcribed, never synthesised),
+        and the cost the result reported or a ``ToolCost`` whose basis is
+        ``UNKNOWN`` where it reported none — never ``ToolDefinition.cost``
+        (ADR-0192 §3, §5). The obligation is **to make the call**: a completion
+        that is refused or fails to write changes nothing about the act itself.
+        ``invoke`` returns the result the call produced, or re-raises what it was
+        already raising; it does not convert a completion's failure into a
+        ``ToolResult``, substitute an outcome, retry the act, or re-claim. A
+        ``SUCCEEDED`` side effect is not reported as failed because a disk was
+        full. Such a failure is not swallowed either: it reaches the operator as a
+        Tier 2 diagnostic carrying enumerated fields and no free text — the ledger
+        operation, the exception's fault class where it is an ``Exception``, and
+        the outcome being written — and never an instance, a message, a member of a
+        cause chain, or any identifier (ADR-0004 §5, ADR-0031 §5).
+
+        A ``BaseException`` that is not a cancellation is not an exit that clause
+        reaches: ADR-0029 §3 requires it to propagate unchanged, no outcome is
+        invented for it, no completion is written, and the claim is left **open** —
+        which states positively that the act **may have executed** and is read as
+        nothing else (ADR-0192 §3). What the store already committed **stands**, on
+        either append: where one raises, no row is known to have landed and none is
+        known not to have, and nothing is deleted, rewritten or compensated to tell
+        the two apart.
+
         **Failures of the tool come back as data; only seam faults are raised.**
         An exception escaping the tool implementation becomes an ``INTERNAL``
         result, as does a return value :data:`FrozenJsonValue` rejects.
@@ -2683,6 +2735,19 @@ class ToolInvoker(Protocol):
         What the deadline buys is that the seam stops waiting, not that the tool
         stops working: a tool that suppresses its own cancellation can outlive
         it, and no seam can prevent that (ADR-0029 §4).
+
+        **``timeout`` is the deadline for the *call*, and it is not a budget for
+        this method's whole frame** (ADR-0192 §1, §3, §7). Neither ledger append is
+        bounded by it: each is awaited to its outcome, so a store that has stopped
+        answering blocks the call before the callable and blocks the classified
+        result after it. That narrows ADR-0029 §4 deliberately and in one
+        direction — a bound over the claim would buy a row that may or may not
+        exist for an act that certainly never happened, and a bound over the
+        completion would be a fiction, since the audit store this system wires
+        absorbs cancellation until its worker finishes (ADR-0054). The trade is a
+        liveness cost on a broken store, in exchange for the property that no act
+        is performed on an authorisation whose claim could not be confirmed, and no
+        outcome is dropped for a call that ran.
 
         On expiry the outcome is ``FAILED`` when the tool is not
         ``side_effecting`` **or** its ``idempotency`` is ``NATURAL``, and
@@ -2719,12 +2784,33 @@ class ToolInvoker(Protocol):
                 instantly-expired deadline: expiry is delivered at an await
                 point, so a callable performing a synchronous side effect before
                 its first ``await`` would already have acted.
-            ToolBindingError: If any of the three checks above fails.
+            ToolBindingError: If any of the checks above fails — the three, and
+                the callable-shape pairing where an implementation has one.
+                **No claim is appended for any of them** (ADR-0192 §1).
+            AuthorisationSpentError: If the ledger refuses the claim because the
+                authorisation is spent (ADR-0192 §1). Propagated unchanged rather
+                than translated, and never auto-retried.
+            UnrecordedAuthorisationError: If the trail holds no decision equal to
+                the one this call carries under its id, or holds one whose ruling
+                outcome is not ``ALLOW``. Propagated unchanged, likewise.
+            AuditError: If the **claim** append failed with anything that is not an
+                ``AssistantError`` — including a ``CancelledError`` a collaborator
+                raised while the ``Task.cancelling()`` count was unmoved across the
+                call, which is not a cancellation of this call and does not leave as
+                one (ADR-0192 §1, ADR-0031 §2). Every exit from the claim append is
+                a **pre-callable** one, so it qualifies on ADR-0034 §1's second
+                ground and the executor commits ``RUNNING → FAILED`` on the window
+                rather than on a list of causes. A failure of the **completion**
+                append is absorbed instead and reaches the operator as the
+                diagnostic above.
             CancelledError: If the invoking task is cancelled from outside. The
                 seam does not convert it to a result — there is no return path
                 from a task being torn down — so committing the step by the same
                 rule the timeout uses, and then re-raising, is the executor's
-                obligation (ADR-0029 §4).
+                obligation (ADR-0029 §4). It is delivered onward **whatever an
+                append did**: where one failed while a cancellation was pending, the
+                cancellation is what leaves and the append's failure is attached as
+                its cause, never raised in its place (ADR-0060 §1).
         """
         ...
 
