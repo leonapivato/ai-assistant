@@ -4054,17 +4054,24 @@ def test_a_stalled_tidy_up_cannot_silently_refuse_another_parks_answer() -> None
     request sent and nothing said, which is the one failure a confirmation surface
     cannot have. The guard is claimed per token, and the read that tidies up what is
     left on screen happens after it and is waited on by nothing else.
+
+    **Nor by the row that sent the answer**, which is round 2's finding and the same
+    argument one caller out: the tidy-up is *started* and never awaited, so a resume
+    that succeeded and a listing read that then hung cannot leave every row of that park
+    announcing an answer still in flight. Nothing depends on the read — the outcome is
+    already on screen — and what is left is which rows the listing still holds.
     """
     script = _code("app.js")
     body = _functions(script)["answerConfirmation"]
 
-    assert "let answering" not in script
+    assert "let answering = " not in script
     # No `finally` here, which is the shape a page-wide lock takes: the guard is given
     # back on the two named refusal paths and on neither of them is the tidy-up waited
     # on first.
     assert "} finally {" not in body
-    assert body.index("spent.add(token);") < body.index("await readPending(true);")
-    assert body.index('relay(half, "/confirmation/resume"') < body.index("await readPending(true);")
+    assert "await readPending(" not in body
+    assert body.index("spent.add(token);") < body.index("readPending(true);")
+    assert body.index('relay(half, "/confirmation/resume"') < body.index("readPending(true);")
 
 
 def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock() -> None:
@@ -4280,9 +4287,18 @@ def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> Non
     assert "parkRows.delete(row);" in refresh
     # Reached where the park's state moves, and from nowhere else — a row is never left
     # rendering a fact that has moved, and nothing re-renders on a schedule.
+    # Reached where the park's state moves, and where a container that holds rows is
+    # replaced — those two and nothing else. A registry pruned only on a state
+    # transition retained every detached row a listing read had ever rendered, which
+    # adversarial review found on round 2.
     assert {name for name, body in functions.items() if "refreshParks();" in body} == {
-        "offerApproval"
+        "offerApproval",
+        "readPending",
+        "renderOutcome",
     }
+    for name in ("readPending", "renderOutcome"):
+        cleared = functions[name]
+        assert cleared.index("clearNode(") < cleared.index("refreshParks();"), name
     offer = functions["offerApproval"]
     # Three: the park claimed, the park settled, and the token the listing handed back —
     # the last of which is what keeps the row that *sent* the abandoned answer from

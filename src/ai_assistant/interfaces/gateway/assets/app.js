@@ -824,6 +824,10 @@ async function* streamValues(response) {
 function renderOutcome(outcome, chosenAt) {
   const body = el("answer-body");
   clearNode(body);
+  // The other container a park row is rendered into, pruned where it is replaced for
+  // `readPending`'s reason: a turn that parks leaves a row here, and the next answer
+  // detaches it.
+  refreshParks();
   if (outcome.capture_degraded) {
     line(body, "This turn was not recorded, so it will not be part of this conversation.", "notice");
   }
@@ -1366,6 +1370,13 @@ async function readPending(quiet) {
     }
     const list = el("confirmation-list");
     clearNode(list);
+    // **Every row this read replaces leaves the registry here** (adversarial review,
+    // round 2). `parkRows` holds a strong reference to each row's node, and pruning it
+    // only on a park's state transition meant a listing read with nothing answered
+    // retained every detached row it had ever rendered. A prune is what `refreshParks`
+    // does on the way past, so the clear and the prune are one line apart and cannot
+    // drift.
+    refreshParks();
     if (body.confirmations.length === 0) {
       if (quiet) {
         show("confirmations", false);
@@ -1523,7 +1534,19 @@ async function answerConfirmation(token, approved, stopping) {
   // Read again, and **after** the guard on this token has done its work rather than
   // inside it: this is the best-effort tidy-up of what is left on screen, and no other
   // park's answer waits on it.
-  await readPending(true);
+  //
+  // **Started and not waited on**, which is the abandoned path's rule arriving on the
+  // one that settled — adversarial review found on round 2 that awaiting it was the
+  // difference. `readPending` reaches the same unbounded `relay`, so a resume that
+  // *succeeded* and a listing read that then hung left this call pending: the row's
+  // `finally` never ran, every row of the park went on saying an answer was on its way,
+  // and the way out beside it aborted a controller whose request had already finished.
+  // A resolved park announced as one still in flight is a state this page has read and
+  // is misreporting, which is worse than the silence it replaced.
+  //
+  // Nothing here depends on the read: `renderOutcome` above has already put the answer
+  // on screen, and what is left is which rows the listing still holds.
+  readPending(true);
 }
 
 async function startSession(event) {
