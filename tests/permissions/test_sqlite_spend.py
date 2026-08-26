@@ -15,7 +15,6 @@ read falls on.
 from __future__ import annotations
 
 import asyncio
-import threading
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -40,7 +39,7 @@ from ai_assistant.core.types import SpendPeriod, ToolOutcome
 from ai_assistant.permissions import spend as spend_module
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.spend import SpendConfiguration
-from ai_assistant.testing.cancellation import ThreadSuspension
+from ai_assistant.testing.cancellation import LoopSuspension, ThreadSuspension
 
 #: How long a case waits for something that should already have happened.
 _WAITING = 2.0
@@ -77,6 +76,7 @@ class SqliteSpendHarness:
         self._opened: list[SqliteAuditTrail] = []
         self._stores: dict[int, object] = {}
         self._parked: list[ThreadSuspension] = []
+        self._loop_parked: list[LoopSuspension] = []
 
     def open(
         self,
@@ -131,28 +131,36 @@ class SqliteSpendHarness:
         return True
 
     def arm_read(self, subject: SpendSubject) -> SuspendedCall | None:
-        """Park the next spend read **after** it has snapshotted its rows.
+        """Park the next spend read once its rows are in hand and its lock is released.
 
-        After, and deliberately not before: ADR-0194 §3's take-effect rule is that
-        a release landing between an admission's row snapshot and its comparison
-        is not applied to that admission, and a suspension armed before the
-        snapshot passes against an implementation that applies one.
+        After the snapshot, and deliberately not before it: ADR-0194 §3's
+        take-effect rule is that a release landing between an admission's row
+        snapshot and its comparison is not applied to that admission, and a
+        suspension armed before the snapshot passes against an implementation that
+        applies one.
+
+        And after the **connection lock**, not inside it. Parking the worker inside
+        ``_spend_rows_sync`` holds the one ``sqlite3`` connection open, so the
+        completion append every one of these cases lands while the admission is
+        parked would queue behind it and the case would deadlock — which is also
+        why an earlier version of this harness could not have caught an admission
+        that read outside that lock.
         """
         trail = subject
         assert isinstance(trail, SqliteAuditTrail)
-        original = trail._spend_rows_sync
-        parked = ThreadSuspension()
-        armed = threading.Event()
+        original = trail._spend_rows
+        parked = LoopSuspension()
+        armed = [False]
 
-        def blocking(*args: object) -> object:
-            taken = original(*args)  # type: ignore[arg-type]
-            if not armed.is_set():
-                armed.set()
-                parked.hold()
+        async def blocking(periods: Any) -> Any:
+            taken = await original(periods)
+            if not armed[0]:
+                armed[0] = True
+                await parked.hold()
             return taken
 
-        trail._spend_rows_sync = blocking  # type: ignore[method-assign, assignment]
-        self._parked.append(parked)
+        trail._spend_rows = blocking  # type: ignore[method-assign]
+        self._loop_parked.append(parked)
         return parked
 
     def wedge_reads(self, subject: SpendSubject) -> bool:
@@ -172,6 +180,8 @@ class SqliteSpendHarness:
         """Release anything still parked, then close every trail opened."""
         for parked in self._parked:
             parked.release()
+        for waiting in self._loop_parked:
+            waiting.release()
         for trail in self._opened:
             trail.close()
 
@@ -432,6 +442,27 @@ async def test_an_understated_declaration_is_admitted_and_its_overrun_is_recorde
         await subject.admit_invocation(estimate=FREE)
 
 
+def _park_the_worker(subject: SpendSubject) -> ThreadSuspension:
+    """Block the ``sqlite3`` worker itself inside the read, not the coroutine above it.
+
+    The harness's own ``arm_read`` parks on the event loop *after* the read has
+    returned, which is what the race cases need. This one parks where ADR-0029 §4's
+    third bullet lives: inside the worker thread ``_run_to_completion`` waits on and
+    absorbs a cancellation for.
+    """
+    trail = subject
+    assert isinstance(trail, SqliteAuditTrail)
+    original = trail._spend_rows_sync
+    parked = ThreadSuspension()
+
+    def blocking(*args: object) -> object:
+        parked.hold()
+        return original(*args)  # type: ignore[arg-type]
+
+    trail._spend_rows_sync = blocking  # type: ignore[method-assign, assignment]
+    return parked
+
+
 async def test_this_holder_s_wedged_read_outlives_its_caller_s_deadline(
     sqlite_spend: SqliteSpendHarness,
 ) -> None:
@@ -452,8 +483,7 @@ async def test_this_holder_s_wedged_read_outlives_its_caller_s_deadline(
     that rather than asserting a bound this holder does not have.
     """
     subject = sqlite_spend.open()
-    parked = sqlite_spend.arm_read(subject)
-    assert parked is not None
+    parked = _park_the_worker(subject)
 
     admission = asyncio.ensure_future(subject.admit_invocation(estimate=usd("1")))
     await parked.reached()
@@ -469,3 +499,40 @@ async def test_this_holder_s_wedged_read_outlives_its_caller_s_deadline(
     # a shutdown reaches it as.
     assert isinstance(subject, SqliteAuditTrail)
     subject.close()
+
+
+async def test_a_spend_read_holds_the_one_connection_against_an_append(
+    sqlite_spend: SqliteSpendHarness,
+) -> None:
+    """The read takes the connection's own lock, as every other method of this store does.
+
+    One ``sqlite3`` connection admits one transaction: two workers inside it can
+    meet a ``BEGIN`` while one is already open, and what that produces is a refusal
+    the ceiling had nothing to do with — or a disturbed transaction boundary on the
+    *append*, which is ADR-0054's reason for the exclusion in the first place. The
+    hazard is timing-dependent, so it is pinned as the exclusion rather than as the
+    failure: with the read's worker parked, a completion append **does not
+    complete** until it is released.
+
+    Its complement — that the lock is *released* before the comparison, so an
+    append can land while the admission sits between its snapshot and its decision
+    — is the shared suite's, driven over both implementations.
+    """
+    clock = MovableClock()
+    subject = sqlite_spend.open(REPORTING, now=clock)
+    claim = await Rows(subject, clock).claimed()
+    parked = _park_the_worker(subject)
+
+    reading = asyncio.ensure_future(subject.spend_totals())
+    await parked.reached()
+    appending = asyncio.ensure_future(
+        subject.complete_invocation(
+            claim_id=claim.id, outcome=ToolOutcome.SUCCEEDED, incurred_cost=usd("1")
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    assert not appending.done(), "the append reached the connection beside a spend read"
+    parked.release()
+    assert await asyncio.wait_for(appending, _WAITING)
+    assert await asyncio.wait_for(reading, _WAITING)

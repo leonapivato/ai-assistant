@@ -578,8 +578,22 @@ class SqliteAuditTrail:
                 the reporting currency, the two ceilings, the unknown-price
                 allowance and the zone the calendar periods are computed in.
                 **Explicit values, never a ``Settings`` read** (ADR-0194 §11).
-                Defaults to an unconfigured ceiling, which refuses nothing and
-                states no total.
+
+                Defaults to an **unconfigured** ceiling, which refuses nothing and
+                states no total — and that is not the substitution §5 forbids. That
+                clause is about a *consumer* manufacturing a holder where the
+                composition root wired none: "no default is substituted where the
+                composition root did not wire one", beside "no subsystem constructs
+                one". This default is a holder handed no configuration behaving as
+                §1 says an unconfigured mechanism behaves: "no ceiling configured
+                means no ceiling", unconditionally. Nothing opens that was closed
+                before, because §11 puts the four settings in the **consumer
+                group** precisely so that no window exists in which a user can
+                configure a ceiling this does not consult — the failure that
+                placement is written to prevent is a configured ceiling that does
+                not bind, and until those settings exist there is none to
+                configure. Requiring the argument instead would oblige this lane to
+                edit ``app/composition.py``, which §11 makes the consumer group's.
             identifiers: The factory each row's ``id`` is minted from. Defaults to
                 the process's own, so two stores in one process never mint from
                 independent sequences (ADR-0192 §2). Injected so a suite can force
@@ -1759,9 +1773,7 @@ class SqliteAuditTrail:
         try:
             return tuple(period_bounds(instant, self._spend, period) for period in SpendPeriod)
         except (SpendArithmeticError, OverflowError, ValueError, OSError) as exc:
-            raise SpendUndeterminedError(
-                _undetermined(f"the period could not be computed: {exc}")
-            ) from exc
+            raise SpendUndeterminedError(_undetermined(_CLOCK_RAISED)) from exc
 
     def _spend_reading(self) -> datetime:
         """Take the one guarded clock reading a spend decision is made on.
@@ -1775,18 +1787,31 @@ class SqliteAuditTrail:
         try:
             return self._clock()
         except Exception as exc:
-            raise SpendUndeterminedError(_undetermined(f"the clock raised: {exc}")) from exc
+            raise SpendUndeterminedError(_undetermined(_CLOCK_RAISED)) from exc
 
     async def _spend_rows(self, periods: Sequence[PeriodBounds]) -> Sequence[_SpendRow]:
-        """Read every row either period could hold, as one snapshot."""
+        """Read every row either period could hold, as one snapshot.
+
+        **Under the connection's own lock**, which is the exclusion every other
+        method of this store takes and which one ``sqlite3`` connection requires:
+        two workers inside it at once can meet a ``BEGIN`` while a transaction is
+        already open, so an admission reading beside a completion append would
+        refuse a call the ceiling had nothing to do with — and could disturb the
+        append's own transaction boundary (ADR-0054).
+
+        The lock is released **before** the comparison, which is the whole of what
+        the separate spend lock buys: ADR-0194 §3 requires a completion appended by
+        a call already in flight to be able to land while an admission is between
+        its row snapshot and its decision, and holding the connection across that
+        window would make it impossible.
+        """
         low = min(bounds.start for bounds in periods)
         high = max(bounds.end for bounds in periods)
         try:
-            return await _run_to_completion(self._spend_rows_sync, low, high)
+            async with self._lock:
+                return await _run_to_completion(self._spend_rows_sync, low, high)
         except Exception as exc:
-            raise SpendUndeterminedError(
-                _undetermined(f"the store could not be read: {exc}")
-            ) from exc
+            raise SpendUndeterminedError(_undetermined(_STORE_UNREADABLE)) from exc
 
     def _spend_rows_sync(self, low: datetime, high: datetime) -> Sequence[_SpendRow]:
         """Return the rows in ``[low, high)`` with whether each claim is completed.
@@ -1828,9 +1853,7 @@ class SqliteAuditTrail:
                 accounted = exact_sum(amounts)
                 projected = exact_projection(accounted, [*outstanding, contribution])
             except SpendArithmeticError as exc:
-                raise SpendUndeterminedError(
-                    _undetermined(f"the arithmetic trapped: {exc}")
-                ) from exc
+                raise SpendUndeterminedError(_undetermined(_ARITHMETIC_TRAPPED)) from exc
             if projected > ceiling:
                 crossings.append(
                     f"{bounds.period.value}: {projected} projected against a ceiling of "
@@ -1957,6 +1980,20 @@ _SPEND_ROWS = (
     "EXISTS(SELECT 1 FROM invocations c WHERE c.completes = i.id) "
     "FROM invocations i WHERE i.recorded_at_us >= ? AND i.recorded_at_us < ?"
 )
+
+
+#: ADR-0194 §4's six grounds, as **fixed** text.
+#:
+#: Fixed, and never the caught exception interpolated into a message. A collaborator
+#: this seam is written to distrust — an injected clock, a backend — may raise a value
+#: whose ``__str__`` raises, and formatting it would leak *that* exception out of a
+#: member ADR-0194 §5 closes at two classes, which is the one thing the translation
+#: exists to prevent. The original is chained as ``__cause__``, so nothing needed to
+#: diagnose it is lost, and §4's payload-free rule is tightened rather than relaxed:
+#: the numbers and the ground are the whole explanation.
+_CLOCK_RAISED: Final = "the injected clock raised"
+_STORE_UNREADABLE: Final = "the store could not be read"
+_ARITHMETIC_TRAPPED: Final = "the arithmetic trapped"
 
 
 def _undetermined(because: str) -> str:

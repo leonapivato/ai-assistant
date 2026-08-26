@@ -62,7 +62,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     describe_untrusted,
 )
-from ai_assistant.testing.cancellation import SuspendableResource
+from ai_assistant.testing.cancellation import LoopSuspension, SuspendableResource
 from ai_assistant.testing.spend import (
     Bounds,
     SpendBooks,
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
     from ai_assistant.core.types import ActionRequest
-    from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+    from ai_assistant.testing.cancellation import ResourceLog
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
 _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it authorises nothing"
@@ -406,7 +406,7 @@ class FakeAuditTrail:
         # Its own lock and its own resource: ADR-0194 §3 serialises admissions
         # against each other and deliberately not against the appends.
         self._spend_lock = asyncio.Lock()
-        self._spend_reads = SuspendableResource()
+        self._spend_park: LoopSuspension | None = None
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call that enters the modelled resource open inside it.
@@ -1031,7 +1031,11 @@ class FakeAuditTrail:
         Returns:
             The handle to wait on and release.
         """
-        return self._spend_reads.suspend_next()
+        if self._spend_park is not None:
+            msg = "a spend read is already armed on this fake"
+            raise RuntimeError(msg)
+        self._spend_park = LoopSuspension()
+        return self._spend_park
 
     async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
         """Admit this invocation and reserve its declared contribution, or refuse.
@@ -1108,16 +1112,14 @@ class FakeAuditTrail:
         try:
             return self._clock()
         except Exception as exc:
-            raise SpendUndeterminedError(_unmeasured(f"the clock raised: {exc}")) from exc
+            raise SpendUndeterminedError(_unmeasured(_CLOCK_RAISED)) from exc
 
     def _spend_periods(self, instant: datetime) -> tuple[Bounds, ...]:
         """Return both periods containing ``instant``, from that one reading."""
         try:
             return self._books.periods(instant)
         except (SpendTrapError, OverflowError, ValueError, OSError) as exc:
-            raise SpendUndeterminedError(
-                _unmeasured(f"the period could not be computed: {exc}")
-            ) from exc
+            raise SpendUndeterminedError(_unmeasured(_CLOCK_RAISED)) from exc
 
     async def _spend_read(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:
         """Take the snapshot, translating whatever it failed with.
@@ -1132,9 +1134,7 @@ class FakeAuditTrail:
         try:
             return await self._spend_snapshot()
         except Exception as exc:
-            raise SpendUndeterminedError(
-                _unmeasured(f"the store could not be read: {exc}")
-            ) from exc
+            raise SpendUndeterminedError(_unmeasured(_STORE_UNREADABLE)) from exc
 
     async def _spend_snapshot(self) -> Sequence[tuple[datetime, ToolCost | None, bool]]:
         """Snapshot every row, then model the read a durable store performs.
@@ -1143,15 +1143,27 @@ class FakeAuditTrail:
         armed on it holds the admission at the one point ADR-0194 §3's take-effect
         rule is about: rows fixed, comparison not yet made.
         """
-        completed = {
-            row.completes for row in self._invocations.values() if row.completes is not None
-        }
-        taken = [
-            (row.recorded_at, row.incurred_cost, row.id in completed)
-            for row in self._invocations.values()
-        ]
-        async with self._spend_reads.held():
-            return taken
+        async with self._resource.held():
+            # Inside the resource a durable holder's connection lock stands for, so
+            # this fake queues against an append exactly as that one does — and
+            # releases it before the parking point below, because ADR-0194 §3
+            # requires a completion to be able to land while an admission sits
+            # between its row snapshot and its decision.
+            completed = {
+                row.completes for row in self._invocations.values() if row.completes is not None
+            }
+            taken = [
+                (row.recorded_at, row.incurred_cost, row.id in completed)
+                for row in self._invocations.values()
+            ]
+        parked, self._spend_park = self._spend_park, None
+        if parked is not None:
+            # Deliberately **not** a locked resource: a second spend read and an
+            # append both have to be able to land while this one is parked, and a
+            # parking point that held an exclusion would make the very interleaving
+            # ADR-0194 §3 is about unreachable.
+            await parked.hold()
+        return taken
 
     def _reserve_or_refuse(
         self,
@@ -1177,7 +1189,7 @@ class FakeAuditTrail:
                 accounted = add_exactly(amounts)
                 projected = add_exactly([accounted, *outstanding, contribution])
             except SpendTrapError as exc:
-                raise SpendUndeterminedError(_unmeasured(f"the arithmetic trapped: {exc}")) from exc
+                raise SpendUndeterminedError(_unmeasured(_ARITHMETIC_TRAPPED)) from exc
             if projected > ceiling:
                 crossed.append(
                     f"{bounds.period.value}: {projected} projected against a ceiling of "
@@ -1260,6 +1272,15 @@ class FakeAuditTrail:
         """
         by_id = sorted(self._decisions.values(), key=lambda decision: decision.id)
         return sorted(by_id, key=lambda decision: decision.decided_at, reverse=True)
+
+
+#: ADR-0194 §4's grounds, as **fixed** text — never the caught exception
+#: interpolated. A collaborator this seam distrusts may raise a value whose
+#: ``__str__`` raises, and formatting it would leak that exception out of a member
+#: §5 closes at two classes. The original is chained as ``__cause__``.
+_CLOCK_RAISED: Final = "the injected clock raised"
+_STORE_UNREADABLE: Final = "the store could not be read"
+_ARITHMETIC_TRAPPED: Final = "the arithmetic trapped"
 
 
 def _unmeasured(because: str) -> str:
