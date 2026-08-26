@@ -29,15 +29,24 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
+import structlog.testing
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ToolBindingError
+from ai_assistant.core.errors import (
+    AuditError,
+    AuthorisationSpentError,
+    ToolBindingError,
+    UnrecordedAuthorisationError,
+)
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
 from ai_assistant.core.types import (
+    UNREPRESENTABLE_FAULT_CLASS,
     ActionRequest,
     CostBasis,
     Idempotency,
@@ -52,11 +61,13 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
 )
+from ai_assistant.testing import APPEND_FAILED, CLAIM, COMPLETION, FakeAuditTrail
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.types import FrozenJson
+    from ai_assistant.core.protocols import InvocationLedger
+    from ai_assistant.core.types import FrozenJson, ToolInvocation, ToolResult
     from ai_assistant.testing import FakeToolImplementation
 
 #: A fixed instant, so nothing here depends on how fast the suite runs.
@@ -319,6 +330,160 @@ class KeyedTool:
         self.effects += 1
         self._seen[idempotency_key] = (self.now, self.effects)
         return self.effects
+
+
+# --- the consume: ADR-0192 §1 and §3 ------------------------------------
+#
+# Everything below drives `invoke` through a ledger, which is the only thing that
+# can observe the claim and the completion. The ledger under it is always the
+# canonical `FakeAuditTrail` — the store side is the paired lane's suite, not this
+# one — wrapped where a test needs an append held, failed, or failed *after* it
+# committed.
+
+
+class MovingClock:
+    """A clock the test advances, for the window ADR-0192 §1 measures.
+
+    The ledger stamps ``recorded_at`` from this and decides its admission rules on
+    the same reading, so moving it is how a test reaches the far side of an
+    ``idempotency_window`` without racing one.
+    """
+
+    def __init__(self, at: datetime = AT) -> None:
+        """Read ``at`` until moved."""
+        self.now = at
+
+    def __call__(self) -> datetime:
+        """Return the current reading."""
+        return self.now
+
+
+class Append:
+    """How one ledger member behaves on the next call (a test's own arrangement)."""
+
+    def __init__(self) -> None:
+        """Behave exactly like the ledger under it, until arranged otherwise."""
+        #: Set the moment the append is entered.
+        self.entered = asyncio.Event()
+        #: Awaited before the append proceeds, where a test holds one.
+        self.hold: asyncio.Event | None = None
+        #: Raised instead of, or after, the real append.
+        self.error: BaseException | None = None
+        #: Whether the real append runs before ``error`` is raised. ``True`` is
+        #: ADR-0192 §1's and §3's commit-state case: the row stands and the append
+        #: raised, and no caller may tell that apart from a write that never landed.
+        self.commits = False
+        #: How many times this member has been entered.
+        self.calls = 0
+
+
+class DrivenLedger:
+    """An ``InvocationLedger`` a test can hold, fail, or fail after it committed.
+
+    **A wrapper rather than a second store.** Every rule about *what a ledger
+    does* is the paired lane's, pinned in its own conformance suite; what this
+    suite needs is a ledger whose **timing** and **failure** the test owns, so the
+    seam's own clauses — the shield, the absorption, the commit-state split, the
+    diagnostic — become observable.
+
+    ADR-0192 §3 decides absorption "by class, not by origin", so raising the
+    exception from here is a faithful driver for a ledger that raised it, whatever
+    produced it — a refusal, a guard's rejection, a store that would not write, or
+    an exception an injected clock callable raised and the ledger propagated
+    unwrapped (ADR-0026 §2).
+    """
+
+    def __init__(self, inner: FakeAuditTrail) -> None:
+        """Delegate to ``inner``, under the two arrangements below."""
+        self.inner = inner
+        self.claim = Append()
+        self.completion = Append()
+
+    async def _through(
+        self, append: Append, real: Callable[[], Awaitable[ToolInvocation]]
+    ) -> ToolInvocation:
+        """Run ``real`` under ``append``'s arrangement."""
+        append.calls += 1
+        append.entered.set()
+        if append.hold is not None:
+            await append.hold.wait()
+        if append.error is not None and not append.commits:
+            raise append.error
+        row = await real()
+        if append.error is not None:
+            raise append.error
+        return row
+
+    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
+        """Append a claim under ``decision``, or behave as arranged."""
+        return await self._through(
+            self.claim, lambda: self.inner.claim_invocation(decision=decision)
+        )
+
+    async def complete_invocation(
+        self,
+        *,
+        claim_id: str,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None = None,
+    ) -> ToolInvocation:
+        """Append the completion of ``claim_id``, or behave as arranged."""
+        return await self._through(
+            self.completion,
+            lambda: self.inner.complete_invocation(
+                claim_id=claim_id,
+                outcome=outcome,
+                incurred_cost=incurred_cost,
+                failure_kind=failure_kind,
+            ),
+        )
+
+
+async def rows(trail: FakeAuditTrail) -> list[ToolInvocation]:
+    """Every invocation row the trail holds, in the order the read returns them.
+
+    That order is ``recent``'s and not the ledger's append order (ADR-0192 §2), so
+    nothing below reads a row *by position*: the two kinds are told apart by
+    :attr:`ToolInvocation.completes`, which is what the shape's own discriminator
+    is for.
+    """
+    return [each.invocation for each in await trail.export_invocations()]
+
+
+async def claims(trail: FakeAuditTrail) -> list[ToolInvocation]:
+    """Every claim row the trail holds, completed or not."""
+    return [each for each in await rows(trail) if each.completes is None]
+
+
+async def completions(trail: FakeAuditTrail) -> list[ToolInvocation]:
+    """Every completion row the trail holds."""
+    return [each for each in await rows(trail) if each.completes is not None]
+
+
+def appended(captured: Sequence[Mapping[str, Any]]) -> list[dict[str, object]]:
+    """The append-failure diagnostics among ``captured``, fields and all.
+
+    ``capture_logs`` adds its own ``event`` and ``log_level`` keys; both are
+    dropped so a test can assert the ADR-0192 §3 matrix **field by field**,
+    including that an absent field is absent rather than merely unchecked.
+    """
+    return [
+        {key: value for key, value in each.items() if key not in {"event", "log_level"}}
+        for each in captured
+        if each.get("event") == APPEND_FAILED
+    ]
+
+
+async def _settled(cycles: int = 4) -> None:
+    """Let the loop deliver whatever is pending, without sleeping on a clock.
+
+    A cancellation is delivered at the invoking task's next suspension point, so
+    a test that asserts "still waiting" has to give the loop a turn first —
+    deterministically, and never by racing a duration.
+    """
+    for _ in range(cycles):
+        await asyncio.sleep(0)
 
 
 class ToolInvokerContract:
@@ -878,3 +1043,776 @@ class ToolInvokerContract:
         assert result.failure is None
         assert result.output == {"message_id": "m-1"}
         assert spy.calls == [({"to": "someone@example.com"}, None)]
+
+    # --- ADR-0192 §1: the claim, and where it sits ------------------------
+
+    @pytest.fixture
+    def consuming(self) -> Callable[[InvocationLedger], InvocableToolRegistry]:
+        """Return a factory building an empty invoker over ``ledger``.
+
+        A factory rather than a built subject, because half the cases below need
+        the ledger *wrapped* — held on a barrier, made to fail, made to fail after
+        it committed — and an invoker is handed its ledger at construction.
+        """
+        raise NotImplementedError
+
+    async def test_a_call_claims_before_the_callable_and_completes_after(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The order ADR-0192 §1 places and §3 closes, asserted as a sequence.
+
+        Held on a barrier the test owns, so "before" is observed rather than
+        inferred from two rows that happen to be in that order: while the claim
+        append is in flight the callable has **not** been entered and ``invoke``
+        has not returned, and the completion exists only once the call has run.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await ledger.claim.entered.wait()
+
+        assert spy.calls == [], "the claim is appended before the callable is entered"
+        assert not task.done()
+        assert await rows(trail) == []
+
+        ledger.claim.hold.set()
+        result = await task
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert spy.calls == [({"to": "someone@example.com"}, None)]
+        (claim,) = await claims(trail)
+        (completion,) = await completions(trail)
+        assert claim.decision_id == call.decision.id
+        assert completion.completes == claim.id
+        assert completion.outcome is ToolOutcome.SUCCEEDED
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    @pytest.mark.parametrize(
+        "wiring",
+        ["unbound-id", "substituted-definition", "unauthorised", "malformed-parameters"],
+    )
+    async def test_a_refused_check_appends_no_invocation_row(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], wiring: str
+    ) -> None:
+        """Every check that raises a seam fault sits **above** the claim (ADR-0192 §1).
+
+        Parameterised rather than written for one check, because a suite
+        inspecting only the exception and the untouched callable certifies an
+        implementation that claims first and then refuses — which enters no
+        callable, raises the expected class, and has nonetheless spent the
+        authorisation and left an open claim for a call that was never made.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        spy = Spy()
+        invoker.register(tool(), spy)
+
+        call = call_for(tool("never-registered") if wiring == "unbound-id" else tool())
+        await trail.record(call.decision)
+        if wiring == "substituted-definition":
+            object.__setattr__(call.request.tool, "risk_level", RiskLevel.LOW)
+        elif wiring == "unauthorised":
+            call.__dict__["request"] = ActionRequest(
+                tool=tool(), parameters={"to": "elsewhere@example.com"}, step_id="step-1"
+            )
+        elif wiring == "malformed-parameters":
+            call.__dict__["request"] = ActionRequest.model_construct(
+                tool=call.request.tool,
+                parameters={"to": {"a", "set", "has", "no", "json"}},
+                step_id="step-1",
+            )
+
+        with pytest.raises(ToolBindingError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert spy.calls == [], "the callable was never reached"
+        assert await rows(trail) == [], "a seam fault appends no invocation row"
+
+    async def test_an_unrecorded_authorisation_is_refused_before_the_callable(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The claim is the consume, and a claim the ledger refuses never reaches the tool.
+
+        The refusal reaches the caller **as its own class**, unwrapped: ADR-0192
+        §2's exhaustive refusal orders would mean nothing if a caller could not
+        catch the class they name (§1).
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        spy = Spy()
+        invoker.register(tool(), spy)
+
+        with pytest.raises(UnrecordedAuthorisationError):
+            await invoker.invoke(call_for(tool()), timeout=PATIENT)
+
+        assert spy.calls == []
+        assert await rows(trail) == []
+
+    async def test_a_second_act_under_a_spendable_authorisation_is_refused_at_the_seam(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """One authorisation, one act — and the refusal is what leaves ``invoke``.
+
+        Asserted at the seam rather than on a ledger method driven directly: the
+        refusal is ADR-0192 §1's and is decided inside the append, so a
+        ledger-only test would pin the store's rule while leaving the seam free to
+        swallow it.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        first = await invoker.invoke(call, timeout=PATIENT)
+        with pytest.raises(AuthorisationSpentError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert first.outcome is ToolOutcome.SUCCEEDED
+        assert len(spy.calls) == 1, "the second act never reached the callable"
+        assert len(await rows(trail)) == 2, "one claim and one completion, and no more"
+
+    @pytest.mark.parametrize("definition", [read_only("inbox"), natural("upsert")])
+    async def test_a_second_act_under_a_non_spendable_authorisation_is_admitted(
+        self,
+        consuming: Callable[[InvocationLedger], InvocableToolRegistry],
+        definition: ToolDefinition,
+    ) -> None:
+        """A read gated by ADR-0016 §3 is invoked under one ``ALLOW`` as often as needed.
+
+        The half a one-winner test cannot see: an implementation consuming every
+        ``ALLOW`` would refuse the second gated read and the second ``NATURAL``
+        invocation, which ADR-0192 §1 says are never refused on this ground.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        spy = Spy()
+        invoker.register(definition, spy)
+        call = call_for(definition)
+        await trail.record(call.decision)
+
+        await invoker.invoke(call, timeout=PATIENT)
+        await invoker.invoke(call, timeout=PATIENT)
+
+        assert len(spy.calls) == 2
+        assert len(await completions(trail)) == 2
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_completion_that_did_not_commit_leaves_the_claim_open_and_spends_it(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """Completion durability is a third prerequisite for a further act (ADR-0192 §1).
+
+        The composition a suite holding the two halves separately cannot see: the
+        completion append fails before committing, ``invoke`` returns the call's
+        own result unchanged, and the next act under that authorisation is refused
+        **twice over** — a claim is open, and the last claim in the append order is
+        that same open one and so is not completed ``FAILED`` at all.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = RuntimeError("the store would not write")
+        invoker = consuming(ledger)
+        spy = Spy(output={"message_id": "m-1"})
+        invoker.register(keyed(), spy)
+        call = call_for(keyed())
+        await trail.record(call.decision)
+
+        result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED, "the act's own result stands"
+        assert result.output == {"message_id": "m-1"}
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+        assert await completions(trail) == []
+
+        with pytest.raises(AuthorisationSpentError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert len(spy.calls) == 1, "no second callable was entered"
+        assert len(await rows(trail)) == 1, "one claim, still open, and no completion"
+
+    # --- ADR-0192 §2, §5: what the completion row carries ------------------
+
+    async def test_a_success_completes_with_no_kind_and_a_cost_nobody_measured(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The declaration's price appears on no row, on this path or any other.
+
+        ``ToolResult.incurred_cost`` is what the *tool* reported, and nothing
+        populates it yet (#1558), so the row records an ``UNKNOWN`` basis. A lane
+        filling it from ``ToolDefinition.cost`` would put a declaration where a
+        measurement belongs and corrupt the spend total ADR-0192 §5 is built on.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        priced = tool(
+            cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.01"), currency="USD")
+        )
+        invoker.register(priced, Spy())
+        call = call_for(priced)
+        await trail.record(call.decision)
+
+        await invoker.invoke(call, timeout=PATIENT)
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.SUCCEEDED
+        assert completion.failure_kind is None, (
+            "a SUCCEEDED result carries no failure to transcribe"
+        )
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    @pytest.mark.parametrize(
+        ("definition", "expected"),
+        [(read_only("inbox"), ToolOutcome.FAILED), (keyed(), ToolOutcome.INDETERMINATE)],
+    )
+    async def test_a_deadline_transcribes_its_kind_onto_the_completion(
+        self,
+        consuming: Callable[[InvocationLedger], InvocableToolRegistry],
+        definition: ToolDefinition,
+        expected: ToolOutcome,
+    ) -> None:
+        """``TIMED_OUT`` is transcribed and never dropped, on both outcomes.
+
+        A ``FAILED``-with-kind case is owed separately from the
+        ``INDETERMINATE``-with-kind one: an implementation can preserve one and
+        drop the other, and dropping either produces a valid kindless completion
+        that silently refuses a legitimate retry as spent (ADR-0192 §9).
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        invoker.register(definition, Slow())
+        call = call_for(definition)
+        await trail.record(call.decision)
+
+        result = await invoker.invoke(call, timeout=BRIEF)
+
+        assert result.outcome is expected
+        (completion,) = await completions(trail)
+        assert completion.outcome is expected
+        assert completion.failure_kind is ToolFailureKind.TIMED_OUT
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    @pytest.mark.parametrize(
+        ("definition", "expected"),
+        [(read_only("inbox"), ToolOutcome.FAILED), (tool(), ToolOutcome.INDETERMINATE)],
+    )
+    async def test_a_cancelled_call_completes_kindless_at_an_unknown_cost(
+        self,
+        consuming: Callable[[InvocationLedger], InvocableToolRegistry],
+        definition: ToolDefinition,
+        expected: ToolOutcome,
+    ) -> None:
+        """A completion derived from no ``ToolResult`` invents neither field.
+
+        ``failure_kind`` is transcribed and never synthesised — ADR-0031 §3 rules
+        that the seam never synthesises ``CANCELLED`` — and the cost is the
+        ``UNKNOWN`` basis, never the declaration's figure. Without this a spend
+        accumulator counts an invented measurement.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        slow = Slow()
+        invoker.register(definition, slow)
+        call = call_for(definition)
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await slow.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is expected
+        assert completion.failure_kind is None
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    # --- ADR-0192 §3: a failed append changes nothing about the act --------
+
+    async def test_a_completion_that_fails_does_not_change_what_the_call_returned(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """A ``SUCCEEDED`` side effect is not reported as failed because a disk was full.
+
+        The failure is not swallowed either: it reaches the operator as a Tier 2
+        diagnostic carrying the operation, the fault class and the outcome that
+        was being written — and **nothing else**, the instance, the message and
+        every member of the cause chain included (ADR-0192 §3, ADR-0004 §5).
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = RuntimeError("recipient@example.com")
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 3}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert result.output == {"unread": 3}
+        assert appended(captured) == [
+            {
+                "operation": COMPLETION,
+                "fault_class": "RuntimeError",
+                "outcome": ToolOutcome.SUCCEEDED,
+            }
+        ]
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    async def test_the_diagnostics_four_shapes_carry_exactly_their_own_fields(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """ADR-0192 §3's matrix, shape by shape, with absent fields asserted absent.
+
+        A shape-by-shape test is owed because every drift this rule has had was a
+        clause restating the field list for one case and disagreeing with another.
+        The claim shapes carry **no** outcome — a claim carries no ``ToolOutcome``
+        at all, so nothing stands in for it and no literal is minted for the
+        position — and the ``BaseException`` shapes carry **no class**, which is
+        ``fault_class_of``'s own rule read forward rather than worked around.
+        """
+        shapes: list[tuple[str, BaseException, dict[str, object]]] = [
+            ("claim", RuntimeError("boom"), {"operation": CLAIM, "fault_class": "RuntimeError"}),
+            ("claim", KeyboardInterrupt(), {"operation": CLAIM}),
+            (
+                "completion",
+                RuntimeError("boom"),
+                {
+                    "operation": COMPLETION,
+                    "fault_class": "RuntimeError",
+                    "outcome": ToolOutcome.SUCCEEDED,
+                },
+            ),
+            (
+                "completion",
+                KeyboardInterrupt(),
+                {"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED},
+            ),
+        ]
+        for member, error, expected in shapes:
+            trail = FakeAuditTrail()
+            ledger = DrivenLedger(trail)
+            getattr(ledger, member).error = error
+            invoker = consuming(ledger)
+            invoker.register(read_only("inbox"), Spy())
+            call = call_for(read_only("inbox"))
+            await trail.record(call.decision)
+
+            # The exit itself is the other cases' subject; this one is about the
+            # fields the diagnostic carries on the way out.
+            with structlog.testing.capture_logs() as captured, contextlib.suppress(BaseException):
+                await invoker.invoke(call, timeout=PATIENT)
+
+            assert appended(captured) == [expected], f"{member} raising {type(error).__name__}"
+
+    async def test_no_tier_one_content_reaches_the_diagnostic_by_any_route(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The sentinel in four hostile positions (ADR-0192 §9, ADR-0004 §5).
+
+        A message, a member of the cause chain, an identifier, and the **class
+        name** of a dynamically built exception. On the first three the assertion
+        is that no such name reaches the log at all; on the fourth it is
+        ``fault_class_of``'s own boundary and nothing wider — a name outside that
+        function's identifier pattern becomes the reserved literal, and the
+        residue for a *pattern-valid* hostile name is ADR-0119's, filed as #1569.
+        """
+        sentinel = "recipient@example.com"
+        hostile = type(sentinel, (RuntimeError,), {})
+        error = hostile("the message names " + sentinel)
+        error.__cause__ = ValueError("the cause names " + sentinel)
+
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = error
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy())
+        call = call_for(read_only("inbox"), decision_id=sentinel)
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            await invoker.invoke(call, timeout=PATIENT)
+
+        (diagnostic,) = appended(captured)
+        assert diagnostic == {
+            "operation": COMPLETION,
+            "fault_class": UNREPRESENTABLE_FAULT_CLASS,
+            "outcome": ToolOutcome.SUCCEEDED,
+        }
+        assert sentinel not in repr(captured), "no route carries a Tier 1 name into the log"
+
+    async def test_a_collaborators_cancellation_on_the_completion_path_is_absorbed(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """A cancellation with nothing cancelled is not a cancellation of this call.
+
+        Propagating it would discard a ``ToolResult`` the tool had already
+        produced and hand the executor a ``CancelledError`` for a call nothing
+        cancelled — a known-successful side effect recorded as interrupted, the
+        one outcome ADR-0192 §3 calls worse than an incomplete record. The two
+        cases are told apart by the ``Task.cancelling()`` count and by nothing
+        else, so the diagnostic carries no class.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = asyncio.CancelledError("the ledger invented one")
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 1}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.output == {"unread": 1}
+        assert appended(captured) == [{"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED}]
+        assert ledger.completion.calls == 1, "no exit attempts a second completion for one claim"
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    async def test_a_collaborators_cancellation_on_the_claim_path_is_an_audit_error(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The mirror case at the seam, and it must **not** leave as a ``CancelledError``.
+
+        No callable was entered and no claim was observed, so this is a
+        pre-callable exit: ADR-0034 §1's second ground classifies the step
+        ``FAILED`` and no retry follows. Leaving as a cancellation would have the
+        executor record ``interrupted_outcome`` — ``INDETERMINATE`` for a
+        side-effecting tool — for a call that provably did not run.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        invented = asyncio.CancelledError("the ledger invented one")
+        ledger.claim.error = invented
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with pytest.raises(AuditError) as caught:
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert not isinstance(caught.value, asyncio.CancelledError)
+        assert caught.value.__cause__ is invented
+        assert spy.calls == []
+        assert await rows(trail) == []
+
+    @pytest.mark.parametrize("member", ["claim", "completion"])
+    async def test_a_non_assistant_error_reaches_the_caller_as_an_audit_error_or_is_absorbed(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], member: str
+    ) -> None:
+        """The two boundaries answer differently, and an earlier draft ran them together.
+
+        On the **claim** path an exception that is not an ``AssistantError`` is
+        translated to an ``AuditError`` carrying it as the cause, its type intact
+        — parameterised over three classes, so an implementation that catches one
+        name rather than the class boundary fails. On the **completion** path none
+        leaves at all, because it is absorbed (ADR-0192 §1, §3).
+        """
+
+        class BespokeError(Exception):
+            """An exception class this test defines, so no name is being caught."""
+
+        for raised in (RuntimeError("a"), ValueError("b"), BespokeError("c")):
+            trail = FakeAuditTrail()
+            ledger = DrivenLedger(trail)
+            getattr(ledger, member).error = raised
+            invoker = consuming(ledger)
+            invoker.register(read_only("inbox"), Spy())
+            call = call_for(read_only("inbox"))
+            await trail.record(call.decision)
+
+            if member == "claim":
+                with pytest.raises(AuditError) as caught:
+                    await invoker.invoke(call, timeout=PATIENT)
+                assert caught.value.__cause__ is raised
+            else:
+                result = await invoker.invoke(call, timeout=PATIENT)
+                assert result.outcome is ToolOutcome.SUCCEEDED
+
+    async def test_a_base_exception_on_the_completion_path_is_not_absorbed(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """A process being torn down is not a refusal (ADR-0192 §3).
+
+        No ``ToolResult`` reaches the caller, no completion is written, the claim
+        is left open and the diagnostic carries **no class**. The test asserts
+        those and stops there, asserting **nothing** about the class ``invoke``
+        raises outward: that clock runs inside a retained append, and ADR-0192 §3
+        leaves exactly that one thing uncontracted, so a case asserting it would
+        pin behaviour the ADR declines to state.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = KeyboardInterrupt()
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 1}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        returned: ToolResult | None = None
+        # ADR-0192 §3 leaves the outward class of a `BaseException` raised inside a
+        # retained append uncontracted, so nothing here names one.
+        with structlog.testing.capture_logs() as captured, contextlib.suppress(BaseException):
+            returned = await invoker.invoke(call, timeout=PATIENT)
+
+        assert returned is None, "no result is manufactured for a torn-down process"
+        assert appended(captured) == [{"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED}]
+        assert await completions(trail) == []
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    async def test_a_base_exception_from_the_callable_propagates_unchanged(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The path that **is** contracted, and it answers differently (ADR-0192 §3).
+
+        The callable is awaited **directly** and is not isolated in a task, so its
+        own ``KeyboardInterrupt`` propagates unchanged, asserted by class. A suite
+        omitting this would admit an implementation that had isolated the callable
+        too — the shape ADR-0031 §4 refused outright.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        invoker.register(tool(), Raiser(KeyboardInterrupt()))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with pytest.raises(KeyboardInterrupt):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert await completions(trail) == [], "no outcome is invented for one"
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    # --- ADR-0192 §1, §3: what the store already committed, stands ---------
+
+    async def test_a_claim_that_committed_and_then_raised_leaves_its_row_standing(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """No rollback is on offer, and none is faked (ADR-0192 §1, §6).
+
+        The row is durable before the failure reaches the frame. ``invoke``
+        observed no claim, so it enters no callable and attempts no completion —
+        and the committed row **stands**: nothing deleted, no compensating append,
+        no marker. Without this case a suite certifies an implementation that
+        cleans up after itself.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.error = RuntimeError("the connection dropped after the commit")
+        ledger.claim.commits = True
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with pytest.raises(AuditError):
+            await invoker.invoke(call, timeout=PATIENT)
+
+        assert spy.calls == [], "the callable is never entered"
+        assert ledger.completion.calls == 0, "no completion is attempted for a claim never observed"
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    async def test_a_completion_that_committed_and_then_raised_leaves_the_claim_closed(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The other side of the commit-state split, on the same clause.
+
+        A suite carrying only the failed-before-commit timing certifies an
+        implementation that tries to repair this one. What ``invoke`` returns is
+        decided independently of which side of the commit the failure landed on,
+        and the test asserts that too.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.error = RuntimeError("the connection dropped after the commit")
+        ledger.completion.commits = True
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 2}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.output == {"unread": 2}, "the outward answer is decided independently"
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.SUCCEEDED
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+        assert ledger.completion.calls == 1, "no compensating append and no second completion"
+
+    async def test_an_erasure_between_the_claim_and_its_completion_leaves_no_claim(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """``clear()`` wins over a write in flight (ADR-0192 §3, §6).
+
+        The call's own result stands, the refusal reaches the operator as a
+        diagnostic, and **nothing is recreated**: the "claim left open"
+        postcondition is not an obligation to put back a row the user destroyed on
+        purpose, which §6 names as the one answer no store may give.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.hold = asyncio.Event()
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy(output={"unread": 4}))
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+            await ledger.completion.entered.wait()
+            await trail.clear()
+            ledger.completion.hold.set()
+            result = await task
+
+        assert result.output == {"unread": 4}
+        assert appended(captured) == [
+            {
+                "operation": COMPLETION,
+                "fault_class": "InvalidCompletionError",
+                "outcome": ToolOutcome.SUCCEEDED,
+            }
+        ]
+        assert await rows(trail) == [], "nothing is recreated over an erased claim"
+
+    # --- ADR-0192 §1, §3: neither append is bounded, and both are shielded --
+
+    async def test_neither_append_is_bounded_by_the_seams_deadline(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """A lane that "helpfully" wraps either in a deadline breaks a clause here.
+
+        ``invoke`` is given a ``timeout`` far shorter than each barrier is held
+        for, and the **negative** is what is asserted while the barrier is held:
+        no return, no ``AuditError``, no diagnostic, no ``ToolResult``. Nothing
+        advances the ledger's clock, because that clock supplies instants and
+        nothing here is decided on a duration at all — the determinism comes from
+        the ordering the barrier fixes.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(read_only("inbox"), spy)
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        held = asyncio.create_task(invoker.invoke(call, timeout=BRIEF))
+        await ledger.claim.entered.wait()
+        await _settled()
+
+        assert not held.done(), "the claim append outlasts the call's deadline"
+        assert spy.calls == []
+
+        ledger.claim.hold.set()
+        ledger.completion.hold = asyncio.Event()
+        await ledger.completion.entered.wait()
+        await _settled()
+
+        assert not held.done(), "the completion append outlasts it too"
+        assert len(spy.calls) == 1, "the callable has run and its result is computed"
+
+        ledger.completion.hold.set()
+        result = await held
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert len(await completions(trail)) == 1
+
+    async def test_two_cancellations_during_the_claim_append_do_not_lose_the_claim(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The shield, and ADR-0192 §1's clause on a cancellation before the callable.
+
+        One cancellation is passed by an implementation that shields the first
+        await and then awaits the retained task bare, so two are delivered and the
+        test asserts ``invoke`` was still waiting after the second. Four things
+        follow once the append lands: the callable is **never entered**; the
+        completion carrying what ADR-0029 §4 computes for that cancellation is
+        **durably appended**; **no claim is left open**; and the
+        ``CancelledError`` still reaches the caller, with the task ending
+        cancelled (ADR-0060 §1).
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await ledger.claim.entered.wait()
+        for _ in range(2):
+            task.cancel()
+            await _settled()
+            assert not task.done(), "absorbing exactly one cancellation is a failure"
+
+        ledger.claim.hold.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert spy.calls == [], "the callable is never entered"
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert completion.failure_kind is None
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_two_cancellations_during_a_failing_completion_carry_its_failure_out(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The shield on the *second* append, which §3 puts on each and not the first.
+
+        An implementation can shield the claim robustly and then await the
+        retained completion task bare, losing the append's real failure to the
+        cancellation ADR-0054 permits the store to re-raise in its place — and
+        reporting neither the fault nor the open claim. Here the cancellation is
+        what leaves, carrying the append's failure as its ``__cause__``, the
+        diagnostic is emitted, and the claim is left open.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.completion.hold = asyncio.Event()
+        failure = RuntimeError("the worker failed")
+        ledger.completion.error = failure
+        invoker = consuming(ledger)
+        invoker.register(read_only("inbox"), Spy())
+        call = call_for(read_only("inbox"))
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+            await ledger.completion.entered.wait()
+            for _ in range(2):
+                task.cancel()
+                await _settled()
+                assert not task.done(), "absorbing exactly one cancellation is a failure"
+
+            ledger.completion.hold.set()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await task
+
+        assert caught.value.__cause__ is failure
+        assert task.cancelled()
+        assert appended(captured) == [
+            {
+                "operation": COMPLETION,
+                "fault_class": "RuntimeError",
+                "outcome": ToolOutcome.SUCCEEDED,
+            }
+        ]
+        assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1

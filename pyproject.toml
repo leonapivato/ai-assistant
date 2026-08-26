@@ -1280,6 +1280,7 @@ source_modules = [
     "ai_assistant.tools._transactions",
     "ai_assistant.tools.builtin",
     "ai_assistant.tools.connection_store",
+    "ai_assistant.tools.consume",
     "ai_assistant.tools.destinations",
     "ai_assistant.tools.egress_binder",
     "ai_assistant.tools.egress_declaration",
