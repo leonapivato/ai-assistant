@@ -959,43 +959,74 @@ class ToolInvokerContract:
         assert result.failure.kind is ToolFailureKind.INTERNAL
         assert result.failure.kind.retryable is False
 
-    async def test_a_tool_whose_exception_refuses_to_be_named_is_still_an_internal_result(
-        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    @pytest.mark.parametrize(
+        "hostile",
+        ["raises", "cancels", "str-subclass", "unrepresentable"],
+    )
+    async def test_a_tool_whose_exception_class_is_hostile_is_still_an_internal_result(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry], hostile: str
     ) -> None:
-        """ADR-0029 §3's rule has to survive the class the tool chose.
+        """ADR-0029 §3's rule has to survive the class the *tool* chose.
 
         A broken tool becomes a ``ToolResult``, not an exception — and the seam
-        builds that result by naming the exception's class. The name is read from
-        an object the *tool* controls: a metaclass may override the ``__name__``
-        access and raise. Unguarded, that read escapes **after** the claim, so
-        ``invoke`` raises the metaclass's exception, ADR-0192 §3 gets no
-        completion for a claim it already appended, and a known-failed act
-        permanently spends its authorisation with the failure lost as data.
+        builds that result by naming the exception's class. Everything about that
+        name comes from an object the tool controls, and this runs **after** the
+        claim, so each way it can misbehave has the same two consequences:
+        ``invoke`` leaves without a ``ToolResult``, and ADR-0192 §3 gets no
+        completion for a claim it already appended — a known-failed act
+        permanently spending its authorisation with its failure lost as data.
 
-        So the class is read once and totally, and where no name comes back the
-        result carries ``core``'s own reserved literal — the same shape ADR-0192
-        §3 gives a fault class that cannot be represented, rather than one
-        invented for the position. The completion is written either way, which is
-        the assertion that matters: the claim does not stay open.
+        The four arms are the four ways it misbehaves.
+
+        - ``raises`` — the ``__name__`` access raises an ``Exception``.
+        - ``cancels`` — it raises a ``CancelledError`` instead. Nothing was
+          cancelled: this branch has already established that (ADR-0029 §4), and
+          the read is synchronous, so delivering it would report a cancellation
+          nobody asked for **and** leave the claim open. ADR-0031 §2 calls an
+          invented one exactly that, and §4 makes it ``INTERNAL``.
+        - ``str-subclass`` — the access returns a ``str`` subclass whose
+          ``__format__`` raises, so the *message* build is where the frame is
+          lost rather than the read.
+        - ``unrepresentable`` — the name is a valid string carrying content. It
+          reaches a ``ToolFailure.message`` and a log, and ADR-0004 §5 rules a log
+          Tier 2 only, so a class named after a recipient is a disclosure on the
+          failure path of every tool nobody thought about.
+
+        In all four the answer is the same, and it is ``core``'s own reserved
+        literal rather than one invented at this seam.
         """
+        sentinel = "recipient@example.com"
 
-        class Unnameable(type):
-            """Refuses to be named, with an ``Exception`` the guard catches."""
+        class Formatting(str):
+            """A name that passes every check and then runs its own code."""
+
+            def __format__(self, spec: str) -> str:
+                msg = "the name refuses to be rendered"
+                raise RuntimeError(msg)
+
+        class Named(type):
+            """A metaclass that misbehaves on the ``__name__`` access."""
 
             def __getattribute__(cls, name: str) -> object:
                 if name == "__name__":
-                    msg = "the metaclass refuses to be named"
-                    raise RuntimeError(msg)
+                    if hostile == "raises":
+                        msg = "the metaclass refuses to be named"
+                        raise RuntimeError(msg)
+                    if hostile == "cancels":
+                        raise asyncio.CancelledError
+                    if hostile == "str-subclass":
+                        return Formatting("RuntimeError")
+                    return sentinel
                 return super().__getattribute__(name)
 
         trail = FakeAuditTrail()
         invoker = consuming(trail)
-        hostile = Unnameable("Hostile", (RuntimeError,), {})("upstream said no")
-        invoker.register(read_only("inbox"), Raiser(hostile))
+        invoker.register(read_only("inbox"), Raiser(Named("H", (RuntimeError,), {})("upstream")))
         call = call_for(read_only("inbox"))
         await trail.record(call.decision)
 
-        result = await invoker.invoke(call, timeout=PATIENT)
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
 
         assert result.outcome is ToolOutcome.FAILED
         assert result.failure is not None
@@ -1003,6 +1034,7 @@ class ToolInvokerContract:
         assert result.failure.message == (
             f"{UNREPRESENTABLE_FAULT_CLASS} escaped tool {read_only('inbox').id!r}"
         )
+        assert sentinel not in repr(captured), "a class name is as attacker-controlled as a message"
         assert await trail.open_invocations(decision_id=call.decision.id) == [], (
             "the completion is written, so the claim does not stay open"
         )

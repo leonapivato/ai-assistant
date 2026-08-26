@@ -411,22 +411,25 @@ def _expired(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
     )
 
 
-def _class_name(exc: BaseException) -> str:
-    """``type(exc).__name__``, or the reserved literal where the read fails.
+_INVENTED_CANCELLATION = "CancelledError"
 
-    Total, and read after the claim: see `ai_assistant.tools.invocation`. A
-    metaclass raising on the name access would otherwise leave the frame in place
-    of the ``ToolResult``, with a claim appended and no completion owed to it.
-    The guard stops at ``Exception``, so a ``CancelledError`` raised by the read
-    is delivered onward (ADR-0060 §1).
+
+def _fault_class(exc: BaseException) -> str:
+    """Name the exception's class, totally, and with nothing the tool controls.
+
+    See `ai_assistant.tools.invocation` for the whole of it. Read after the claim,
+    so an unguarded read would leave the frame in place of the ``ToolResult``;
+    classified by ``core``'s own ``fault_class_of``, so an attacker-controlled
+    name cannot reach a message or a log; a ``CancelledError`` from the read is
+    invented with nothing cancelled and is swallowed rather than delivered; and
+    the result must be an exact ``str``, because a subclass's ``__format__`` runs
+    when the message is built.
     """
     try:
-        name = type(exc).__name__
-    # A blind `except Exception` on purpose — `BaseException` is deliberately not
-    # caught.
-    except Exception:
+        fault = fault_class_of(exc) if isinstance(exc, Exception) else _INVENTED_CANCELLATION
+    except asyncio.CancelledError:
         return UNREPRESENTABLE_FAULT_CLASS
-    return name if isinstance(name, str) else UNREPRESENTABLE_FAULT_CLASS
+    return fault if type(fault) is str else UNREPRESENTABLE_FAULT_CLASS
 
 
 def _internal(definition: ToolDefinition, exc: BaseException) -> ToolResult:
@@ -435,7 +438,7 @@ def _internal(definition: ToolDefinition, exc: BaseException) -> ToolResult:
         outcome=ToolOutcome.FAILED,
         failure=ToolFailure(
             kind=ToolFailureKind.INTERNAL,
-            message=f"{_class_name(exc)} escaped tool {definition.id!r}",
+            message=f"{_fault_class(exc)} escaped tool {definition.id!r}",
         ),
     )
 
