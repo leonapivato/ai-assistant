@@ -1304,6 +1304,23 @@ const PARK_REFUSAL_NOT_KNOWN =
   "Nothing was re-sent and nothing was cancelled. " +
   PARK_ROUTE_BACK;
 
+// **A reply that was read and carries no outcome** (round 9), which is round 8's
+// blocker one step in: `asObject` answers `{}` for a `2xx` body that parsed to
+// something that is not an object, and a well-formed object may still be missing
+// `outcome` — a proxy-substituted or truncated-then-reassembled `200` is the reachable
+// case, the same one round 6 admitted for a refusal.
+//
+// A read response is not by itself a landed one, and this is the arm where the page
+// read a response and still cannot say what happened: ADR-0177 §7's third clause sorts
+// a *refusal* into landed or not-known, and says nothing that turns an unreadable
+// success into a resolution. ADR-0139 §4's third outcome is what this is.
+const PARK_REPLY_UNREADABLE =
+  "The gateway answered that request and the answer carried no outcome this browser " +
+  "could read. So what became of the park is not known: the action may have been " +
+  "carried out, with only the account of it lost. " +
+  "Nothing was re-sent and nothing was cancelled. " +
+  PARK_ROUTE_BACK;
+
 // **The same ending, reached without the owner asking for it**, which is round 4's
 // first blocker. A `fetch` that rejects is the browser's own request failing with no
 // response read — ADR-0177 §7's fourth clause exactly, "the request was sent and no
@@ -1728,7 +1745,28 @@ async function answerConfirmation(token, approved, stopping) {
     spent.delete(token);
     return;
   }
-  renderOutcome(body.outcome, chosenAt);
+  // **What was read has to be an outcome before it is rendered as one** (round 9).
+  // `renderOutcome(undefined, …)` throws on `outcome.capture_degraded`, and it throws
+  // *outside* the `try` above: the token stayed `spent` and never `unresolved`, the
+  // row's `finally` cleared `answering`, and every row of the park then read "That park
+  // has been answered from this page" for an outcome nothing had read. That is the
+  // resolution ADR-0139 §4 forbids, reached through the last door in this function.
+  //
+  // The check is the shape and not the members, because a body carrying an outcome this
+  // page renders badly is a different failure from one carrying no outcome at all.
+  //
+  // `ask` and `askStreaming` reach `renderOutcome` the same unchecked way and are left
+  // alone here: neither spends a consent token, so a throw there is a console error and
+  // a panel that does not update rather than a park falsely reported as resolved. Still
+  // wrong, and filed as #1622 rather than absorbed.
+  const outcome = body.outcome;
+  if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome)) {
+    unresolved.add(token);
+    readPending(false);
+    fault(PARK_REPLY_UNREADABLE, "confirmations");
+    return;
+  }
+  renderOutcome(outcome, chosenAt);
   // Read again, and **after** the guard on this token has done its work rather than
   // inside it: this is the best-effort tidy-up of what is left on screen, and no other
   // park's answer waits on it.

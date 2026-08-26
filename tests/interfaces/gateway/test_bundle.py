@@ -4246,10 +4246,10 @@ def test_a_listing_read_never_re_offers_a_park_whose_answer_is_unaccounted_for()
     # builds a row from one, and not anywhere else in the page.
     assert "unresolved.delete" not in script
     assert "spent.delete" not in offer
-    # Two writes and no delete at all: the two endings that read no reply, and the
-    # refusal the gateway answered whose condition ADR-0177 §7's third clause still
-    # makes not known.
-    assert len(re.findall(r"unresolved\.add\(", script)) == 2
+    # Three writes and no delete at all: the two endings that read no reply, the refusal
+    # the gateway answered whose condition ADR-0177 §7's third clause still makes not
+    # known, and the ``2xx`` whose body carried no outcome (round 9).
+    assert len(re.findall(r"unresolved\.add\(", script)) == 3
     # The single ``spent.delete`` is the one ending that is known *not* to have landed —
     # a refusal the gateway named and this page can read — and it lives in the relay,
     # never in the render.
@@ -4485,6 +4485,50 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     assert 'const named = typeof body.fault === "string";' in functions[_ACT_SITE]
 
 
+def test_a_read_reply_carrying_no_outcome_resolves_nothing() -> None:
+    """Round 9's blocker: round 8's, one step in.
+
+    ``asObject`` answers ``{}`` for a ``2xx`` body that parsed to something that is not
+    an object, and a well-formed object may still be missing ``outcome`` — a
+    proxy-substituted or reassembled ``200`` is the reachable case, the same one round 6
+    admitted for a refusal. ``renderOutcome(undefined, …)`` then throws on
+    ``outcome.capture_degraded``, **outside** this function's ``try``: the token stayed
+    ``spent`` and never ``unresolved``, the row's ``finally`` cleared ``answering``, and
+    every row of the park read "That park has been answered from this page" for an
+    outcome nothing had read.
+
+    A read response is not by itself a landed one. ADR-0177 §7's third clause sorts a
+    *refusal* into landed or not-known and says nothing that turns an unreadable success
+    into a resolution, so ADR-0139 §4's third outcome is what this is — and the ending
+    is the one every other not-known arm takes: the token is recorded unresolved, the
+    listing is re-read without being waited on, and the fault slot names the cause.
+    """
+    script = _code("app.js")
+    answering = _functions(script)["answerConfirmation"]
+
+    guard = 'if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome)) {'
+    assert guard in answering
+    # It stands between the refusal branch and the render, so nothing reaches
+    # ``renderOutcome`` without having been checked.
+    assert answering.index(guard) < answering.index("renderOutcome(outcome, chosenAt);")
+    assert "renderOutcome(body.outcome" not in answering
+    # And the ending is the not-known one, in the order every other arm uses.
+    taken = answering[answering.index(guard) :]
+    for step in ("unresolved.add(token);", "readPending(false);", "PARK_REPLY_UNREADABLE"):
+        assert step in taken.split("renderOutcome(outcome")[0], step
+
+    # Its own sentence, because the cause is its own: the gateway answered, and what it
+    # answered with carried nothing this page could read.
+    said = _constant(script, "PARK_REPLY_UNREADABLE")
+    assert "carried no outcome this browser" in said
+    assert "not known" in said
+    assert "Nothing was re-sent and nothing was cancelled." in said
+    assert said.rstrip().endswith("PARK_ROUTE_BACK")
+    # It does not borrow a cause it has not established.
+    for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
+        assert attributed not in said, attributed
+
+
 def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
     """Round 5's second finding: a row is re-rendered long after the ending, so the
     sentence it carries cannot be the one that names what happened.
@@ -4509,8 +4553,13 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
     # Cause-neutral: none of the three endings' own openings appears in it.
     for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
         assert attributed not in neutral, attributed
-    # And the three that *do* name a cause reach the owner through the fault slot only,
+    # And the four that *do* name a cause reach the owner through the fault slot only,
     # never through a row that outlives the ending.
-    for named in ("PARK_UNRESOLVED", "PARK_LOST", "PARK_REFUSAL_NOT_KNOWN"):
+    for named in (
+        "PARK_UNRESOLVED",
+        "PARK_LOST",
+        "PARK_REFUSAL_NOT_KNOWN",
+        "PARK_REPLY_UNREADABLE",
+    ):
         assert named not in words, named
         assert named in _functions(script)["answerConfirmation"], named
