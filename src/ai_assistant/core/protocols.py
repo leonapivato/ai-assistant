@@ -3323,8 +3323,12 @@ class ActionPolicy(Protocol):
     (a) as licence to relax the rule on ``resolve``. It is not a refusal: the call
     is still put to the user, with the fact in front of them (ADR-0181 §6), which is
     the containment #668 asks for. And no implementation acquires a trail read, a
-    store handle or a grant seam in order to discharge it — ADR-0097 §7 forbids the
-    last of those outright.
+    store handle or a grant seam **in order to discharge it** — ADR-0097 §7 forbids
+    consulting either *source*-grant seam outright, and the
+    :class:`RecipientGrants` a policy may hold under ADR-0193 §7 is not an
+    exception to this sentence: ``covering`` does not read
+    ``planned_with_external_content`` at all, so this obligation is discharged from
+    the request and never from that seam.
 
     Within those floors an implementation may be arbitrarily permissive: a
     policy returning ``CONFIRM`` for everything and one returning ``ALLOW`` for
@@ -3338,10 +3342,16 @@ class ActionPolicy(Protocol):
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         """Rule on ``request``.
 
-        Must return ``authorised_by is None`` from a policy constructed with no
-        authorisation source — today that is *every* policy, since standing
-        grants are deferred, so no conforming implementation can invent an
-        authorisation while ruling on a fresh request.
+        Must return ``authorised_by is None`` — and ``authorised_subject is
+        None`` with it — from a policy constructed with **no** authorisation
+        source, so no such implementation can invent an authorisation while
+        ruling on a fresh request. A policy constructed **with** a
+        :class:`RecipientGrants` may set both, and only to the ``id`` and the
+        recomputed ``subject_digest`` of a grant it read from that seam and found
+        covering under ADR-0193 §3; that is the condition ADR-0021 §3's own
+        bullet contemplates, and ADR-0193 §7 fixes what such a policy may do with
+        the seam — one read per ruling, after every ground the request alone
+        settles, failing closed on a fault and caching nothing between rulings.
 
         **It returns no ``ALLOW`` at all on a request whose ``egress_binding``
         carries ``planned_with_external_content``** (ADR-0181 §5's third clause).
