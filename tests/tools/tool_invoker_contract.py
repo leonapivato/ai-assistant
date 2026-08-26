@@ -1563,12 +1563,20 @@ class ToolInvokerContract:
         await trail.record(call.decision)
 
         returned: ToolResult | None = None
-        # ADR-0192 §3 leaves the outward class of a `BaseException` raised inside a
-        # retained append uncontracted, so nothing here names one.
-        with structlog.testing.capture_logs() as captured, contextlib.suppress(BaseException):
-            returned = await invoker.invoke(call, timeout=PATIENT)
+        raised: BaseException | None = None
+        with structlog.testing.capture_logs() as captured:
+            try:
+                returned = await invoker.invoke(call, timeout=PATIENT)
+            except BaseException as exc:
+                # Captured rather than named: ADR-0192 §3 leaves the outward class
+                # of a `BaseException` raised inside a retained append
+                # uncontracted, so nothing here asserts one. That it *left* is a
+                # different claim and is asserted — absorbing a `KeyboardInterrupt`
+                # into a returned `None` would pass a suppression alone.
+                raised = exc
 
-        assert returned is None, "no result is manufactured for a torn-down process"
+        assert raised is not None, "a torn-down process is not absorbed"
+        assert returned is None, "no result is manufactured for one"
         assert appended(captured) == [{"operation": COMPLETION, "outcome": ToolOutcome.SUCCEEDED}]
         assert await completions(trail) == []
         assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
@@ -1848,6 +1856,44 @@ class ToolInvokerContract:
         assert completion.outcome is ToolOutcome.INDETERMINATE
         assert completion.failure_kind is None
         assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_cancellation_during_a_failing_claim_carries_its_failure_out(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The **append-fails** twin of the append-lands case, and the exits differ.
+
+        There the append succeeded, so a completion is owed and its absence is the
+        defect. Here ``invoke`` observed **no** claim, so it enters no callable and
+        completes nothing — and the cancellation is delivered onward **whatever
+        the append did** (ADR-0060 §1): the append's failure does not stand in its
+        place, it is attached as the cause and reaches the operator through the
+        diagnostic. An implementation can pass either case and fail the other.
+        """
+        trail = FakeAuditTrail()
+        ledger = DrivenLedger(trail)
+        ledger.claim.hold = asyncio.Event()
+        failure = RuntimeError("the store would not write")
+        ledger.claim.error = failure
+        invoker = consuming(ledger)
+        spy = Spy()
+        invoker.register(tool(), spy)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+            await ledger.claim.entered.wait()
+            task.cancel()
+            await _settled()
+            ledger.claim.hold.set()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await task
+
+        assert caught.value.__cause__ is failure, "the append failure never stands in its place"
+        assert task.cancelled()
+        assert spy.calls == [], "the callable is never entered"
+        assert ledger.completion.calls == 0, "no completion is attempted for a claim never observed"
+        assert appended(captured) == [{"operation": CLAIM, "fault_class": "RuntimeError"}]
 
     async def test_two_cancellations_during_a_failing_completion_carry_its_failure_out(
         self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]

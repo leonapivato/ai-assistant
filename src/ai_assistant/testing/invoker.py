@@ -278,9 +278,13 @@ class FakeToolInvoker:
             )
             raise ToolBindingError(msg)
 
-        self.invocations.append(checked)
-
         async def act() -> ToolResult:
+            # Recorded **after** the claim is accepted and immediately before the
+            # callable, because this list is what a consumer's test reads to prove
+            # that nothing was accepted when a call was refused (ADR-0192 §1). A
+            # call the ledger refused reached no callable, so it belongs here as
+            # little as one the three checks refused.
+            self.invocations.append(checked)
             return await self._run(binding, checked, timeout)
 
         if self._ledger is None:

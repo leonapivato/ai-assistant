@@ -26,9 +26,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 from egress_transport_harness import arguments, binding
-from tool_invoker_contract import PATIENT, DrivenLedger, Spy, call_for, rows, tool
+from tool_invoker_contract import (
+    PATIENT,
+    DrivenLedger,
+    Spy,
+    call_for,
+    keyed,
+    rows,
+    tool,
+)
 
-from ai_assistant.core.errors import ToolBindingError
+from ai_assistant.core.errors import AuthorisationSpentError, ToolBindingError
 from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
@@ -37,6 +45,8 @@ from ai_assistant.core.types import (
     PermissionRuling,
     ToolCall,
     ToolCost,
+    ToolFailure,
+    ToolFailureKind,
     ToolOutcome,
     ToolResult,
 )
@@ -219,3 +229,91 @@ async def test_the_callables_shape_is_resolved_once_and_never_read_after_the_cla
     assert shifty.calls == 1, "the shape resolved before the claim is the one that ran"
     assert [each.completes is not None for each in await rows(trail)].count(True) == 1
     assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+
+def unavailable() -> ToolResult:
+    """A ``FAILED`` result whose kind is a **retryable** one (ADR-0029 §5)."""
+    return ToolResult(
+        outcome=ToolOutcome.FAILED,
+        failure=ToolFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down"),
+    )
+
+
+async def test_a_retryable_failure_on_a_spendable_keyed_call_admits_the_retry() -> None:
+    """ADR-0192 §9's retry arm, driven at the boundary where it is constructible.
+
+    **Not through ``invoke``, and that is a property of the tree rather than a
+    choice.** The seam produces exactly two failure shapes: a raising callable
+    becomes ``FAILED``/``INTERNAL``, which is not retryable, and an expired
+    deadline becomes ``interrupted_outcome``/``TIMED_OUT`` — and
+    ``interrupted_outcome`` is ``FAILED`` exactly when the tool is **not**
+    *spendable*, the precise complement of §1's discriminator. So on a spendable
+    authorisation the deadline always yields ``INDETERMINATE``, which spends, and
+    "a retryable ``FAILED`` on a spendable ``KEYED`` authorisation" has no
+    producer until #1558 lands a carrier that lets an integration report its own
+    kind. Filed as #1583.
+
+    What is constructible is the boundary ADR-0192 §5 and §2 actually decide, and
+    it carries the whole of what §9's clause is for: the kind is **transcribed**
+    onto the completion rather than dropped, and the ledger then admits a further
+    claim inside the window. An implementation dropping ``failure_kind`` for a
+    keyed side-effecting ``FAILED`` produces a valid kindless completion that
+    silently refuses a legitimate retry as spent — which this case fails on.
+    """
+    trail = FakeAuditTrail()
+    call = call_for(keyed())
+    await trail.record(call.decision)
+
+    async def act() -> ToolResult:
+        return unavailable()
+
+    first = await consume.consumed_call(
+        ledger=trail, definition=keyed(), decision=call.decision, act=act
+    )
+
+    assert first.outcome is ToolOutcome.FAILED
+    (completion,) = [each for each in await rows(trail) if each.completes is not None]
+    assert completion.outcome is ToolOutcome.FAILED
+    assert completion.failure_kind is ToolFailureKind.UNAVAILABLE, "the kind is not dropped"
+    assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    # §1's conjunction is satisfied — no claim open, none carrying `SUCCEEDED` or
+    # `INDETERMINATE`, the last completed `FAILED` with a retryable kind, `KEYED`,
+    # inside the window — so the further claim is admitted.
+    await consume.consumed_call(ledger=trail, definition=keyed(), decision=call.decision, act=act)
+
+    assert len([each for each in await rows(trail) if each.completes is None]) == 2
+
+
+async def test_the_same_sequence_refuses_the_retry_where_the_completion_did_not_commit() -> None:
+    """The twin, differing in **one fact**: whether the completion append landed.
+
+    ADR-0192 §1 states it positively rather than leaving it to be composed out of
+    the conjunction — an open claim refuses a further act, so completion
+    durability is a third prerequisite for ADR-0029 §5's retry. Both of §5's own
+    conditions hold here and the retry is nonetheless refused, twice over: a claim
+    under that decision is open, and the last claim in the append order is that
+    same open one and so is not completed ``FAILED`` at all.
+    """
+    trail = FakeAuditTrail()
+    ledger = DrivenLedger(trail)
+    ledger.completion.error = RuntimeError("the store would not write")
+    call = call_for(keyed())
+    await trail.record(call.decision)
+
+    async def act() -> ToolResult:
+        return unavailable()
+
+    returned = await consume.consumed_call(
+        ledger=ledger, definition=keyed(), decision=call.decision, act=act
+    )
+
+    assert returned.outcome is ToolOutcome.FAILED, "the act's own result stands"
+    assert len(await trail.open_invocations(decision_id=call.decision.id)) == 1
+
+    with pytest.raises(AuthorisationSpentError):
+        await consume.consumed_call(
+            ledger=ledger, definition=keyed(), decision=call.decision, act=act
+        )
+
+    assert len(await rows(trail)) == 1, "one claim, still open, and no completion"
