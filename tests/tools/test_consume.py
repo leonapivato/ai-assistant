@@ -20,6 +20,7 @@ only *this* one can be held to, or what ``invoke``'s own surface cannot reach:
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -160,3 +161,61 @@ def test_the_two_copies_of_the_diagnostics_vocabulary_agree() -> None:
         fake_invoker.COMPLETION,
         fake_invoker.APPEND_FAILED,
     )
+
+
+class Shifty:
+    """An ordinary callable that acquires the **egress** shape mid-claim.
+
+    ``EgressToolImplementation`` is ``runtime_checkable``, so the shape is an
+    attribute an object can grow while the seam is awaiting something — which is
+    the only way a second reading of it could disagree with the first.
+    """
+
+    def __init__(self) -> None:
+        """Start out as an ordinary callable."""
+        self.calls = 0
+
+    async def __call__(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+    ) -> FrozenJson:
+        """Record the entry and succeed."""
+        self.calls += 1
+        return None
+
+    def become_an_egress_callable(self) -> None:
+        """Grow ``invoke_bound``, so a later ``isinstance`` reads a different shape."""
+        self.invoke_bound = self.__call__
+
+
+async def test_the_callables_shape_is_resolved_once_and_never_read_after_the_claim() -> None:
+    """ADR-0192 §1's property, tested against the only thing that can falsify it.
+
+    "After the claim, ``invoke`` performs no check that can raise a seam fault" is
+    stated as a **property, not a list**, so it is not enough that no *ordinary*
+    input reaches a post-claim check. Here the callable grows ``invoke_bound``
+    while the claim append is held: a seam that read the shape again would raise
+    ``ToolBindingError`` after the claim — an exit ADR-0029 computes no outcome
+    for, leaving the claim open under a step ADR-0034 §1 commits ``FAILED`` and no
+    scan ever returns for.
+    """
+    trail = FakeAuditTrail()
+    ledger = DrivenLedger(trail)
+    ledger.claim.hold = asyncio.Event()
+    shifty = Shifty()
+    registry = InMemoryToolRegistry([(tool(), shifty)], ledger=ledger)
+    call = call_for(tool())
+    await trail.record(call.decision)
+
+    task = asyncio.create_task(registry.invoke(call, timeout=PATIENT))
+    await ledger.claim.entered.wait()
+    shifty.become_an_egress_callable()
+    ledger.claim.hold.set()
+    result = await task
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert shifty.calls == 1, "the shape resolved before the claim is the one that ran"
+    assert [each.completes is not None for each in await rows(trail)].count(True) == 1
+    assert await trail.open_invocations(decision_id=call.decision.id) == []
