@@ -719,9 +719,16 @@ exception value.
 """
 
 
-def _attach_cause(exception: BaseException, cause: BaseException) -> None:
-    """Attach ``cause`` to ``exception`` without entering the object's own code."""
+def _attach_cause(exception: BaseException, cause: BaseException) -> bool:
+    """Attach ``cause`` to ``exception``, and answer whether it now holds it.
+
+    See ``ai_assistant.tools.consume``. The write enters none of the object's own
+    code but can *release* some — a displaced cause finalised by this very write
+    can reclaim the slot from its ``__del__`` — so the slot is read back through
+    the same descriptor, and a ``False`` answer is final.
+    """
     _CAUSE_SLOT.__set__(exception, cause)
+    return _CAUSE_SLOT.__get__(exception) is cause
 
 
 def _cancellation(reason: str, cause: BaseException | None) -> asyncio.CancelledError:
@@ -827,8 +834,15 @@ async def _consumed_call(
         # completion that failed. `_attach_cause` writes through
         # `BaseException`'s own descriptor rather than assigning the attribute,
         # so a tool's `__setattr__` or `__cause__` property never runs.
-        _attach_cause(cancellation, appended.failure)
-        raise
+        if _attach_cause(cancellation, appended.failure):
+            raise
+        # The write landed and was then reclaimed by the displaced cause's own
+        # finaliser — see `ai_assistant.tools.consume`. A cancellation this seam
+        # owns carries the failure instead.
+        raise _cancellation(  # noqa: B904 — the cause is the append failure, deliberately
+            "the invoking task was cancelled while the tool was running",
+            appended.failure,
+        )
 
     appended = await _complete(
         ledger,

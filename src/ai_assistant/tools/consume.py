@@ -377,9 +377,30 @@ can prevent, and the failure is attached either way.
 """
 
 
-def _attach_cause(exception: BaseException, cause: BaseException) -> None:
-    """Attach ``cause`` to ``exception`` without entering the object's own code."""
+def _attach_cause(exception: BaseException, cause: BaseException) -> bool:
+    """Attach ``cause`` to ``exception``, and answer whether it now holds it.
+
+    The write itself enters none of the object's own code. It can still *release*
+    some: the slot held a reference, and ``PyException_SetCause`` stores the new
+    value and only then drops the old one, so a displaced cause whose last
+    reference this was is finalised **after** the write has landed. A ``__del__``
+    the tool wrote can write the slot again from there, and what the caller would
+    then receive is the tool's value in place of the ledger's failure — silently,
+    because the assignment did exactly what it was asked to.
+
+    So the slot is read back, through the same descriptor the write went through:
+    the answer is what the seam observed, and no ``__cause__`` a subclass declares
+    is consulted for either half. A second write would not help — the value that
+    reclaimed the slot can carry a finaliser too — so a ``False`` answer is final,
+    and the caller decides what to raise instead.
+
+    Where the displaced cause is referenced elsewhere, this write does not finalise
+    it and nothing here is triggered; a tool that still holds its own exception can
+    mutate it whenever it likes, and no seam that hands an object back can prevent
+    that.
+    """
     _CAUSE_SLOT.__set__(exception, cause)
+    return _CAUSE_SLOT.__get__(exception) is cause
 
 
 def _cancellation(reason: str, cause: BaseException | None) -> asyncio.CancelledError:
@@ -544,8 +565,18 @@ async def consumed_call(
         # nothing loses the failure while looking correct. `_attach_cause` runs
         # none of it, writing through `BaseException`'s own descriptor into a slot
         # no subclass can shadow.
-        _attach_cause(cancellation, appended.failure)
-        raise
+        if _attach_cause(cancellation, appended.failure):
+            raise
+        # The write landed and was then reclaimed — the displaced cause's own
+        # finaliser put the tool's value back. Identity is worth less than the
+        # failure: a cancellation this seam owns carries it instead, which is
+        # ADR-0060 §1's requirement that *a* cancellation reach the caller and
+        # §3's that it carry the append's failure, both satisfied by an object
+        # whose slot no collaborator has ever held.
+        raise _cancellation(  # noqa: B904 — the cause is the append failure, deliberately
+            "the invoking task was cancelled while the tool was running",
+            appended.failure,
+        )
 
     appended = await _complete(
         ledger,
