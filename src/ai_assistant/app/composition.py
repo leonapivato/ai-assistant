@@ -653,6 +653,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # two registries one seam over.
         trail = SqliteAuditTrail(
             path=directory / "audit.db",
+            # **The clock is injected here**, which ADR-0194 §5 names alongside the
+            # five settings as this root's own obligation. Left to the store's
+            # default it would be a clock this layer neither chose nor could
+            # substitute — and this is the same `_utcnow` every other seam here is
+            # given, so the instant that stamps an invocation row and the instant
+            # that selects its calendar period are read through one function.
+            now=_utcnow,
             spend=SpendConfiguration(
                 currency=settings.world_spend_currency,
                 day_ceiling=settings.world_spend_day_ceiling,

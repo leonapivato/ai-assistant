@@ -24,6 +24,8 @@ from ai_assistant.core.errors import (
     AuditError,
     AuthorisationSpentError,
     PlanningError,
+    SpendCeilingError,
+    SpendUndeterminedError,
     ToolBindingError,
     UnrecordedAuthorisationError,
 )
@@ -42,6 +44,7 @@ from ai_assistant.core.types import (
     Provenance,
     Reversibility,
     RiskLevel,
+    SpendAdmissionHandle,
     StepExecution,
     StepStatus,
     ToolCall,
@@ -578,6 +581,110 @@ async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -
     state = await a_claimed_execution(store)
     seam = FakeToolInvoker(
         [(tool("other"), Spy())], ledger=_AdmittingLedger(), gate=FakeAuditTrail()
+    )
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.failure is not None
+    assert "someone@example.com" not in step.failure.message
+
+
+# --- ADR-0194 §4, §11: a spend refusal is the same pre-callable exit -----
+
+
+class _RefusingGate:
+    """A ``SpendGate`` that refuses every admission with one scripted exception."""
+
+    def __init__(self, refusal: BaseException) -> None:
+        """Refuse with ``refusal`` and count what was asked of this holder."""
+        self._refusal = refusal
+        self.asked = 0
+        self.released: list[SpendAdmissionHandle] = []
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Refuse, having recorded that the seam reached the gate at all."""
+        del estimate
+        self.asked += 1
+        raise self._refusal
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Retire ``handle``; this holder never delivered one."""
+        self.released.append(handle)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        SpendCeilingError("the projected total 101 crosses the CALENDAR_DAY ceiling of 100"),
+        SpendUndeterminedError("the CALENDAR_DAY period could not be measured"),
+    ],
+    ids=["ceiling", "undetermined"],
+)
+async def test_a_spend_refusal_is_committed_failed_and_not_re_driven(
+    refusal: BaseException,
+) -> None:
+    """ADR-0194 §4: an exit **before the callable is entered**, so ADR-0034 §1's window.
+
+    "The executor commits ``RUNNING → FAILED`` and never retries, **on the window
+    and not on a list of classes**" — which is exactly why this is driven rather
+    than inferred from the binding case above: the executor's rule is over the
+    window, and a regression that let either class propagate uncommitted would
+    strand the step until recovery, which would then record ``INDETERMINATE``
+    about a call the ceiling stopped before any callable existed.
+
+    Both classes are driven, because §4 keeps them apart precisely so that a
+    consumer can tell "you are over your ceiling" from "your spend could not be
+    measured" — and an executor branching on one would pass a single-class case.
+
+    The gate is asserted to have been **asked**, which is the control: a seam that
+    never consulted it would pass every assertion below by simply succeeding.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    gate = _RefusingGate(refusal)
+    seam = FakeToolInvoker([(tool(), implementation)], ledger=_AdmittingLedger(), gate=gate)
+
+    final = await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert gate.asked == 1, "the seam consulted the gate before the claim"
+    assert step.status is StepStatus.FAILED
+    assert step.attempts == 1, "a refused call is not re-claimed"
+    assert step.failure is not None
+    assert step.failure.kind is None, "no tool classified a seam refusal (ADR-0039 §3)"
+    assert step.finished_at is not None
+    assert implementation.calls == [], "the callable was never reached"
+    assert final.step(STEP) == step
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        SpendCeilingError("the projected total 101 crosses the CALENDAR_DAY ceiling of 100"),
+        SpendUndeterminedError("the CALENDAR_DAY period could not be measured"),
+    ],
+    ids=["ceiling", "undetermined"],
+)
+async def test_a_spend_refusal_records_nothing_the_executor_did_not_author(
+    refusal: BaseException,
+) -> None:
+    """ADR-0194 §4's payload-free rule surviving into the step a user reads.
+
+    The refusal "crosses the seam into the executor and reaches a step failure that
+    a user reads", and it is composed at a moment when the call's arguments are in
+    hand. ``StepFailure.message`` is Tier 2 text bound for a log (ADR-0004 §5), so
+    what must not be in it is the recipient the call carried.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = FakeToolInvoker(
+        [(tool(), Spy())], ledger=_AdmittingLedger(), gate=_RefusingGate(refusal)
     )
 
     await executor_over(store, seam).execute(
