@@ -55,7 +55,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
@@ -167,48 +167,109 @@ _WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', 
 #: conventional.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-# The columns beside the ``data`` blob exist only so SQLite can order, constrain
-# and narrow; the blob is the record. ``revokes`` is what the outstanding
-# anti-join reads, the two instant columns are what the liveness predicate reads,
-# and ``decided_at_us`` doubles as the ordering key ``recent`` and ``export``
-# share.
+# **The blob is the record, and every column that decides anything is derived
+# from it** (ADR-0193 §1). ``id`` and ``revokes`` are ``GENERATED ALWAYS`` from the
+# JSON, which is ``SqliteAuditTrail``'s shape for the ``invocations`` table one
+# module over and is taken for its reason: a stored column that merely *agreed*
+# with the blob when it was written is a second copy of a value, and a store whose
+# anti-join reads the copy while its answer decodes the blob can be made to say
+# that a revoked grant is outstanding. Derived, they cannot disagree.
 #
-# **The subject is deliberately *not* projected into a column.** The
-# duplicate-subject refusal compares a whole ``ToolDefinition``, a whole
-# ``BoundAccount`` and a whole destination tuple by value (ADR-0193 §1), and a
-# shadow column holding a serialised form of those would be a second copy of the
-# value free to disagree with the one every read answers from — the failure
-# ``SqliteSourceGrantStore._standing_sync`` names when it declines to do its own
-# duplicate check in SQL. The check runs over decoded outstanding records
-# instead, which the ceiling already bounds.
+# **``decided_at_us`` is a plain column and orders nothing that authorises.** It
+# exists because ``recent`` and ``export`` sort by decision time and SQLite cannot
+# sort an ISO-8601 instant correctly — ``"…:00.000001Z"`` sorts *before*
+# ``"…:00Z"`` by code point, so a generated column over ``json_extract`` would put
+# a later record first. Liveness is therefore **not** decided in SQL at all: the
+# interval is evaluated over the decoded record, against one clock reading, so both
+# instants that decide coverage come from the blob. What is left on this column is
+# an ordering, and the append-only trigger below is what holds it.
 _CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS recipient_grants("
-    "id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-    "expires_at_us INTEGER NOT NULL, revokes TEXT, data TEXT NOT NULL)"
+    "decided_at_us INTEGER NOT NULL, data TEXT NOT NULL, "
+    "id TEXT GENERATED ALWAYS AS (json_extract(data, '$.id')) VIRTUAL, "
+    "revokes TEXT GENERATED ALWAYS AS (json_extract(data, '$.revokes')) VIRTUAL)"
 )
 
-_INDEXES = (
-    # A *unique* index, so the one-revocation-per-grant rule survives even a bug
-    # in `_check_revocation`. SQLite treats NULLs as distinct, so it constrains
+#: Keyed by name, because :data:`_OBJECTS` holds each one to its own definition and
+#: a positional tuple would make that mapping a place to get wrong.
+_INDEXES = {
+    # The primary key `id` cannot be, because SQLite refuses a generated column in
+    # one. Same constraint, same enforcement, and the derivation is kept.
+    "recipient_grants_id": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS recipient_grants_id ON recipient_grants(id)"
+    ),
+    # A *unique* index, so one-revocation-per-grant survives even a bug in
+    # `_check_revocation`. SQLite treats NULLs as distinct, so it constrains
     # revoking rows only and leaves granting records unaffected. The mechanical
     # sibling of `grants_revokes` on the source-grant store.
-    "CREATE UNIQUE INDEX IF NOT EXISTS recipient_grants_revokes ON recipient_grants(revokes)",
-    "CREATE INDEX IF NOT EXISTS recipient_grants_order "
-    "ON recipient_grants(decided_at_us DESC, id ASC)",
-    # The outstanding anti-join narrows on `revokes` first. There is no index
-    # expressing "live", because liveness is *derived* — from the `revokes`
-    # relation and the clock — rather than stored, and an index that claimed to
-    # store it would be a second answer free to disagree with the first.
-    "CREATE INDEX IF NOT EXISTS recipient_grants_outstanding ON recipient_grants(revokes)",
+    "recipient_grants_revokes": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS recipient_grants_revokes ON recipient_grants(revokes)"
+    ),
+    "recipient_grants_order": (
+        "CREATE INDEX IF NOT EXISTS recipient_grants_order "
+        "ON recipient_grants(decided_at_us DESC, id ASC)"
+    ),
+}
+
+#: **The table is append-only, said to SQLite rather than only to the reader.**
+#: ADR-0193 §1's guarantee is that nothing recorded is edited, narrowed, re-scoped
+#: or extended in place, and this store never issues an ``UPDATE`` — ``clear()``
+#: deletes, and every other write appends. Stating it as a trigger closes the one
+#: column a comparison cannot reach: ``decided_at_us`` orders a **bounded**
+#: listing, and a bounded listing applies its ``LIMIT`` in the same statement that
+#: orders, so a row whose key was altered to sort late falls beyond the cut and is
+#: never decoded and never compared — the caller is handed a wrong page with every
+#: row on it valid. Validating rows the bound excludes would mean reading the whole
+#: table to serve a page, which is the bound defeated rather than enforced.
+#:
+#: Rewriting ``data`` is refused here too, which is what makes the derived columns
+#: whole: they cannot disagree with the blob, so the remaining move against them
+#: was to move the blob.
+#:
+#: **What it is and is not.** It is this store's invariant enforced by the store,
+#: the way a ``UNIQUE`` index enforces write-once; it is not a boundary against an
+#: actor who can already run arbitrary SQL against the file, who could drop it as
+#: easily as run the ``UPDATE``. ADR-0004 §4's owner-only mode is where that
+#: question is answered, and ADR-0099 §1's single-user model is what scopes it.
+_APPEND_ONLY = (
+    "CREATE TRIGGER IF NOT EXISTS recipient_grants_append_only "
+    "BEFORE UPDATE ON recipient_grants "
+    "BEGIN SELECT RAISE(ABORT, 'the recipient-grant store is append-only; a grant is "
+    "never edited, narrowed or re-scoped in place'); END"
 )
+
+#: **Every object this store defines, held to its own definition.** ``CREATE TABLE
+#: IF NOT EXISTS`` is a no-op against a table already there under that name
+#: *whatever shape it has*, so a file arriving with a ``recipient_grants`` table of
+#: ordinary columns keeps it — and both generated projections then read as ``NULL``,
+#: because ``_record_sync`` writes only ``decided_at_us`` and ``data``. The
+#: outstanding anti-join would then find no revocation at all and every revoked
+#: grant would answer as live: the exact failure the generated columns exist to
+#: make impossible, walked around rather than through. The indexes and the trigger
+#: are held the same way and for the same reason — a pre-existing non-unique
+#: ``recipient_grants_revokes`` lets one grant be revoked twice, and a pre-existing
+#: trigger that does nothing lets the ordering key be rewritten.
+#:
+#: SQLite stores a definition verbatim but for ``IF NOT EXISTS``, so what it holds
+#: is compared against these very statements rather than against a second copy of
+#: them written out by hand.
+_OBJECTS: Final = {
+    "recipient_grants": _CREATE_TABLE,
+    **_INDEXES,
+    "recipient_grants_append_only": _APPEND_ONLY,
+}
 
 _ORDERED = "SELECT data FROM recipient_grants ORDER BY decided_at_us DESC, id ASC"
 
-#: Every **outstanding** granting record: rows whose ``revokes`` is NULL that no
-#: recorded revocation names. Liveness's clock-free half, and the whole of what
-#: ``record`` and ``outstanding`` decide over — no instant appears in this
-#: statement at all, which is what keeps the write path free of a clock and lets
-#: an expired-but-unrevoked grant still be revoked (ADR-0193 §1, §9).
+#: Every **outstanding** granting record: rows whose derived ``revokes`` is NULL
+#: that no recorded revocation names. Liveness's clock-free half, and the whole of
+#: what ``record`` and ``outstanding`` decide over — no instant appears in this
+#: statement at all, which is what keeps the write path free of a clock and lets an
+#: expired-but-unrevoked grant still be revoked (ADR-0193 §1, §9).
+#:
+#: It is also what ``covering`` and ``standing`` read: the interval they add is
+#: applied over the **decoded** records rather than in SQL, so no instant that
+#: decides coverage is ever read from a column.
 _OUTSTANDING = (
     "SELECT data FROM recipient_grants AS g "
     "WHERE g.revokes IS NULL "
@@ -226,21 +287,9 @@ _OUTSTANDING_BY_ID = (
     "AND NOT EXISTS (SELECT 1 FROM recipient_grants AS r WHERE r.revokes = g.id)"
 )
 
-#: Every **live** grant as of one instant: :data:`_OUTSTANDING` with the interval
-#: predicate added. Closed below and open above — ``decided_at <= now <
-#: expires_at`` — which is ADR-0193 §1's interval exactly, and bounded below as
-#: well as above because a future-dated grant the store called live is one the
-#: policy would author an ``ALLOW`` on and ``AuditTrail.record`` would then refuse.
-#:
-#: The instant is **bound twice from one reading** rather than read per row, which
-#: is §9's single-read clause held in SQL rather than by discipline.
-_LIVE = (
-    "SELECT data FROM recipient_grants AS g "
-    "WHERE g.revokes IS NULL "
-    "AND g.decided_at_us <= ? AND g.expires_at_us > ? "
-    "AND NOT EXISTS (SELECT 1 FROM recipient_grants AS r WHERE r.revokes = g.id) "
-    "ORDER BY g.decided_at_us DESC, g.id ASC"
-)
+#: Whether one id is already held, over the derived column so a hand-written
+#: ``id`` cannot hide a row from the duplicate check.
+_ID_IS_HELD = "SELECT 1 FROM recipient_grants WHERE id = ?"
 
 
 def _sort_key(instant: datetime) -> int:
@@ -260,6 +309,27 @@ def _sort_key(instant: datetime) -> int:
     """
     elapsed = instant - _EPOCH
     return (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+
+
+def _is_live(grant: RecipientGrant, reading: datetime) -> bool:
+    """Whether ``grant`` is live at ``reading`` (ADR-0193 §1, §9).
+
+    The interval is **closed below and open above** — at or after ``decided_at``
+    and strictly before ``expires_at`` — and both ends are read off the **record**
+    rather than off a column, so no instant that decides coverage comes from a
+    projection. Bounded below as well as above, because without that half a
+    future-dated grant would be handed to the policy and ``AuditTrail.record``
+    would then refuse the ``ALLOW`` it sourced.
+
+    ``reading`` is passed in rather than taken here, which is §9's single-read
+    clause: one instant measures every record a query considers, and a per-row
+    reading could return one of two grants sharing an ``expires_at`` and omit the
+    other — a set true at no real instant.
+
+    A ``revokes``-bearing record is never live, and it never reaches this function:
+    the callers read :data:`_OUTSTANDING`, which returns granting records alone.
+    """
+    return grant.decided_at <= reading < grant.expires_at
 
 
 def _utc_now() -> datetime:
@@ -379,8 +449,18 @@ class SqliteRecipientGrantStore:
                 conn.execute(_META_SCHEMA)
                 labelled = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
-                for statement in _INDEXES:
+                # The table is held to its definition **before** the indexes and
+                # the trigger are created over it. A file arriving with a
+                # ``recipient_grants`` table of ordinary columns would otherwise
+                # fail on an index naming a column it does not have, and the open
+                # would report a raw SQLite complaint instead of the fact — that
+                # this is not this store's table and its rows cannot be trusted to
+                # say what the user authorised.
+                self._check_objects(conn, ("recipient_grants",))
+                for statement in _INDEXES.values():
                     conn.execute(statement)
+                conn.execute(_APPEND_ONLY)
+                self._check_objects(conn, tuple(_OBJECTS))
                 if not labelled:
                     # Stamped *after* the create above, and inside the same
                     # transaction, so a failure rolls the marker — and the `meta`
@@ -397,6 +477,44 @@ class SqliteRecipientGrantStore:
             msg = f"failed to initialise the recipient-grant store at {self._path!r}: {exc}"
             raise RecipientGrantError(msg) from exc
         return conn
+
+    def _check_objects(self, conn: sqlite3.Connection, names: tuple[str, ...]) -> None:
+        """Refuse a file whose ``names`` are not the objects this store defines.
+
+        Run after the creates and **before** the marker is written, inside the same
+        transaction, so a refusal leaves the file exactly as it arrived —
+        unopened, unlabelled, and not carrying this store's marker over a shape
+        that is not this store's.
+
+        Every object is compared to the statement that defines it
+        (:data:`_OBJECTS` says why each one matters). An object this open created
+        matches by construction; one that was already there matches only if it is
+        the same object, which is the whole question.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+            names: Which of :data:`_OBJECTS` to check. The table alone runs first,
+                so a file that is not this store's is reported as that rather than
+                as an index failing on a column it does not have.
+
+        Raises:
+            RecipientGrantError: If an object is missing or is not the one this
+                store defines.
+        """
+        held = {
+            str(name): sql
+            for name, sql in conn.execute("SELECT name, sql FROM sqlite_master")
+            if name in names
+        }
+        for name in names:
+            defined = _OBJECTS[name].replace(" IF NOT EXISTS", "", 1)
+            if held.get(name) != defined:
+                msg = (
+                    f"the recipient-grant store at {self._path!r} holds an object named "
+                    f"{name!r} that is not the one this store defines; its rows cannot be "
+                    f"trusted to say what the user authorised, so it is not opened"
+                )
+                raise RecipientGrantError(msg)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -530,9 +648,7 @@ class SqliteRecipientGrantStore:
     def _record_sync(self, snapshot: RecipientGrant) -> None:
         """Validate against what is stored and insert, as one transaction."""
         with self._transaction(f"record recipient grant {snapshot.id!r}") as conn:
-            if conn.execute(
-                "SELECT 1 FROM recipient_grants WHERE id = ?", (snapshot.id,)
-            ).fetchone():
+            if conn.execute(_ID_IS_HELD, (snapshot.id,)).fetchone():
                 msg = (
                     f"recipient grant {snapshot.id!r} is already recorded; the store is "
                     f"append-only, so history cannot be rewritten by replaying a write"
@@ -542,17 +658,12 @@ class SqliteRecipientGrantStore:
                 self._check_granting(conn, snapshot)
             else:
                 self._check_revocation(conn, snapshot)
+            # Only the two stored columns: `id` and `revokes` are derived from the
+            # blob by the table's own definition, so there is nothing to write and
+            # nothing that could be written disagreeing with it.
             conn.execute(
-                "INSERT INTO recipient_grants("
-                "id, decided_at_us, expires_at_us, revokes, data"
-                ") VALUES (?, ?, ?, ?, ?)",
-                (
-                    snapshot.id,
-                    _sort_key(snapshot.decided_at),
-                    _sort_key(snapshot.expires_at),
-                    snapshot.revokes,
-                    snapshot.model_dump_json(),
-                ),
+                "INSERT INTO recipient_grants(decided_at_us, data) VALUES (?, ?)",
+                (_sort_key(snapshot.decided_at), snapshot.model_dump_json()),
             )
 
     def _check_granting(self, conn: sqlite3.Connection, grant: RecipientGrant) -> None:
@@ -692,10 +803,15 @@ class SqliteRecipientGrantStore:
         member or the reverse, no re-canonicalising either side.
 
         **Precedence is total**: the greatest ``decided_at`` wins, ties broken by
-        the least ``id``. That order is :data:`_LIVE`'s own ``ORDER BY``, so the
-        **first** matching row is the winner and no second sort is needed — which
-        is why the comparison loop below stops at the first match rather than
-        collecting and ranking.
+        the least ``id``. That order is :data:`_OUTSTANDING`'s own ``ORDER BY``, so
+        the **first** matching row is the winner and no second sort is needed —
+        which is why the loop below stops at the first match rather than collecting
+        and ranking.
+
+        **Liveness is decided over the decoded record**, not in SQL, so both ends
+        of the interval come from the blob rather than from a column (see
+        :data:`_CREATE_TABLE`). The clock is read **once**, and every record the
+        loop considers is measured against that one instant.
 
         Raises:
             RecipientGrantError: If the store cannot be read, or holds a record
@@ -706,11 +822,13 @@ class SqliteRecipientGrantStore:
             return None
         wanted = binding.canonical_destination_set
         async with self._lock:
-            rows = await _run_to_completion(self._live_sync)
+            rows = await _run_to_completion(self._outstanding_sync)
+        reading = self._clock()
         for row in rows:
             grant = _decode(row)
             if (
-                grant.tool == request.tool
+                _is_live(grant, reading)
+                and grant.tool == request.tool
                 and grant.account == binding.account
                 and all(member in grant.destinations for member in wanted)
             ):
@@ -736,21 +854,13 @@ class SqliteRecipientGrantStore:
                 that no longer validates.
         """
         async with self._lock:
-            rows = await _run_to_completion(self._live_sync)
-        return [_decode(row) for row in rows]
+            rows = await _run_to_completion(self._outstanding_sync)
+        reading = self._clock()
+        return [grant for row in rows if _is_live(grant := _decode(row), reading)]
 
-    def _live_sync(self) -> Sequence[str]:
-        """Read every live row against **one** clock reading (ADR-0193 §9).
-
-        The reading is taken once, here, and bound to both ends of the interval
-        predicate, so every record the query considers is measured against the same
-        instant. A per-row reading could return one of two grants sharing an
-        ``expires_at`` and omit the other — a set true at no real instant — and it
-        is the shared helper rather than two copies precisely so ``covering`` and
-        ``standing`` cannot acquire different clock disciplines.
-        """
-        reading = _sort_key(self._clock())
-        return self._read(self._conn, _LIVE, (reading, reading))
+    def _outstanding_sync(self) -> Sequence[str]:
+        """Read every outstanding granting row — the clock-free half of liveness."""
+        return self._read(self._conn, _OUTSTANDING, ())
 
     async def outstanding(self, grant_id: str) -> RecipientGrant | None:
         """The **granting** record with ``grant_id``, if unrevoked, else ``None``.
@@ -766,10 +876,10 @@ class SqliteRecipientGrantStore:
                 that no longer validates.
         """
         async with self._lock:
-            rows = await _run_to_completion(self._outstanding_sync, grant_id)
+            rows = await _run_to_completion(self._one_outstanding_sync, grant_id)
         return _decode(rows[0]) if rows else None
 
-    def _outstanding_sync(self, grant_id: str) -> Sequence[str]:
+    def _one_outstanding_sync(self, grant_id: str) -> Sequence[str]:
         """Read the outstanding granting row with ``grant_id``, if there is one."""
         return self._read(self._conn, _OUTSTANDING_BY_ID, (grant_id,))
 
