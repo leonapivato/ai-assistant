@@ -838,6 +838,116 @@ class InvalidCompletionError(AuditError):
     """
 
 
+class SpendError(AssistantError):
+    """A spend ceiling refused an invocation before it began (ADR-0194 §4).
+
+    The base for the two refusals below, so a caller that only wants "the budget
+    would not let this run" gets one handler. Both are **seam faults**: raised by
+    :meth:`~ai_assistant.core.protocols.SpendGate.admit_invocation`, never
+    returned as a :class:`~ai_assistant.core.types.ToolResult`, and never
+    auto-retried.
+
+    **Not a :class:`PermissionDeniedError`, and the corpus has drawn this line
+    twice already.** That class means somebody was asked and said no. Here the
+    recorded ruling *is* ``ALLOW`` — the user said yes about this call — and what
+    refuses is arithmetic over a calendar period. Folding the two together would
+    let a surface tell a user their answer was overruled when it was honoured and
+    their month was spent, and would leave a trace unable to separate "you
+    declined" from "you are out of budget" (ADR-0097 §7's reasoning one store
+    over).
+
+    **The refusal is an exit before the callable is entered**, so it falls in the
+    window ADR-0034 §1 governs and qualifies on that section's second ground: the
+    executor commits ``RUNNING -> FAILED`` and never retries, on the window and
+    not on a list of classes.
+
+    **No :class:`BaseException` that is not an ``Exception`` is ever translated
+    into this hierarchy** (ADR-0194 §4). A ``CancelledError`` delivered from
+    outside propagates unchanged: it is neither a refusal nor a budget fact, and
+    ADR-0029 §4 and ADR-0031 already own how one is classified.
+    """
+
+
+class SpendCeilingError(SpendError):
+    """A configured ceiling would have been crossed (ADR-0194 §4).
+
+    Raised where the **projected** total — the period's accounted total, plus
+    every reservation the gate is holding, plus this call's own declared cost —
+    is strictly greater than a configured ceiling. A projection exactly equal to
+    a ceiling is admitted, so this class never fires at equality.
+
+    **Its message states the ceiling that was crossed, its period, its currency,
+    the accounted total and the projected total.** The accounted figure alone
+    would leave a user reading "90 against a ceiling of 100" beside a refusal and
+    no way to see the reservations and the declaration that made 101. Where both
+    configured ceilings are crossed by one projection, **one** error is raised
+    naming **both**, in ``SpendPeriod``'s fixed order — ``CALENDAR_DAY`` then
+    ``CALENDAR_MONTH`` — with each one's ceiling and total: naming only the day
+    would tell a user to wait until tomorrow when their month is spent, and naming
+    only the month would hide the nearer bound.
+
+    **It is never raised for a spend that could not be measured.** A crossing is
+    knowable only after every other ground has been ruled out, so this class never
+    pre-empts :class:`SpendUndeterminedError` and a call that could not be
+    measured is never reported as one that overspent.
+
+    **The message is payload-free** (ADR-0194 §4, ADR-0093 §8's rule for
+    ``SensorError``). It carries no argument value, no recipient, no account, no
+    tool output and no digest of any of them: the error travels further than the
+    call did, and the numbers are the whole explanation.
+    """
+
+
+class SpendUndeterminedError(SpendError):
+    """The spend the admission needed could not be reduced to a number (ADR-0194 §4).
+
+    Raised on exactly **six** grounds, evaluated in this order, the first that
+    holds being the one the message names:
+
+    1. the call's own declared ``ToolCost.amount`` is not countable (ADR-0194 §1);
+    2. the call's own declared cost has no number at all — an ``UNKNOWN`` basis,
+       or a cost in a currency other than the configured one — with no allowance
+       configured (ADR-0194 §2);
+    3. the injected clock raised;
+    4. the store read failed;
+    5. the period is indeterminate — an open claim in it, or a completion whose
+       reported cost has no number this mechanism may add (ADR-0194 §2);
+    6. the arithmetic trapped.
+
+    **The order is not arbitrary and it is contract.** Without it two conforming
+    implementations meeting a non-countable amount and a raising clock in the same
+    call would send the operator to two different repairs. The first two are facts
+    about the call and need no I/O, so they are decided before anything is read;
+    the clock precedes the store because the period is what selects the rows;
+    indeterminacy is a property of rows already read; and a trap can only arise
+    once operands exist.
+
+    **A separate class from :class:`SpendCeilingError` because the messages state
+    different facts and one of them would otherwise be false.** None of these six
+    crossed a ceiling — nothing measured one — so reporting one as a crossing
+    would tell the user a number about their budget that nothing computed. It is
+    also why no implementation substitutes a large stand-in amount for an unpriced
+    cost: that stand-in would have to be a particular ``Decimal``, and two
+    implementations picking different ones would refuse the same call while
+    reporting different contract values.
+
+    **What the message says.** Which of the six grounds applied, and the period
+    only where one was determined — a clock that raised leaves no period to name,
+    and the message says the clock failed rather than inventing one. Where the
+    ground is an indeterminate period and **both** configured periods are
+    indeterminate at once, it names both in ``SpendPeriod``'s fixed order, and it
+    names only the periods that are both indeterminate and carrying a ceiling of
+    their own. It states no amount, and it is payload-free on the same terms as
+    the class above.
+
+    **Also raised by
+    :meth:`~ai_assistant.core.protocols.SpendLedger.spend_totals`**, but only
+    where that member cannot produce its values at all — a failed store read or a
+    raising clock. An indeterminate period is *returned* there, as
+    ``accounted=None`` beside a present ``currency``, and never raised.
+    """
+
+
 class GrantError(AssistantError):
     """A source-grant store could not be read or written (ADR-0097 §10).
 

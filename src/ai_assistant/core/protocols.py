@@ -183,6 +183,8 @@ if TYPE_CHECKING:
         SourceGrant,
         SourceReading,
         SourceReadRecord,
+        SpendAdmissionHandle,
+        SpendTotal,
         StepTransition,
         ToolCall,
         ToolCost,
@@ -3856,6 +3858,264 @@ class AuditTrail(Protocol):
         It wins any race with an in-flight invocation: a completion whose claim it
         erased is refused ``InvalidCompletionError`` like any other completion
         naming no claim, and nothing is recreated.
+        """
+        ...
+
+
+@runtime_checkable
+class SpendGate(Protocol):
+    """Decides, before an act, whether the world may cost this much (ADR-0194 §3, §5).
+
+    ``ToolInvoker.invoke`` holds one and **never** a :class:`SpendLedger`: an
+    invoker able to read a totals projection has acquired a permissions-owned
+    history it has no use for, which is ADR-0029 §1's argument one seam over. It
+    appends no row, writes no durable state, and can neither record nor read a
+    ``PermissionDecision``, neither export nor ``clear``.
+
+    **Where the invocation is decided, and why not at the policy.**
+    ``ActionPolicy.decide`` already reads ``ToolCost`` and looks like the home for
+    a cost rule; two things forbid it. A ceiling check needs a running total (a
+    store read) and a period (a clock read), and ADR-0021 §5's monotonicity and
+    floor obligations are checkable only because ``decide`` is a genuine function
+    of its argument. And a ruling cannot bind a total that moves after it: a
+    ``CONFIRM`` is answered at human speed, and between the ruling and the act
+    other calls complete and a calendar period can roll over. The only instant at
+    which the answer is true is the instant before the act.
+
+    **What the decision reads, exhaustively** (ADR-0194 §3): the ``ToolCost`` it is
+    handed; the four configured spend values with the zone that selects the period;
+    the instant read from the injected clock; and the rows and reservations the
+    holder holds. Nothing else conditions it — not the calling subsystem, not the
+    tool's identity, not a capability, not a protocol — and **no caller-controlled
+    value**: there is no parameter, argument, header or configuration by which a
+    caller obtains an invocation the ceiling would refuse, and no override, bypass
+    or force flag exists to be reached for.
+
+    Cancelling either method is governed by this module's cancellation clause
+    (ADR-0060), and how a call observes its inputs by the input-observation clause
+    (ADR-0065).
+    """
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Admit this invocation and reserve its declared contribution, or refuse.
+
+        **Where neither ceiling is configured this returns before it reads the
+        clock, reads the store or performs any arithmetic**, takes no reservation,
+        and cannot refuse — not on a crossed ceiling, not on a raising clock, not
+        on a failed store read, not on a trapped computation. That is what makes
+        ADR-0194 §1's "no ceiling configured means no ceiling" unconditional in
+        fact and not only in wording.
+
+        **Where at least one is configured** it compares the *projected* total
+        against each configured ceiling for the period containing the invoker's
+        current instant, and refuses where the projection is **strictly greater**
+        than one. A projection exactly equal to a ceiling is admitted. The
+        projection is the period's accounted total, plus the declared amounts of
+        **every** reservation this holder is still holding — whichever period each
+        was taken in, since a call admitted before a boundary can complete after it
+        — plus ``estimate``'s own declared amount. Every declared amount is used for
+        this arithmetic alone: none is added to an accounted total and none is
+        written to any row (ADR-0194 §2).
+
+        **The store read, the comparison and the reservation are one critical
+        section**, with no other admission interleaved and **no release taking
+        effect inside it either**. The Nth concurrent invocation sees the N-1
+        reservations already taken and cannot project a total that omits a call
+        already admitted. A release that lands between an admission's row snapshot
+        and its comparison is the single interleaving that can under-count, so a
+        recorded release takes effect at the **start of the next** critical
+        section, before that admission's snapshot.
+
+        **The holder mints the handle** (ADR-0194 §3). An injected id factory
+        supplies candidate values and nothing more: a candidate the handle type
+        would refuse, and a factory raising an ``Exception``, are each replaced by a
+        value the holder generates itself — neither reaches the caller and neither
+        costs the call. No value this holder has **ever delivered** is delivered
+        again, over its whole lifetime and not merely among the outstanding set: a
+        re-minted retired value would make a stale release drop a *live*
+        reservation, after which a later admission projects a total omitting a call
+        already in flight. The mint sits on the far side of the comparison, so a
+        refusal consults no factory at all.
+
+        **A reservation is in-memory state of the holder** — never a row, never
+        durable, never a ``PermissionDecision`` — and is discarded when the process
+        restarts, which is the one way an unreleased one ever ends. Between a
+        completion's append and its release the same call is counted twice, once
+        accounted and once reserved; that direction is deliberate, the mechanism
+        over-counting for one operation rather than under-counting for one.
+
+        **It runs inside the deadline ``invoke`` already enforces** (ADR-0029 §4),
+        never outside it: an admission outside the deadline would move the one await
+        that deadline exists for out of its reach. What that buys is what ADR-0029
+        §4 buys and no more — the seam stops waiting, not that the gate stops
+        working — and a store read that suppresses its own cancellation can outlive
+        the deadline exactly as §4's third bullet already says.
+
+        Args:
+            estimate: The **pinned declaration** — the ``cost`` on the
+                ``ToolDefinition`` the call's recorded ``PermissionDecision`` pins,
+                read off the revalidated, detached copy ADR-0029 §2's checks
+                produced and never off the argument a caller passed. It is not
+                caller-supplied: a turn cannot author it and a tool cannot restate
+                it between the ruling and the call. **No tool identity is taken**:
+                the admission is not conditional on which tool is calling, so the
+                seam is given nothing it must not read, and two tools declaring the
+                same cost are deliberately indistinguishable here.
+
+        Returns:
+            The handle for the reservation this admission took, valid until it is
+            released. Where no ceiling is configured no reservation was taken and
+            the handle is a value the release accepts and ignores.
+
+        Raises:
+            SpendCeilingError: If a configured ceiling would be crossed, and only
+                then. Never raised for a spend that could not be measured.
+            SpendUndeterminedError: If the spend the admission needed could not be
+                reduced to a number, on ADR-0194 §4's six grounds in that
+                section's order — the declared amount is not countable; the
+                declared cost has no number at all; the clock raised; the store
+                read failed; the period is indeterminate; the arithmetic trapped.
+                A backend exception is translated rather than propagated, so
+                ``tools/`` never sees a store's own error type.
+
+        No other ``Exception`` escapes: minting the handle adds no third class, and
+        neither a ``ValidationError`` nor an id factory's own exception reaches the
+        caller. A ``BaseException`` that is not an ``Exception`` — a
+        ``CancelledError`` delivered from outside above all — propagates unchanged
+        and is never translated into either class, and where a reservation was
+        already recorded it is **removed before the exception leaves the member**,
+        so nothing is left that nobody holds a key for.
+        """
+        ...
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Drop the reservation ``handle`` names. Synchronous, idempotent, silent.
+
+        ``ToolInvoker.invoke`` calls this in a ``finally``, after ADR-0192's
+        completion has been appended or after the failure that prevented it. **It
+        raises no ``Exception`` at all**: an unknown handle and a handle already
+        released are each a no-op, and a ``finally`` that raised would replace the
+        call's own outcome with a book-keeping failure.
+
+        **Synchronous because it is not I/O-bound and must not become so**, which
+        is ``CLAUDE.md``'s own rule for the choice (ADR-0194 §5). It is given no
+        store, no I/O and no lock a store read is held under, so there is nothing
+        for it to await, and symmetry with the member above is not a ground that
+        rule recognises. The asymmetry buys three properties an ``async`` release
+        only approximates. It **cannot be made to wait** — by construction rather
+        than by clause: were a release made to wait on the admission's exclusion, an
+        invocation whose callable had already returned would block in its
+        ``finally`` behind another invocation's store I/O and outlast the
+        ``timeout`` its own caller set. It carries **no suspension point**, so a
+        ``CancelledError`` cannot be delivered inside it and no interleaving exists
+        in which a release begins, is interrupted, and leaves the reservation
+        standing. And the invoker's ``finally`` reaches it with no ``await``, so
+        unwinding under a cancellation cannot lose the release.
+
+        An ``async`` release containing no await would have all three in practice
+        and none of them in the contract: a cancellation is delivered only at a
+        suspension point, so a shared conformance suite could not drive a
+        cancelled-release fixture against the implementations that conform.
+
+        **What a release records is a reservation, not a value**, and which
+        reservation it names is decided **when this is called** and never later
+        (ADR-0194 §3). A handle identifying no reservation outstanding at that
+        moment — an unknown value, or one already retired — is discarded there and
+        then and nothing is recorded. Only the moment of *application* is deferred
+        to the next admission's critical section. An implementation recording the
+        raw value and matching it at application time loses a live reservation: a
+        release of an unknown value queued while an admission is paused, that
+        admission then minting the same value, and the queued entry retiring a
+        reservation taken **after** the release that supposedly names it.
+
+        A release **lowers no accounted total**: that is read from ADR-0192's rows,
+        which this member does not touch.
+
+        Args:
+            handle: The handle ``admit_invocation`` returned for this call.
+        """
+        ...
+
+
+@runtime_checkable
+class SpendLedger(Protocol):
+    """States what each calendar period has cost, and refuses nothing (ADR-0194 §5).
+
+    ``AssistantEngine``'s spend read holds one and **never** a :class:`SpendGate`:
+    an adapter able to call the admission has acquired the ability to spend a
+    budget. Two Protocols rather than one because they have two consumers and
+    neither needs the other's face.
+
+    **One object implements this, :class:`SpendGate` and ADR-0192's ledger seam**,
+    over one store, because all three read the same rows — two stores keyed by the
+    same rows could disagree about a total, which is the failure ADR-0016 §7 named
+    for two registries one seam over. The composition root is the sole constructor
+    and sole wirer, and hands each consumer the face its job needs.
+
+    **The accounted total is derived and nothing here is durable** (ADR-0194 §7).
+    This mints no counter, no per-period row, no cached total and no marker that
+    survives a restart; an implementation that caches recomputes from the rows and
+    no cache is authoritative. So ``AuditTrail.clear()`` erasing the rows leaves
+    every period a currency is configured for determinate at ``Decimal("0")``, and
+    nothing preserves a total across an erasure.
+
+    Cancelling this member is governed by this module's cancellation clause
+    (ADR-0060).
+    """
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Return one total per period, in :class:`SpendPeriod`'s fixed order.
+
+        ``CALENDAR_DAY`` then ``CALENDAR_MONTH``, and **both** entries whatever is
+        configured. ``async`` because it reads a store, which is ``CLAUDE.md``'s
+        rule for an I/O-bound method.
+
+        **Both entries are derived from one reading of the clock and one snapshot
+        of the rows.** A conforming implementation does not read the clock twice,
+        and does not compute one period's total, let a completion append, and then
+        compute the other's: a day total of 10 returned beside a month total of 0
+        states two facts that cannot both be true of one instant, and a clock read
+        either side of a calendar boundary pairs periods that do not contain each
+        other. The two entries are one observation of one moment. The weaker
+        "the day total never exceeds the month's" is a *consequence* of one
+        snapshot and not a test for it: a pair aggregated either side of an append
+        can satisfy it while being a state no snapshot of the rows was ever in.
+
+        **The accounted total of a period is the sum of the reported
+        per-invocation costs on ADR-0192's completion rows recorded in it**, and
+        nothing else contributes: not a ``ToolDefinition.cost``, not a
+        ``PermissionDecision``, not a model call. Every row in the period counts,
+        including the one whose reported cost carried the total past a ceiling and
+        one whose outcome is ``INDETERMINATE``. Model-provider spend is out of
+        scope and enters no total.
+
+        **An indeterminate period is returned, not raised** — ``accounted=None``
+        beside a present ``currency``. A period is indeterminate where an open
+        claim falls in it, where a reported cost has no number this mechanism may
+        add (an ``UNKNOWN`` basis or a foreign currency, with no allowance
+        configured), where a reported amount is not countable, or where the
+        arithmetic trapped. It is a state of one period, ends when that period
+        does, and is recomputed from the rows rather than persisted as a flag.
+
+        Where no currency is configured nothing is summed and no total is stated:
+        both entries carry ``currency=None``, ``ceiling=None`` and
+        ``accounted=None``, which is the *other* meaning of that absence.
+
+        Returns:
+            Exactly two totals, in ``SpendPeriod``'s declaration order. Each
+            carries the bounds ADR-0194 §1's rule computes for its own period in
+            the ledger's configured zone, and the offsets in force at those two
+            instants — a producer obligation, deliberately not a validator on the
+            model, because only the producer can compare against the rule rather
+            than against a second implementation of it.
+
+        Raises:
+            SpendUndeterminedError: Only where the values cannot be produced at
+                all — a store read that failed, or an injected clock that raised.
+                A trapped sum is not that case: the other period's figure is still
+                computable, so the affected periods come back indeterminate. A
+                backend exception is translated rather than propagated, and a
+                ``CancelledError`` delivered from outside propagates unchanged.
         """
         ...
 
