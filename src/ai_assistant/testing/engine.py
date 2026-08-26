@@ -73,6 +73,7 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
+    RecordedInvocation,
     ReplyChunk,
     Retirement,
     SkipReason,
@@ -1109,6 +1110,37 @@ class FakeAssistantEngine:
         self.calls.append(("export_reads", {}))
         return self._checked(tuple(reversed(await self.reads.export())), "export_reads")
 
+    # --- the trail's two invocation reads (ADR-0192 §4) --------------------
+
+    async def recent_invocations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecordedInvocation, ...]:
+        """What the system did on an authorisation, newest first, bounded by ``limit``.
+
+        ``limit`` is refused when it is **not strictly positive**, locally and
+        before the trail is touched, on ``recent_decisions``' reason (ADR-0192 §4).
+        """
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_invocations", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_invocations", {"limit": limit}))
+        return self._checked(
+            _ordered_invocations(await self.trail.recent_invocations(limit=limit)),
+            "recent_invocations",
+        )
+
+    async def export_invocations(self) -> tuple[RecordedInvocation, ...]:
+        """Every invocation row, in :meth:`recent_invocations`' order.
+
+        **Sorted here rather than relayed**, on ``export_decisions``' reasoning:
+        ADR-0192 §4 makes the order the *operation's* guarantee "over a list it has
+        materialised", so a fake handing back whatever a trail produced would be
+        conforming by luck rather than by construction.
+        """
+        self.calls.append(("export_invocations", {}))
+        return self._checked(
+            _ordered_invocations(await self.trail.export_invocations()), "export_invocations"
+        )
+
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).
 
@@ -1527,6 +1559,19 @@ def _ordered_decisions(rows: Sequence[PermissionDecision]) -> tuple[PermissionDe
     """
     by_id = sorted(rows, key=lambda decision: decision.id)
     return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
+
+
+def _ordered_invocations(rows: Sequence[RecordedInvocation]) -> tuple[RecordedInvocation, ...]:
+    """Put ADR-0192 §4's total order on what an invocation read returned.
+
+    The row's ``recorded_at`` **descending**, ties broken by the row's ``id``
+    **ascending** — :func:`_ordered_decisions`' shape, with the key one level down
+    on :attr:`RecordedInvocation.invocation`, because the join adds the tool, the
+    capability and the egress boolean and restates neither the instant nor the id
+    (ADR-0192 §2).
+    """
+    by_id = sorted(rows, key=lambda row: row.invocation.id)
+    return tuple(sorted(by_id, key=lambda row: row.invocation.recorded_at, reverse=True))
 
 
 def _provenance_for(

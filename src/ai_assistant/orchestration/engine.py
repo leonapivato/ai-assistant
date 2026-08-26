@@ -186,6 +186,7 @@ if TYPE_CHECKING:
         ObservationReport,
         PermissionDecision,
         Question,
+        RecordedInvocation,
         SecretValue,
         SourceGrant,
         SourceReadRecord,
@@ -516,6 +517,40 @@ async def _ordered_decisions(
     """
     by_id = sorted(await read, key=lambda decision: decision.id)
     return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
+
+
+async def _ordered_invocations(
+    read: Awaitable[list[RecordedInvocation]],
+) -> tuple[RecordedInvocation, ...]:
+    """Await one invocation read and put ADR-0192 §4's total order on what it returned.
+
+    :func:`_ordered_decisions`' shape one row kind over, and the sort is owed here
+    for that function's reason: §4 states the order as "guaranteed by the engine
+    operation, over a list it has materialised", so an engine writing
+    ``tuple(await trail.export_invocations())`` would be relaying a promise the
+    *store* happens to make today rather than keeping one this contract states.
+
+    **The key lives one level down.** ``recorded_at`` and ``id`` are the row's, on
+    :attr:`RecordedInvocation.invocation`, and the joined value carries neither at
+    its top level — the join adds the tool, the capability and the egress boolean
+    and restates nothing (ADR-0192 §2). Sorting on anything the join added would
+    order two rows of one attempt by a fact about the *decision*.
+
+    **Two sorts rather than one reversed key**, exactly as :func:`_ordered_decisions`
+    does it: the order is ``recorded_at`` descending with ties broken by ``id``
+    *ascending*, and ``reverse=True`` over a compound key reverses **both** halves.
+    Python's sort is stable, so sorting by the tie-break first and the primary key
+    second composes them correctly.
+
+    Args:
+        read: The trail read to await — ``recent_invocations`` or
+            ``export_invocations``.
+
+    Returns:
+        Its rows, as the tuple ADR-0085 §3b requires, in §4's total order.
+    """
+    by_id = sorted(await read, key=lambda row: row.invocation.id)
+    return tuple(sorted(by_id, key=lambda row: row.invocation.recorded_at, reverse=True))
 
 
 async def _newest_recorded_first(
@@ -4244,6 +4279,65 @@ class Engine:
         return await self._tracked(
             _newest_recorded_first(self._reads.export()),
             "export_reads",
+            checked=True,
+        )
+
+    # --- the trail's two invocation reads (ADR-0192 §4) --------------------
+
+    async def recent_invocations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecordedInvocation, ...]:
+        """List what this system did on an authorisation, newest first (ADR-0192 §4).
+
+        A **relay** over the trail's joined listing, and it stays one because the
+        join is the store's: the tool's identity lives on the decision, and an
+        engine reading rows and then reading decisions would have an ``await``
+        between the two that a ``clear()`` can land in (ADR-0192 §2).
+
+        ``limit`` is refused when it is **not strictly positive**, on
+        ``recent_decisions``' reason and in every implementation (ADR-0192 §4), so
+        neither is silently more permissive than the other:
+        ``AuditTrail.recent_invocations`` refuses zero and ADR-0085 §9 would admit
+        it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            AuditError: If the trail cannot be read, or holds a row it could not
+                pair with the decision that row names.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_invocations", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            _ordered_invocations(self._trail.recent_invocations(limit=limit)),
+            "recent_invocations",
+            checked=True,
+        )
+
+    async def export_invocations(self) -> tuple[RecordedInvocation, ...]:
+        """Return every invocation row, in ``recent_invocations``' order (ADR-0192 §4).
+
+        Takes no argument and pages nothing: it is the unbounded read that
+        discharges ADR-0004 §6's portability obligation for **this row kind**, which
+        ``export_decisions`` does for the decision rows and, after ADR-0192 §2, for
+        those alone. A trail too large for the frame is an ``OversizedValueError``
+        and no artifact at all — the measurement ``_tracked`` already applies to
+        every result, which is the whole of what stops a partial export being handed
+        back as a complete one.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            AuditError: If the trail cannot be read, or holds a row it could not
+                pair with the decision that row names.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            _ordered_invocations(self._trail.export_invocations()),
+            "export_invocations",
             checked=True,
         )
 
