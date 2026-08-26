@@ -198,6 +198,37 @@ to leave an access unrecorded; both are places the mechanism does not reach, and
 surface that papered over them would be claiming a completeness the store does
 not have.
 
+``invocations`` and ``export-invocations`` are the **third** pair, over the audit
+trail again and over a different row kind — what this system *did* on an
+authorisation, which ADR-0192 §4 promotes as two more engine operations and no
+third. §4 bounds the adapter set by one and leaves the choice here: this is the
+surface that already renders the decision trail, so the act taken under a ruling
+lands beside the ruling. The two answers are **two sequences and never one**: no
+operation returns a mixed one, and nothing here presents a decision row as a
+transmission, an invocation row as a ruling, or a joined pair as a single record.
+
+**Three of ADR-0192 §4's clauses land on this module and each is a sentence the
+renderer refuses to write.** A *call begun* is never rendered as pending, open,
+in flight, awaiting an outcome, or as having no completion yet — no row carries
+that fact, and establishing it would need the join across two answers §4 forbids
+a surface making. Nothing is said or implied about anything being received,
+delivered or acted on by any recipient, on any row, in any state, and no
+recipient, account, endpoint or destination is named on an invocation row: the
+row carries none, and who a ruling was taken over is ``assistant decisions``'
+under ADR-0186 §7's floor. And the word **sent** is withheld even on a successful
+outbound call — ADR-0031 §4 bounds ``SUCCEEDED`` to a validated callable return,
+an unexpired deadline and no increase in the cancellation count, none of which is
+a transmission — so what such a row says is that the call was *attempted and
+reported success*, which is the one statement §4 licenses and only on that one
+state.
+
+**An absence is stated as one, twice over** (ADR-0192 §4, ADR-0184). A completion
+whose outcome is not ``SUCCEEDED`` and which reports no failure kind renders
+**that no kind was reported**, never a kind this module chose and never a blank;
+and a cost whose basis is ``UNKNOWN`` renders **that it is not known**, never a
+zero, a dash or "free" — an unknown price and a free one being the distinction
+:class:`~ai_assistant.core.types.ToolCost` exists to keep apart.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -242,6 +273,7 @@ from ai_assistant.core.types import (
     AnswerKind,
     BeliefBand,
     ClassReach,
+    CostBasis,
     DiscloserProvenance,
     Disposition,
     FeedbackEvent,
@@ -263,6 +295,7 @@ from ai_assistant.core.types import (
     ReplyChunk,
     SecretScope,
     StepStatus,
+    ToolOutcome,
     encodable_text,
     secret_value,
 )
@@ -312,9 +345,12 @@ if TYPE_CHECKING:
         PermissionDecision,
         Question,
         QueuedQuestion,
+        RecordedInvocation,
         SourceGrant,
         SourceReadRecord,
         StepOutcome,
+        ToolCost,
+        ToolInvocation,
         TurnOutcome,
         Warrant,
     )
@@ -2210,6 +2246,78 @@ def export_reads() -> None:
     raise typer.Exit(code)
 
 
+@app.command()
+def invocations(
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many rows to show at most (at least 1).",
+    ),
+) -> None:
+    """Show what I did on the authorisations you gave me, newest recorded first.
+
+    Where ``assistant decisions`` says what was **decided**, this says what I then
+    **did about it**. One attempt writes up to two rows: a *call begun*, recorded
+    before I attempt the call, and a *call finished*, recorded after it with how it
+    ended and what it cost.
+
+    **A row says I spent an authorisation and attempted a call.** It does not say
+    the tool itself was entered — I write the first row before attempting the call,
+    and there is a path where the call is abandoned before it starts. One case says
+    more: a call that finished *successfully* is the tool answering me back, which
+    it could not do without having run.
+
+    **A row with no partner on the page is a fact about the page.** The other half
+    may simply be further back, so a *call begun* on its own is never shown as
+    pending, in flight, or waiting for anything, and I count nothing from what
+    happens to be on screen. Raise ``--limit`` to look further back.
+
+    **What an outbound call did at the other end is not here and is not knowable
+    to me.** A row says whether the ruling it ran under was for an outbound call
+    and never who or where — that is on the ruling, in ``assistant decisions``. And
+    when such a call finishes successfully, what that states is that I attempted it
+    and the tool reported success, which is the most the record holds.
+
+    **A cost of "not known" is not a cost of nothing.** Where a tool reports no
+    price for an invocation the row says so in those words, because an unknown
+    price and a free one are different facts.
+    """
+    code = asyncio.run(_list_invocations(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command("export-invocations")
+def export_invocations() -> None:
+    """Write every act I recorded on an authorisation to standard output, as JSON.
+
+    The portability half for this record, in ``assistant invocations``' order. It
+    is the whole of it or an error — nothing here truncates or samples an export
+    without saying so. Unlike ``assistant export-reads`` this record is not capped
+    and drops nothing, so what you get is the history rather than a horizon.
+
+    **This is a different record from ``assistant export-decisions``**, not a
+    superset of it: that one is what was ruled, this one is what was then
+    attempted. Neither export is the whole trail on its own, and a program wanting
+    both takes both.
+
+    **The document is a faithful copy.** No key is added, renamed or annotated for
+    presentation, so it validates back into exactly the rows it came from. One
+    consequence is worth knowing: where a call finished without the tool reporting
+    a failure kind, the key is simply ``null``, and that absence is the fact.
+    ``assistant invocations`` is where that state is put into words.
+
+    **Only the document goes to standard output** — every message, warning and
+    error goes to standard error — so ``assistant export-invocations > acts.json``
+    writes an artifact and nothing else. There is no ``--output``: your shell
+    already decides where a stream goes, and better than I would.
+
+    This exports **one** record, and is not the whole-installation export.
+    """
+    code = asyncio.run(_export_invocations())
+    raise typer.Exit(code)
+
+
 @device_app.command("enrol")
 def device_enrol(
     hub_identity: str = typer.Argument(
@@ -3438,6 +3546,44 @@ async def _export_reads() -> int:
         return await _drive_export_reads(engine, artifact=artifact)
 
 
+async def _list_invocations(*, limit: int) -> int:
+    """Obtain a client, read the bounded listing, and render it (ADR-0192 §4).
+
+    :func:`_list_decisions`' shape over the same store's third pair, and
+    deliberately the same shape: the operations are two more reads on one trail, so
+    a door that differed here would be a difference the contract does not have.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_invocations(engine, limit=limit)
+
+
+async def _export_invocations() -> int:
+    """Obtain a client, read every invocation row, and write the artifact (ADR-0192 §4).
+
+    :func:`_export_decisions`' claim on standard output, for the same reason and by
+    the same means: the stream is claimed for the document before anything else
+    runs, and everything in between — the settings load, the logging configuration,
+    the probe, the call — prints to standard error instead, whatever prints it and
+    whether or not this module wrote it. ADR-0186 §9's clause is about the
+    *stream*, and a redirect is the only way to say that about code this adapter
+    does not own.
+    """
+    artifact = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            engine = await _open_engine()
+        except (AssistantError, TransportError) as exc:
+            _render_error(exc, to_stderr=True)
+            return _EXIT_ERROR
+
+        return await _drive_export_invocations(engine, artifact=artifact)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -4467,6 +4613,77 @@ def _reads_artifact(recorded: tuple[SourceReadRecord, ...]) -> str:
         One JSON document, newline-terminated so it is a well-formed text stream.
     """
     return json.dumps([record.model_dump(mode="json") for record in recorded], indent=2) + "\n"
+
+
+async def _drive_invocations(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the bounded listing of invocation rows and render it in the operation's order.
+
+    The order is the **engine's** guarantee (ADR-0192 §4) — the row's
+    ``recorded_at`` descending, ties broken by the row's ``id`` ascending — so
+    nothing here sorts. Nothing here filters either, and nothing here **pairs**: a
+    claim and the completion that names it are two rows of one attempt, and joining
+    them would be the second read across two answers §4 forbids a surface making
+    (and the business logic golden rule 3 keeps out of this layer).
+    """
+    try:
+        recorded = await engine.recent_invocations(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_invocations(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_export_invocations(engine: AssistantEngine, *, artifact: TextIO) -> int:
+    """Read every invocation row and write ADR-0186 §9's document to ``artifact``.
+
+    **Whole or nothing**, :func:`_drive_export_decisions`' clause over the third
+    pair. ``export_invocations`` raises rather than truncating when the trail
+    outgrows the contract limit (ADR-0085 §8c, ADR-0192 §4), and that refusal is
+    rendered as an error on standard error with **no** document written — a partial
+    artifact that looked complete is the one outcome ruled out, and it is the one a
+    helpful adapter would produce.
+    """
+    try:
+        recorded = await engine.export_invocations()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc, to_stderr=True)
+        return _EXIT_ERROR
+    artifact.write(_invocations_artifact(recorded))
+    artifact.flush()
+    return _EXIT_OK
+
+
+def _invocations_artifact(recorded: tuple[RecordedInvocation, ...]) -> str:
+    """The document over the invocation trail: the rows' own JSON projections.
+
+    **Faithful, which is a statement about keys.** Each row is its own
+    ``model_dump(mode="json")`` and this adds no key, removes none, renames none,
+    reorders none for presentation and annotates none — so the array re-validates
+    as ``tuple[RecordedInvocation, ...]``, whose models set ``extra="forbid"``. In
+    particular an unset ``failure_kind`` on a completion is rendered as ``null``
+    and never annotated with a friendly marker: what "no kind was reported" means
+    is :func:`_invocation_failure_kind`'s job on the listing, exactly as ADR-0186
+    §9 puts the words for an unrecorded origin on ``assistant decisions`` rather
+    than in the artifact.
+
+    **What the document does not carry is the row's own doing** (ADR-0192 §2). No
+    recipient, account, endpoint or destination is in it, because none is in the
+    record — the keys are the invocation's own plus the three the store's join
+    adds, and the join adds a tool identifier, a capability and a boolean.
+
+    **Not folded together with** :func:`_decisions_artifact` **or**
+    :func:`_reads_artifact`, and the reason is those two's: the return annotation
+    is what says which store this document is a faithful copy *of*, and a shared
+    helper taking a sequence of models would make all three claims unstatable.
+
+    Args:
+        recorded: Every invocation row the trail holds, in the operation's order.
+
+    Returns:
+        One JSON document, newline-terminated so it is a well-formed text stream.
+    """
+    return json.dumps([row.model_dump(mode="json") for row in recorded], indent=2) + "\n"
 
 
 def _partial_reference(exc: BaseException) -> str | None:
@@ -8039,6 +8256,334 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
 
 
 # --- rendering the connection surface (ADR-0151 §4, §5, §7, §8, §9) ----------
+
+
+# --- rendering the invocation trail (ADR-0192 §4) ---------------------------
+# The third pair's rendering, over the same store as the decision block above and
+# a different row kind. What is inherited from ADR-0186 §7 is its last two
+# clauses — a row is rendered whole or **fewer rows** are, and every value is
+# inserted as data — and §8's bars on liveness, on authorisation and on event
+# wording (ADR-0192 §4). What is added is this row kind's own floor and its own
+# bars, and the bars are the harder half: what a row says is small and what a
+# reader wants it to say is large.
+
+
+def _recorded_at(instant: datetime) -> str:
+    """The instant an invocation row was appended, at :func:`_decided_at`'s precision.
+
+    **The same format for a different fact**, on :func:`_checked_at`'s reasoning:
+    ADR-0192 §4 requires "the instant it was recorded" as part of the row and
+    forbids a surface truncating any part of what it renders, so a minute-grained
+    instant would be a truncation. This store makes the case stronger than either
+    of the other two — a claim and the completion that names it are written either
+    side of one tool call, typically milliseconds apart, so at ``%H:%M`` the pair
+    renders as one instant twice and the ordering key disappears from the page.
+
+    **It is not the durable append order** (ADR-0192 §2). The ledger decides every
+    admission rule on its own append order precisely so a wall clock that steps
+    backwards cannot make a completed act stop being the most recent one; this
+    value is what the guarded clock read at the append and no more. It *is* the
+    listing's primary sort key (§4), which is a different claim from being the
+    ledger's order and is the only one this surface makes.
+
+    A pure formatting of a value that arrived on the row — no clock is consulted
+    here, and none may be (golden rule 3).
+    """
+    return _decided_at(instant)
+
+
+def _invocation_kind(row: ToolInvocation) -> tuple[str, str]:
+    """The row's kind — claim or completion — and what that kind states.
+
+    **Every row states its kind** (ADR-0192 §4), because the two are different
+    facts and a page holding both must render neither in the other's vocabulary.
+    :attr:`~ai_assistant.core.types.ToolInvocation.completes` is the
+    discriminator the model itself uses, so this branches on the same field the
+    validator does rather than on a second spelling of it.
+
+    **A claim is a call begun and never a call pending** (ADR-0192 §4). The words
+    *pending*, *open*, *in flight*, *awaiting an outcome* and "has no completion
+    yet" are all the same inference wearing different clothes: no row carries the
+    fact, establishing it would need the join across two operations §4 forbids,
+    and a completed call's claim row says nothing whatever about its completion.
+
+    **It is not a statement that the tool callable was entered**, either (ADR-0192
+    §4, ADR-0034 §1). The claim is written *before* the callable, and §1's
+    cancellation clause has a path where the claim lands, a completion is written,
+    and the callable is provably never entered — so what the row says is that this
+    system spent an authorisation and attempted a call, which is what the sentence
+    below says and the most a claim carries.
+
+    Args:
+        row: The invocation row, for its discriminator.
+
+    Returns:
+        The kind's word, coloured, and the sentence stating what the kind is.
+    """
+    if row.completes is None:
+        return (
+            "[cyan]call begun[/]",
+            "a claim: I spent an authorisation and attempted a call. It does not say "
+            "the tool itself was entered, and it says nothing about how the call ended",
+        )
+    return (
+        "[blue]call finished[/]",
+        "a completion: how an attempted call ended, written after it",
+    )
+
+
+def _invocation_outcome(outcome: ToolOutcome, *, egress_call: bool) -> tuple[str, str]:
+    """How a completed call ended: the outcome's word, and what it does and does not say.
+
+    **The word is the enum's own**, on :func:`_read_ending`'s reasoning: what a
+    user sees on screen and what an exported row carries are the same three words,
+    so a reader comparing a screen with an ``invocations.json`` needs no glossary.
+
+    **``SUCCEEDED`` is the one state that establishes the callable was entered**
+    (ADR-0192 §4). It is the tool reporting an outcome back through the seam, which
+    is unreachable without it — and where the row also carries ``egress_call`` true
+    this is the one place a surface may say the egress call was **attempted and
+    reported success**. It says it on no other row and in no other state.
+
+    **It may not say the call was *sent***, and the withholding is deliberate
+    rather than fussy (ADR-0192 §4, ADR-0031 §4). ``SUCCEEDED`` is bounded to three
+    facts — a validated callable return, an unexpired deadline, and no increase in
+    the cancellation count — and none of them is a transmission; an egress callable
+    that returns normally without putting a byte on the wire produces ``SUCCEEDED``
+    like any other. Nothing available could carry the word either:
+    ``ToolImplementation`` returns a ``FrozenJson`` with no channel for a
+    transmission fact (#1558). And nothing here says or implies that anything was
+    received, delivered or acted on by any recipient, on any row, in any state:
+    ``SUCCEEDED`` is what the tool reported to the seam, and nothing in this system
+    observes what happened after that — or upstream of it.
+
+    **``INDETERMINATE`` is a state and not a hedge** (ADR-0014 §4, ADR-0192 §3).
+    The call may or may not have taken effect, and a surface resolving that in
+    either direction would be minting the fact the outcome exists to refuse.
+
+    Total over the enum through :func:`~typing.assert_never`, so a fourth outcome
+    would fail the type check rather than render as an empty ending.
+
+    Args:
+        outcome: How the call ended, as the row states it.
+        egress_call: Whether the named decision carried an egress binding — read
+            only to decide the one extra sentence ``SUCCEEDED`` licenses.
+
+    Returns:
+        The outcome's own word, coloured, and the sentence bounding what it states.
+    """
+    match outcome:
+        case ToolOutcome.SUCCEEDED:
+            if egress_call:
+                return (
+                    "[green]succeeded[/]",
+                    "the tool reported success. This was an outbound call, so what it "
+                    "says is that I attempted it and the tool reported it succeeded — "
+                    "and no more than that",
+                )
+            return "[green]succeeded[/]", "the tool reported success"
+        case ToolOutcome.FAILED:
+            return "[red]failed[/]", "the tool reported that the call did not succeed"
+        case ToolOutcome.INDETERMINATE:
+            return (
+                "[yellow]indeterminate[/]",
+                "the tool could not say whether the call took effect, and I cannot "
+                "resolve that in either direction",
+            )
+    assert_never(outcome)
+
+
+def _invocation_failure_kind(row: ToolInvocation) -> str:
+    """The kind the completion reported, or the statement that none was (ADR-0192 §4).
+
+    Three shapes and each is stated rather than inferred. A ``SUCCEEDED``
+    completion carries no kind by construction and this is not called for one. A
+    completion carrying a kind renders **that kind exactly**, substituting nothing.
+    A completion whose outcome is not ``SUCCEEDED`` and which carries **no** kind —
+    the cancellation-derived completion ADR-0192 §2 permits and forbids any lane to
+    fill — renders **that no kind was reported**.
+
+    **That third shape is where a helpful surface goes wrong.** Rendering a kind of
+    its own would be minting a fact the record declines to hold; rendering a blank
+    would let the reader supply one; dropping the row or the field would hide that
+    a call ended without a reported kind, which is itself information. It is
+    ADR-0184's positively-read absence, one store over, and the same treatment this
+    module already gives an unknown cost and an unrecorded origin.
+
+    Args:
+        row: The completion row.
+
+    Returns:
+        The reported kind, or the sentence naming the absence as one.
+    """
+    if row.failure_kind is not None:
+        return f"{_safe(row.failure_kind.value)}"
+    return "[dim]none was reported — the record holds no kind for this one[/]"
+
+
+def _incurred_cost(cost: ToolCost) -> str:
+    """What the invocation cost, as the tool reported it (ADR-0192 §4, §5).
+
+    **Three bases, and ``UNKNOWN`` is the one the floor is written for.** ADR-0192
+    §4 requires the incurred cost on every completion "**including that the cost is
+    unknown** where the basis is ``UNKNOWN``", so the absence is stated as a state
+    rather than shown as a blank, a zero or a dash. *Free* and *unknown* are the
+    distinction :class:`~ai_assistant.core.types.ToolCost` exists to keep apart —
+    the first is a fact a running total can add, the second an absence a ceiling
+    must fail closed on (ADR-0016 §4) — and a surface folding them would undo at
+    the last inch what the type protects everywhere else.
+
+    **It is what the tool reported and never what the definition advertised**
+    (ADR-0192 §2, §5). ``ToolDefinition.cost`` is a price list; this is what this
+    invocation incurred, and the two are different facts even when the numbers
+    agree.
+
+    Total over the enum through :func:`~typing.assert_never`.
+
+    Args:
+        cost: The cost the completion carries.
+
+    Returns:
+        The amount with its currency, or the sentence naming which absence this is.
+    """
+    match cost.basis:
+        case CostBasis.PER_CALL:
+            # Both members are present on this basis by construction
+            # (``ToolCost._amount_matches_basis``), so neither branch below is
+            # reachable with one missing.
+            return f"{_safe(str(cost.amount))} {_safe(str(cost.currency))}"
+        case CostBasis.FREE:
+            return "free [dim](the tool reported this invocation carried no charge)[/]"
+        case CostBasis.UNKNOWN:
+            return (
+                "[yellow]not known[/] [dim](the tool reported no cost for this "
+                "invocation; that is not the same as free)[/]"
+            )
+    assert_never(cost.basis)
+
+
+def _render_invocation(recorded: RecordedInvocation) -> None:
+    """One invocation row, whole (ADR-0192 §4).
+
+    **The floor, field by field.** Every row renders its kind, the instant it was
+    recorded, and the tool identifier and capability *the value itself carries* —
+    from the join the store made, never from a registry and never from a second
+    call. A completion also renders the outcome, the failure kind where the row
+    carries one or the statement that none was reported, and the incurred cost
+    including that it is unknown. Nothing is omitted, truncated, summarised,
+    sampled or counted in place of, so a narrow terminal gets fewer rows rather
+    than shorter ones.
+
+    **Every value comes from the row in hand** (ADR-0192 §4). Nothing here joins
+    two operations' answers, reads a store, calls a second operation to complete a
+    row, or infers a missing half — which is what the store-side join exists to
+    make unnecessary, and what golden rule 3 would forbid this layer doing anyway.
+
+    **No recipient, account, endpoint or destination is named, on any row, in any
+    state** (ADR-0192 §4). ``egress_call`` states that the call was an outbound one
+    and states nothing about whose bytes went where; who a ruling was taken over is
+    ``assistant decisions``' to render from the binding itself, under ADR-0186 §7's
+    floor. The row carries none of it to render even if this wanted to (ADR-0192
+    §2).
+
+    **The authorisation is named and never resolved here.** ``decision_id`` points
+    one way, at a row ``assistant decisions`` renders; this prints it as recorded,
+    looks nothing up, and claims nothing about what that ruling now says — the
+    pointer treatment :func:`_read_grant_line` already gives a grant id, and
+    ADR-0186 §8's liveness bar read one row kind over.
+
+    Every value is inserted as data and neutralised for this terminal (ADR-0192
+    §4's last clause, ADR-0042 §4). Being read from an append-only store relaxes
+    nothing: a tool identifier and a capability are values a registration supplied,
+    and ``VisibleIdentifier`` admits far more than this terminal treats as inert.
+    """
+    row = recorded.invocation
+    kind, states = _invocation_kind(row)
+    console.print(f"  {kind} [dim]{_recorded_at(row.recorded_at)}[/] [dim]{_safe(row.id)}[/]")
+    console.print(f"    [dim]{states}[/]")
+    console.print(
+        f"  [bold]Tool:[/] {_safe(recorded.tool)} [dim](capability {_safe(recorded.capability)})[/]"
+    )
+    console.print(
+        f"  [bold]Outbound call:[/] {'yes' if recorded.egress_call else 'no'} "
+        "[dim](whether the ruling this ran under carried an outbound binding; "
+        "who or where is not on this row)[/]"
+    )
+    console.print(
+        f"  [bold]Under authorisation:[/] {_safe(row.decision_id)} "
+        "[dim](what it cited then; it is not looked up now)[/]"
+    )
+    if row.outcome is not None:
+        word, ending = _invocation_outcome(row.outcome, egress_call=recorded.egress_call)
+        console.print(f"  [bold]Ended:[/] {word} [dim]— {ending}[/]")
+        if row.outcome is not ToolOutcome.SUCCEEDED:
+            console.print(f"  [bold]Failure kind:[/] {_invocation_failure_kind(row)}")
+        # A completion always carries one; the model refuses one without
+        # (``ToolInvocation._is_a_claim_or_a_completion``).
+        if row.incurred_cost is not None:
+            console.print(f"  [bold]Cost:[/] {_incurred_cost(row.incurred_cost)}")
+    console.print()
+
+
+def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int) -> None:
+    """The bounded listing, and the four things the page itself has to say.
+
+    **One attempt is up to two rows, and they are presented as the two rows they
+    are** (ADR-0192 §4). Nothing here pairs them, counts them as one, or renders
+    either in the other's vocabulary — and the footer says so, because a reader
+    seeing "call begun" without "call finished" beneath it will otherwise supply
+    the pairing themselves.
+
+    **A page's silence is a fact about the page** (ADR-0192 §4). The absence of a
+    completion, or of a claim, from a bounded page says something about the bound
+    and nothing about the call: the other half may simply be further back. No count
+    of calls, attempted or completed, is derived from anything but the rows on
+    screen.
+
+    **Liveness is not derivable from history** (ADR-0186 §8's first clause, read
+    one row kind over). A row states that an act was recorded — never that the
+    authorisation it names still stands, that the tool is still registered under
+    the identifier printed, or that anything is still running.
+
+    **An empty page is not a claim that nothing ever ran.** ADR-0192 §1's
+    cancellation clause and §3's commit-state clause both admit paths where an
+    attempt leaves fewer rows than a reader expects, so the one thing this surface
+    must not do is turn an empty page into a statement the record declines to make.
+
+    Args:
+        recorded: The page, in the operation's order.
+        limit: The bound that was asked for, so a full page can say it is one.
+    """
+    if not recorded:
+        console.print("[yellow]Nothing recorded.[/] No act on an authorisation is in this record.")
+        console.print(
+            "[dim]That is not a claim that nothing ever ran: this record states what "
+            "it holds, and a fault can leave an act with fewer rows than it made.[/]"
+        )
+        return
+    console.print(f"[bold]{len(recorded)}[/] row(s), newest recorded first:\n")
+    for row in recorded:
+        _render_invocation(row)
+    if len(recorded) == limit:
+        console.print(
+            f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
+            "count, and 'assistant export-invocations' writes the whole record.[/]"
+        )
+    console.print(
+        "[dim]One attempt is up to two rows — a call begun, and how a call finished. "
+        "They are two rows and not one, and a row with no partner on this page is a "
+        "fact about the page: the other half may be further back.[/]"
+    )
+    console.print(
+        "[dim]A row says I spent an authorisation and attempted a call. It does not "
+        "say the authorisation still stands, that the tool is still registered under "
+        "the identifier above, or that anything is still running.[/]"
+    )
+    console.print(
+        "[dim]Nothing here names who or where an outbound call went, and nothing "
+        "here says what became of it at the other end — I do not observe that. "
+        "'assistant decisions' is where a ruling's recipients are.[/]"
+    )
 
 
 def _reference_hint(reference: str, command: str, *, subject: str = "That reference") -> str:
