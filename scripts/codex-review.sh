@@ -364,12 +364,20 @@ _artifact_for_tree() {
 # same ref is what the child's own defaulting would have produced anyway; what is
 # removed is the window in which it would not have.
 _mode_start() {
+    # Zero is refused rather than accepted as "do not wait". `--start`'s whole
+    # contract is that it returns once the round has claimed its loop, so a
+    # zero-second budget for that is a contradiction, and it does not fail
+    # harmlessly: the deadline is already past on the first pass, so every start
+    # would report a round that "is not running" while its child ran on to
+    # completion behind the message. Refused at the point it is read, like every
+    # other numeric knob here.
     local start_grace="${CODEX_REVIEW_START_GRACE:-30}"
-    if [[ ! "$start_grace" =~ ^(0|[1-9][0-9]{0,3})$ ]]; then
-        echo "CODEX_REVIEW_START_GRACE must be a non-negative decimal integer of at" \
-            "most 4 digits with no leading zero (a shell reads a leading zero as" \
-            "octal), not '${start_grace}' — it bounds the seconds --start waits for" \
-            "the detached round to claim its loop" >&2
+    if [[ ! "$start_grace" =~ ^[1-9][0-9]{0,3}$ ]]; then
+        echo "CODEX_REVIEW_START_GRACE must be a decimal integer from 1 to 9999 with" \
+            "no leading zero (a shell reads a leading zero as octal), not" \
+            "'${start_grace}' — it bounds the seconds --start waits for the detached" \
+            "round to claim its loop, and zero would declare every round failed" \
+            "before any could answer" >&2
         exit 2
     fi
 
@@ -505,9 +513,15 @@ _mode_start() {
             exit 1
         fi
         if [[ "$(date +%s)" -ge "$deadline" ]]; then
+            # Stated as what is known — the claim did not arrive — rather than as
+            # "it is not running", which this cannot see. The child is left alone
+            # rather than killed: if it is merely slow it will claim the loop and
+            # `--wait` will find it, where killing a round mid-flight would throw
+            # away work to make a message true.
             echo "the detached '${persona}' round did not claim this loop within" >&2
-            echo "  ${start_grace}s, so it is not running. Its output follows" >&2
-            echo "  (${log_file#"${repo_root}/"}):" >&2
+            echo "  ${start_grace}s. It failed at startup, or it is unusually slow —" >&2
+            echo "  its output follows (${log_file#"${repo_root}/"}). If it is running" >&2
+            echo "  after all, --wait will find it; nothing here has killed it." >&2
             _echo_log
             exit 1
         fi

@@ -477,3 +477,26 @@ def test_two_simultaneous_starts_leave_one_round_and_one_success(tmp_path: Path)
 
     _reap(repo)
     assert len(list((repo / ".review").glob("*.md"))) == 1
+
+
+@pytest.mark.parametrize("value", ["0", "not-a-number", "030", "-1", "5s"])
+def test_a_start_grace_that_cannot_be_waited_out_is_refused(tmp_path: Path, value: str) -> None:
+    """Zero is refused with the malformed values, not accepted as "do not wait".
+
+    `--start`'s contract is that it returns once the round has claimed its loop, so
+    a zero-second budget for that is a contradiction — and it does not fail
+    harmlessly: the deadline is already past on the first pass, so the start would
+    report a round that "is not running" while its child ran on behind the message.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path)
+    env["CODEX_REVIEW_START_GRACE"] = value
+
+    result = _run(repo, env, "--start", "adversarial", "main")
+
+    assert result.returncode == USAGE, result.stderr
+    assert "CODEX_REVIEW_START_GRACE" in result.stderr
+    # Refused before anything was launched: no round, no marker, no log.
+    assert _round_pids(repo) == []
+    assert not list((repo / ".review").glob("*.md"))
