@@ -774,14 +774,16 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     the decision goes instead.
 
     So the walk asserts the whole set rather than spot-checking: a decision, or either
-    binding it may carry, is annotated on exactly the audit surface's six functions
-    and on no others. A seventh entry — most of all ``_render_confirmation`` or
+    binding it may carry, is annotated on exactly the audit surface's seven functions
+    and on no others. An eighth entry — most of all ``_render_confirmation`` or
     ``_prompt_for_approval`` — fails here, which is the route around ADR-0042 §6 that
     ADR-0178 exists to close and that ADR-0186 §8's last clause bars from the other
     direction.
 
-    ``_authorisation_line`` is the sixth, added by ADR-0193 §11: it renders what
-    authorised an ``ALLOW`` from the row alone, so it takes the decision and belongs
+    ``_authorisation_line`` and ``_refuse_a_page_this_surface_cannot_state`` are the
+    sixth and seventh, added by ADR-0193 §11: the first renders what authorised an
+    ``ALLOW`` from the row alone, the second runs that same dispatch over a page
+    before a byte of it is printed, and both therefore take the decision and belong
     on this surface. The set is **extended** rather than relaxed to a superset test,
     because a membership check would stop catching the entry this case exists for.
     """
@@ -800,6 +802,7 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
         "_decisions_artifact",
         "_recorded_origin_line",
         "_render_decision",
+        "_refuse_a_page_this_surface_cannot_state",
         "_render_decisions",
         "_render_recorded_egress",
     }

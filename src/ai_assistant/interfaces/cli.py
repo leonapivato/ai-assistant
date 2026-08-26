@@ -258,6 +258,7 @@ from ai_assistant.core.errors import (
     ConfigurationError,
     DisplacedProvisioningError,
     IncompleteProvisioningError,
+    InvalidResolutionError,
     OversizedValueError,
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
@@ -4541,11 +4542,39 @@ async def _drive_decisions(engine: AssistantEngine, *, limit: int) -> int:
     """
     try:
         recorded = await engine.recent_decisions(limit=limit)
+        _refuse_a_page_this_surface_cannot_state(recorded)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_decisions(recorded, limit=limit)
     return _EXIT_OK
+
+
+def _refuse_a_page_this_surface_cannot_state(recorded: tuple[PermissionDecision, ...]) -> None:
+    """Run ADR-0193 §11's dispatch over the whole page before a byte is printed.
+
+    **Ahead of the rendering rather than inside it**, so the refusal is a refusal
+    and not a half-drawn listing: ADR-0186 §7 says a surface that cannot render a
+    row whole renders *fewer rows*, not partial ones, and a page half printed under
+    an error message is exactly the partial rendering that clause is about. The
+    existing boundary in :func:`_drive_decisions` then reports it, as it reports an
+    unreadable trail — a refusal reaches the user as itself and no row is invented.
+
+    **It is :func:`_authorisation_line` itself and not a second copy of its rule**,
+    which is the whole point of calling it here: a check that restated the three
+    conditions would be a second spelling to keep in step with the first, and the
+    failure would be a page that passed the check and then raised mid-render.
+
+    Args:
+        recorded: The page the operation returned, in its own order.
+
+    Raises:
+        InvalidResolutionError: If any ``ALLOW`` on the page satisfies none of
+            §11's three conditions.
+    """
+    for decision in recorded:
+        if decision.ruling.outcome is PermissionOutcome.ALLOW:
+            _authorisation_line(decision)
 
 
 async def _drive_export_decisions(engine: AssistantEngine, *, artifact: TextIO) -> int:
@@ -8015,27 +8044,43 @@ def _authorisation_line(decision: PermissionDecision) -> str:
     written. The second is conditioned on ``resolves`` unset, so it is never widened
     to cover a resolving row.
 
-    **A row satisfying none of the three conditions gets no statement of the fact,
-    and that is §11's own reasoning rather than a gap left in it.** ``PermissionRuling``
-    refuses ``authorised_by`` on a non-``ALLOW`` and ``AuditTrail.record`` refuses a
-    *resolving* ``ALLOW`` whose ``authorised_by`` is not its own ``resolves``, which
-    together make §11's three states total over every row a trail can return — the
-    totality the section claims when it says "the discriminator is total because
-    ``authorised_by`` and ``resolves`` are". The types alone are looser: a row
-    carrying ``resolves`` and a *different* ``authorised_by`` validates, and this
-    surface renders whatever the operation hands it, over the wire, from a hub this
-    adapter does not own. No state's claim is true of such a row — it answers a
-    confirmation about this call and rests on something that is not that
-    confirmation — so assigning it one would be asserting the basis the record does
-    not determine. §11 rejects "no statement at all" for a *non-egress* ``ALLOW``
-    expressly because "the record already determines the answer" there; here it does
-    not, and the line says so and names neither. That is a refusal to state §11's
-    fact, not a fourth answer to it: nothing is rendered as any of the three, and
-    every conforming row still reaches exactly one.
+    **A row satisfying none of the three conditions is refused rather than rendered,
+    and there is no fourth state.** ``PermissionRuling`` refuses ``authorised_by`` on
+    a non-``ALLOW`` and ``AuditTrail.record`` refuses a *resolving* ``ALLOW`` whose
+    ``authorised_by`` is not its own ``resolves``, which together make §11's three
+    states total over every row a trail can return — the totality the section claims
+    when it says "the discriminator is total because ``authorised_by`` and
+    ``resolves`` are". The types alone are looser: a row carrying ``resolves`` and a
+    *different* ``authorised_by`` validates, and this surface renders whatever the
+    operation hands it, over the wire, from a hub this adapter does not own.
+
+    No state's claim is true of such a row — it answers a confirmation about this
+    call and rests on something that is not that confirmation — so assigning it one
+    would assert a basis the record does not determine, and rendering a fourth
+    would be a state §11 does not have. What is left is the refusal ADR-0186 §7
+    already names: "a surface that cannot render a row whole renders **fewer rows**,
+    not partial ones". The listing takes that to its end and renders none, exactly as
+    it does for an unreadable trail — a refusal reaches the user as itself, and no
+    row is invented. The record is still reachable: ``assistant export-decisions``
+    is a faithful copy (§9) and states this shape as the bytes it is, which is the
+    artifact's job and not this listing's.
+
+    :class:`~ai_assistant.core.errors.InvalidResolutionError` is the refusal's name
+    because ``core`` already gives this exact condition that name — it is raised
+    "when the resolving ruling's ``authorised_by`` does not match its ``resolves``" —
+    so the adapter names the trail's own rule rather than authoring one, which is
+    golden rule 3. It is an :class:`~ai_assistant.core.errors.AssistantError`, so
+    :func:`_drive_decisions`' existing boundary catches it and
+    :func:`_render_error` neutralises every value in the message for this terminal.
 
     Args:
         decision: The recorded ruling, whose outcome the caller has already
             established is ``ALLOW``.
+
+    Raises:
+        InvalidResolutionError: If the row is an ``ALLOW`` that satisfies none of
+            §11's three conditions — a resolving decision whose ``authorised_by`` is
+            neither unset nor its own ``resolves``.
 
     Returns:
         The line's markup, with every value from the row neutralised for this
@@ -8058,10 +8103,13 @@ def _authorisation_line(decision: PermissionDecision) -> str:
             "[bold]Authorised by:[/] a decision you took about this call, "
             f"recorded as {_safe(authorised_by)}"
         )
-    return (
-        "[bold]Authorised by:[/] this row does not say — it answers one decision and names "
-        "a different one as what authorised it, and nothing here guesses between them"
+    msg = (
+        f"decision {decision.id!r} answers {decision.resolves!r} but rests on "
+        f"{authorised_by!r}; no ruling an audit trail accepts carries both, and this "
+        f"listing states what authorised a call rather than guessing between them. "
+        f"'assistant export-decisions' writes the record as it stands."
     )
+    raise InvalidResolutionError(msg)
 
 
 def _render_decision(decision: PermissionDecision) -> None:

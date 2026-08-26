@@ -1214,7 +1214,7 @@ def test_the_three_states_are_distinct_and_none_is_rendered_as_another(
     assert len(set(prose)) == 3, prose
 
 
-def test_a_row_naming_an_authorisation_other_than_its_own_question_gets_no_state(
+def test_a_row_no_basis_state_reaches_refuses_the_page_and_renders_none_of_it(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The one combination the type admits, no trail can hold, and no state fits.
@@ -1226,51 +1226,81 @@ def test_a_row_naming_an_authorisation_other_than_its_own_question_gets_no_state
     alone are looser: this row validates, and the surface renders whatever the
     operation hands it, over the wire, from a hub the adapter does not own.
 
-    **No state's claim is true of it**, so it is assigned none. It answers a
-    confirmation about this call and rests on something that is not that
-    confirmation, so the first state's claim is false; the second is conditioned on
-    ``resolves`` unset, and widening it to cover this row would assign a state §11
-    does not define for it; the third is false outright, because ``authorised_by`` is
-    set. §11 rejects "no statement at all" for a *non-egress* ``ALLOW`` expressly
-    because "the record already determines the answer" there — here it does not, and
-    the line says so and names neither value as the basis.
+    **No state's claim is true of it, and there is no fourth state**, so the listing
+    refuses. It answers a confirmation about this call and rests on something that is
+    not that confirmation, so the first state is false; the second is conditioned on
+    ``resolves`` unset; the third is false outright, because ``authorised_by`` is set.
+    What is left is ADR-0186 §7's own answer — "a surface that cannot render a row
+    whole renders **fewer rows**, not partial ones" — taken to its end.
+
+    **Nothing at all is printed**, which is the half a containment assertion would
+    miss: the conforming row is seeded *first*, so a check made inside the rendering
+    would leave it on screen under an error message, and that is the partial page §7
+    rules out.
     """
-    _listing(
-        output,
-        monkeypatch,
+    engine = _ScriptedDecisionEngine(
+        _decision("d-fine", binding=_binding(planned=False)),
         _decision("d-odd", resolves="d-ask", authorised_by="g-1"),
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
-    assert _basis_line(output) == (
-        "Authorised by: this row does not say — it answers one decision and names a "
-        "different one as what authorised it, and nothing here guesses between them"
-    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["decisions"])
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "'d-odd' answers 'd-ask' but rests on 'g-1'" in rendered
+    assert "assistant export-decisions" in rendered
+    assert _basis_lines(output) == []
+    assert "d-fine" not in rendered
+    assert "ruling(s), newest ruling first" not in rendered
+    assert "Nothing recorded" not in rendered
 
 
-def test_no_state_is_assigned_to_a_row_none_of_the_three_conditions_reaches(
+def test_the_refusal_names_none_of_the_three_states_as_the_rows_basis(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the case above: none of §11's three renderings appears.
+    """The other half: refusing is not a covert fourth rendering of §11's fact.
 
-    An equality on the line pins what *is* said; this pins that none of the three
-    states is said, which is the failure the clause is actually about — "each
-    distinct from the other two and none rendered as any other" is unsatisfiable for
-    a row the discriminator does not reach, and the repair is to render none of them
-    rather than to pick the least wrong.
+    "Each distinct from the other two and none rendered as any other" is
+    unsatisfiable for a row the discriminator does not reach, and the repair is to
+    render none of them — not to pick the least wrong, and not to word the refusal so
+    that it states a basis anyway.
     """
-    rendered = _listing(
-        output,
-        monkeypatch,
+    engine = _ScriptedDecisionEngine(
         _decision("d-odd", resolves="d-ask", authorised_by="g-1"),
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["decisions"])
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
     for state in (
         "a decision you took about this call",
         "a standing authorisation this ruling names",
         "the policy's own rules",
     ):
         assert state not in rendered, state
-    assert "Answers the question: d-ask" in rendered
+
+
+def test_the_export_still_carries_the_row_the_listing_will_not_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0186 §9's faithful copy is untouched by §11's refusal, and must be.
+
+    The artifact is "a faithful copy": no key added, removed, renamed, reordered for
+    presentation or annotated. Putting the listing's refusal into it would make the
+    export no longer an export, and it would also put the row beyond the user's
+    reach — the refusal above is about what can be said *in prose*, never about what
+    the record holds.
+    """
+    rows = (_decision("d-odd", resolves="d-ask", authorised_by="g-1"),)
+    _wire(monkeypatch, _ScriptedDecisionEngine(*rows))
+
+    result = CliRunner().invoke(cli.app, ["export-decisions"])
+    assert result.exit_code == 0
+    reloaded = TypeAdapter(tuple[PermissionDecision, ...]).validate_json(result.stdout)
+    assert reloaded == rows
 
 
 def test_a_resolving_row_carrying_no_authorisation_is_the_third_state(
