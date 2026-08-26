@@ -2,6 +2,57 @@
 
 - Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam)
 - Date: 2026-08-14
+- **Note (2026-08-26): §4's condition 3 is re-attested, and now holds by both
+  limbs of ADR-0017 §3's disjunct rather than by the first alone.** ADR-0193's
+  implementing lane has landed, so the condition-3 subsection's stated limit —
+  "ADR-0148 §3's third clause closes limb (b) until an ADR establishes standing
+  grants, so **route (a) is the only available route today**", and its code
+  paragraph's "Limb (b) is closed in code as well as in prose:
+  `ThresholdActionPolicy` … consults no grant seam" — is no longer true of the
+  tree. This note records what replaced it, under §4's own rule that a later
+  change which falsifies a subsection's stated property "either restores the
+  property in the same change or opens an ADR reconsidering the designation"
+  (ADR-0193 §12's fifth clause assigns the re-attestation here).
+
+  **The condition itself is unfalsified**, which is why no ADR reconsidering
+  designation is owed. ADR-0017 §3's condition 3 offers a user decision **or** a
+  standing user policy established by a recorded act of the user; ADR-0154
+  satisfied it by the first alone and said so, and it is now satisfied by both.
+  Nothing was added to ADR-0017 §3's list, nothing was relaxed, and no limb was
+  widened: what changed is which limb is *available*.
+
+  **What holds in code at the tree this note is written against.**
+  `ThresholdActionPolicy` may be constructed with a `RecipientGrants` — the query
+  face of `SqliteRecipientGrantStore`, which `app/composition.py` wires — and it
+  consults that seam **at most once per ruling**, only where the disclosure floor
+  is the entire reason the request is not already an `ALLOW`, and never on a
+  request the origin bar or any other ground has already settled. A covering
+  grant then sources an `ALLOW` naming the grant's `id` and its recomputed
+  `subject_digest`, and `AuditTrail.record` refuses that row unless the pointer
+  resolves, at its own read, to an outstanding grant whose declaration, account
+  and destination set cover the decision and whose digest matches. Recipient
+  authorisation still traces to a **user act** — ADR-0193 §2 admits exactly one
+  route to a grant, a user answering a recorded `CONFIRM` about an egress call and
+  asking in the same act that its recipients be remembered — and it is still bound
+  to the **resolved destination set**, compared as set membership over
+  `CanonicalDestination` and never by any looser relation.
+
+  **ADR-0148 §3's second clause is untouched and is reinforced.** No grant is
+  created from a tool's declaration, a credential's scope or audience, a configured
+  base URL or host, an allowlist the system assembled, a recipient appearing in a
+  prior call, a connected account, a `Settings` value, a first run, a migration, or
+  a destination this system extracted from a span it selected (ADR-0193 §2's second
+  and third clauses). §2's own bar on a *configuration* granting a standing
+  authorisation for a recipient likewise stands.
+
+  **Nothing else in this ADR changes**: §1's designation, §2's clauses, the other
+  thirteen attestations and their verdicts, §5's transition and §7's limits all
+  hold as written. Issue **#68**, which condition 3's "stated limit" paragraph
+  leaves open, is answered by ADR-0193 §6 and §11 rather than by this note, and
+  **#1593** records that route (b) is not yet *reachable* for `send_email` as
+  declared — its `UNKNOWN` cost trips a floor no configuration reaches — which is
+  a fact about that declaration and about the budget lane, not about this
+  condition.
 - **Note (2026-08-24): §4's standing-authorisation floor is lifted for a
   user-established recipient grant, and for nothing else.** ADR-0193 is the ADR item
   (ii)'s second clause anticipated — "the ADR that would permit a standing
