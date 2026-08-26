@@ -1250,17 +1250,18 @@ async def test_a_cancellation_requested_before_invoke_lands_on_the_claim_append(
         current.cancel()
         return AT
 
-    outcome: object = None
-    try:
-        outcome = await executor_over(store, seam, now=cancelling_clock).execute(
+    with pytest.raises(asyncio.CancelledError):
+        await executor_over(store, seam, now=cancelling_clock).execute(
             state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
-    except BaseException as exc:
-        outcome = exc
-    print("OUTCOME", type(outcome).__name__)
-    step_probe = await stored_step(store, state)
-    print("STEP", step_probe.status)
+
     assert implementation.calls == 0, "the cancellation lands on the claim, before the callable"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.INDETERMINATE, (
+        "`interrupted_outcome` for a side-effecting, non-NATURAL tool (ADR-0029 §4)"
+    )
+    assert step.finished_at is not None, "the step is committed out of RUNNING, not stranded"
+    assert step.attempts == 1, "a cancelled attempt is not re-driven"
     rows = [each.invocation for each in await ledger.trail.export_invocations()]
     assert len(rows) == 2, "one claim, and the completion §1 owes for this exit"
     (completion,) = [row for row in rows if row.completes is not None]

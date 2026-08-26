@@ -34,7 +34,11 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import ToolCall, ToolDefinition
 from ai_assistant.tools.consume import consumed_call
-from ai_assistant.tools.invocation import BoundImplementation, prepared_call, run_prepared_call
+from ai_assistant.tools.invocation import (
+    BoundImplementation,
+    checked_pairing,
+    run_prepared_call,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -422,31 +426,23 @@ class InMemoryToolRegistry:
         # subsume it, and a `ToolBindingError` from it must stay where ADR-0034 §1
         # already puts it — a pre-callable exit with no row written (ADR-0192 §1).
         #
-        # **Resolved once, here, and never read again.** The coroutine is built
-        # now rather than after the claim so that no reading of the callable's
-        # shape survives the claim append: an implementation that acquired or shed
-        # `invoke_bound` while that append was in flight would otherwise raise a
-        # `ToolBindingError` *after* the claim, and §3 would owe a completion
-        # carrying an outcome ADR-0029 computes for no such error. Creating a
-        # coroutine executes none of it, so nothing is entered by doing this early.
-        running = prepared_call(binding.implementation, checked)
-        entered = False
+        # **Resolved once, here, and never read again — and nothing is called.**
+        # The shape is decided above the claim so that no reading of it survives
+        # the append: an implementation that acquired or shed `invoke_bound` while
+        # that append was in flight would otherwise raise a `ToolBindingError`
+        # *after* the claim, and §3 would owe a completion carrying an outcome
+        # ADR-0029 computes for no such error. What comes back is a **factory**
+        # rather than a coroutine, because obtaining a coroutine means *calling*
+        # the registration — and nothing makes one a native `async def`, so a
+        # plain function's body would have run before the claim was appended.
+        entering = checked_pairing(binding.implementation, checked)
 
         async def act() -> ToolResult:
-            nonlocal entered
-            entered = True
-            return await run_prepared_call(running, definition=binding.definition, timeout=timeout)
+            return await run_prepared_call(entering, definition=binding.definition, timeout=timeout)
 
-        try:
-            return await consumed_call(
-                ledger=self._ledger,
-                definition=binding.definition,
-                decision=checked.decision,
-                act=act,
-            )
-        finally:
-            if not entered:
-                # A refused claim never reaches the callable, so the coroutine
-                # built above is closed rather than left for the collector to
-                # complain about. Closing an unstarted coroutine runs none of it.
-                running.close()
+        return await consumed_call(
+            ledger=self._ledger,
+            definition=binding.definition,
+            decision=checked.decision,
+            act=act,
+        )

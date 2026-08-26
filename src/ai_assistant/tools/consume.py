@@ -215,17 +215,29 @@ def _diagnose(
     return unclassifiable
 
 
-def _chained(error: BaseException, unclassifiable: BaseException | None) -> None:
-    """Keep a diagnostic's own failure on the record without letting it decide the exit.
+def _disposed(error: BaseException, unclassifiable: BaseException | None) -> BaseException:
+    """Return the exception this path must now dispose of, and keep the other.
 
     :func:`_diagnose` hands back the ``BaseException`` its class read raised, where
-    one did. It is attached to the append's failure as that exception's context, so
-    it survives on the chain a caller can walk — and it changes nothing about which
-    branch below is taken, which is the whole point of returning it rather than
-    raising it.
+    one did — ``fault_class_of`` guards that read against ``Exception`` and
+    deliberately not ``BaseException``, so a hostile metaclass can raise one out of
+    the classifier. ADR-0192 §3 gives it no exemption: it "is governed by this
+    section's own clauses on a ``BaseException`` raised there — the
+    ``CancelledError`` branches by the ``Task.cancelling()`` count, everything else
+    propagating unchanged with no diagnostic standing in for it".
+
+    So it **becomes** what the caller disposes of, rather than being swallowed
+    behind the append's own failure. Both survive: the append's failure is attached
+    as its context, so nothing is lost from the chain a caller can walk. What is
+    ruled out is the classifier deciding the exit *by escaping* — which would carry
+    it past the disposition entirely, leaving a failed claim with an unmoved count
+    as a ``CancelledError`` instead of the ``AuditError`` §1 requires.
     """
-    if unclassifiable is not None and error.__context__ is None:
-        error.__context__ = unclassifiable
+    if unclassifiable is None:
+        return error
+    if unclassifiable.__context__ is None:
+        unclassifiable.__context__ = error
+    return unclassifiable
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +327,7 @@ async def _complete(
         return _Appended(None, cancelled)
     error = appended
 
-    _chained(error, _diagnose(COMPLETION, error, completion.outcome))
+    error = _disposed(error, _diagnose(COMPLETION, error, completion.outcome))
     if propagating or cancelled:
         return _Appended(error, cancelled)
     if isinstance(error, asyncio.CancelledError | Exception):
@@ -392,7 +404,7 @@ async def _claimed(
         )
 
     error = appended
-    _chained(error, _diagnose(CLAIM, error))
+    error = _disposed(error, _diagnose(CLAIM, error))
     if cancelled:
         raise _cancellation(
             "the invoking task was cancelled while the invocation's claim was in flight", error

@@ -23,7 +23,8 @@ other, and it refuses both mismatches before the deadline opens.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from functools import partial
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
@@ -37,10 +38,21 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Mapping
+    from collections.abc import Callable, Coroutine, Mapping
     from datetime import timedelta
 
     from ai_assistant.core.types import EgressBinding, FrozenJson, ToolCall, ToolDefinition
+
+    #: What enters the bound callable once the claim has landed: a zero-argument
+    #: callable returning the coroutine to await. :func:`checked_pairing` builds
+    #: one, having decided the shape — so nothing about the callable is read again
+    #: after the claim, and nothing is *called* before it (ADR-0192 §1).
+    #:
+    #: Declared here rather than at module scope because it is a name for a
+    #: signature and never a value: every use is an annotation, which
+    #: ``from __future__ import annotations`` leaves unevaluated, so binding it at
+    #: runtime would buy three imports nothing else in this module needs.
+    EntersCallable = Callable[[], Coroutine[Any, Any, FrozenJson]]
 
 _log = structlog.get_logger(__name__)
 
@@ -127,8 +139,27 @@ class EgressToolImplementation(Protocol):
 BoundImplementation = ToolImplementation | EgressToolImplementation
 
 
-def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None:
-    """Refuse a callable whose shape and the call's egress binding disagree.
+def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> EntersCallable:
+    """Check the pairing and return what will enter the callable — **without entering it**.
+
+    Two things have to be true at once since ADR-0192 §1, and an implementation
+    that does either without the other is wrong in a way no ordinary test sees.
+
+    **The shape is resolved exactly once, above the claim.** Reading it again
+    afterwards would let an object that acquired or shed ``invoke_bound`` while the
+    claim append was in flight raise a ``ToolBindingError`` *after* the claim, and
+    §3 would owe a completion carrying an outcome ADR-0029 computes for no such
+    error. §1 states that as a **property, not a list**: after the claim, ``invoke``
+    performs no check that can raise a seam fault.
+
+    **And nothing is called here.** An earlier version returned the *coroutine*,
+    which meant invoking the registered callable to obtain one. Nothing makes a
+    registration a native ``async def`` — a plain function returning a coroutine
+    satisfies the shape — so its body would have run before the claim, and a claim
+    then refused as spent or unrecorded would have left a side effect performed
+    under an authorisation the ledger declined. So this returns a **factory**: the
+    branch is decided here, and entering the callable is the first thing that
+    happens after the claim lands, inside the deadline.
 
     **The check, separated from creating the coroutine, because ADR-0192 §1 puts
     the ledger claim between them.** "After ADR-0029 §2's three checks" is that
@@ -169,6 +200,10 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None
         implementation: The registry's callable for the call's tool.
         call: The revalidated, detached call.
 
+    Returns:
+        A zero-argument callable that enters the bound callable and returns its
+        coroutine. It performs no check of its own.
+
     Raises:
         ToolBindingError: If the callable's shape and the call's binding disagree.
     """
@@ -181,7 +216,13 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None
                 f"destination set for it to transmit under (ADR-0148 §4, ADR-0152 §8)"
             )
             raise ToolBindingError(msg)
-        return
+        bound = implementation.invoke_bound
+        return partial(
+            bound,
+            call.request.parameters,
+            idempotency_key=call.idempotency_key,
+            egress_binding=binding,
+        )
     if binding is not None:
         msg = (
             f"tool {call.request.tool.id!r} was authorised as an egress call and is bound to a "
@@ -189,41 +230,7 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> None
             f"was authorised (ADR-0148 §4)"
         )
         raise ToolBindingError(msg)
-
-
-def prepared_call(
-    implementation: BoundImplementation, call: ToolCall
-) -> Coroutine[Any, Any, FrozenJson]:
-    """Check the pairing and return the unawaited coroutine, in **one** resolution.
-
-    Created outside the deadline so that :func:`run_prepared_call` starts the
-    clock and the call together — and, since ADR-0192 §1, resolved **before** the
-    ledger claim so that nothing about the callable's shape is read again
-    afterwards. Reading it twice would let an implementation that acquired or
-    shed ``invoke_bound`` while the claim append was in flight raise a
-    ``ToolBindingError`` **after** the claim, which is the one thing §1 states as
-    a property rather than as a list: after the claim, ``invoke`` performs no
-    check that can raise a seam fault.
-
-    A caller that ends up not awaiting the returned coroutine — because the claim
-    was refused — closes it, which is why this is separate from awaiting it.
-
-    Raises:
-        ToolBindingError: If the callable's shape and the call's binding disagree
-            (:func:`checked_pairing`).
-    """
-    checked_pairing(implementation, call)
-    if isinstance(implementation, EgressToolImplementation):
-        return implementation.invoke_bound(
-            call.request.parameters,
-            idempotency_key=call.idempotency_key,
-            # `checked_pairing` refused this call unless the binding is present,
-            # and it is a pure check with no suspension point, so nothing can have
-            # removed it between there and here. A second `is None` branch would
-            # be code no input reaches.
-            egress_binding=cast("EgressBinding", call.request.egress_binding),
-        )
-    return implementation(call.request.parameters, idempotency_key=call.idempotency_key)
+    return partial(implementation, call.request.parameters, idempotency_key=call.idempotency_key)
 
 
 def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
@@ -341,7 +348,7 @@ async def run_bound_call(
 ) -> ToolResult:
     """Pair ``call`` with ``implementation`` and run it, in one step.
 
-    The convenience composition of :func:`prepared_call` and
+    The convenience composition of :func:`checked_pairing` and
     :func:`run_prepared_call`, for a caller with no ledger claim to place between
     them. A caller that has one **must** use the two halves: resolving the shape
     twice would put a check that can raise a seam fault *after* the claim, which
@@ -355,12 +362,12 @@ async def run_bound_call(
         CancelledError: If the invoking task was cancelled from outside.
     """
     return await run_prepared_call(
-        prepared_call(implementation, call), definition=definition, timeout=timeout
+        checked_pairing(implementation, call), definition=definition, timeout=timeout
     )
 
 
 async def run_prepared_call(
-    running: Coroutine[Any, Any, FrozenJson],
+    entering: EntersCallable,
     *,
     definition: ToolDefinition,
     timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
@@ -394,8 +401,9 @@ async def run_prepared_call(
     bypass the failure path it specifies is enforcing nothing.
 
     Args:
-        running: The unawaited coroutine :func:`prepared_call` built, whose
-            callable shape was resolved and checked **once**, before any claim.
+        entering: What :func:`checked_pairing` built, having resolved the
+            callable's shape **once** and before any claim, and having called
+            nothing.
         definition: The registry's own declaration, used for classification.
         timeout: How long to wait; already checked by the caller.
 
@@ -409,7 +417,9 @@ async def run_prepared_call(
     deadline = asyncio.timeout(timeout.total_seconds())
     try:
         async with deadline:
-            output = await running
+            # Entered here, inside the deadline, and not a moment earlier: this is
+            # the first thing that happens after the claim landed (ADR-0192 §1).
+            output = await entering()
     except asyncio.CancelledError as exc:
         if _pending_cancellations() > entered_with:
             raise
@@ -441,7 +451,6 @@ __all__ = [
     "ToolImplementation",
     "checked_pairing",
     "internal_failure",
-    "prepared_call",
     "run_bound_call",
     "run_prepared_call",
 ]
