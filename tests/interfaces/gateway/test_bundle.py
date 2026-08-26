@@ -4163,44 +4163,52 @@ def test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act() -> N
     assert "unresolved" not in _functions(script)["relay"]
 
 
-def test_the_listing_is_what_hands_an_abandoned_parks_token_back() -> None:
-    """Where the token *does* come back, and why that is a read rather than a guess.
+def test_a_listing_read_never_re_offers_a_park_whose_answer_is_unaccounted_for() -> None:
+    """Round 7's blocker: a recovery snapshot cannot exclude a resume still in transit.
 
-    ADR-0084 §7 names the remedy for a token the engine cannot resolve — "The remedy is
-    ``pending_confirmations()``" — and ADR-0177 §8 makes that read this surface's one
-    recovery route. ADR-0139 §4 supplies the principle: "the state is never inferred
-    from the unresolved act, and where this surface cannot read it, the user's next call
-    can."
+    An earlier revision handed the token back wherever the listing still offered the
+    park, on the reading that ``_resolve_park`` records the answer and evicts the
+    binding under the one lock ``_pending_confirmations`` also takes — so a park
+    observed pending is one no resume had resolved. That is true and insufficient: the
+    lock establishes that no resume *has* resolved the park, never that none *will*.
 
-    A row is built from that listing, or from a ``Confirmation`` a turn just returned,
-    and both are the engine's own statement that the park is still answerable —
-    ``_resolve_park`` records the answer and evicts the binding under the one lock
-    ``_pending_confirmations`` also takes, so a park observed pending is one no resume
-    had resolved.
+    An abandoned answer is one that may still be in flight, so a listing read that
+    reaches the lock first legitimately returns the park as pending, and a second
+    ``resume`` then races the first. Whichever loses raises ``UnknownContinuationError``,
+    which reaches this page as ``assistant-declined`` and renders as a denial ADR-0084 §7
+    refuses in terms — "never a denial". A consent token is the wrong place to carry that
+    race and this surface cannot close it: ``resume`` idempotent per binding, or recovery
+    minting a token that invalidates an outstanding one, is reachable from nowhere under
+    ``interfaces/gateway/``. That is #1536's residual and is filed as #1621.
+
+    So the token stays spent for the life of the page and the route back is a reload,
+    which starts both sets empty over an engine that still holds the binding.
     """
     script = _code("app.js")
     functions = _functions(script)
     offer = functions["offerApproval"]
 
-    assert (
-        "if (unresolved.delete(token)) {\n    spent.delete(token);\n    refreshParks();\n  }"
-    ) in offer
-    # Before a control is built from it, so nothing renders off the state it corrects.
-    assert offer.index("unresolved.delete(token)") < offer.index("parkRows.add(")
-    assert offer.index("unresolved.delete(token)") < offer.index('document.createElement("button")')
-    # Two writes and no third: taken where an answer was abandoned, given up where the
-    # listing says the park survived it.
-    # Two writes: the two endings that read no reply at all, and the refusal the gateway
-    # answered whose condition ADR-0177 §7's third clause still makes not known. One
-    # delete: the listing saying the park survived.
+    # Nothing un-spends a token on a listing's evidence — not in the function that
+    # builds a row from one, and not anywhere else in the page.
+    assert "unresolved.delete" not in script
+    assert "spent.delete" not in offer
+    # Two writes and no delete at all: the two endings that read no reply, and the
+    # refusal the gateway answered whose condition ADR-0177 §7's third clause still
+    # makes not known.
     assert len(re.findall(r"unresolved\.add\(", script)) == 2
-    assert len(re.findall(r"unresolved\.delete\(", script)) == 1
+    # The single ``spent.delete`` is the one ending that is known *not* to have landed —
+    # a refusal the gateway named and this page can read — and it lives in the relay,
+    # never in the render.
+    assert len(re.findall(r"spent\.delete\(", script)) == 1
+    assert "spent.delete(token);" in functions["answerConfirmation"]
     # Read as a use rather than as a mention, because ``_functions`` attributes the
     # declaration itself — it sits between two functions — to whichever one precedes it.
     assert {name for name, body in functions.items() if "unresolved." in body} == {
         "offerApproval",
         "answerConfirmation",
     }
+    # ``offerApproval``'s only use is the read that picks the row's sentence.
+    assert re.findall(r"unresolved\.\w+", offer) == ["unresolved.has"]
 
 
 def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing() -> None:
@@ -4274,6 +4282,17 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     assert "nothing here calls it resolved" in route
     assert "was answered" not in route
 
+    # **And it promises no re-offer on this page**, which is round 7's blocker: the
+    # controls do not come back while the page is open, so a route back that said they
+    # did would send the owner to press a button that will still be disabled. It says
+    # what is true instead — the pair stays as it is, and a reload is what makes the
+    # park answerable again — so the disabled control gives an account of itself rather
+    # than being a silent refusal one step removed.
+    assert "will not offer that park again while this page is open" in route
+    assert "what makes the park answerable again." in route
+    assert "Press Confirmations after a reload" in route
+    assert "controls come back" not in route
+
     # And the wait says there is no deadline, rather than implying one.
     waiting = _constant(script, "PARK_WAITING")
     assert "puts no deadline on it" in waiting
@@ -4343,11 +4362,11 @@ def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> Non
         cleared = functions[name]
         assert cleared.index("clearNode(") < cleared.index("refreshParks();"), name
     offer = functions["offerApproval"]
-    # Three: the park claimed, the park settled, and the token the listing handed back —
-    # the last of which is what keeps the row that *sent* the abandoned answer from
-    # standing there saying its outcome is not known after the listing has said the park
-    # survived it.
-    assert offer.count("refreshParks();") == 3
+    # Two, and no third: the park claimed and the park settled. The third used to be a
+    # token handed back on a listing read, which round 7's blocker removed — a recovery
+    # snapshot cannot exclude a resume still in transit, so nothing on this page moves a
+    # park out of the unaccounted-for state and there is no such transition to announce.
+    assert offer.count("refreshParks();") == 2
     assert "parkRows.add({ node: item, settle });" in offer
     # And the second row says an answer is on its way rather than that the park was
     # answered, because ``spent`` is claimed before the request goes out and cannot tell

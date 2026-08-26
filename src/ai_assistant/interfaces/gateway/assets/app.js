@@ -1163,8 +1163,9 @@ const PARK_WAITING =
 // recovery route.
 //
 // **It is the owner's act and not this page's, which is ADR-0182 §7's fifth clause.**
-// Nothing is re-sent here: the read is a read, and the answer is offered again only
-// where the engine's own enumeration says there is still a park to answer.
+// Nothing is re-sent here and nothing is offered again on this page's own reading of a
+// listing: the read is a read, and what turns a park back into an answerable one is the
+// owner reloading — see `PARK_ROUTE_BACK` for why that is where the line falls.
 
 // The route back, shared by both endings that read no reply because it does not depend
 // on which of them happened — `WHERE_TO_LOOK`'s device, one surface over.
@@ -1183,11 +1184,42 @@ const PARK_WAITING =
 // ADR-0139 §4 is the rule and it does not soften for an absence: the state is never
 // inferred from what this surface could not read. What the listing does state is which
 // parks are answerable, and that is what this says.
+//
+// **And it no longer promises that the controls come back**, which is adversarial
+// review's round-7 blocker and the ruling on it. An earlier draft handed the token back
+// where the listing still offered the park, on the reading that `_resolve_park` records
+// the answer and evicts the binding under the one lock `_pending_confirmations` also
+// takes — so a park observed pending is one no resume had resolved. That sentence is
+// true and insufficient: the lock establishes that no resume *has* resolved the park,
+// never that none *will*. The abandoned answer is still in transit, and a listing read
+// that reaches the lock first legitimately returns the park as pending — after which a
+// second `resume` races the first, one of them wins, and the loser raises
+// `UnknownContinuationError`, which reaches this page as `assistant-declined` and
+// renders as a denial ADR-0084 §7 refuses in terms.
+//
+// The window is narrow — the owner must press **Stop waiting** while the resume is
+// still in transit and not yet at the lock, and once it holds the lock it holds it
+// across the runner call — but a consent token is the wrong place to carry a narrow
+// race, and this page cannot close it. The fix is at the engine seam, where `resume` is
+// either idempotent per binding or recovery mints a token that invalidates an
+// outstanding one; that is #1536's residual, filed as #1621 and reachable from nowhere
+// under `interfaces/gateway/`.
+//
+// **So the token stays spent for the life of the page, and the route back is a
+// reload** — which starts `spent` and `unresolved` empty over an engine that still
+// holds the binding. The page states that rather than leaving the owner to discover it:
+// the pair is disabled, it says why, and it says what makes the park answerable again.
+// #1536's harder half stays closed — a re-read never renders an enabled control that
+// submits nothing — and what is reinstated is the softer half, the pair being unusable
+// until a reload.
 const PARK_ROUTE_BACK =
-  "Press Confirmations to read what is still waiting: a park still listed there is one " +
-  "that can still be answered, and its controls come back with it. A park the listing " +
-  "no longer offers is one this browser cannot answer — the listing says which parks " +
-  "are answerable and not why one is missing, so nothing here calls it resolved.";
+  "This browser will not offer that park again while this page is open: it cannot tell " +
+  "an answer lost on the way home from one that never arrived, and a second answer " +
+  "would be reported as a refusal if the first had in fact run. Reloading the page is " +
+  "what makes the park answerable again. Press Confirmations after a reload: a park " +
+  "still listed there is one that can still be answered. A park the listing no longer " +
+  "offers is one this browser cannot answer — the listing says which parks are " +
+  "answerable and not why one is missing, so nothing here calls it resolved.";
 
 // **What a row carries while its token is claimed and its answer went unread.**
 //
@@ -1201,6 +1233,13 @@ const PARK_ROUTE_BACK =
 // So the division is: **what happened** is said once, at the ending, in the fault line
 // beside the row — one of the three below, each naming its own cause — and **what is
 // still true** is what the row carries, which is this. Neither restates the other.
+//
+// **This is the sentence beside a pair that will stay disabled**, so it is the one that
+// has to explain that: it ends in `PARK_ROUTE_BACK`, which says the park cannot be
+// answered again from this page and that reloading is what makes it answerable. A
+// disabled control that gave no account of itself would be the silent refusal one step
+// removed — which is the failure #1536 is about, and the row is where the owner is
+// looking when they meet it.
 const PARK_NOT_KNOWN =
   "This browser sent an answer for this park and never read a reply, so what became of " +
   "it is not known: the assistant may have carried the action out and may never have " +
@@ -1313,32 +1352,29 @@ function parkWords(mine, out, answered, stranded) {
 }
 
 function offerApproval(item, token) {
-  // **The listing is what gives a token back, and the act never does** (#1536).
-  // `answerConfirmation` claims the token before its request goes out and returns it
-  // only where the gateway answered; an answer whose reply was never read resolves
-  // nothing, so returning the token on the strength of that act would let a second
-  // `resume` go out on a continuation the first may already have resolved — which
-  // raises `UnknownContinuationError`, reaches this page as `assistant-declined`, and
-  // renders as "The hub received the request and declined it". ADR-0084 §7 refuses that
-  // reading in terms: an unresolvable token is "never a denial".
+  // **Nothing here gives a token back, and nothing else does either** (#1536, and
+  // adversarial review's round-7 blocker). `answerConfirmation` claims the token before
+  // its request goes out and returns it on exactly one ending — a refusal the gateway
+  // named that this page reads as known *not* to have landed. Every other ending leaves
+  // it spent for the life of the page.
   //
-  // A row is built from `pending_confirmations`, or from a `Confirmation` a turn just
-  // returned, and both are the engine's own statement that this park is still
-  // answerable — `_resolve_park` records the answer and evicts the binding under one
-  // lock the enumeration also takes, so a park observed pending is one no resume had
-  // resolved. That is a read rather than a guess, which is what ADR-0139 §4 asks for:
-  // "the state is never inferred from the unresolved act, and where this surface cannot
-  // read it, the user's next call can."
+  // A row built here is built from `pending_confirmations`, or from a `Confirmation` a
+  // turn just returned, and an earlier draft treated either as the engine's own
+  // statement that the park is still answerable and un-spent the token on it. It is
+  // not. `_resolve_park` records the answer and evicts the binding under the one lock
+  // `_pending_confirmations` also takes, so a park observed pending is one no resume
+  // *has* resolved — and the abandoned answer is one that may still be in transit, so
+  // nothing there says none *will*. Re-offering on that evidence lets a second `resume`
+  // race the first; the loser raises `UnknownContinuationError`, which reaches this page
+  // as `assistant-declined` and renders as "The hub received the request and declined
+  // it". ADR-0084 §7 refuses that reading in terms: an unresolvable token is "never a
+  // denial".
   //
-  // **And every other row of this park is told**, because the one that sent the
-  // abandoned answer is still on screen saying its outcome is not known — true when it
-  // was written and stale the moment the listing says the park survived. The row being
-  // built is not registered yet and does not need to be: it takes the same state from
-  // `settle` at the end of this function.
-  if (unresolved.delete(token)) {
-    spent.delete(token);
-    refreshParks();
-  }
+  // So the row renders **disabled** and says so, `PARK_ROUTE_BACK` says a reload is
+  // what makes the park answerable again, and the re-answer-without-reload question is
+  // filed where it can actually be settled — #1621, at the engine seam: `resume`
+  // idempotent per binding, or recovery minting a token that invalidates an outstanding
+  // one.
   const approve = document.createElement("button");
   approve.type = "button";
   approve.textContent = "Yes, do it";
@@ -1509,19 +1545,28 @@ async function readPending(quiet) {
 //
 // It is held in page state and in no browser storage (ADR-0177 §8), the token is
 // compared and never read, and the set is bounded by the parks answered in one page's
-// life — a reload starts it empty, which is correct: the engine has evicted every entry
-// it resolved, so a spent token is one the listing will never hand back.
+// life.
+//
+// **A reload starts it empty, and that is the deliberate route back** rather than an
+// accident of where the state lives. A token spent on a resolution names an entry the
+// engine has evicted, so the listing will never hand it back; a token spent on an
+// answer whose reply was never read may well come back, and a reloaded page may answer
+// it. What a reload buys is that the abandoned request is no longer one this page is
+// racing — the decision is the owner's, taken after reading why, rather than this
+// page's, taken off a listing that cannot see an answer still in transit
+// (`PARK_ROUTE_BACK`).
 const spent = new Set();
 
 // The subset of those whose answer produced no reply at all (#1536).
 //
 // **A second set rather than a flag on `spent`**, because the two record different
-// facts and only one of them may ever be undone: `spent` is the guard that stops one
-// park being answered twice, and this is the part of it whose outcome ADR-0177 §7's
-// fourth clause makes **not known** — "the request was sent and no response was read".
-// A token in both is one the page must neither submit again on its own motion nor
-// declare resolved, and `offerApproval` is where the listing's evidence turns the first
-// of those into an answerable row again.
+// facts: `spent` is the guard that stops one park being answered twice, and this is the
+// part of it whose outcome ADR-0177 §7's fourth clause makes **not known** — "the
+// request was sent and no response was read". A token in both is one the page must
+// neither submit again nor declare resolved, and the difference is a sentence the owner
+// reads: `parkWords` gives a stranded row `PARK_NOT_KNOWN` where an ordinary spent one
+// gets `PARK_ANSWERED`. **Neither set is ever undone by a listing read** — round 7's
+// blocker and the ruling on it — so this is written and read and never deleted from.
 //
 // Held in page state and in no browser storage, compared and never read, and bounded by
 // the parks answered in one page's life — `spent`'s own properties, for `spent`'s own
@@ -1624,8 +1669,8 @@ async function answerConfirmation(token, approved, stopping) {
     // A second `resume` on a token the first resolved then raises
     // `UnknownContinuationError`, which reaches this page as `assistant-declined` and
     // renders as a denial ADR-0084 §7 refuses in terms. It is recorded as unresolved
-    // instead, and `offerApproval` gives it back where the listing says the park is
-    // still answerable.
+    // instead and stays spent for the life of the page — nothing on this page, the
+    // recovery listing included, gives it back (`PARK_ROUTE_BACK`, and round 7).
     //
     // **So this is the one `relay` entry point that does not report a rejection as
     // `GATEWAY_GONE`**, and it is the second such site rather than the first: `act`
