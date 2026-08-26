@@ -321,6 +321,103 @@ review-codex-both base="":
     fi
     scripts/codex-review.sh architecture "$1"
 
+# --- The same round, started and then polled (issue #1594) -------------------
+#
+# For a caller that cannot hold one process open for the minutes a round takes.
+# A dispatched agent's foreground tool call is capped well below a round, and for
+# a subagent *ending the turn is ending the agent* — so a backgrounded round
+# finishes with nobody left to wake, the artifact lands on disk, and the lane sits
+# believing it is waiting for a notification that can never arrive. Twice
+# observed; the procedural fix ("run it in the foreground, poll `.review/` by
+# tree if you are cut off") is what failed both times.
+#
+# `-start` returns once the round has claimed its loop and published the tree it
+# pinned. `-wait` blocks up to `timeout` seconds and then reports, with three
+# exit statuses of which exactly ONE means "ask again":
+#
+#   0  the artifact is recorded — its path and verdict are on stdout
+#   3  `still running` — call `-wait` again; nothing is wrong and nothing is lost
+#   4  no round is in flight for HEAD's tree — start one, or read why it stopped
+#
+# Never relaunch on a 3: the round is alive, and a second one is refused anyway.
+# Never poll a 4: nothing is coming.
+#
+# The driver does the work in both, so `just review-codex` is untouched and
+# nothing here can drift from what a round actually is: `-start` re-executes the
+# driver's own foreground form, detached.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Launch a Codex review round detached; returns at once (poll it with -wait)
+review-codex-start persona base="":
+    scripts/codex-review.sh --start "$1" "$2"
+
+# `timeout` before `base` because the timeout is the argument anyone passes: the
+# base is resolved by the driver, and is only ever spelled out here to match a
+# `-start` that spelled it out.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Block up to `timeout`s on the round for HEAD's tree, then report it (3=running)
+review-codex-wait persona timeout="540" base="":
+    scripts/codex-review.sh --wait "$1" "$3" --timeout "$2"
+
+# The start/wait form of `review-codex-both`, for a both-lens lane that has to
+# poll. The two lenses run as two detached rounds, which is a shape the driver is
+# built for rather than one this recipe invents: its own `#142` block names
+# "`adversarial` and `architecture` started at once on a fresh loop" as the case
+# the loop lock exists for, that lock is released across the Codex call itself,
+# the in-flight locks are per-persona, and the artifact, the thread and the
+# disposition snapshot are per-persona paths.
+#
+# #1425's one-tree guard is not weakened, it is CHECKED LATER AND HARDER. There,
+# HEAD is pinned across the seam between two sequential runs. Here, `-wait`
+# returns an artifact only when its recorded `tree=` is HEAD's tree — so
+# `-both-wait` exiting 0 for both personas *is* the proof that both artifacts
+# carry one tree, established before the author triages rather than at a seam.
+# Each driver invocation still refuses to record if HEAD moves during it, and
+# HEAD is pinned across the seam between the two starts here as well.
+#
+# Adversarial is started first for the reason `review-codex-both` runs it first:
+# it is the lens `ship` requires unconditionally, so if the second start fails
+# the required round is already running rather than not yet begun.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Launch both Codex lenses detached, one round on one tree (poll with -both-wait)
+review-codex-both-start base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pinned="$(git rev-parse HEAD)"
+    scripts/codex-review.sh --start adversarial "$1"
+    moved="$(git rev-parse HEAD)"
+    if [ "$moved" != "$pinned" ]; then
+        echo "just review-codex-both-start: HEAD was ${pinned}, now ${moved} — it" \
+             "moved between the two starts, so the pair would review two trees and" \
+             "would not be one round. Architecture NOT started; the adversarial" \
+             "round is already running on ${pinned}." >&2
+        exit 1
+    fi
+    scripts/codex-review.sh --start architecture "$1"
+
+# One deadline across both waits, not one each, so `timeout` means what it says.
+# Both are attempted whatever the first returns: a lane told only "adversarial is
+# still running" learns nothing about the lens it is also owed, and the second
+# wait costs nothing once the shared deadline has passed. The worst status wins,
+# so a 0 is never reported for a pair that is not both recorded.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Block up to `timeout`s on BOTH lenses' rounds for HEAD's tree, then report them
+review-codex-both-wait timeout="540" base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    deadline=$(( $(date +%s) + $1 ))
+    status=0
+    for persona in adversarial architecture; do
+        remaining=$(( deadline - $(date +%s) ))
+        [ "$remaining" -lt 0 ] && remaining=0
+        scripts/codex-review.sh --wait "$persona" "$2" --timeout "$remaining" ||
+            status=$?
+    done
+    exit "$status"
+
 # Refuses unless a review artifact covers the content the PR head carries,
 # whatever commit the artifact is filed under. Two paths are accepted
 # (ADR-0027 §2). Base unmoved: the recorded base and tree must both match the

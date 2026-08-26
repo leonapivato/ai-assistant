@@ -17,7 +17,17 @@ You are a worker agent in one of the sibling clones (`~/projects/ai-assistant-N`
 - **Your ADR number comes from the dispatch.** Never pick your own, never fill a gap.
 - **Your brief outranks an issue** (it is newer, and stale issue text is the largest source of rework), but a ratified ADR outranks your brief. Where the brief conflicts with an ADR, follow the ADR and escalate — FLAG or STOP by the test in "Two ways to escalate" below, which owns that call.
 - **Rebase before you gate *and* again before you review** (`CONTRIBUTING.md` → "Run it against a current `main`" gives both reasons). **If a rebase moved your base, the *full* gate is owed again** — before the next review invocation, and again before the rebased head is pushed for merge, however many times you rebase (ADR-0136 §1). Between those points the fast gate is the four static steps before every commit and `pytest` is yours to choose; `CONTRIBUTING.md` → "When the full gate is owed, and when it is not" carries the two anchors and every condition. **The closing anchor binds the *tree* of the final push and passes before `just ready`, not before the push** (ADR-0180 §1) — so you may push and run it while CI runs, provided the tree is byte for byte the pushed head's and you leave it alone while the run is out. After the push, take the format step in its **non-rewriting** form (`just check`'s `ruff format --check`) — `ruff format .` rewrites drifted files and exits 0, which would pass the anchor on a tree it had just moved off the pushed head. Drift reported there, or a non-empty `git status --porcelain` afterwards, means that push was not the final one. `just test-fast` is the parallel suite, and since ADR-0166 it discharges either anchor as well as the rounds in between; since ADR-0179 it deselects nothing, so choose the serial run when your change is order-dependent, shares state through a fixture, or is timing-sensitive — not because a Protocol is in the diff.
-- **The gate and the review run in the foreground, on one command with a timeout long enough to finish.** Never background them, never poll for completion, never start a second while the first is out. One command, one result. A backgrounded run splits a single answer across turns and invites you to act on a partial one as if it were final — and the gate and the review are precisely the two answers a lane must not get wrong.
+- **The gate runs in the foreground, on one command with a timeout long enough to finish.** Never background it, never poll it for completion, never start a second while the first is out. One command, one result. A backgrounded run splits a single answer across turns and invites you to act on a partial one as if it were final — and the gate is one of the two answers a lane must not get wrong.
+- **The review is the other, and a round is *started* and then *polled*.** Never `run_in_background`, and **never end a turn with a round in flight**.
+
+  ```bash
+  just review-codex-start adversarial     # returns once the round is running
+  just review-codex-wait  adversarial     # blocks ≤540s, then says which of three
+  ```
+
+  `wait` exits **0** with the artifact path and verdict on stdout — read the artifact and triage. It exits **3** `still running`, which means the round is alive and nothing is lost: **call `wait` again**, as many times as it takes. It exits **4** when no round is in flight for HEAD's tree — never started, running on a *different* tree because you committed after starting it, or died having recorded nothing (it prints the log). A 4 is never a reason to call `wait` again; read what it says and act on it. Never relaunch on a 3: the round is alive, a second one is refused, and relaunching is how a paid round gets thrown away.
+
+  This exists because for a subagent **ending the turn is ending the agent**. A backgrounded round's completion re-invokes the session that launched it; a worker has none, so "waiting for the notification" is a state that does not exist — the round runs on detached, the artifact lands on disk, and nobody reads it. Twice observed, both times by a lane that believed it was waiting (issue #1594). `just review-codex <persona>` in the foreground is still exactly right where you can hold one call for the whole round; what is ruled out is backgrounding it, and what `-start`/`-wait` buy you is not having to guess in advance whether you can.
 - **You cannot read your own loop.** There is deliberately no round cap (`CONTRIBUTING.md` → "Stop when the required reviews are green"), because a late round looks like an early one from inside — and in a dispatched lane the outside view is the coordinator's, not yours. So when the aggregate's churn ratio is running far above 1 and the required review still is not terminal, report the standing findings with your grounded assessment of each and let the coordinator decide, rather than spending another round on your own judgement.
 - **Past a counted threshold that stops being a judgement, and you hand the loop over.** ADR-0138 §1: hand off once a required lens has recorded **seven rounds under you** and is not terminal, or once the churn ratio `codex-review.sh` prints **first reaches 1.5 during your tenure** with a required lens still open — whichever fires first. The counts are per lens and per holder (§2: the printed round is persona-agnostic and an upper bound; subtract what the handoff comment you took the lane under recorded). It caps nothing — the eighth round is run by a **different agent** on this branch in this clone, which is the entire point. A handoff is a **comment on the PR** as well as your report — standing findings with your assessment, which you treat as settled and which you contest, the exact next action you would have taken, and the per-lens counts and churn at that moment (§4) — and then you stop: you do not pick the successor, do not flip the PR ready on a lens that is not terminal, and do not resume the loop yourself.
 
@@ -115,13 +125,21 @@ for.
 most changes, adversarial **and** architecture for a contract-surface one — a
 diff touching `core/protocols.py` or `core/types.py`, or the ADR deciding that
 surface, prose-only though such a PR is (ADR-0015 §1). If your lane is
-single-lens, nothing here applies: `just review-codex adversarial`, unchanged.
+single-lens, nothing here applies: the `-start`/`-wait` pair above, unchanged.
 
-**On a both-lens lane, round N is both lenses on one committed tree** —
-`just review-codex-both` — from round 1, not adversarial to terminal with
-architecture at the end. It is one command in the foreground like any other
-review invocation, and it runs the same driver twice in sequence, so both
-artifacts record the same `tree=` and the pair is one round.
+**On a both-lens lane, round N is both lenses on one committed tree** — from
+round 1, not adversarial to terminal with architecture at the end. Start and
+poll it exactly as a single lens, with the `-both` pair:
+
+```bash
+just review-codex-both-start            # starts both lenses on HEAD's tree
+just review-codex-both-wait             # one deadline across both; 3 = call again
+```
+
+`-both-wait` exits 0 only when **both** artifacts are recorded for HEAD's tree,
+which is what makes the pair one round — a lens that landed on a different tree
+cannot be reported as part of it. `just review-codex-both` is the same round held
+in one foreground call, where you can hold one that long.
 
 **Triage the two verdicts as one queue, before you edit anything**, by the same
 rule as ever: `blocker`/`major` about code in your diff gets fixed; everything

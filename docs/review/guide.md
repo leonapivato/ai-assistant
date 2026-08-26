@@ -99,14 +99,22 @@ Waiving a `blocker` or `major` is allowed; write the one-line rationale in the P
 or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
 belongs in its own issue.
 
+*Operator note, not a rule for the reviewer: a round runs for minutes, and a
+caller that cannot hold one process open that long starts it and polls it instead
+— `just review-codex-start <persona>`, then `just review-codex-wait <persona>`
+until it exits 0 with the artifact path and verdict. Exit 3 is `still running`
+(ask again, nothing is lost); exit 4 is no round in flight for HEAD's tree. It is
+the same round as the foreground form — same locks, same artifact, same
+acceptance — started detached rather than reimplemented (issue #1594).*
+
 ## When a change owes both lenses
 
 Two shapes require both reviewers rather than adversarial alone: a change to the
 contract surface (`core/protocols.py`, `core/types.py`), and the ADR deciding
 that surface (ADR-0015 §1; `CONTRIBUTING.md` → "Stop when the required reviews
 are green" owns the test). On those, **run both lenses in the same round, from
-round 1** — `just review-codex-both` — and triage the union before editing
-anything.
+round 1** — `just review-codex-both`, or the `-both-start`/`-both-wait` pair
+where the round has to be polled — and triage the union before editing anything.
 
 **The reason is that one lens can reverse the other, and running them in
 sequence decides that after the edits are paid for.** On PR #1377 (ADR-0178)
