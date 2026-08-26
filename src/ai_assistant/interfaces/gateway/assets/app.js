@@ -523,7 +523,7 @@ function line(parent, text, className) {
   return p;
 }
 
-// One response body, as an object or as nothing.
+// One parsed JSON document as an object, or `{}` for anything else.
 //
 // **A body that is not an object is not distinguished from an absent one**, which is
 // the gateway's own `_payload` rule read from this side: every caller reads named
@@ -534,12 +534,27 @@ function line(parent, text, className) {
 // read — and on a grant act that throw would escape as "the gateway did not answer",
 // which is not one of the three outcomes ADR-0139 §4 requires the act to be reported
 // as. An unreadable condition has to arrive as an unnamed one, not as an exception.
+//
+// **It is the shape rule and nothing else**, which is what lets the two readers below
+// disagree about a body that could not be read at all while agreeing about this.
+function asObject(parsed) {
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+// One **refusal's** body, read as far as it can be read.
+//
+// A refusal that carries no condition this page can read is still a refusal the gateway
+// answered, and the caller's job is to classify it — `act`'s rule, which round 6 brought
+// to a park's answer: "a refusal whose condition this page cannot read is a refusal it
+// cannot classify, and ADR-0139 §4's third outcome is what an unclassifiable one is". So
+// a body that will not parse arrives as an unnamed condition rather than as an exception,
+// and the caller decides what an unnamed one means.
+//
+// **This is not the rule for a body the gateway answered `2xx` with**, and conflating
+// the two was adversarial review's round-8 blocker: see `relay`.
 async function readBody(response) {
   try {
-    const parsed = await response.json();
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : {};
+    return asObject(await response.json());
   } catch (_) {
     return {};
   }
@@ -2922,10 +2937,33 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
     body: JSON.stringify(payload),
     signal: stopping === undefined ? undefined : stopping.signal,
   });
-  const body = await readBody(response);
   if (response.ok) {
-    return body;
+    // **The head is not the answer, and a body this browser did not read is not a
+    // response** — adversarial review's round-8 blocker, and ADR-0177 §7's fourth
+    // clause in terms: a failure of "the browser's own request to the gateway — the
+    // request was sent and no response was read — is an outcome that is **not known**".
+    //
+    // `fetch` settles when the *head* lands, so the body is still arriving when this
+    // resumes, and the owner's **Stop waiting** aborts a request whose status has
+    // already been read. Routing that through `readBody` swallowed the abort and
+    // returned `{}` for a `200`, and a park's answer then ran straight past its
+    // unknown-outcome branch into `renderOutcome(undefined, …)`: an uncaught
+    // `TypeError`, a token left `spent` and never `unresolved`, and a row reading "That
+    // park has been answered from this page" for an outcome nothing had read. That is
+    // the resolution-from-an-unresolved-act ADR-0139 §4 forbids, arriving through the
+    // one door the rest of this lane closed.
+    //
+    // So the rejection is **kept** here and `readBody`'s swallow is left to the refusal
+    // path it was written for. Every caller of this function already runs it inside a
+    // `try`, and each one's `catch` is the ending it wants: `GATEWAY_GONE` for a read,
+    // and for a park's answer the not-known branch that keeps the continuation.
+    //
+    // The gateway writes every `2xx` through `_json_response`, so a `2xx` body that
+    // will not parse is a transport truth and not a shape this page has to tolerate —
+    // which is the asymmetry with a refusal, whose condition a proxy really can replace.
+    return asObject(await response.json());
   }
+  const body = await readBody(response);
   // Every other request that names a conversation goes through here — the digest, the
   // forget, and `observe`, which sends this view's selection exactly as `ask` does.
   conversationLost(body, payload.conversation_id);

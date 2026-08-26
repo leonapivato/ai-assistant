@@ -2700,12 +2700,66 @@ def test_a_body_that_is_not_an_object_reaches_no_caller_as_one() -> None:
     an object is not distinguished from an absent one, because every caller reads
     named members and a second failure mode would be a second way to say the same
     thing.
-    """
-    reading = _functions(_code("app.js"))["readBody"]
 
-    assert "parsed !== null" in reading
-    assert 'typeof parsed === "object"' in reading
-    assert "!Array.isArray(parsed)" in reading
+    The shape rule is its own function so that the two readers can disagree about a
+    body that could not be read *at all* while agreeing about this — round 8's blocker,
+    pinned in :func:`test_a_body_never_read_is_not_a_response_whatever_the_status_said`.
+    """
+    functions = _functions(_code("app.js"))
+    shape = functions["asObject"]
+
+    assert "parsed !== null" in shape
+    assert 'typeof parsed === "object"' in shape
+    assert "!Array.isArray(parsed)" in shape
+    # And both readers go through it, so the shape rule has one statement. Its own
+    # declaration counts as a mention: ``_functions`` attributes it to itself.
+    assert {name for name, body in functions.items() if "asObject(" in body} == {
+        "asObject",
+        "readBody",
+        "relay",
+    }
+    # A refusal's body is still read as far as it can be read, because a refusal that
+    # carries no readable condition is one the *caller* classifies (``act``'s rule).
+    assert "catch (_) {\n    return {};\n  }" in functions["readBody"]
+
+
+def test_a_body_never_read_is_not_a_response_whatever_the_status_said() -> None:
+    """Round 8's blocker, and ADR-0177 §7's fourth clause on the one path that reached it.
+
+    ``fetch`` settles when the **head** lands, so a body is still arriving when ``relay``
+    resumes — and the owner's **Stop waiting** aborts a request whose status has already
+    been read. Routing that through ``readBody`` swallowed the abort and returned ``{}``
+    for a ``200``, so a park's answer ran straight past its unknown-outcome branch into
+    ``renderOutcome(undefined, …)``: an uncaught ``TypeError``, a token left ``spent``
+    and never ``unresolved``, and a row reading "That park has been answered from this
+    page" for an outcome nothing had read. §7's fourth clause is explicit that "the
+    request was sent and no response was read" is an outcome that is **not known**
+    "whatever the gateway did", and ADR-0139 §4 forbids the surface resolving it.
+
+    So the rejection is kept on the ``2xx`` path and ``readBody``'s swallow is left to
+    the refusal path it was written for. Every caller already runs ``relay`` inside a
+    ``try``, and each ``catch`` is the ending it wants: ``GATEWAY_GONE`` for a read, and
+    for a park's answer the branch that keeps the continuation.
+
+    The asymmetry is the gateway's own: every ``2xx`` is written through
+    ``_json_response``, so a ``2xx`` body that will not parse is a transport truth —
+    where a *refusal*'s condition really can be replaced by a proxy.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    relaying = functions["relay"]
+
+    # The ok path parses for itself and lets the rejection out.
+    assert "return asObject(await response.json());" in relaying
+    # ``readBody`` is reached only after the ok path has returned, so no swallow can
+    # stand between an unread body and a caller's catch.
+    assert relaying.index("if (response.ok) {") < relaying.index("await readBody(response)")
+    assert relaying.count("readBody(") == 1
+    # And the one caller whose catch keeps a consent token is reached by that rejection:
+    # it is inside the ``try``, and the branch it takes records the park as unresolved.
+    answering = functions["answerConfirmation"]
+    assert answering.index("await relay(") < answering.index("} catch (_) {")
+    assert answering.index("} catch (_) {") < answering.index("unresolved.add(token);")
 
 
 def test_an_amendment_is_two_requests_and_sends_no_grant_after_an_unresolved_one() -> None:
