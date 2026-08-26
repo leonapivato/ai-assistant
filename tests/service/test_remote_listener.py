@@ -1236,3 +1236,64 @@ def test_neither_read_trail_read_is_a_connection_method() -> None:
 
     assert reads <= METHODS
     assert not (reads & CONNECTION_METHODS)
+
+
+# --- ADR-0192 §4: the invocation reads are carried on this listener too -------
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [("recent_invocations", {"limit": 10}), ("export_invocations", {})],
+)
+async def test_both_invocation_reads_are_served_on_the_remote_listener(
+    tmp_path: Path, method: str, payload: dict[str, Any]
+) -> None:
+    """Both are carried here, by the mechanism's default rather than by a clause.
+
+    The two pairs above's case, one row kind over, and it sits beside them for their
+    reason: ``serve_connection`` bars a method from this listener exactly when it is
+    in ``CONNECTION_METHODS``, so "carried here" and "not one of the five" are the
+    same fact reached from opposite sides.
+
+    **The disclosure argument is the strongest of the three.** The five are withheld
+    because they carry a **Tier 0 credential** (ADR-0151 §13), which ADR-0124 §3's
+    accepted-disclosure list does not cover. A ``RecordedInvocation`` carries no
+    credential, and ADR-0192 §2 excludes content from the row by name: no
+    ``ToolDefinition``, no ``parameters_digest``, no ``step_id``, no account, no
+    transport endpoint, no destination, "no **content** — not an argument value, not
+    a payload, not an output, not a failure message, and not a digest of any of
+    them". What crosses is two identifiers, an instant, an outcome, a cost, an
+    optional failure kind, and the tool identifier, capability and boolean the
+    store's join adds — every one of which a ``PermissionDecision`` already carries
+    across this hop today.
+
+    Withholding it would leave a user on their own second machine able to read what
+    was *ruled* and not what was then *done*, which is the half #1503 was opened
+    about.
+    """
+    engine = FakeAssistantEngine()
+    async with _remote(tmp_path, engine=engine) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(kind=env.FrameKind.REQUEST, id="r-0", payload=payload, method=method)
+            )
+            answer = await peer.receive()
+
+    assert answer.kind is env.FrameKind.RESULT, f"{method} was not served: {answer.payload}"
+    assert [name for name, _arguments in engine.calls] == [method]
+
+
+def test_neither_invocation_read_is_a_connection_method() -> None:
+    """Neither joins ``CONNECTION_METHODS``, which is what leaves both carried.
+
+    Asserted against the **frozen set itself** rather than by absence from a
+    hand-written list, so a rename or an addition on either side is caught here, and
+    in both directions: the two are on the promoted surface, and neither is among
+    the five ADR-0151 §13 withholds.
+    """
+    reads = {"recent_invocations", "export_invocations"}
+
+    assert reads <= METHODS
+    assert not (reads & CONNECTION_METHODS)
