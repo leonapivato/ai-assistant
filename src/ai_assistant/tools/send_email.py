@@ -376,7 +376,11 @@ class SendEmail:
                 may act on, this seam has no vocabulary for these yet, and so the
                 seam classifies them ``INTERNAL`` and names only the type.
             IndeterminateTransmissionError: If the message was written and the
-                server's verdict could not be read.
+                server's verdict could not be read. Classified apart from the
+                line above: the seam records it as this tool's
+                ``interrupted_outcome`` rather than ``INTERNAL``, because the one
+                thing that is known about this window is that nobody knows
+                (ADR-0148 §9, ADR-0191 §4, issue #1602).
             ConnectionStoreError: If the connection record could not be read.
         """
         await self._transport.transmit(egress_binding, parameters)
