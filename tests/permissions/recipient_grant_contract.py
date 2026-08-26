@@ -72,6 +72,7 @@ from ai_assistant.core.protocols import (
     RecipientGrants,
     RecipientGrantStore,
 )
+from ai_assistant.core.types import CanonicalDestination, DestinationProtocol
 from ai_assistant.testing.recipient_grants import (
     recipient_grant,
     recipient_revocation_of,
@@ -437,12 +438,18 @@ class RecipientGrantsContract:
         A caller can write past a frozen model through ``__dict__``, and a store
         handing back its own object would let a grant be **widened after it was
         read** — the gate defeated through its own answer.
+
+        **Both levels**, because §1 says "the list, the records in it, and
+        everything mutable those reach": rewriting the recipient *inside* the
+        returned destination reaches the same widening through a snapshot that
+        detached only its root.
         """
         await self.given(grants, recipient_grant(member(ALICE), grant_id="g-1"))
         found = await grants.covering(request(binding(ALICE)))
         assert found is not None
 
         found.__dict__["destinations"] = (member(ALICE), member(BOB))
+        found.destinations[0].__dict__["canonical"] = BOB
 
         again = await grants.covering(request(binding(ALICE)))
         assert again is not None
@@ -543,12 +550,17 @@ class RecipientGrantResolutionContract:
     async def test_a_returned_record_is_detached_from_the_store(
         self, resolution: RecipientGrantResolution
     ) -> None:
-        """Detached like every other query on this seam (ADR-0193 §1)."""
+        """Detached like every other query on this seam (ADR-0193 §1).
+
+        Both levels, for the reason ``RecipientGrantsContract``'s own detachment
+        case gives: §1's clause reaches everything mutable a returned record does.
+        """
         await self.held(resolution, recipient_grant(member(ALICE), grant_id="g-1"))
         found = await resolution.outstanding("g-1")
         assert found is not None
 
         found.__dict__["destinations"] = (member(ALICE), member(BOB))
+        found.destinations[0].__dict__["canonical"] = BOB
 
         again = await resolution.outstanding("g-1")
         assert again is not None
@@ -1155,14 +1167,127 @@ class RecipientGrantStoreContract(RecipientGrantsContract, RecipientGrantResolut
     async def test_a_returned_list_is_detached_from_the_store(
         self, store: RecipientGrantStore
     ) -> None:
-        """The list, the records in it, and everything mutable those reach."""
+        """The list, the records in it, and everything mutable those reach.
+
+        The third clause is the one a root-only snapshot passes: the nested
+        ``CanonicalDestination`` is rewritten here as well as the record's own
+        ``expires_at``, so a store handing back its own nested models is caught by
+        the same case rather than by a later one.
+        """
         await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
 
         held = await store.standing()
         held.clear()
         exported = await store.export()
         exported[0].__dict__["expires_at"] = AT + timedelta(days=3650)
+        exported[0].destinations[0].__dict__["canonical"] = BOB
 
         assert len(await store.standing()) == 1
         again = await store.export()
         assert again[0].expires_at == EXPIRES
+        assert again[0].destinations == (member(ALICE),)
+
+    async def test_a_recorded_grant_shares_no_model_beneath_its_root(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """§1's snapshot is recursive, and a shallow one is not detached at all.
+
+        A mapping of the grant's *own* field values still holds the caller's
+        ``CanonicalDestination``, ``ToolDefinition`` and ``BoundAccount`` objects —
+        pydantic's default ``revalidate_instances="never"`` keeps whatever instance
+        was passed — so the snapshot and the caller share every model beneath the
+        root. ``frozen=True`` refuses ``destination.canonical = …`` and does not
+        refuse ``destination.__dict__["canonical"] = …``, which is the same gate
+        ``test_a_recorded_grant_is_detached_from_the_caller`` defeats one level up.
+
+        So the widening that clause exists to deny is available one level down: a
+        caller rewrites the recipient **after** ``record`` accepted the grant, and
+        the store holds an authorisation over Bob established by an act that named
+        Alice. The declaration and the account carry it too — coverage compares all
+        three by value (§3), so rewriting either widens what the grant covers just
+        as rewriting a destination does.
+
+        The three nested values are **copies**, because the builder's defaults are
+        module-level singletons: mutating those in place would rewrite what every
+        other case in this suite is arranged around.
+        """
+        tool = TOOL.model_copy(deep=True)
+        account = ACCOUNT.model_copy(deep=True)
+        granted = recipient_grant(member(ALICE), grant_id="g-1", tool=tool, account=account)
+        await store.record(granted)
+
+        granted.destinations[0].__dict__["canonical"] = BOB
+        tool.__dict__["description"] = "a declaration the user never saw"
+        account.__dict__["reference"] = "conn-9999"
+
+        held = await store.outstanding("g-1")
+        assert held is not None
+        assert held.destinations == (member(ALICE),)
+        assert held.tool == TOOL
+        assert held.account == ACCOUNT
+
+    async def test_a_grant_holding_a_nested_subclass_is_refused(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """The other half of a recursive snapshot: what the rebuild would **drop**.
+
+        A ``CanonicalDestination`` subclass carrying a field of its own survives
+        validation for the reason above, and the rebuild that detaches the record
+        emits the *declared* fields and drops that one — so the stored grant would
+        compare equal to a record the user never authorised, and the store would
+        have kept less than it was handed. Refused rather than narrowed, which is
+        the ruling the invocation ledger reached on the identical shape and which
+        the shared helper carries to this store.
+        """
+        wider = type(
+            "_WiderDestination",
+            (CanonicalDestination,),
+            {"__annotations__": {"note": str}, "note": "carried past the record"},
+        )
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        granted.__dict__["destinations"] = (
+            wider(protocol=DestinationProtocol.SMTP, canonical=ALICE),
+        )
+
+        with pytest.raises(InvalidRecipientGrantError, match="not a valid record"):
+            await store.record(granted)
+
+        assert await store.outstanding("g-1") is None
+
+    async def test_a_grant_mutated_while_its_write_is_queued_stores_what_was_submitted(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """ADR-0065: a post-call mutation test does not detect tearing.
+
+        The case above pins what a store **retains**; this pins what it
+        *serialises*, which is the half a store that writes JSON inside its lock
+        survives by accident. ``record`` takes its snapshot and then awaits — for
+        the lock, and for the write behind it — so an implementation whose snapshot
+        shares the caller's nested models writes whatever those say by the time it
+        gets there. A first write occupying the lock makes that interval a real one
+        rather than a hoped-for interleaving: the second ``record`` is suspended,
+        with its grant accepted and not yet stored, when the recipient is rewritten.
+
+        The three nested values are copies for
+        ``test_a_recorded_grant_shares_no_model_beneath_its_root``'s reason.
+        """
+        tool = TOOL.model_copy(deep=True)
+        account = ACCOUNT.model_copy(deep=True)
+        granted = recipient_grant(member(ALICE), grant_id="g-1", tool=tool, account=account)
+
+        async def _rewrite_the_recipient() -> None:
+            granted.destinations[0].__dict__["canonical"] = BOB
+            tool.__dict__["description"] = "a declaration the user never saw"
+            account.__dict__["reference"] = "conn-9999"
+
+        await asyncio.gather(
+            store.record(recipient_grant(member(BOB), grant_id="g-block")),
+            store.record(granted),
+            _rewrite_the_recipient(),
+        )
+
+        held = await store.outstanding("g-1")
+        assert held is not None
+        assert held.destinations == (member(ALICE),)
+        assert held.tool == TOOL
+        assert held.account == ACCOUNT

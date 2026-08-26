@@ -61,7 +61,8 @@ from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
-from ai_assistant.core.types import RecipientGrant
+from ai_assistant.core.types import RecipientGrant, describe_untrusted
+from ai_assistant.permissions._detachment import field_state
 from ai_assistant.permissions._transactions import transaction
 
 if TYPE_CHECKING:
@@ -1017,9 +1018,9 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
     comparisons over a spelling the record's own validator refuses.
 
     Rebuilt as a ``RecipientGrant`` specifically, not as ``type(grant)``: a
-    caller's subclass could carry extra fields, and ``extra="forbid"`` refuses them
-    here rather than letting them vanish at serialisation and make the stored
-    record differ from the one that reloads.
+    caller's subclass could carry extra fields, and they are refused here rather
+    than allowed to vanish at serialisation and make the stored record differ from
+    the one that reloads.
 
     **And rebuilt from the instance's field state rather than from
     ``model_dump()``**, which is ``SqliteSourceGrantStore._revalidated``'s
@@ -1030,9 +1031,23 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
     named**. That is not the caller-falsifies-its-own-record case ADR-0018 §3 puts
     outside a store's reach: the object presented is a valid narrow grant and the
     record kept is a wider one, which is precisely what "stores a detached,
-    validated snapshot" denies. ``__dict__`` is where pydantic keeps validated
-    field state, and it is read through ``object.__getattribute__`` so that the
-    read itself dispatches no user code either.
+    validated snapshot" denies. ``field_state`` is that read — the class's own
+    serializer, resolved on the class, consulting no instance attribute — and it
+    is the trail's, shared rather than spelled a second way.
+
+    **And detached *recursively*, which is what ``field_state`` buys over a copy
+    of ``__dict__``.** ADR-0193 §1 asks for a snapshot "recursively over reachable
+    state", and a mapping of the instance's own field values still holds the
+    caller's ``tool``, ``account`` and ``CanonicalDestination`` objects: pydantic's
+    default ``revalidate_instances="never"`` keeps whatever instance was passed, so
+    the snapshot and the caller share every model beneath the root. ``frozen=True``
+    refuses ``destination.canonical = …`` and does not refuse
+    ``destination.__dict__["canonical"] = …``, so a caller could rewrite a
+    recipient **after** ``record`` accepted the grant and before the write inside
+    the lock serialises it — storing an authorisation over Bob from a grant that
+    named Alice. ``field_state`` returns plain mappings all the way down, so the
+    rebuild below constructs every nested model afresh and the store shares no
+    object with the caller at any depth.
 
     **The refusal names the id out of the same mapping**, never through
     ``grant.id``: a record whose ``__dict__`` is missing a field has no ``id``
@@ -1041,17 +1056,25 @@ def _revalidated(grant: RecipientGrant) -> RecipientGrant:
     with a builtin escaping its error boundary.
 
     Raises:
-        InvalidRecipientGrantError: If the record does not satisfy its own model.
-            The subclass rather than the ``RecipientGrantError`` base: here the
-            base is the *store fault* and only the subclass says "your record was
-            refused", which is the distinction a consumer's fail-closed branch
-            keeps alive.
+        InvalidRecipientGrantError: If the record does not satisfy its own model,
+            carries state ``RecipientGrant`` declares no field for, or holds
+            beneath it a model of any type other than exactly the declared one.
+            ``ValueError`` and not ``ValidationError``: those are the classes
+            ``field_state`` refuses in, and pydantic's own is one of them. The
+            subclass rather than the ``RecipientGrantError`` base: here the base is
+            the *store fault* and only the subclass says "your record was refused",
+            which is the distinction a consumer's fail-closed branch keeps alive.
     """
     fields = dict(object.__getattribute__(grant, "__dict__"))
     try:
-        return RecipientGrant.model_validate(fields)
-    except ValidationError as exc:
-        msg = f"recipient grant {fields.get('id')!r} is not a valid record: {exc}"
+        return RecipientGrant.model_validate(field_state(RecipientGrant, grant))
+    except ValueError as exc:
+        # `describe_untrusted` on the cause as well as on the id: `field_state`
+        # re-raises a `ValueError` the caller's own code raised, and a hostile
+        # `__str__` on it would replace this refusal with whatever it threw — from
+        # inside the `except` block that exists to report it.
+        named = describe_untrusted(fields.get("id"))
+        msg = f"recipient grant {named} is not a valid record: {describe_untrusted(exc)}"
         raise InvalidRecipientGrantError(msg) from exc
 
 
