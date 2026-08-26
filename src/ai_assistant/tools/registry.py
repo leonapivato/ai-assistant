@@ -82,37 +82,39 @@ def checked_timeout(timeout: object) -> timedelta:
     would already have acted. Refusing the value never creates the coroutine,
     which is the only placement that holds for every tool.
 
-    **A plain ``timedelta`` is returned, never the caller's object.** ``isinstance``
-    admits a subclass, and this seam reads the duration *after* the claim has
-    landed — ``asyncio.timeout(timeout.total_seconds())`` — so an overridden
+    **A plain ``timedelta`` is returned, rebuilt from the base class's own
+    fields, and never the caller's object.** ``isinstance`` admits a subclass, and
+    this seam reads the duration *after* the claim has landed —
+    ``asyncio.timeout(timeout.total_seconds())`` — so an overridden
     ``total_seconds`` could raise there, leaving a claim open with no completion
     and no ``ToolResult``, or return ``inf`` and disable the deadline the contract
-    says there always is. Reading the duration **here** and rebuilding a plain
-    ``timedelta`` from it puts every one of those failures back where ADR-0034 §1
-    already puts a refused deadline: a pre-callable exit with no claim appended.
-    The comparison below is made against the snapshot for the same reason — an
+    says there always is.
+
+    The three fields are read through ``timedelta``'s **own** descriptors rather
+    than by attribute access, so a subclass shadowing ``days`` with a property, or
+    overriding ``__getattribute__``, decides nothing. That is exact where a float
+    round-trip is not: ``timedelta.max`` survives it, a microsecond on a
+    200,000-day duration survives it, and nothing about the reconstruction can
+    raise for a value ``isinstance`` already called a ``timedelta``. The
+    positivity comparison is made against the snapshot for the same reason — an
     overridden ``__le__`` decides nothing the seam then relies on.
 
     Returns:
-        A plain ``timedelta`` of the same duration, which is the value the seam
-        uses from here on.
+        A plain ``timedelta`` of exactly the same duration, which is the value the
+        seam uses from here on.
 
     Raises:
-        ValueError: If ``timeout`` is not a ``timedelta``, is not strictly
-            positive, or is one whose duration cannot be read and enforced.
+        ValueError: If ``timeout`` is not a ``timedelta``, or is not strictly
+            positive.
     """
     if not isinstance(timeout, timedelta):
         msg = f"timeout must be a timedelta, got {type(timeout).__name__}"
         raise ValueError(msg)
-    try:
-        duration = timedelta(seconds=timeout.total_seconds())
-    except Exception as exc:
-        # Anything the duration read or the reconstruction raises — an overridden
-        # `total_seconds` failing, a non-numeric return, `inf`, a value outside
-        # `timedelta`'s range — is a deadline this seam could not enforce, and
-        # that is the refusal this guard exists to make (ADR-0029 §4).
-        msg = "timeout must be a timedelta whose duration can be read and enforced"
-        raise ValueError(msg) from exc
+    duration = timedelta(
+        days=timedelta.days.__get__(timeout),
+        seconds=timedelta.seconds.__get__(timeout),
+        microseconds=timedelta.microseconds.__get__(timeout),
+    )
     if duration <= timedelta(0):
         msg = f"timeout must be strictly positive, got {duration}"
         raise ValueError(msg)

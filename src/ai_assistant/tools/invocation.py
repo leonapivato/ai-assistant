@@ -32,6 +32,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolBindingError
 from ai_assistant.core.types import (
+    UNREPRESENTABLE_FAULT_CLASS,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -234,6 +235,33 @@ def checked_pairing(implementation: BoundImplementation, call: ToolCall) -> Ente
     return partial(implementation, call.request.parameters, idempotency_key=call.idempotency_key)
 
 
+def _class_name(exc: BaseException) -> str:
+    """``type(exc).__name__``, or the reserved literal where the read fails.
+
+    **Read once, and total, because this runs after the claim.** Both the
+    diagnostic and the failure message below need the class, and a metaclass that
+    raises on the ``__name__`` access would otherwise leave this frame in place of
+    the ``ToolResult`` — so ADR-0192 §3 would get no completion for a claim it had
+    already appended, a known-failed act permanently spending its authorisation,
+    and ADR-0029 §3's rule that a broken tool becomes a *result* rather than an
+    exception would not hold for the one class of tool most likely to break it.
+
+    The guard stops at ``Exception`` for exactly the reason
+    :func:`~ai_assistant.core.types.fault_class_of` does: a ``CancelledError``
+    raised *by the name read* is delivered onward (ADR-0060 §1). The literal it
+    falls back to is ``core``'s own shape for a class no name can be read from,
+    not one invented here.
+    """
+    try:
+        name = type(exc).__name__
+    # A blind `except Exception` on purpose — see above. `BaseException` is
+    # deliberately not caught. (`BLE` is not enabled in this tree and `RUF100`
+    # fails the gate on an unused directive, so the reason stays a comment.)
+    except Exception:
+        return UNREPRESENTABLE_FAULT_CLASS
+    return name if isinstance(name, str) else UNREPRESENTABLE_FAULT_CLASS
+
+
 def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
     """Describe a broken tool without quoting it (ADR-0029 §3).
 
@@ -245,6 +273,7 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     integration, accepted because the alternative is a disclosure on the failure
     path of every tool nobody thought about.
     """
+    fault = _class_name(exc)
     with contextlib.suppress(Exception):
         # Guarded because this runs **after** the claim: a configured processor
         # that raises would otherwise leave this frame in place of the
@@ -257,13 +286,13 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
             "tool_implementation_raised",
             tool_id=definition.id,
             # The type, never the instance: rendering the exception is the leak.
-            error_type=type(exc).__name__,
+            error_type=fault,
         )
     return ToolResult(
         outcome=ToolOutcome.FAILED,
         failure=ToolFailure(
             kind=ToolFailureKind.INTERNAL,
-            message=f"{type(exc).__name__} escaped tool {definition.id!r}",
+            message=f"{fault} escaped tool {definition.id!r}",
         ),
     )
 
