@@ -9,11 +9,15 @@ only *this* one can be held to, or what ``invoke``'s own surface cannot reach:
   (ADR-0152 §10), and the canonical fake binds one shape, so this check exists
   here alone — and ADR-0192 §1 moves it **above** the claim rather than leaving
   it where an implementation happened to have put it.
-* the ``ToolResult`` → ``ToolInvocation`` **cost mapping** for a result that
-  carries a figure. Nothing populates ``ToolResult.incurred_cost`` yet (#1558),
-  so no call through ``invoke`` can produce one; the mapping is driven at
-  :func:`~ai_assistant.tools.consume.consumed_call`, which is the boundary
-  ADR-0192 §5 actually decides.
+* the ``ToolResult`` → ``ToolInvocation`` **cost mapping** driven at
+  :func:`~ai_assistant.tools.consume.consumed_call` itself, which is the boundary
+  ADR-0192 §5 decides. Since ADR-0195 a call through ``invoke`` *can* produce a
+  figure, and the shared suite drives that end to end on both subjects; this one
+  stays because it holds the mapping directly, without a seam in front of it.
+* the **egress** arm of ADR-0195 §2's widening. Both callable shapes admit the
+  envelope, and the canonical fake models only one of them — which callable a
+  declaration binds is `tools/`-internal (ADR-0152 §10) — so the second shape is
+  proved here (#1618).
 * that the two copies of the diagnostic's enumerated field values — this
   subsystem's and the canonical fake's — have not drifted apart.
 """
@@ -28,6 +32,7 @@ import pytest
 from egress_transport_harness import arguments, binding
 from tool_invoker_contract import (
     PATIENT,
+    REPORTED,
     DrivenLedger,
     Spy,
     call_for,
@@ -48,6 +53,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    ReportedOutput,
     ToolCall,
     ToolCost,
     ToolFailure,
@@ -85,6 +91,31 @@ class BoundSpy:
         """Record the binding it was handed and succeed."""
         self.calls.append(egress_binding)
         return None
+
+
+class PricedBound:
+    """An **egress** callable that reports what its bound call cost (ADR-0195 §2).
+
+    ``BoundSpy`` with an envelope in the return position: the widening is in the
+    return type, which both callable shapes already share, so no third shape is
+    minted for the cost channel and the registry's resolution stays a two-way
+    branch.
+    """
+
+    def __init__(self) -> None:
+        """Record nothing yet."""
+        self.calls: list[EgressBinding] = []
+
+    async def invoke_bound(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+        egress_binding: EgressBinding,
+    ) -> ReportedOutput:
+        """Record the binding it was handed and report the call's price."""
+        self.calls.append(egress_binding)
+        return ReportedOutput(output={"sent": True}, incurred_cost=REPORTED)
 
 
 def call_carrying(definition: object, bound: EgressBinding | None) -> ToolCall:
@@ -148,11 +179,13 @@ async def test_the_pairing_check_refuses_before_any_claim_is_appended(shape: str
 async def test_a_reported_cost_maps_onto_the_row_unaltered() -> None:
     """ADR-0192 §5's boundary, driven where the mapping actually is.
 
-    Not through ``invoke``: ``ToolImplementation`` returns ``FrozenJson`` and no
-    ADR owns minting a carrier, so a case asserting a figure traversing the
-    production path would have to construct a ``ToolResult`` past the seam or
-    patch inside it — proving the mapping this drives and proving nothing about
-    the path. The end-to-end case is owed by whichever ADR answers #1558.
+    Driven at the mapping rather than through ``invoke``, deliberately: this is
+    the clause about what ``consumed_call`` does with a ``ToolResult`` that
+    carries a figure, whoever built it. ADR-0195 answered #1558 and the shared
+    suite now drives the whole path — a tool reporting, the seam unwrapping, the
+    row recording, ADR-0194 §2 totalling — on both subjects; keeping this one
+    means the mapping is still pinned where it lives if the seam above it
+    changes shape again.
     """
     trail = FakeAuditTrail()
     call = call_for(tool())
@@ -527,3 +560,35 @@ async def test_the_same_sequence_refuses_the_retry_where_the_completion_did_not_
         )
 
     assert len(await rows(trail)) == 1, "one claim, still open, and no completion"
+
+
+async def test_a_reported_figure_reaches_the_row_through_the_egress_shape() -> None:
+    """ADR-0195 §2 widens **both** callable shapes, and this is the second one.
+
+    Driven here rather than in the shared conformance suite because
+    ``FakeToolImplementation`` models one callable shape and no egress one: which
+    callable a declaration binds is `tools/`-internal and contracted nowhere
+    (ADR-0152 §10), and giving the fake a second shape would widen
+    ``ai_assistant.testing`` to cover a concern none of its consumers has —
+    ADR-0029 §1's own rule, and the argument ADR-0195 §2 itself leans on.
+
+    So §11's "the fake invoker and the real seam agree on every case above" is
+    **narrowed** to the shapes the fake models, and the egress arm is proved at
+    the real seam instead. Issue #1618 is that narrowing, and this is the
+    coverage it promised.
+    """
+    trail = FakeAuditTrail()
+    implementation = PricedBound()
+    registry = InMemoryToolRegistry([(tool(), implementation)], ledger=trail, gate=trail)
+    call = call_carrying(tool(), binding())
+    await trail.record(call.decision)
+
+    result = await registry.invoke(call, timeout=PATIENT)
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert result.output == {"sent": True}
+    assert result.incurred_cost == REPORTED
+    assert len(implementation.calls) == 1, "the egress shape is what was entered"
+    (completion,) = [each for each in await rows(trail) if each.completes is not None]
+    assert completion.incurred_cost == REPORTED
+    assert await trail.open_invocations(decision_id=call.decision.id) == []

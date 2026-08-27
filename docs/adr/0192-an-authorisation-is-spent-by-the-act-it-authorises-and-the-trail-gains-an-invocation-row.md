@@ -1,7 +1,18 @@
 # 192. An authorisation is spent by the act it authorises, and the trail gains an invocation row
 
-- Status: Accepted
+- Status: Accepted, §5's no-channel clause amended by ADR-0195
 - Date: 2026-08-24
+- Amended: 2026-08-26 by ADR-0195 — §5's "No integration can populate this
+  field yet, and this ADR mints no channel by which one could" no longer describes
+  the tree. ADR-0195 mints the channel §5 named #1558 as the owner of: a successful
+  call reports a figure by returning `core/types.py`'s `ReportedOutput`, which the seam
+  unwraps, and a classified failure reports one on `ClassifiedToolError`'s new
+  keyword-only `incurred_cost`. Everything else in §5 stands and ADR-0195 rests on it:
+  the field and its `None` meaning, the naming apart from `ToolDefinition.cost`, the
+  report-only-what-you-know rule, the mapping onto the completion row, the summing
+  clause, the open-claim clause and the prohibition on copying the declaration.
+  ADR-0195 adds no field to `ToolResult` and no branch to the mapping. Refs #1558,
+  ADR-0195 §2, §3, §9, §10.
 - Partially supersedes: ADR-0029 — §5's closing paragraph, "An approval is not
   consumed by executing it", and §5's two-part retry conjunction where the preceding
   attempt's completion did not commit; §3's sentence "`ToolResult` carries no cost
