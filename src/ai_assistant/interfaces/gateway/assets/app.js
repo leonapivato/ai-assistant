@@ -3746,12 +3746,23 @@ let playing = null;
 // sound: what the owner asked for by pressing is the silence, and a page that gave it to
 // them only on the presses that happened to record would be answering a different act.
 function interruptPlayback() {
+  const ended = stopPlaying();
+  if (ended !== null) {
+    playbackInterrupted(ended.slot);
+  }
+}
+
+// End whatever is in the air, let go of the record, and hand back what it named — or
+// `null` where there was nothing. **It says nothing of its own**, because what is owed
+// depends on *why* the playback ended and only the caller knows that: a press is an
+// interruption the owner is told about, and an answer taking the record over is not.
+function stopPlaying() {
   const mine = playing;
   if (mine === null) {
-    return;
+    return null;
   }
-  // Cleared first, so the decode this press overtook finds the record already gone and
-  // starts nothing — see `playSpoken`, where that comparison is made.
+  // Cleared first, so a decode this overtook finds the record already gone and starts
+  // nothing — see `playSpoken`, where that comparison is made.
   playing = null;
   if (mine.source !== null) {
     try {
@@ -3762,7 +3773,7 @@ function interruptPlayback() {
     }
     mine.source = null;
   }
-  playbackInterrupted(mine.slot);
+  return mine;
 }
 
 // The press being served, or `null` between presses.
@@ -4195,6 +4206,13 @@ async function playSpoken(spoken, slot) {
     couldNotPlay(slot);
     return;
   }
+  // **One playback in the air, and taking the record over ends the one it named.**
+  // Adversarial review, round 1, `major`. The sequence the finding describes — a second
+  // spoken answer arriving over a first one still sounding — is unreachable through the
+  // control, because every spoken answer arrives from a press and the press has already
+  // interrupted; and that is exactly why the invariant is held here rather than left to
+  // be inferred from the only caller there happens to be today.
+  stopPlaying();
   const mine = { source: null, slot };
   playing = mine;
   try {
