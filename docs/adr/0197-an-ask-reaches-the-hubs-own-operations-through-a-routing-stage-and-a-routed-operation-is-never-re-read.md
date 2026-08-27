@@ -428,11 +428,25 @@ second, and both failures are visible.
 > recency, score, best match, or a second model call. Ambiguity ends the route.
 
 > **Normative.** The ambiguity listing is bounded by `DEFAULT_PAGE_SIZE` and is
-> never truncated silently: a lookup that would exceed the bound is
-> `RouteOutcome.AMBIGUOUS` over the bounded listing, and the reply composed for it
-> says the request matched more than can be shown. No surface renders fewer
+> never truncated silently, and the disclosure rides the **outcome** rather than a
+> count. A lookup resolving to more than one candidate but no more than the bound
+> ends in `RouteOutcome.AMBIGUOUS`; a lookup that would **exceed** the bound ends
+> in `RouteOutcome.AMBIGUOUS_TRUNCATED` over the bounded listing, and that member
+> is the whole of what tells the reply the request matched more than can be shown.
+> The two are otherwise identical: both perform nothing, both confirm nothing, both
+> carry the listing, and both write no row (§9). No surface renders fewer
 > candidates than the outcome carries or summarises in place of them (ADR-0186 §7's
 > rule for a trail row, applied to a candidate listing).
+
+**The eighth member exists because §6 leaves no other channel, and that is the
+right way round.** §6 gives the composing stage exactly two closed values and
+explicitly no count — so a single `AMBIGUOUS` cannot distinguish two candidates
+from a hundred, and a reply that disclosed truncation for every ambiguity would be
+false on the two-candidate case while one that never disclosed it would be false on
+the overflow case. The alternative is handing the composer a number, which is a
+count of the user's own records reaching a prompt and the first crack in §6's
+second clause. A closed enum member carries the same one bit and carries nothing
+else, which is what §6 is for.
 
 **Ambiguity ends the route rather than parking on it, and this is a departure from
 the shape the milestone's planning note sketched.** That note said ambiguity is "a
@@ -671,8 +685,9 @@ whole product is that it noticed.
 ### 8. The contract surface
 
 > **Normative.** `core/types.py` gains `RoutableOperation` (§3) and `RouteOutcome`, a
-> `StrEnum` with exactly seven members: `PERFORMED`, `AWAITING_CONFIRMATION`,
-> `REFUSED`, `AMBIGUOUS`, `NOT_FOUND`, `UNRECORDED` and `FAILED`.
+> `StrEnum` with exactly eight members: `PERFORMED`, `AWAITING_CONFIRMATION`,
+> `REFUSED`, `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED`, `NOT_FOUND`, `UNRECORDED` and
+> `FAILED`.
 
 > **Normative.** `FAILED` means the operation was **called and raised**, and the
 > engine asserts nothing about whether it took effect. `UNRECORDED` means §9's row
@@ -722,7 +737,8 @@ whole product is that it noticed.
 > `model_validator(mode="after")` on `RoutedOperation`, in **both** directions, as
 > `StepOutcome._confirmation_matches_disposition` states its own: `confirmation` is
 > present **iff** `outcome` is `AWAITING_CONFIRMATION`; `listing` is present **iff**
-> `outcome` is `AMBIGUOUS` or `outcome` is `PERFORMED` on a read-only operation;
+> `outcome` is `AMBIGUOUS`, `outcome` is `AMBIGUOUS_TRUNCATED`, or `outcome` is
+> `PERFORMED` on a read-only operation;
 > every element of `listing`, and of a confirmation's `subject`, is of the arm
 > `operation` names; and a present `confirmation`'s **own** `operation` equals the
 > outer `operation`. The last is the one an inner-model validator cannot reach: a
@@ -802,7 +818,8 @@ and a renderer.
 > before a read-only operation is performed; before a confirm-owed route **parks**;
 > and on the `resume` that answers such a park — before the operation is performed
 > where the answer is yes, and before the pass returns where it is no. A route
-> whose resolution ended in `AMBIGUOUS` or `NOT_FOUND` decided nothing to do and
+> whose resolution ended in `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED` or `NOT_FOUND`
+> decided nothing to do and
 > writes no row, and a pass that declined to route writes none.
 
 > **Normative.** So a **confirm-owed route writes two rows**, one per decision: the
@@ -1379,7 +1396,12 @@ consumer group and not a second decision.
 > one-turn test cannot see this failure and does not satisfy this clause.
 
 > **Normative.** The same lane ships §5's three resolution cases — none, one, more
-> than one — asserting that the many-candidate case performs **nothing**; §5's
+> than one — asserting that the many-candidate case performs **nothing**; the
+> truncation boundary asserted on **both** sides, a lookup of exactly
+> `DEFAULT_PAGE_SIZE` candidates reaching `AMBIGUOUS` and one of
+> `DEFAULT_PAGE_SIZE + 1` reaching `AMBIGUOUS_TRUNCATED` over a listing of exactly
+> the bound, which is the pair that fails on an off-by-one and on an
+> implementation that never distinguishes the two; §5's
 > mapping asserted per confirm-owed member, that the façade was called with the
 > scalar identity and never handed the record; and §7's park-and-resume pair
 > asserting that a refused resume performs nothing and that a routed park does not
@@ -1496,7 +1518,8 @@ consumer group and not a second decision.
 > answered `True` leaving an `OWED` row and a `GIVEN` row sharing one `route_id`;
 > answered `False` leaving `OWED` and `REFUSED`; a park **never answered** leaving
 > exactly the `OWED` row and no other; a read-only route leaving exactly one
-> `NOT_OWED` row; and an `AMBIGUOUS` and a `NOT_FOUND` route each leaving **none**.
+> `NOT_OWED` row; and an `AMBIGUOUS`, an `AMBIGUOUS_TRUNCATED` and a `NOT_FOUND`
+> route each leaving **none**.
 > It also ships a row asserted to carry no query, no utterance and no record
 > contents, and `RouteApproval`'s two-directional validator against the tag.
 
