@@ -10,8 +10,9 @@
 - **It decides a `core` surface and is therefore reviewed under both lenses.**
   `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a change
   contract-surface "when it is the ADR deciding that surface", prose-only though
-  this PR is. §8 is the surface: one field on `TurnOutcome`, four new `core/types.py`
-  names, and one new Protocol in `core/protocols.py`. The implementation is separate
+  this PR is. The surface is one field on `TurnOutcome` and five new
+  `core/types.py` names (§8), plus two more `core/types.py` names, one new Protocol
+  in `core/protocols.py` and one error class (§9). The implementation is separate
   lanes against this ADR once it is merged (golden rule 5, ADR-0015 §5).
 - **It partially supersedes ADR-0170 §4** — that section's second `None` shape and
   its two clauses stated in the `turn is None` direction, exactly as far as they
@@ -67,8 +68,8 @@ CLI subcommands and browser buttons.
 
 ### Two doors to one surface, and only one of them is a sentence
 
-The gap is not that the operations are missing. `forget`, `grant`, `revoke`,
-`answer`, `recent_reads`, `spend_totals` are all on the promoted surface, all
+The gap is not that the operations are missing. `forget`, `revoke`,
+`recent_reads`, `spend_totals` and the rest are all on the promoted surface, all
 reachable from the CLI (ADR-0084) and twenty-eight of the thirty from a browser
 (ADR-0177 §1). What is missing is the door a person actually uses: saying it.
 
@@ -99,7 +100,7 @@ deterministic result is rendered **beside** the reply, the way ADR-0170 §6 rend
 the step account beside it, and the composing stage is told only that an operation
 ran and which closed-vocabulary outcome it reached.
 
-**Its own confirm rule.** `forget` destroys; `grant` widens; `revoke` and `answer`
+**Its own confirm rule.** `forget` destroys, and `revoke` and `forget_question`
 write. ADR-0073 §5 already rules the shape for the destructive one — "the surface
 renders the belief it is about to destroy … and takes the user's confirmation
 before deleting" — and the reason given there is the reason here: *a person cannot
@@ -152,10 +153,17 @@ for that algorithm to find.
 > `ActionPolicy` or `ToolInvoker` is reached. The composing stage still runs, on
 > §6's inputs.
 
-> **Normative.** **One ask performs at most one routed operation, by construction.**
-> The routing stage is entered once per `converse`, `converse_streaming` or
-> `resume` pass, and no clause of this ADR, and no later ADR citing it, permits a
-> routed operation's result to select a second operation within the same pass.
+> **Normative.** The routing stage is entered on a `converse` or
+> `converse_streaming` pass and on **no other**. `AssistantEngine.resume` routes
+> nothing: it carries an opaque `ContinuationToken` and a boolean and no utterance,
+> so there is no input a router could consume, and what it performs is the
+> operation an earlier pass already routed to.
+
+> **Normative.** **One ask performs at most one routed operation, by
+> construction.** The routing stage runs once per pass that enters it, and no
+> clause of this ADR, and no later ADR citing it, permits a routed operation's
+> result to select a second operation — within that pass, or on the `resume` that
+> resolves its park.
 
 > **Normative.** The implementing lane amends the pipeline's stage list in
 > `ai_assistant.orchestration`'s module docstring to name the routing stage in its
@@ -212,15 +220,23 @@ and only the first keeps one implementation of `forget`. The second would put a
 second `MemoryStore.delete` call site behind a different set of preconditions,
 which is how two doors to one operation stop behaving the same way.
 
-### 3. The routable vocabulary: eleven operations, each tagged, and the rule that widens it
+### 3. The routable vocabulary: nine operations, each tagged, and the rule that widens it
 
 > **Normative.** `core/types.py` gains `RoutableOperation`, a `StrEnum` whose members
-> are the operations an ask may be routed to. Its members are exactly these eleven,
+> are the operations an ask may be routed to. Its members are exactly these nine,
 > named for the `AssistantEngine` operation each routes to:
 >
 > - **read-only** — `questions`, `recent_reads`, `recent_invocations`,
 >   `recent_decisions`, `standing_grants`, `spend_totals`;
-> - **confirm-owed** — `forget`, `answer`, `grant`, `revoke`, `forget_question`.
+> - **confirm-owed** — `forget`, `revoke`, `forget_question`.
+
+> **Normative.** Every member above takes **exactly one** argument that varies with
+> the ask, or none: a confirm-owed member takes the one identity §5's lookup
+> resolves, and a read-only member takes none and is called with the promoted
+> surface's own declared defaults. An operation taking a second varying argument —
+> a scope, a mode, an accept/reject decision, a preferences object — is outside the
+> vocabulary until a decision says how that argument is chosen, rendered and
+> confirmed.
 
 > **Normative.** An operation is **read-only** exactly when performing it writes
 > nothing durable and destroys nothing, and **confirm-owed** otherwise. The tag is a
@@ -253,13 +269,15 @@ which is how two doors to one operation stop behaving the same way.
 > change already owes, which of the five conditions each added member satisfies and
 > how. Adding a member silently does not satisfy this clause.
 
-**Why a starter set rather than every non-egress operation.** Twenty-eight of the
-thirty-nine would pass conditions (i) and (ii). What stops them is (iii) and (v):
-`set_notification_preferences` takes a whole `NotificationPreferences` object that
-no query resolves to; `belief` and `conversation` take an id a user does not say;
-`observe` takes an optional conversation and returns an `ObservationReport` no arm
-carries. The eleven above are the ones a person says out loud, and the vocabulary
-is closed at what has been argued rather than at what would compile.
+**Why a starter set rather than every non-egress operation.** Most of the
+thirty-nine pass conditions (i) and (ii). What stops them is (iii) and (v):
+`grant` takes a `Sequence[GrantScope]` beside its source and `answer` takes an
+`accept: bool` beside its question, neither of which any query resolves to;
+`set_notification_preferences` takes a whole `NotificationPreferences` object;
+`belief` and `conversation` take an id a user does not say; `observe` returns an
+`ObservationReport` no arm carries. The nine above are the ones a person says out loud whose whole argument
+is one identity, and the vocabulary is closed at what has been argued rather than
+at what would compile.
 
 **`beliefs` is deliberately excluded, and that is the one exclusion a reader will
 expect to be wrong.** "What do you know about me?" is milestone 17's ruled exit
@@ -273,8 +291,10 @@ where it is: `assistant beliefs`, and the browser's control surface.
 `AssistantEngine.learn` takes a `FeedbackEvent` — a structured correction with a
 kind, a subject and its content — which is not a thing a router extracts from a
 sentence under (iii). What a person *says* when correcting the assistant reaches
-memory through `answer` on an open question, which is in the vocabulary, and
-through the ordinary pipeline otherwise. ADR-0177 §1's third clause already holds
+memory through `answer` on an open question, and `answer` is itself outside this
+vocabulary for the reason §11 gives — it takes an `accept: bool` beside the
+question's identity, and a router that supplied it would be deciding the
+correction rather than routing to it. ADR-0177 §1's third clause already holds
 `learn` outside the browser's reach on a related instinct; this decision does not
 disturb it either way.
 
@@ -517,9 +537,8 @@ whole product is that it noticed.
 > arms a routed listing may take. Its arms are homogeneous tuples of types the
 > promoted surface already carries: `tuple[Belief, ...]`, `tuple[Question, ...]`,
 > `tuple[SourceReadRecord, ...]`, `tuple[RecordedInvocation, ...]`,
-> `tuple[PermissionDecision, ...]`, `tuple[SourceGrant, ...]`,
-> `tuple[SpendTotal, ...]`, `tuple[GrantableSource, ...]`. It mints no payload type
-> of its own.
+> `tuple[PermissionDecision, ...]`, `tuple[SourceGrant, ...]` and
+> `tuple[SpendTotal, ...]`. It mints no payload type of its own.
 
 > **Normative.** `core/types.py` gains `OperationConfirmation`, frozen and
 > `extra="forbid"`, with exactly three fields: `operation: RoutableOperation`, the
@@ -556,12 +575,22 @@ whole product is that it noticed.
 > passes.
 
 > **Normative.** On a pass that routed, `TurnOutcome.turn` is `None`, and this
-> **partially supersedes ADR-0170 §4** in the scope the header names. `reply` is
-> present, and `reply_degraded` may be `True`, beside a `None` `turn` **iff**
-> `routed` is non-`None` and `routed.outcome` is not `AWAITING_CONFIRMATION`. On a
-> routed park `reply` is `None` and `reply_degraded` is `False`. Every other clause
-> of ADR-0170 §4, and ADR-0173 §6's widening, stand unchanged: an outcome carrying
-> no `routed` obeys them exactly as before.
+> **partially supersedes ADR-0170 §4** in the scope the header names. A routed pass
+> **owes an answer** exactly when `routed` is non-`None` and `routed.outcome` is not
+> `AWAITING_CONFIRMATION`, and where an answer is owed the outcome carries a
+> non-`None` `reply` **or** carries `reply` `None` with `reply_degraded` `True` —
+> the same two states ADR-0170 §4 and §8 already give a pass that owes one, and
+> ADR-0173 §6's third state, a partial `reply` beside `reply_degraded` `True`, is
+> admitted here on the same terms. A routed pass that owes **no** answer — a routed
+> park — carries `reply` `None` and `reply_degraded` `False`.
+
+> **Normative.** What is superseded is exactly this: ADR-0170 §4's second `None`
+> shape ceases to be an exhaustive account of a `None` `turn`, and its two clauses
+> stated in the `turn is None` direction — that such an outcome carries no `reply`,
+> and that `reply_degraded` is never `True` on it — cease to bind where `routed` is
+> non-`None`. Nothing else moves. An outcome carrying **no** `routed` obeys ADR-0170
+> §4 and ADR-0173 §6 exactly as before, and a **recovered** park is such an
+> outcome: it refuses a `reply` after this decision as it did before.
 
 > **Normative.** The lane implementing this surface bumps `PROTOCOL_VERSION` in the
 > **same change** and appends its reason to the running note in `wire/envelope.py`,
@@ -605,26 +634,77 @@ rendering a routed `recent_reads` uses the renderer it already has for
 member adds an enum member and, at most, one arm — not a wrapper model, a schema
 and a renderer.
 
-### 9. A routed operation is recorded, and the record is the routing decision
+### 9. A routed operation is recorded, the row is written before the effect, and it states what was decided
 
-> **Normative.** Every routed operation that reaches a terminal `RouteOutcome` —
-> `PERFORMED`, `REFUSED`, `AMBIGUOUS`, `NOT_FOUND` or `FAILED` — is recorded
-> durably before the pass returns. A park is not a terminal outcome and is recorded
-> when it resolves, under the outcome it resolves to.
+> **Normative.** A row is written for every pass on which a route was **taken**,
+> and for no pass that declined to route. It is written **before** the operation is
+> performed, and on a confirm-owed operation it is written after the user's
+> approval is received and before anything is destroyed.
+
+> **Normative.** A taken route whose row cannot be written **performs nothing**.
+> The route ends in `RouteOutcome.FAILED`, no operation is called, and the pass
+> returns that outcome. This applies to read-only members as well as confirm-owed
+> ones: one ordering, one failure mode, and no partial mode in which some routed
+> operations are recorded and others are not.
+
+> **Normative.** The row states what was **decided** and never what happened —
+> ADR-0186's own title, and here it is forced rather than chosen, because the row
+> is written before the operation runs and a row claiming an effect would be
+> claiming one that had not occurred yet. The pass's own `RouteOutcome` on
+> `TurnOutcome.routed` is where what happened is reported.
 
 > **Normative.** `core/types.py` gains `RoutedOperationRecord`, frozen and
-> `extra="forbid"`: an `id`, the instant it was decided, the `RoutableOperation`,
-> the `RouteOutcome`, whether a confirmation was owed and how it was answered, and
-> the conversation the ask ran under. It carries **no content** — no query, no
-> record contents, no listing, no free text — on ADR-0185 §2's ground, which is that
-> a trail row is a statement about a decision and not a copy of what the decision
-> was about.
+> `extra="forbid"`, with exactly six fields and no others:
+>
+> - `id: Identifier` — the row's own identity, minted by the recorder.
+> - `decided_at: UtcInstant` — when the route was decided, from the injected clock
+>   (ADR-0009), never from the store.
+> - `operation: RoutableOperation` — which operation the route named.
+> - `approval: RouteApproval` — a `StrEnum` gaining exactly three members:
+>   `NOT_OWED` on a read-only operation, `GIVEN` where the user answered a §7
+>   confirmation `True`, and `REFUSED` where they answered `False`. A confirm-owed
+>   operation's row is never `NOT_OWED` and a read-only operation's row is always
+>   `NOT_OWED`, stated as a two-directional validator.
+> - `subject: Identifier | NonBlankEncodableText | None` — the identity §5's lookup
+>   resolved, or `None` where the operation takes none. It is the *identity* the
+>   operation was called with — a record id, a question id, a source name — and
+>   never the record's contents.
+> - `conversation_id: Identifier | None` — the conversation the ask ran under,
+>   `None` where the pass has none for ADR-0074 §3's own reasons.
+
+> **Normative.** The record carries **no content**: no query, no utterance, no
+> belief text, no listing, no reason, and no free text of any kind. That is
+> ADR-0185 §2's ground — a trail row is a statement about a decision, not a copy of
+> what the decision was about — and it is what makes the row safe to keep after the
+> belief it names is destroyed.
 
 > **Normative.** `core/protocols.py` gains `RoutingTrail`, the durable store, with
-> four members on ADR-0185 §12's shape: `record`, `recent`, `export` and `clear`.
-> It is a **new Protocol and owes the full triad** — Protocol, shared conformance
-> suite, and canonical fake in `ai_assistant.testing` — in one change
-> (`CONTRIBUTING.md` → "Adding a Protocol", ADR-0137 §3).
+> exactly four members on ADR-0185 §12's shape and no others:
+>
+> ```python
+> async def record(self, record: RoutedOperationRecord) -> None
+> async def recent(self, *, limit: int) -> tuple[RoutedOperationRecord, ...]
+> async def export(self) -> tuple[RoutedOperationRecord, ...]
+> async def clear(self) -> None
+> ```
+>
+> `record` appends one row and returns nothing; a row already present under the
+> same `id` is not appended twice and is not an error, so a retried write is
+> idempotent. `recent` answers **newest-recorded first** and refuses a `limit`
+> outside `[1, 2**63)` locally and before any I/O, as ADR-0186 §3 requires of every
+> bounded listing. `export` answers the whole trail in the same order and is bounded
+> only by ADR-0085 §8c's payload limit. `clear` destroys every row, for ADR-0007's
+> deletion right.
+
+> **Normative.** `core/errors.py` gains `RoutingTrailError`, a direct subclass of
+> `AssistantError` — **one class rather than several**, as `ReadTrailError` is one
+> class rather than two — and it is what every `RoutingTrail` member raises on a
+> durable failure. No member raises a bare `Exception`, and no member orphans a
+> resource it acquired when the call is cancelled (ADR-0060 §1).
+
+> **Normative.** `RoutingTrail` is a **new Protocol and owes the full triad** —
+> Protocol, shared conformance suite, and canonical fake in `ai_assistant.testing`
+> — in one change (`CONTRIBUTING.md` → "Adding a Protocol", ADR-0137 §3).
 
 > **Normative.** The trail is bounded, on ADR-0185 §6's shape: a maximum row count
 > read through `core.config.Settings`, pruned earliest-recorded-first, **with no
@@ -649,6 +729,35 @@ that destroys the only evidence of itself, since `AssistantEngine.forget` "relay
 `MemoryStore.delete` and nothing more". Leaving the new door unrecorded because the
 old door is would be reasoning from the gap rather than from the rule.
 
+**Writing the row first is what makes "every" true, and it is this repository's own
+pattern rather than a new one.** `ConversationTurn`'s docstring states it for the
+conversation index: "no episode can exist for a conversation without its id having
+been recorded here first (§8)", which is what makes that index "an intent log". The
+alternative ordering — perform, then record — cannot be made true by any amount of
+care: the two writes are to two stores, and a failure or a cancellation between them
+leaves a destroyed belief with no row, which is precisely the state a trail exists
+to make impossible. Ordering it the other way inverts the residual into the safe
+direction: a cancellation between the write and the call leaves a **row for an
+operation that did not happen**, and an over-recorded trail is a trail an operator
+can reconcile, where an under-recorded one is a trail nobody can trust. ADR-0060
+makes a cancelled write's effect indeterminate and requires the cancellation to
+propagate; both hold here, and this ordering is what makes the indeterminacy fall on
+the row rather than on the act.
+
+**The row therefore states no outcome, and that is not a shortcut.** A row written
+before the call cannot say whether the call succeeded without being rewritten, and
+rewriting is what an append-only trail is not. ADR-0186's title is the rule it lands
+on — a row states what was decided rather than what happened — and the pass's own
+`RouteOutcome` is where "what happened" belongs, because that is the value the user
+is looking at.
+
+**Refusing to perform on a failed write costs a routed read during a trail outage,
+and it is still the right side.** The alternative is a rule that records
+confirm-owed operations and best-efforts the rest, which is two orderings, two
+failure modes and a branch every reader must hold. One rule is cheaper to obey and
+cheaper to test, and a hub whose routing trail is unwritable has a fault the
+operator should see rather than route around.
+
 **The asymmetry objection is real and it is answered by scope rather than
 dismissed.** A `forget` through the typed door records nothing today; after this,
 the same act through the routed door records a row. That is not incoherent, it is
@@ -664,12 +773,10 @@ argued the bound, the ceiling and what a row renders as on their own merits. Doi
 the same here keeps this decision to routing and leaves the surface to a decision
 that can weigh it — including whether the four trails should be read through four
 pairs of methods or something better, which is a question this ADR would answer
-badly by answering it incidentally.
-
-**`clear` is on the Protocol because ADR-0007's deletion right does not have an
-exception for trails**, and a row naming a conversation the user deleted is a
-pointer into nothing. The trail store's own lifecycle is the implementing lane's,
-under the settings shape above.
+badly by answering it incidentally. The two unreached members are specified now
+rather than added later for the reason ADR-0185 §12 specified them: widening a
+ratified Protocol is a breaking change, and a store built against a two-member
+seam would be rebuilt against a four-member one.
 
 ### 10. Rendering, composition and failure
 
@@ -731,7 +838,8 @@ that conversation.
 
 > **Normative.** Beyond §§1–10 and §13, this ADR decides nothing. It registers no
 > tool, designates no seam, changes no method signature on `AssistantEngine`, and
-> adds no `core` name other than §8's five and §9's two. A lane needing any of those
+> adds no `core` name other than §8's five, §9's two types, its one Protocol and
+> its one error class. A lane needing any of those
 > needs its own change and, where golden rule 5 reaches it, its own ADR.
 
 - **Milestone 27 — multi-step plan driving** (#242). ADR-0170 §5's "at most a
@@ -740,6 +848,9 @@ that conversation.
 - **A read surface for the routing trail.** §9 mints the store and no engine
   method. The surface is its own decision, on ADR-0185 → ADR-0186's sequence, and
   should weigh whether four trails want four pairs of operations.
+- **A second varying argument on any routed operation**, and therefore a route
+  envelope carrying more than `operation` and `query`. §3's one-argument clause is
+  the boundary, and moving it is a decision rather than an extension.
 - **Whether a `forget` through the typed door is recorded.** `track:memory`
   ground — ADR-0073's contract and ADR-0007's deletion right — and the asymmetry
   §9 names is filed rather than closed here.
@@ -757,9 +868,21 @@ that conversation.
 - **Voice's spoken route** (#1318). A spoken ask reaches `converse` like any other
   and routes by these rules; whether speaking changes what may be confirmed by
   voice alone is `track:voice`'s.
-- **`beliefs`, `learn`, and the twenty-eight operations §3 leaves out.** The
-  widening rule is how they arrive, and each arrival owes §3's five conditions
-  stated in its own lane's ADR.
+- **`grant` and `answer`, and every other operation with a second varying
+  argument.** `AssistantEngine.grant(source, *, scope: Sequence[GrantScope])` needs
+  a scope, and `answer(question_id, *, accept: bool)` needs the accept/reject
+  decision itself. §5's lookup resolves one identity and §7's confirmation is a
+  yes/no, so neither argument has a source that is not the model inventing it —
+  and a model-invented `scope` is a model authoring an authorisation, which is
+  ADR-0102's ground and not a routing detail. Mapping the confirmation's `approved`
+  onto `accept` is refused for the same reason it looks tempting: it fuses "may I
+  do this" with "what should I do", so a user declining a correction and a user
+  declining to be asked would be the same wire value. Both are named as the first
+  candidates for a widening once that argument's design exists, and #1312's "yes, I
+  did move" example is what that widening buys.
+- **`beliefs`, `learn`, and the operations §3 leaves out.** The widening rule is how
+  they arrive, and each arrival owes §3's five conditions stated in its own lane's
+  ADR.
 - **The router's prompt text and which model answers.** `orchestration`'s to write,
   under §4's constraints on what it contains.
 
@@ -779,10 +902,13 @@ across three PRs is the precedent for an ADR that lands in more than one.
 
 > **Normative.** The lane landing §8 ships tests pinning: `RoutedOperation`'s
 > validator in **both** directions on each of the three invariants; the
-> `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape — a routed
-> non-park carrying a reply beside a `None` turn, a routed park carrying neither,
-> and a **recovered** park still refusing a reply, so the supersession is pinned as
-> narrow rather than as a relaxation.
+> `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape across
+> **all four** of its routed cases — a routed non-park carrying a `reply` beside a
+> `None` turn; the same pass with `reply` `None` and `reply_degraded` `True`, which
+> is the routed composition failure §10 requires and the case a validator written
+> as "a routed pass carries a reply" silently forbids; a routed park carrying
+> neither; and a **recovered** park still refusing a reply, so the supersession is
+> pinned as narrow rather than as a relaxation.
 
 > **Normative.** The same lane ships §4's decline tests on ADR-0176 §1's own model:
 > a parameterized test that `1`, `1.0`, `"true"`, `"yes"` and JSON `false` are each
@@ -806,9 +932,16 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > park-and-resume pair asserting that a refused resume performs nothing and that a
 > routed park does not appear in `pending_confirmations`.
 
-> **Normative.** The same lane ships §9's recording tests: a row for each terminal
-> outcome, no row for a park until it resolves, and a row carrying no query and no
-> record contents.
+> **Normative.** The lane landing §9 ships its ordering tests, and they are the
+> ones that fail on the plausible wrong implementation: a `RoutingTrail` double
+> whose `record` raises, over a confirm-owed route the user approved, asserting
+> that the operation's store was **not called at all** and the pass returned
+> `RouteOutcome.FAILED`; the same over a read-only route; and a `record` that
+> observes the operation's store to be untouched at the moment it is called, which
+> is the only assertion that fails on an implementation that performs first and
+> records after. It also ships a row for a route taken under each `RouteApproval`
+> member, no row for a pass that declined to route, and a row asserted to carry no
+> query, no utterance and no record contents.
 
 > **Normative.** A separate lane may land the CLI and gateway renderings of §10.
 > They are a **consumer group**, not a second decision: each renders the routed
@@ -831,8 +964,9 @@ widely than it now holds?
 **ADR-0170 §4 — a record is owed, and it is a partial supersession.** That section
 rules `reply` `None` on "exactly three shapes", names the second as "a pass whose
 `turn` is `None`", and rules `reply_degraded` "never `True` … where `turn` is
-`None`". §8 above admits a fourth shape in which `turn` is `None`, `reply` is
-present and `reply_degraded` may be `True`. A reader holding only ADR-0170 would
+`None`". §8 above admits routed passes in which `turn` is `None` and an answer is
+nevertheless **owed** — carrying a `reply`, or carrying `reply` `None` beside
+`reply_degraded` `True` where composing it failed. A reader holding only ADR-0170 would
 build a validator that refuses the routed outcome, so this is a change to what was
 decided and not a reconciliation of it. It is **partial**, and deliberately narrow:
 the park shape, the recovered-resume shape, the composition-failure shape, the
@@ -941,7 +1075,19 @@ forbids. The lane that ratifies this ADR makes them, and no other lane does.
 - **A routed park does not survive a restart.** The user repeats one sentence. The
   alternative was a second durable park store, and §7 states the trade rather than
   hiding it.
-- **Revisit if** a routed confirmation becomes expensive for a user to reconstruct,
+- **A hub whose routing trail cannot be written routes nothing at all**, reads
+  included (§9). That is one failure mode rather than two and an operator sees it
+  rather than routing around it, and the price is that a trail fault takes a
+  capability with it. The ordinary pipeline is unaffected: an unroutable ask is an
+  ask that plans, which is what it did before this decision.
+- **A correction spoken in words still does not reach memory.** `answer` and `grant`
+  are outside the first vocabulary because each takes a second argument no query
+  resolves (§3, §11), so #1312's "yes, I did move" is not what milestone 26
+  delivers. The widening rule is the route back, and what it waits on is a design
+  for that argument rather than a further decision about routing.
+- **Revisit if** an operation worth routing needs a second varying argument often
+  enough that §3's one-argument boundary is the thing in the way; if a routed
+  confirmation becomes expensive for a user to reconstruct,
   which is when §7's recovery trade flips; if the vocabulary's widening rule is
   exercised often enough that a lane wants a generic argument resolver rather than
   a per-operation lookup; or if a consumer appears that genuinely needs the model
