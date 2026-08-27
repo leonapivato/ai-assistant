@@ -4088,9 +4088,24 @@ def _decision_view(decision: PermissionDecision) -> dict[str, Any]:
     the pair** (ADR-0193 §6, §11). The discriminator is whether ``resolves`` is set,
     with no field added to carry the basis itself, so a view that pre-computed the
     state would be putting §6's discriminator in a second place.
+
+    **A row carrying a ``resolves`` and a *different* ``authorised_by`` is not a
+    ruling this surface reads at all**, and ``unreadable`` is that fact carried.
+    ADR-0193 §11 names exactly three states and this pair is none of them; the trail
+    refuses to record one (``InvalidResolutionError``), so a row reaching a reader
+    with it is a value no store this system wrote would hold. ``interfaces.cli``
+    raises there and the whole listing ends. This marks the **row** instead, for a
+    reason that is about where the row is: a routed listing rides a turn, so raising
+    would take the reply and the routed account with it — a reader losing what did
+    happen because one row cannot be read. Either way nothing guesses: §11's line is
+    not rendered, neither pointer is presented as the authorisation, and the row's
+    other fields are not rendered beside a ruling this surface has declined to read.
+    Adversarial review's round-2 blocker, and correct that a fourth state was being
+    invented.
     """
     return {
         "id": decision.id,
+        "unreadable": _is_unreadable_ruling(decision),
         "outcome": decision.ruling.outcome.value,
         "reason": decision.ruling.reason,
         "decided_at": decision.decided_at.isoformat(),
@@ -4101,6 +4116,24 @@ def _decision_view(decision: PermissionDecision) -> dict[str, Any]:
         "authorised_by": decision.ruling.authorised_by,
         "binding": _recorded_binding_view(decision.egress_binding),
     }
+
+
+def _is_unreadable_ruling(decision: PermissionDecision) -> bool:
+    """Whether this row's authorisation pointers contradict each other (ADR-0193 §11).
+
+    The condition ``interfaces.cli._authorisation_line`` raises
+    :class:`~ai_assistant.core.errors.InvalidResolutionError` on, spelled as a
+    predicate: a ruling that **answers** one decision while **resting on** another.
+    §11 names three states and this is none of them, and no ruling an audit trail
+    accepts carries both — ``InvalidResolutionError``'s own subject includes "when
+    the resolving ruling's ``authorised_by`` does not match its ``resolves``".
+
+    ``authorised_by`` unset is the policy's own rules and ``resolves`` unset is a
+    standing authorisation, so neither is this: both must be present and differ.
+    """
+    authorised_by = decision.ruling.authorised_by
+    resolves = decision.resolves
+    return authorised_by is not None and resolves is not None and authorised_by != resolves
 
 
 def _recorded_binding_view(
@@ -4168,20 +4201,39 @@ def _spend_view(total: SpendTotal) -> dict[str, Any]:
     **The amounts cross as text**, for :func:`_decimal`'s reason: a ceiling read by
     ``JSON.parse`` is a double, and a ceiling the owner set would reach them changed.
 
-    **The offsets cross beside the bounds and are not folded into them.** ADR-0194's
-    bounds are instants and the offset is what was in force, so a view that shifted
-    the instant would be deciding a calendar question the record does not delegate.
+    **Each bound crosses already rendered from its own offset**, which is ADR-0194 §6
+    in terms: "each bound rendered from the value's **own**
+    ``start_offset``/``end_offset`` and labelled with that offset — never from the
+    client's zone and never through the client's ``tzdata``". So the arithmetic is
+    ``interfaces.cli._bound``'s, done here rather than on the page: a browser doing it
+    would be doing date arithmetic with a zone database beside it, and §5's bar is on
+    exactly that. An earlier shape of this view crossed the UTC instant beside the
+    offset label, which renders a bound in one offset labelled with another —
+    adversarial review's round-2 blocker, and correct.
     """
     return {
         "period": total.period.value,
-        "period_start": total.period_start.isoformat(),
-        "period_end": total.period_end.isoformat(),
+        "period_start": _bound_text(total.period_start, total.start_offset),
+        "period_end": _bound_text(total.period_end, total.end_offset),
         "start_offset": _offset_text(total.start_offset),
         "end_offset": _offset_text(total.end_offset),
         "ceiling": None if total.ceiling is None else str(total.ceiling),
         "currency": total.currency,
         "accounted": None if total.accounted is None else str(total.accounted),
     }
+
+
+def _bound_text(instant: datetime, offset: timedelta) -> str:
+    """Spell one period bound in its own offset (ADR-0194 §6).
+
+    ``interfaces.cli._bound``'s arithmetic, because it is the same fact reaching a
+    second surface and §6 states it of the bound rather than of a command: the
+    instant is shifted by the offset the value carries and rendered as wall time, so
+    what a reader sees is the boundary the ledger used. **No zone database is
+    consulted here or on the page** — §5 bars the client's ``tzdata`` and this is the
+    only arithmetic that would have wanted one.
+    """
+    return (instant.replace(tzinfo=None) + offset).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _offset_text(offset: timedelta) -> str:

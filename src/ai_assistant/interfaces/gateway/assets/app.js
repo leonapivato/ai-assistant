@@ -1327,11 +1327,9 @@ function decisionWords(outcome) {
 // exists, is held, is live, is unrevoked or covers anything now — ADR-0186 §8's
 // first clause, read on this fact.
 //
-// **A row carrying both a different `resolves` and an `authorised_by` is not one
-// this page chooses between.** The CLI raises there; a view that raised would take
-// the whole turn's rendering with it, so this says what the row is instead. Either
-// way nothing guesses: "this listing states what authorised a call rather than
-// guessing between them".
+// **A row whose pointers contradict each other never reaches here** — it is refused
+// whole by `renderDecisionFields`, which is what keeps this function to §11's three
+// states and stops a fourth being invented in the gap.
 function authorisationWords(decision) {
   if (decision.authorised_by === null) {
     return "the policy's own rules, resting on no decision of yours";
@@ -1342,14 +1340,11 @@ function authorisationWords(decision) {
       `${decision.authorised_by} (what the row names, and no more)`
     );
   }
-  if (decision.authorised_by === decision.resolves) {
-    return `a decision you took about this call, recorded as ${decision.authorised_by}`;
-  }
-  return (
-    `this row answers ${decision.resolves} and rests on ${decision.authorised_by}. No ` +
-    "ruling an audit trail accepts carries both, so nothing here chooses between " +
-    "them — 'assistant export-decisions' writes the record as it stands."
-  );
+  // The pair having reached here at all means it matched, because a row whose
+  // pointers differ never gets past `renderDecisionFields`' first branch. So this is
+  // the third of ADR-0193 §11's three states and there is no fourth to fall through
+  // to.
+  return `a decision you took about this call, recorded as ${decision.authorised_by}`;
 }
 
 // The call's origin as the recorded predicate carries it, including the arm that
@@ -1398,6 +1393,27 @@ function renderRecordedBinding(item, binding) {
 // printed rather than assumed**, because the reader who most needs it is the one
 // treating this as a permissions screen.
 function renderDecisionFields(item, decision) {
+  // **A row whose pointers contradict each other is not read at all** (ADR-0193 §11,
+  // and adversarial review's round-2 blocker). §11 names exactly three authorisation
+  // states and a ruling that answers one decision while resting on another is none of
+  // them; the trail refuses to record one, so such a row is a value no store this
+  // system wrote would hold. `interfaces/cli` raises there and the listing ends —
+  // this ends the **row**, because a routed listing rides a turn and raising would
+  // take the reply and the routed account with it. What matters is the same either
+  // way: no authorisation is stated, neither pointer is presented as one, and none of
+  // the row's other fields is rendered beside a ruling this surface will not read.
+  if (decision.unreadable) {
+    line(
+      item,
+      `This row is not a ruling I will read: it answers ${decision.resolves} and rests ` +
+        `on ${decision.authorised_by}, and no ruling an audit trail accepts carries ` +
+        "both. Nothing here states what authorised the call — 'assistant " +
+        "export-decisions' writes the record as it stands.",
+      "failed"
+    );
+    line(item, `id: ${decision.id}`, "hint");
+    return;
+  }
   line(item, `${decisionWords(decision.outcome)} — ${decision.decided_at}`, "reply");
   line(item, `Tool: ${decision.tool_id} (capability ${decision.capability})`, "hint");
   line(item, `Why: ${decision.reason}`, "hint");
@@ -1436,8 +1452,14 @@ const PERIOD_NAMES = { calendar_day: "Today", calendar_month: "This month" };
 // falsiness of a ceiling**, because a configured ceiling of zero refuses the most.
 function renderSpendFields(item, total) {
   line(item, PERIOD_NAMES[total.period] || total.period, "reply");
-  line(item, `from ${total.period_start} (${total.start_offset})`, "hint");
-  line(item, `up to (not including) ${total.period_end} (${total.end_offset})`, "hint");
+  // **Each bound arrives already rendered from its own offset** (ADR-0194 §6), and
+  // the label beside it is that same offset. The arithmetic is the gateway's, in
+  // Python, because §5 bars this bound from being read "from the client's zone" or
+  // "through the client's `tzdata`" — and a browser shifting an instant is exactly
+  // the code that would reach for one. An earlier shape of this page printed the UTC
+  // instant beside the label, which is a bound in one offset labelled with another.
+  line(item, `from ${total.period_start} ${total.start_offset}`, "hint");
+  line(item, `up to (not including) ${total.period_end} ${total.end_offset}`, "hint");
   if (total.currency === null) {
     line(item, "No spend currency is configured, so I am not keeping a total.", "hint");
     return;
