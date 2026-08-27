@@ -1,6 +1,6 @@
 """The on-device default :class:`~ai_assistant.core.protocols.SpeechSynthesizer`.
 
-``VitsSynthesizer`` renders an answer as speech with a local model and writes it
+``SupertonicSynthesizer`` renders an answer as speech with a local model and writes it
 into the container the caller asked for, so nothing the assistant says leaves the
 device to be spoken. It is :mod:`ai_assistant.models.moonshine_transcriber`'s
 sibling and shares every seam-shape decision with it — the backend seam, the owned
@@ -8,17 +8,14 @@ worker threads, the deadline living in a decorator rather than here, and the rul
 that no message this module writes was authored anywhere else. Read that module's
 docstring for the reasoning; only what differs is written down again below.
 
-## The voice is a phoneme model, and that was a measurement
+## The voice takes text, not phonemes
 
-The obvious cheaper candidate is a VITS voice driven from a pronunciation
-lexicon: three files instead of 359, and no grapheme-to-phoneme data. It was
-measured and **rejected**, because it silently drops every word its lexicon does
-not contain — "you have a meeting with Sam at 3pm" renders without the time, and
-an unfamiliar name renders without the name. ADR-0200 §4 makes it *this seam's*
-obligation that the audio is an audible rendering of the text, and for a personal
-assistant the out-of-vocabulary words are exactly the names, numbers and
-abbreviations the answer is about. ``speech_artifact.py`` records the comparison
-beside the pin.
+The vendored model is indexed straight off the characters it is handed, so this
+module hands it the answer and nothing else — no pronunciation lexicon, no
+grapheme-to-phoneme pass, and no dictionary that could quietly not contain a word.
+``speech_artifact.py`` records why that decided the choice: the two obvious
+alternatives were rejected, one on its licence and one on a measurement showing it
+drops the words a personal assistant's answers are most often about.
 
 ## What it produces
 
@@ -42,7 +39,7 @@ from ai_assistant.core.errors import SpeechError
 from ai_assistant.core.types import SpokenAudio, SpokenAudioFormat
 from ai_assistant.models._embed_worker import OwnedWorkers, WorkersExhaustedError
 from ai_assistant.models.speech_artifact import (
-    VITS_PIPER_EN_US_AMY_LOW,
+    SUPERTONIC_3_INT8,
     SpeechArtifactError,
     packaged_artifact_dir,
 )
@@ -59,14 +56,29 @@ if TYPE_CHECKING:
 #: ``moonshine_transcriber`` gives.
 _ENGINE_THREADS = 1
 
-#: Which voice of a multi-speaker model to use. The vendored voice has one.
+#: Which of the vendored model's voice styles to speak in. Not configurable at
+#: this rung: ADR-0200 §1 says a voice is the implementing lane's to choose, and a
+#: setting for it would be a deployment knob nothing has asked for.
 _SPEAKER = 0
+
+#: Every file the engine is constructed over, checked for presence before the
+#: library is asked — so a missing build input reads as one rather than as an
+#: opaque failure from inside the runtime.
+_ENGINE_FILES = (
+    "duration_predictor.int8.onnx",
+    "text_encoder.int8.onnx",
+    "vector_estimator.int8.onnx",
+    "vocoder.int8.onnx",
+    "tts.json",
+    "unicode_indexer.bin",
+    "voice.bin",
+)
 
 #: The rate the vendored voice is rendered at, relative to its trained pace.
 _SPEED = 1.0
 
 
-class VitsVoice(Protocol):
+class SupertonicVoice(Protocol):
     """A loaded voice: text in, mono float samples out."""
 
     @property
@@ -79,10 +91,10 @@ class VitsVoice(Protocol):
         ...
 
 
-class VitsBackend(Protocol):
+class SupertonicBackend(Protocol):
     """The one seam ``sherpa_onnx`` reaches this adapter through."""
 
-    def load(self) -> VitsVoice:
+    def load(self) -> SupertonicVoice:
         """Load the vendored voice.
 
         Returns:
@@ -94,7 +106,7 @@ class VitsBackend(Protocol):
         ...
 
 
-class _SherpaVitsVoice:
+class _SherpaSupertonicVoice:
     """The real voice, wrapped so the seam above is one property and one method."""
 
     def __init__(self, tts: sherpa_onnx.OfflineTts) -> None:
@@ -125,7 +137,7 @@ class _SherpaVitsVoice:
         )
 
 
-class _SherpaVitsBackend:
+class _SherpaSupertonicBackend:
     """Builds the real voice from the vendored artifact."""
 
     def __init__(self, directory: Path) -> None:
@@ -136,7 +148,7 @@ class _SherpaVitsBackend:
         """
         self._directory = directory
 
-    def load(self) -> VitsVoice:
+    def load(self) -> SupertonicVoice:
         """Construct the engine over the packaged files.
 
         Returns:
@@ -147,22 +159,23 @@ class _SherpaVitsBackend:
                 missing build input reads as a build input rather than as a
                 synthesis failure.
         """
-        model = self._directory / "en_US-amy-low.onnx"
-        tokens = self._directory / "tokens.txt"
-        data_dir = self._directory / "espeak-ng-data"
-        for path in (model, tokens):
+        paths = {name: self._directory / name for name in _ENGINE_FILES}
+        for name, path in paths.items():
             if not path.is_file():
-                msg = f"the vendored voice is incomplete: {path.name!r} is missing"
+                msg = f"the vendored voice is incomplete: {name!r} is missing"
                 raise SpeechArtifactError(msg)
-        if not data_dir.is_dir():
-            msg = "the vendored voice is incomplete: its espeak-ng data is missing"
-            raise SpeechArtifactError(msg)
-        return _SherpaVitsVoice(
+        return _SherpaSupertonicVoice(
             sherpa_onnx.OfflineTts(
                 sherpa_onnx.OfflineTtsConfig(
                     model=sherpa_onnx.OfflineTtsModelConfig(
-                        vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-                            model=str(model), tokens=str(tokens), data_dir=str(data_dir)
+                        supertonic=sherpa_onnx.OfflineTtsSupertonicModelConfig(
+                            duration_predictor=str(paths["duration_predictor.int8.onnx"]),
+                            text_encoder=str(paths["text_encoder.int8.onnx"]),
+                            vector_estimator=str(paths["vector_estimator.int8.onnx"]),
+                            vocoder=str(paths["vocoder.int8.onnx"]),
+                            tts_json=str(paths["tts.json"]),
+                            unicode_indexer=str(paths["unicode_indexer.bin"]),
+                            voice_style=str(paths["voice.bin"]),
                         ),
                         provider="cpu",
                         num_threads=_ENGINE_THREADS,
@@ -173,7 +186,7 @@ class _SherpaVitsBackend:
         )
 
 
-class VitsSynthesizer:
+class SupertonicSynthesizer:
     """A ``SpeechSynthesizer`` over the vendored on-device voice.
 
     Structurally implements
@@ -181,7 +194,7 @@ class VitsSynthesizer:
     anywhere the contract is expected.
     """
 
-    def __init__(self, *, backend: VitsBackend | None = None) -> None:
+    def __init__(self, *, backend: SupertonicBackend | None = None) -> None:
         """Build the synthesizer.
 
         Nothing is loaded here, for the reason
@@ -193,12 +206,12 @@ class VitsSynthesizer:
             backend: The seam the engine is reached through. Defaults to the real
                 one, over the vendored artifact.
         """
-        self._backend: VitsBackend = backend or _SherpaVitsBackend(
-            packaged_artifact_dir(VITS_PIPER_EN_US_AMY_LOW)
+        self._backend: SupertonicBackend = backend or _SherpaSupertonicBackend(
+            packaged_artifact_dir(SUPERTONIC_3_INT8)
         )
-        self._voice: VitsVoice | None = None
+        self._voice: SupertonicVoice | None = None
         self._load_lock = threading.Lock()
-        self._workers = OwnedWorkers(thread_name="vits-synthesize", subject="synthesis")
+        self._workers = OwnedWorkers(thread_name="supertonic-synthesize", subject="synthesis")
 
     @property
     def formats(self) -> frozenset[SpokenAudioFormat]:
@@ -278,7 +291,7 @@ class VitsSynthesizer:
             msg = "the rendering could not be carried as a value"
             raise SpeechError(msg) from exc
 
-    def _loaded(self) -> VitsVoice:
+    def _loaded(self) -> SupertonicVoice:
         """Return the loaded voice, loading it once under this object's lock."""
         with self._load_lock:
             if self._voice is None:
