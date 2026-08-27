@@ -269,6 +269,22 @@ bare `100.86.154.22:8422` in a phone address bar is as likely to be treated as a
 search as an address". What that page has to stop saying is the sentence after
 it — that "`https://` does not work here and is not meant to".
 
+**A gateway that does not start binds no loopback listener either, and that is
+ADR-0174's own arrangement rather than a change to it.** §2's clause that "that
+loopback listener is bound whether or not this one is" says the loopback listener
+does not depend on the remote one being **configured on** — a gateway with no
+remote configuration binds it, which is the sentence's subject. It is not a
+promise that the gateway starts under every remote *mis*configuration, and
+ADR-0174 is the ADR that proves it: its own §2 refuses a wildcard, loopback or
+publicly-routable `gateway_remote_address` "at load rather than bound", and its
+own §8 has the "**gateway refuse[] at start**, before it binds or discloses a
+bootstrap value" an overlay identity over the byte bound. Both outcomes are a
+process that does not run, and therefore a loopback listener that is not bound.
+The clause above adds a third condition of exactly that kind. Architecture review
+raised this on its first round, reading §2's clause as a loopback-availability
+guarantee; §10 records why the test comes out at no supersession rather than
+writing a record ADR-0082 §1 would make wrong.
+
 **The residual is stated rather than closed: an expired certificate takes the
 gateway down, including its loopback listener.** An owner whose certificate lapsed
 and who wants the local browser back turns the remote listener off — unsetting
@@ -817,11 +833,23 @@ ordering against an event §3 had no occasion to mention.
   hub-down legibility clauses are untouched.
 - **ADR-0172** — no clause is cited, widened or relied on (§3). Its class stays the
   three values it enumerates, and this ADR's class is disjoint from it.
-- **ADR-0174 §2, §3, §4, §5, §6, §9 and §10** — each stays true. §2's bind and
-  off-unless-configured clauses are applied unchanged and its proxy prohibition is
-  reinforced (§1); §3's identity check is ordered, not modified (§5); §4's admission
-  is untouched; §5's carry-over is untouched; §6 gains no rule (§6); §9's one-mint
-  rule is untouched; §10's direction rule is reinforced (§9).
+- **ADR-0174 §2's loopback-availability clause** — examined on architecture
+  review's first-round reading of it, and no record owed. The clause is "that
+  loopback listener is bound whether or not this one is", and its subject is
+  whether the remote listener is *configured on*. §2 of this ADR adds a start-time
+  refusal, so a gateway with a broken certificate binds nothing — but ADR-0174
+  already has two such conditions of its own, §2's load refusal of a bad
+  `gateway_remote_address` and §8's start refusal of an over-long overlay identity,
+  and both end in a process that does not run. A reader holding only §2 who
+  configures the remote listener badly is already told the configuration is refused
+  rather than bound; they act identically. Writing the record the reading asks for
+  would declare an amendment no clause of §2 fails the test for, which ADR-0082 §1
+  rules is wrong "however the declaration reads".
+- **ADR-0174 §2's other clauses, §3, §4, §5, §6, §9 and §10** — each stays true. §2's
+  bind and off-unless-configured clauses are applied unchanged and its proxy
+  prohibition is reinforced (§1); §3's identity check is ordered, not modified (§5);
+  §4's admission is untouched; §5's carry-over is untouched; §6 gains no rule (§6);
+  §9's one-mint rule is untouched; §10's direction rule is reinforced (§9).
 - **ADR-0174 §8, apart from the one sentence recorded above** — its three fields are
   joined by two, and a settings table that "carries no clause saying it is complete"
   is not an exclusive enumeration, which is the ground ADR-0182 §9 established for
