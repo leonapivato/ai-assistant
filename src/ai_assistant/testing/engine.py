@@ -38,6 +38,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     GrantError,
     InvalidGrantError,
     NotificationBudgetError,
@@ -226,8 +227,22 @@ class FakeAssistantEngine:
                 admitting a turn, so the ceiling's *backpressure* half has nothing
                 here to bind; what it does bind is the retention, which is the half
                 a conformance case can reach. A subject built at one is how §4's
-                discard is made cheap to observe.
+                discard is made cheap to observe. Refused when it is not positive,
+                exactly as the concrete engine refuses it: ADR-0084 §4's
+                substitutability runs in both directions, so a fake that admitted a
+                deployment no engine admits would let a consumer's tests pass over a
+                configuration production cannot be built into — and this one would
+                then fail inside the retention rather than at construction.
+
+        Raises:
+            ConfigurationError: If ``max_outstanding_confirmations`` is not positive.
         """
+        if max_outstanding_confirmations < 1:
+            msg = (
+                "max_outstanding_confirmations must be positive, got "
+                f"{max_outstanding_confirmations}"
+            )
+            raise ConfigurationError(msg)
         self._max_payload_bytes = max_payload_bytes
         self._max_outstanding = max_outstanding_confirmations
         #: The notification surface's whole state, public so a consumer can

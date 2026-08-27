@@ -2419,6 +2419,44 @@ class AssistantEngineContract(ABC):
         assert restated.step is not None
         assert restated.step.step_id == answered.step.step_id
 
+    async def test_a_settled_denial_restates_the_disposition_it_reached(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0198 §2: the disposition retained is the one the resolution reached.
+
+        Every other case here settles with ``approved`` ``True``, so every other case
+        asserts ``EXECUTED`` — and an implementation that retained only executed
+        resolutions, or that hard-coded the disposition it restates, would pass all of
+        them. §2 retains "the ``Disposition`` the resolution reached", and a denial is
+        one of the two a resolution can reach: ADR-0042 §4 makes ``approved=False`` a
+        ``DENY`` **ruling** rather than an exception, which
+        :meth:`test_a_refusal_is_a_result_and_not_an_exception` has pinned against
+        every implementation since ADR-0084.
+
+        Driven off :attr:`parked_engine` rather than a fourth premise fixture, because
+        this case has to *choose* the answer it settles with, which is exactly what a
+        pre-settled subject has already decided.
+        """
+        pending = await parked_engine.pending_confirmations()
+        denied = await parked_engine.resume(pending[0].token, approved=False, timeout=_PATIENT)
+        assert denied.step is not None
+        assert denied.step.disposition is Disposition.DENIED
+
+        rulings = await parked_engine.export_decisions()
+        invocations = await parked_engine.export_invocations()
+
+        # Replayed with the opposite answer, which §1 says changes nothing.
+        restated = await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+
+        assert restated.step is not None
+        assert restated.step.disposition is Disposition.DENIED
+        assert restated.step.step_id == denied.step.step_id
+        assert restated.step.confirmation is None
+        assert restated.turn is None
+        assert restated.reply is None
+        assert await parked_engine.export_decisions() == rulings
+        assert await parked_engine.export_invocations() == invocations
+
     async def test_a_settled_binding_is_not_listed_among_pending_confirmations(
         self, settled_park: SettledParkSubject
     ) -> None:
