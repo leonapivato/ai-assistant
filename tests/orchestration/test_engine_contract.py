@@ -126,6 +126,8 @@ from ai_assistant.testing import (
     FakeRoutingRecorder,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
+    FakeSpeechSynthesizer,
+    FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -527,6 +529,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         connection_operations=ConnectionOperations(
             provisioner=provisioner if provisioner is not None else FakeConnectionProvisioner()
         ),
+        # ADR-0200's two seams, the canonical fakes, wired **together** as the engine
+        # requires. The contract suite drives the promoted member rather than either
+        # seam, so what these supply is a subject for it to drive at all.
+        transcriber=FakeSpeechTranscriber(),
+        synthesizer=FakeSpeechSynthesizer(),
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,

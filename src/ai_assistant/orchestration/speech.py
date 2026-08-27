@@ -36,7 +36,7 @@ the caller is built from a template rather than from what was caught.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -44,7 +44,7 @@ from ai_assistant.core.errors import SpeechError, SpeechTimeoutError
 from ai_assistant.core.types import SpeechFailure
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Coroutine
 
     from ai_assistant.core.protocols import SpeechSynthesizer, SpeechTranscriber
     from ai_assistant.core.types import SpokenAudio, SpokenAudioFormat
@@ -171,7 +171,7 @@ async def synthesize_within(
     )
 
 
-async def _within[T](work: Awaitable[T], *, seconds: float, subject: str) -> T:
+async def _within[T](work: Coroutine[Any, Any, T], *, seconds: float, subject: str) -> T:
     """Await ``work`` under a caller-budget deadline, in ``models/``'s own shape.
 
     ``BoundedSpeechTranscriber``'s pattern, taken whole because the corpus has
@@ -202,7 +202,21 @@ async def _within[T](work: Awaitable[T], *, seconds: float, subject: str) -> T:
     Raises:
         SpeechTimeoutError: If the caller's budget expired.
     """
-    deadline = asyncio.timeout(max(seconds, 0.0))
+    if seconds <= 0:
+        # ADR-0200 §3: "A budget already exhausted when a stage is reached is that
+        # stage's expiry and is not a separate case." Stated here rather than left
+        # to ``asyncio.timeout(0)``, which fires on the next loop iteration and so
+        # would let a seam that reaches no ``await`` return an answer the budget had
+        # already forbidden — the same "expiry does not always surface" hazard the
+        # ``expired()`` check below exists for, arriving one step earlier.
+        # The coroutine was constructed by the caller's expression and is never
+        # awaited on this path; closing it is what keeps a refused stage from
+        # raising ``RuntimeWarning: coroutine was never awaited`` into a test's
+        # output and a hub's log.
+        work.close()
+        msg = f"{subject} had no budget left to run in"
+        raise SpeechTimeoutError(msg)
+    deadline = asyncio.timeout(seconds)
     cause: TimeoutError | None = None
     try:
         async with deadline:
