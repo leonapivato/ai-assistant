@@ -113,9 +113,6 @@ exercise the capability, not when a test can.
   identity and expiry, because a browser is not a Tailscale device.
   *Exit: an `ask` round-trips from a browser on another Tailscale device, and
   hub-down is a legible fault in the browser.*
-  The ADR lane is recorded on #1230 and carries two delegated calls: whether the
-  decision is one ADR or two (gateway seat vs web-session identity), and in-repo
-  vs sibling repo for the front-end bundle (the ruling leans in-repo).
 - **14 — conversation and notifications.** Streaming chat; conversation list,
   resume and forget; the delivery connection held open (`next_notification`,
   ADR-0131) — the first push consumer.
@@ -157,8 +154,7 @@ Work proceeds in **pilots**. Each pilot is a `batch` issue — the probes, the
 ADRs, the lanes, the run and the error anatomy — and its results land as an
 addendum on #1029; a run aborted on credit is recorded as void rather than
 quietly redone. **#1231 names whichever pilot is open**, the baseline it is
-measured against, and what the next one is shaped by; the pilot it named when
-tracks replaced arcs was #1210.
+measured against, and what the next one is shaped by.
 
 The standing questions the track carries — forgetting, which the complete-intake
 ruling names as the destination of the selectivity it removed from intake;
@@ -259,36 +255,47 @@ why it takes this track's first milestone. Milestones are ordered by
 
 **Deferred — stated, not scheduled:**
 
-- **Breadth, until milestone 23 closes.** The second reader, further actuators,
-  the reader-agent split (trigger: a reader that needs its own model call), a
-  two-phase planner, any classifier-based defence — ADR-0098's own triggers
-  fire with the second reader.
-- **The relabel sweep.** A cluster of `backlog` issues sits at these seams;
-  they are relabelled `track:world` in one pass once the track's shape is on
-  `main`, not issue by issue.
+- **Breadth.** The second reader, further actuators, the reader-agent split
+  (trigger: a reader that needs its own model call), a two-phase planner, any
+  classifier-based defence. ADR-0098's own triggers fire with the second reader;
+  which of them have fired, and what the milestone-23 exit ruling released, is on
+  #1427.
 
-**Concurrency.** This track runs in parallel with `track:web-client` milestone
-16 (#1230). The subsystems differ — `core/`, `memory/`, `permissions/`,
-`planning/`, `readers/` and `tools/` here, `interfaces/gateway` and `docs/`
-there — with **one late collision**: the CONFIRM-card origin rendering touches
-the browser assets and the CLI renderer, so that consumer lane is sequenced
-after milestone 16's client lanes, never beside them (#1226 §3). Clones and
-review quota are one pool, under Concurrency above.
+**Concurrency.** The subsystems this track works in — `core/`, `memory/`,
+`permissions/`, `planning/`, `readers/` and `tools/` — are not
+`track:web-client`'s, so the two run beside each other under Concurrency above,
+with one seam where they meet: the CONFIRM card's origin rendering touches the
+browser assets and the CLI renderer, so a lane there is sequenced after that
+track's client lanes rather than beside them (#1226 §3). Which lanes that
+sequencing has bound is on #1427 and #1230. Clones and review quota are one
+pool, under Concurrency above.
 
 ## The backlog
 
 The backlog is a **label, not a track** (#1226 §4, amended). It fails the
 definition a track has to meet — no purpose-with-milestones, no driveable exit,
-it never closes — because it is the *complement* of the tracks: `backlog` marks
-an issue that has been triaged and sits on **no** program of work, which is what
-distinguishes it from one nobody has looked at yet. Its content is opportunistic
-hardening and debt: correctness findings in shipped subsystems, stale docs and
-citations, missing tests, operator-facing gaps, review-loop tooling. It is
-picked up when a clone and review quota are free under Concurrency above,
-typically as a residuals mini-batch or as one lane alongside another track's
-wave. **#1232** is the census and the conventions record. Return-brief items are
-not backlog: anything that needs the owner carries `ruling` instead
+it never closes — because it is the *complement* of the tracks: a backlog label
+marks an issue that has been triaged and sits on **no** program of work, which is
+what distinguishes it from one nobody has looked at yet. Its content is
+opportunistic hardening and debt: correctness findings in shipped subsystems,
+stale docs and citations, missing tests, operator-facing gaps, review-loop
+tooling. It is picked up when a clone and review quota are free under Concurrency
+above, typically as a residuals mini-batch or as one lane alongside another
+track's wave. **#1232** is the census and the conventions record. Return-brief
+items are not backlog: anything that needs the owner carries `ruling` instead
 (`CONTRIBUTING.md` → "The tracker").
+
+**The label carries a severity, and there is no bare one** (owner's ruling,
+2026-08-27). An issue on no program of work is labeled `backlog:blocker`,
+`backlog:major`, `backlog:minor` or `backlog:unknown`; bare `backlog` is retired.
+The three named severities are `docs/review/guide.md`'s words, applied to the
+issue rather than to a review finding, so a severity means here what it means
+there. **`unknown` means not yet sized** — it is the honest default when the
+issue is filed in passing, and it is re-sized lazily when the issue is next
+touched, under the same lazy-labelling rule as the rest (`CONTRIBUTING.md` →
+"The tracker"). **`backlog:blocker` means it enters the next batch**: a blocker
+against no program of work is a contradiction, so sizing an issue that way is
+what schedules it.
 
 ## Gap register
 
@@ -301,7 +308,7 @@ tracker — so the claim decays into them rather than into this document.
 | In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths — ADR-0102 gives them their CLI doors and milestone 15 their browser surface. *Export*'s surface is #692 (ADR-0004 §6, ADR-0073 §10) |
 | More Capable Over Time | ADR-0009/0022 for the explicit loop, ADR-0077 for the ambient one; ADR-0119/0120 are the instrument that judges it. Whether it is improving is `track:memory`'s pre-registered exits, and the owner's measures gate (#881) is what acts on the answer once real usage exists |
 | Context determines usefulness | ADR-0008's facets, fed by readers (ADR-0093/0095/0140) and rendered into the prompt (ADR-0096; #1082 is the gap that had left that arm vacuous). Device as a context facet, a permission input and the audit trail's "approved from where" is #920 |
-| Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (`backlog`), not a milestone. Closing the seam *by construction* — an injected transport capability rather than import contracts (#85), an approved-recipient policy beyond the tier ceiling (#68) — is `track:world` milestone 25 |
+| Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (a `backlog:*` issue), not a milestone. Closing the seam *by construction* — an injected transport capability rather than import contracts (#85), an approved-recipient policy beyond the tier ceiling (#68) — is `track:world` milestone 25 |
 | Proactivity that earns its place | ADR-0130 (a notification is a proposal; only a perishable one earns an interruption) and ADR-0131 (it travels as an answer the device asked for), with ADR-0134/0135 around delivery. The first push *consumer* is milestone 14; whether the proactivity is welcome is the owner's deferred experiential ruling (#879); the delivery seam's full contract is #975 |
 | Free to choose models | ADR-0002/0011/0013/0061/0062 — decided; on no track |
 | Observability and evaluation | ADR-0119/0120 give the instrument: a measure is a rate over the trace stream, read offline while the hub is stopped. The harness and the benchmark exits are `track:memory` (#1029, #1231) |

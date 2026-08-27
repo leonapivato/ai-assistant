@@ -138,3 +138,28 @@ filed, and what the run could not exercise and why. What the run found feeds
 two places — fix lanes for defects, and the **operator's exit ruling** for the
 milestone, which is the reason this pass runs before that ruling rather than
 after.
+
+**Then sweep `docs/roadmap.md` for what the ruling falsified.** When the exit
+ruling lands and the milestone's checkbox is ticked on the track issue, read
+that track's narrative in the roadmap in the same act and **delete or re-point
+every sentence the ruling has just made false** — a deferral that was waiting on
+this milestone, a sequencing constraint against it, an open question it settled.
+
+This is an obligation of recording the ruling, not a follow-up to file (#1573).
+The ruling is the moment the prose decays *and* the one moment somebody knows
+exactly which claims changed; before this rule, the tracker was updated and
+nothing sent anyone to the roadmap sentence the update had falsified, so the
+plan rotted precisely when the project was most confident it was current
+(#1568).
+
+Two bounds, neither relaxed here:
+
+- **Delete or re-point, never refresh in place.** Replace a falsified claim with
+  a pointer at whatever now holds the fact — the track issue, or a ratified ADR
+  — or remove it. A newer number in the same sentence only resets the clock.
+- **Do not write completion into the roadmap.** It carries a track's shape; the
+  issue carries its live state (#1226 §2). "Milestone N closed" belongs on the
+  issue. The sweep removes false claims; it does not add true ones.
+
+`CONTRIBUTING.md` → "Recording a milestone's exit ruling obliges a roadmap
+sweep" states the same rule at the tracker end of the same moment.

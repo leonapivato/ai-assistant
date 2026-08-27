@@ -175,6 +175,28 @@ just review-codex architecture      # or: scripts/codex-review.sh architecture
 just review-codex adversarial       # base-ref defaults to origin/main (fetch first)
 ```
 
+**A round runs for minutes, so it can also be started and polled** — the same
+round, same locks, same artifact, started detached rather than reimplemented
+(#1594). Use this form when the caller cannot hold one process open that long:
+
+```bash
+just review-codex-start adversarial  # returns once the round is running
+just review-codex-wait  adversarial  # 0 = artifact path + verdict; 3 = ask again
+```
+
+`-wait` blocks up to its timeout and then exits **0** with the artifact path and
+the verdict, **3** for `still running` — the round is alive and nothing is lost,
+so call it again — or **4** for no round in flight for `HEAD`'s tree, which is a
+condition to read and act on rather than to retry. Never relaunch on a 3: a
+second round is refused, and relaunching is how a paid round is thrown away.
+
+**A change that owes both lenses runs both in the same round, from round 1** —
+`just review-codex-both`, or `just review-codex-both-start` and
+`just review-codex-both-wait`, which hold one deadline across the pair and
+succeed only when both artifacts cover `HEAD`'s tree. `docs/review/guide.md` →
+"When a change owes both lenses" says why sequencing them costs more than it
+saves.
+
 Review runs **locally only** (ADR-0015). It used to also run in CI and post its
 findings as a PR comment; that produced far more rounds than it produced value —
 PR #17 drew 20 hosted reviews across 23 commits — so the hosted path is gone.
@@ -540,22 +562,36 @@ files and did not replace them. Labels are how work is found, and they are a
 small fixed set (#1226 §6).
 
 **Track labels — at most one per issue.** A track is a standing program of work
-with a purpose, ordered milestones and driveable exits; `docs/roadmap.md` carries
-each one's shape and each track's issue carries its live state.
-
-- `track:web-client` — the browser client: gateway, conversation and
-  notifications, control surfaces, first-run. Live record: #1230.
-- `track:memory` — learning and memory quality, and the evaluation harness.
-  Live record: #1231.
-- `backlog` — **a label, not a track**: triaged, and on *no* track. It marks
-  opportunistic hardening and debt, and it is what distinguishes a triaged issue
-  from one nobody has looked at yet. Census: #1232.
+with a purpose, ordered milestones and driveable exits. **The live set is
+`gh label list --limit 100`**, which is not enumerated here: this file went two
+tracks stale the last time it was, and a list that decays is worse than a
+pointer. Pass the `--limit`: `gh` defaults it to 30, and a listing silently cut
+at 30 is the failure this pointer exists to avoid — the same caveat the `ruling`
+query carries below.
+`docs/roadmap.md` carries each track's shape, its own issue carries its live
+state, and the label's own description names that issue.
 
 *At most one* `track:*` is the rule with teeth. An issue that would carry two is
 a finding that belongs to a subsystem another track has a lane open in: file it
 to the track that holds that subsystem, not to both (`docs/roadmap.md` →
-"Concurrency"). `backlog` is not a `track:*` label, and an issue carries it
-*instead of* one, never alongside.
+"Concurrency").
+
+**The backlog is a severity family, not a track and not a bare label** (owner's
+ruling, 2026-08-27). An issue that has been triaged onto *no* program of work —
+opportunistic hardening and debt, which is what distinguishes it from one nobody
+has looked at yet — carries exactly one of `backlog:blocker`, `backlog:major`,
+`backlog:minor` or `backlog:unknown`, *instead of* a `track:*` label and never
+alongside one. Census: #1232.
+
+- The three named severities are **`docs/review/guide.md`'s words** — `blocker`
+  (must fix before merge), `major` (should fix), `minor` (worth noting) — read
+  against the issue rather than against a review finding.
+- **`unknown` is "not yet sized"**, the honest default for an issue filed in
+  passing, and it is re-sized **lazily, when the issue is next touched**. There
+  is no sizing sweep owed, for the same reason there is no labelling sweep.
+- **`backlog:blocker` means it enters the next batch.** A blocker against no
+  program of work is a contradiction, so sizing an issue that way is the act
+  that schedules it — which is what stops the severity being decorative.
 
 **Kind labels**, orthogonal to the track:
 
@@ -576,6 +612,34 @@ no obligation to label an issue you merely read; the labels become true as work
 passes through them. `ruling` is the exception above — an issue the owner owes a
 decision on is unreachable in the return brief until it carries one, so label it
 immediately.
+
+### Recording a milestone's exit ruling obliges a roadmap sweep
+
+**Whoever writes an exit ruling onto a track's issue — ticking the checkbox —
+reads that track's narrative in `docs/roadmap.md` in the same act, and deletes
+or re-points every sentence the ruling has just falsified.** The sweep is part
+of recording the ruling, not a follow-up someone might file.
+
+The reason is that the ruling is the moment the prose decays and the one moment
+somebody knows exactly which claims changed. The tracker is updated, the
+checkbox is ticked, and nothing until now obliged anyone to look at the roadmap
+sentence the ruling had made false — so the plan's prose rotted precisely when
+the project was most confident it was current (#1568, #1573).
+
+Two rules bound what the sweep may write, and neither is relaxed by it:
+
+- **Delete or re-point; never refresh in place.** A claim the ruling falsified
+  is removed, or replaced by a pointer at whatever now holds the fact — the
+  track's issue, or a ratified ADR. Rewriting it with a newer number just resets
+  the decay clock (`docs/roadmap.md`'s opening rule; "No state claims in living
+  documents" below).
+- **Milestone completion does not go into `docs/roadmap.md`.** The roadmap
+  carries a track's shape and the issue carries its live state (#1226 §2), so
+  "milestone N has closed" is a sentence for the issue and never for the
+  roadmap. The sweep removes falsified claims; it does not add true ones.
+
+`.claude/skills/qa-milestone` → "Close out" states the same obligation at the
+QA-run end of the same moment.
 
 ## Git & commits
 
