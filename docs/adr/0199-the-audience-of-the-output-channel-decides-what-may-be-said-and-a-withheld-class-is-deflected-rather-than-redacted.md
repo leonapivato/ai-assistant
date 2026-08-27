@@ -1,7 +1,44 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded)
 - Date: 2026-08-27
+- **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
+  reaches an operation whose output channel's audience is unbounded, and nothing
+  else of §5 or of this ADR.** The milestone-19 QA run (#1691) drove this ADR's
+  ruling end to end on a live hub and filed #1692 and #1693. §5's second clause
+  opens "The withholding subtracts from what the turn produced and adds nothing.
+  The `TurnResult` the turn produced is unchanged", and an implementation reading
+  it applies the subtraction to the composing stage's supply alone. Planning has
+  already run over everything by then, so the plan rationale is authored by a
+  model that saw the withheld records; ADR-0074 §3 captures that rationale into an
+  episode whose own recorded origin is `OBSERVED` with `about_person` unstated,
+  which §3 above places **speakable**; and the next spoken turn retrieves it and
+  reads it aloud. The same rationale and the same records travel on the
+  operation's return value, which is #1693.
+
+  **Replaced — the turn's own supply, on such an operation, and nothing else.**
+  ADR-0203 §1 subtracts what §3 withholds **before the turn plans**, so the turn
+  is produced over the subtracted supply and no stage of it — planner, composing
+  stage, or anything rendering what either produced — ever sees a withheld record.
+  A reader now acts differently, which is ADR-0070 §1's test, so this is a
+  supersession rather than an amendment, and it is **partial** in ADR-0070 §3's
+  sense.
+
+  **Not replaced — the rest of that clause, which is the load-bearing half.** The
+  composing stage still gains no `ContextProvider`, no `MemoryStore`, no second
+  context assembly and no second retrieval, and its context and its memories still
+  reach it from the turn and from nowhere else (ADR-0170 §2). ADR-0203 §2 restates
+  all four prohibitions and adds that nothing is refetched to replace what the
+  subtraction removed. The narrowed copy an implementation makes for the stage
+  today does not move — it ceases to exist.
+
+  **Not replaced — anything else in this ADR.** §1's audience test, §2's
+  recorded-origin discipline, §3's placements in both directions, §4's asymmetry,
+  §5's first clause and its third through ninth, §6, §7, §8 and §9 all bind
+  exactly as they did. In particular §5's first clause — withheld **at supply**,
+  never a filter over composed prose — is not merely preserved but extended: the
+  supply site moves one stage earlier and the ruling stays on the input side.
+  ADR-0203 places no class and unplaces none.
 
 ## Context
 
