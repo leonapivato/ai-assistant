@@ -437,12 +437,19 @@ that it is on the owner's own machine, owned by the owner's own user.
 > clause of this ADR obliges a reload, and no lane may present the gateway as
 > renewing, watching or reloading anything.
 
-> **Normative.** §1 admits two roots and each discloses to its own recipients.
+> **Normative.** On **both** of §1's routes the certificate is issued for a name the
+> overlay assigns, so the overlay's control plane learns that one was issued for
+> that machine and when. Where that control plane is a third party's, that is a
+> disclosure beyond ADR-0124 §3's enumeration — which names what the operator holds
+> about devices and networks and does not name an issuance event — and it is
+> **accepted** here rather than read into §3's acceptance.
+
+> **Normative.** What differs between the routes is **publication**, and only that.
 > **On the publicly trusted route** — the one available in practice — issuance makes
 > the gateway machine's overlay name **public**, in the certificate itself and in
 > the transparency logs such an authority publishes to. **On the
-> owner-administered route** the disclosure runs to the owner's own authority and
-> to nobody else, and nothing about the machine becomes public.
+> owner-administered route** nothing about the machine becomes public: the issuing
+> authority is the owner's, and no log outside the owner's own systems records it.
 
 > **Normative.** Both consequences are **accepted**, on the same terms ADR-0124 §3
 > accepted the coordination metadata: each is the owner's act, each is bounded and
@@ -452,9 +459,15 @@ that it is on the owner's own machine, owned by the owner's own user.
 
 **The delta is smaller than it first looks, and naming it exactly is what makes it
 acceptable.** ADR-0124 §3 already has the overlay's operator holding "each
-device's name, platform and public key". The name is therefore not newly known to
-the operator; what is new is that it becomes **public** rather than held by that
-one party, together with the instant it was issued. An overlay name that is
+device's name, platform and public key", and the times at which each device is
+online. The name is therefore not newly known to the operator, and neither is the
+fact that the machine was doing something at a given instant; what §3's
+enumeration does not name is an **issuance**, and what is new on the public route
+is that the name goes **public** rather than staying with that one party.
+Adversarial review found the first half on the round after the two routes were
+split — an owner running someone else's control plane and their own authority
+still tells that operator a certificate was issued — which is why the clause above
+covers both routes and the publication clause covers only one. An overlay name that is
 derived from the owner's account is the case where that matters most, and an owner
 for whom it matters has the vendor's own remedy — the tailnet name is theirs to
 choose — as well as this ADR's exit below.
@@ -960,9 +973,10 @@ it is then permitted to do is that surface's own ADR's business (§9).
 **What gets harder.** A gateway with a remote listener now has one more way to fail
 to start, and an expired certificate takes the whole gateway down rather than
 degrading it — deliberately (§2), and stated as a residual there. An owner who
-never renews discovers it at a restart rather than at the moment of expiry. And the
-machine's overlay name becomes public where it was the overlay operator's alone
-(§4).
+never renews discovers it at a restart rather than at the moment of expiry. And on
+the publicly trusted route — the one available in practice — the machine's overlay
+name becomes public where it was the overlay operator's alone; on §1's other route
+it does not, and on both the operator learns that a certificate was issued (§4).
 
 **What gets easier.** Every secure-context capability the browser surface may later
 want — push, service workers, `crypto.subtle` — becomes reachable on the remote
