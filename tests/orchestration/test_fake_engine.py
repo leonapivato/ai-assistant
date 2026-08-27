@@ -53,7 +53,7 @@ from assistant_engine_contract import (
     seeded_trail,
 )
 
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import ConfigurationError, OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     AnswerKind,
@@ -644,6 +644,23 @@ class _SteplessEngine(FakeAssistantEngine):
         """Resolve the park and hand back nothing to render."""
         await super().resume(token, approved=approved, timeout=timeout)
         return TurnOutcome(turn=None)
+
+
+async def test_a_non_positive_retention_ceiling_is_refused_at_construction() -> None:
+    """The fake refuses a ceiling the concrete engine refuses (ADR-0084 §4).
+
+    Substitutability runs in both directions: a fake admitting a deployment no engine
+    admits lets a consumer's tests pass over a configuration production cannot be built
+    into. Unrefused, the value would surface much later and as something else — the
+    retention would try to discard from an empty table on the first settlement.
+    """
+    for ceiling in (0, -1):
+        with pytest.raises(ConfigurationError):
+            FakeAssistantEngine(max_outstanding_confirmations=ceiling)
+
+    # And the smallest admitted value really is one, which is what the shared suite's
+    # bound case is built at.
+    assert FakeAssistantEngine(max_outstanding_confirmations=1) is not None
 
 
 async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
