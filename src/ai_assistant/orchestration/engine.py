@@ -6463,6 +6463,18 @@ class Engine:
         the outcome learns both, and the disagreement is visible to it without a
         second error class.
 
+        **The refusal names both remedies because the engine cannot tell which token
+        it holds** (#1649). A handle naming nothing here is one of two things, and by
+        this point they are indistinguishable: a step park unknown, aged out or from a
+        previous process life, whose remedy is ``pending_confirmations``; or a
+        **routed** park already claimed or expired, which ``pending_confirmations``
+        never lists and never re-mints (ADR-0197 §7) because "the claim is what evicts
+        it". So the message carries §7's own sentence for the routed case — nothing has
+        happened yet, the operation was never performed, ask for it again — beside the
+        step park's, rather than naming one remedy that is wrong for half the callers
+        it is given to. Telling them apart instead would mean retaining what §7's claim
+        destroys, which is a decision and not a message.
+
         **``state`` is re-read here and never cached at settlement** (§2). It is
         defined as the durable execution state after the last transition committed,
         and a value snapshotted at settlement stops being that the moment anything
@@ -6490,7 +6502,8 @@ class Engine:
         Raises:
             UnknownContinuationError: If the handle names no settled record either —
                 unknown, from a previous process life, reconciled away under ADR-0052
-                §2, or discarded under §4's bound. **Never a denial** (ADR-0084 §7).
+                §2, discarded under §4's bound, or a **routed** park already claimed or
+                expired (ADR-0197 §7). **Never a denial** (ADR-0084 §7).
             PlanningError: If the plan store no longer holds the settled binding's
                 execution.
         """
@@ -6499,8 +6512,10 @@ class Engine:
             msg = (
                 "this token names no step awaiting confirmation in this engine, and no answer "
                 "this engine still holds; it may be from an earlier run of the process, or its "
-                "answer may have aged out. Call pending_confirmations() to re-mint a token for "
-                "any park that is still answerable"
+                "answer may have aged out. If it named a routed operation, nothing has happened "
+                "yet — the operation was never performed — so ask for it again rather than "
+                "resuming this token; if it named a parked step, pending_confirmations() "
+                "re-mints a token for any park that is still answerable"
             )
             raise UnknownContinuationError(msg)
         state = await self._plans.get_execution(settled.execution_id)

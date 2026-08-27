@@ -40,6 +40,7 @@ that pair and nothing more.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
@@ -133,7 +134,9 @@ Where the user is asking for one of those, reply with a ROUTE:
   {"operation": "<one name from the list above>", "query": "<what they named>"}
 
 `query` is the user's own words for WHICH belief, source or question they mean, \
-copied from their sentence. Include it for forget, revoke and forget_question, and \
+copied from their sentence: the words that NAME the thing, without the words that ask \
+for the operation and without the connective that joined them — "forget that I like \
+jazz" gives "I like jazz". Include it for forget, revoke and forget_question, and \
 omit it for the six listing operations, which take no subject. Never invent an \
 identifier; never guess a subject the user did not name.
 
@@ -531,6 +534,17 @@ async def resolve(
     among candidates by rank, recency, score, best match, or a second model call.
     Ambiguity ends the route."
 
+    **What the query is matched against.** Every **distinctive** term of the query —
+    its words, less the framing ones a copied span drags along — must appear inside some
+    word of the record's own text (:func:`_names`). Term-wise rather than whole-span,
+    because the router is asked for the user's own words and copies the sentence's
+    connective with them, so ``that I drive a green estate car`` was never a contiguous
+    substring of the belief ``I drive a green estate car`` and a routed forget of a
+    belief that plainly existed ended in ``NOT_FOUND`` (#1647). The rule stays a lookup:
+    it is total, order-independent, and free of rank, score, best match and any second
+    model call, and where it names more than one record the route ends in ``AMBIGUOUS``
+    over a listing the user reads rather than choosing among them.
+
     **The bound and its disclosure ride the outcome rather than a count.** A lookup
     resolving to more than one candidate but no more than
     :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` ends in ``AMBIGUOUS``; one that
@@ -585,14 +599,20 @@ async def _candidates(
     apart.
     """
     field = _MATCH_ON[operation]
-    wanted = _normalised(query)
+    wanted = _wanted(query)
     ceiling = DEFAULT_PAGE_SIZE + 1
+    if not wanted:
+        # A query that is nothing but framing names no record, and the store is not read
+        # at all. The alternative is worse than useless: every record's terms contain the
+        # empty set, so "forget the thing" would resolve to whatever the store happens to
+        # hold one of and park a confirmation on a record the user never named.
+        return []
     if operation is RoutableOperation.REVOKE:
         # `standing_grants` is complete-or-refused and never truncated (ADR-0139 §2),
         # so there is nothing to page through and its own refusal is what a routed pass
         # reports as `FAILED`.
         grants = await operations.standing_grants()
-        return [one for one in grants if wanted in _normalised(getattr(one, field))][:ceiling]
+        return [one for one in grants if _names(wanted, getattr(one, field))][:ceiling]
     if operation is RoutableOperation.FORGET:
         return await _paged(operations.beliefs, field=field, wanted=wanted, ceiling=ceiling)
     if operation is RoutableOperation.FORGET_QUESTION:
@@ -604,7 +624,9 @@ async def _candidates(
     raise AssertionError(_UNMAPPED.format(operation=operation.value))
 
 
-async def _paged[T](page: _Paged[T], *, field: str, wanted: str, ceiling: int) -> list[T]:
+async def _paged[T](
+    page: _Paged[T], *, field: str, wanted: frozenset[str], ceiling: int
+) -> list[T]:
     """Walk ``page`` a page at a time, collecting matches until ``ceiling`` of them.
 
     The offset advances by what the page **asked for** rather than by what came back,
@@ -615,7 +637,7 @@ async def _paged[T](page: _Paged[T], *, field: str, wanted: str, ceiling: int) -
     offset = 0
     while len(found) < ceiling:
         rows = await page(limit=DEFAULT_PAGE_SIZE, offset=offset)
-        found.extend(one for one in rows if wanted in _normalised(str(getattr(one, field))))
+        found.extend(one for one in rows if _names(wanted, str(getattr(one, field))))
         if len(rows) < DEFAULT_PAGE_SIZE:
             break
         offset += DEFAULT_PAGE_SIZE
@@ -630,15 +652,107 @@ class _Paged[T](Protocol):
         ...
 
 
-def _normalised(value: str) -> str:
-    """Case-fold and collapse whitespace, for the match and for nothing else.
+def _terms(value: str) -> tuple[str, ...]:
+    """``value`` as case-folded words: runs of letters and digits, and nothing else.
 
-    Both sides go through this, so the comparison is symmetric. It normalises the
-    *comparison* and never the stored value: what the card renders is the record, and
-    what the façade is called with is the identity read off it, neither of which passes
-    through here.
+    Punctuation, underscores and whitespace are separators, so ``did the user move?``
+    and ``google_calendar`` are read as the words a person would say them as. This
+    normalises the *comparison* and never the stored value: what the card renders is
+    the record, and what the façade is called with is the identity read off it,
+    neither of which passes through here.
     """
-    return " ".join(value.split()).casefold()
+    return tuple(_WORD.findall(value.casefold()))
+
+
+def _wanted(query: str) -> frozenset[str]:
+    """The query's **distinctive** terms — its words, less :data:`_FRAMING`'s.
+
+    A set rather than a sequence, because the match is on which words the query names
+    and never on the order it named them in: the router copies a span out of a
+    sentence, and the sentence's word order is the sentence's, not the record's.
+    """
+    return frozenset(_terms(query)) - _FRAMING
+
+
+def _names(wanted: frozenset[str], value: str) -> bool:
+    """Whether ``value``'s own words carry **every** distinctive term of the query.
+
+    The rule, whole: each term of ``wanted`` must appear inside some word of ``value``.
+    It is a **lookup, not a generation** (§5) — total, order-independent, and free of
+    rank, score, best-match and any second model call, so the same query and the same
+    store give the same candidates on every run.
+
+    **Term-wise rather than whole-span**, which is what #1647 records: the router is
+    asked for the user's own words and copies the connective the sentence carried, so
+    ``that I drive a green estate car`` was never a contiguous substring of the belief
+    ``I drive a green estate car``, and a routed forget of a belief that plainly exists
+    ended in ``NOT_FOUND``. Requiring each word instead of one span costs nothing that
+    matters here and makes the framing a copied span drags along harmless.
+
+    **Inside a word rather than equal to it**, so this matches everything the whole-span
+    rule matched and more: a term matching a longer word (``like`` in ``likes``, ``sail``
+    in ``sailing``) keeps the tolerance the substring rule happened to have, and the
+    spurious pairs it also admits (``car`` in ``carpet``) end in ``AMBIGUOUS`` over a
+    listing the user reads, which is the outcome §5 designed for and the direction #1647
+    argues for: "it degrades toward ``AMBIGUOUS`` … which is the behaviour §5 already
+    designed for and which a ``NOT_FOUND`` gives them nothing to act on".
+
+    **Widening the match widens what may be confirmed, and that is where the guard
+    already is.** A one-candidate resolution parks (§7) on a card carrying the typed
+    record, and ADR-0073 §5's show-then-confirm binds a routed ``forget`` whole — so
+    the user reads the record this resolved to before anything is destroyed.
+    """
+    words = _terms(value)
+    return all(any(term in word for word in words) for term in wanted)
+
+
+#: One word of a record or a query: a run of letters or digits. Underscores are
+#: separators rather than word characters, so a source named ``google_calendar`` is two
+#: words and a query naming ``calendar`` reaches it.
+_WORD: Final = re.compile(r"[^\W_]+")
+
+#: The words a **query** carries as framing rather than as subject, dropped from the
+#: query side of the comparison and from that side only (#1647). Two closed classes,
+#: and nothing else belongs here:
+#:
+#: 1. **English function words** — articles, demonstratives, pronouns and possessives,
+#:    the common prepositions and conjunctions, the copulas and auxiliaries, and the
+#:    one-letter fragments an apostrophe leaves (``user's`` reads as ``user`` and
+#:    ``s``). These discriminate nothing: a belief store's records are sentences, so
+#:    ``the`` narrows a listing not at all, while a query that carried one and a record
+#:    that did not was the whole of the miss #1647 recorded.
+#: 2. **The words that name a record rather than its content** — a person refers to
+#:    what the assistant holds by its kind ("the question you asked me about my
+#:    commute"), and those words are about the record's *existence*, which is not what
+#:    ``Question.content`` or ``Belief.content`` says.
+#:
+#: The record side keeps all of its words, which is what makes the asymmetry safe: a
+#: record whose own words are ``the`` and ``about`` is still matched by a query naming
+#: them, because the containment is tested against everything the record says.
+_FRAMING: Final[frozenset[str]] = frozenset(
+    word
+    for group in (
+        # articles, determiners and demonstratives
+        "a an the this that these those any some all each every both either no none",
+        # pronouns and possessives
+        "i me my mine myself we us our ours you your yours he him his she her hers",
+        "it its they them their theirs who whom whose which what",
+        # prepositions and conjunctions
+        "about of for to from on in at with by as and or but so than then if when",
+        "where into over under up out off down",
+        # copulas, auxiliaries and modals
+        "am is are was were be been being do does did done have has had",
+        "will would shall should can could may might must",
+        # the words that name a record rather than say what it holds
+        "ask asks asked asking belief beliefs fact facts grant grants know knows",
+        "memory memories note notes question questions record records remember",
+        "remembers said say says source sources tell tells told thing things think",
+        "thinks",
+        # the fragments an apostrophe leaves
+        "s t d ll re ve m",
+    )
+    for word in group.split()
+)
 
 
 #: Raised where §3's vocabulary has grown a confirm-owed member and :data:`_MATCH_ON`
