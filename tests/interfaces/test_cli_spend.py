@@ -370,6 +370,42 @@ def test_an_offset_carrying_seconds_is_rendered_unrounded(
     assert "-15:56:08" in rendered
 
 
+@pytest.mark.parametrize(
+    ("offset", "bound", "label"),
+    [
+        (timedelta(microseconds=500_000), "2026-03-02 10:00:00.500000", "+00:00:00.500000"),
+        (timedelta(microseconds=-500_000), "2026-03-02 09:59:59.500000", "-00:00:00.500000"),
+    ],
+)
+def test_a_sub_second_offset_is_neither_truncated_nor_re_signed(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, offset: timedelta, bound: str, label: str
+) -> None:
+    """§5's "at whatever resolution it has", one resolution below the case above.
+
+    ``SpendTotal``'s field validator accepts an offset at any ``timedelta``
+    resolution, and its cross-field rule exists so that "a renderer performs exactly
+    those two additions" — which is a claim that the rendering is **total** over what
+    the type accepts. Reading the offset through ``total_seconds()`` was not: it
+    truncated ``timedelta(microseconds=-500_000)`` to ``+00:00``, sign and all, and
+    printed a boundary half a second from the one the ledger used.
+
+    **No zone database produces such an offset**, and that is why this is a
+    parametrized pair rather than a rewritten contract: what closes it is not that
+    the value is expected but that the truncation was silent and its direction wrong.
+    The negative arm is the one that mattered — a truncating renderer got the sign
+    from a rounded zero.
+    """
+    rendered = _rendered(
+        output,
+        monkeypatch,
+        _total(start=datetime(2026, 3, 2, 10, 0, tzinfo=UTC), offset=offset),
+        _total(SpendPeriod.CALENDAR_MONTH),
+    )
+
+    assert bound in rendered
+    assert label in rendered
+
+
 def test_the_rendering_is_identical_under_two_hostile_local_zones(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
