@@ -185,8 +185,11 @@ once. And speech is a capability most providers do not offer, which is
 > **Normative.** `SpeechTranscriber` has two members and no more: a `formats`
 > property answering the `SpokenAudioFormat` members this implementation can
 > decode, and `async transcribe(audio: SpokenAudio) -> EncodableText`, returning
-> the words it heard. A blank return is not a failure: it means the recording
-> carried no words, and §4 decides what the engine does with it.
+> the words it heard. A **blank** return — empty, or whitespace only, which is
+> exactly what `NonBlankEncodableText` refuses — is not a failure: it means the
+> recording carried no words, and §4 decides what the engine does with it. The
+> return type is `EncodableText` rather than the non-blank refinement precisely
+> so that a transcriber can say so without raising.
 
 > **Normative.** `SpeechSynthesizer` has two members and no more, symmetric with
 > the transcriber's: a `formats` property answering the `SpokenAudioFormat`
@@ -451,6 +454,23 @@ one this operation exists to keep unavailable.
 > pair is the recording that carried no words: nothing was asked, so nothing was
 > answered, no turn ran, no episode was captured and no conversation was
 > created. It is not an error and no exception is raised for it.
+
+> **Normative.** **A blank transcript is that shape, and the join is stated
+> rather than left to inference.** Blank is §1's sense, which is
+> `NonBlankEncodableText`'s: an empty string, or one that is whitespace only.
+> Where `transcribe` returns such a value the engine runs no turn — `heard` and
+> `outcome` are `None`, `spoken` is `None`, `spoken_degraded` is `False` — and
+> raises nothing. There is no third reading available and no shape left
+> undecided: `heard` is typed `NonBlankEncodableText | None`, so a blank
+> transcript has nowhere else to go, and treating one as a real transcript would
+> create a turn for a recording this section says carried no words.
+
+> **Normative.** A transcript that is **not** blank travels **byte-for-byte**:
+> nothing on this path strips, trims, case-folds or otherwise normalises it. That
+> is `NonBlankEncodableText`'s own posture — it refuses `"   "` while returning
+> `"  calendar  "` unchanged — and ADR-0102 §2's rule for a value a later
+> comparison may be made against. So the engine tests for blankness; it does not
+> *produce* a trimmed value and then use it.
 
 > **Normative.** Where `outcome` is not `None` it is an ordinary `TurnOutcome`,
 > under every clause ADR-0170 §4, ADR-0173 §6 and ADR-0197 §8 place on one. This
@@ -1215,6 +1235,7 @@ each wave must contain if it exists.
 | §3 (version) | `PROTOCOL_VERSION` bumped, with its comment recording why | The handshake test asserting mismatch is refused at connect |
 | §4 | `SpokenTurn` and a validator stating §4's invariants both ways | Tests constructing each admissible shape and rejecting each inadmissible one |
 | §4 (line) | Transcription raises `TranscriptionFailedError`; synthesis degrades | Two tests, one per direction, over a seam made to fail |
+| §4 (blank transcript) | A blank transcript — empty or whitespace-only — yields `heard` `None`, `outcome` `None`, `spoken` `None`, `spoken_degraded` `False`, no turn and no exception; a non-blank one is carried byte-for-byte | A test per blank shape (`""` and a whitespace-only value) asserting all four members and that no turn ran, no episode was captured and no conversation was created; a test that a transcript with leading and trailing spaces reaches `heard` unchanged |
 | §5 | Blocking work off the loop, bounded and abandonable; no `service` wiring | A test asserts `ai_assistant.service` holds neither Protocol; a test that a wedged seam does not stall the loop |
 | §6 | `hub_max_spoken_audio_bytes`, enforced both ways | A test refusing an oversized utterance before any seam call; a test degrading an oversized rendering |
 | §8 | No audio in any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken turn |
