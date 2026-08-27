@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member)
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget)
 - Date: 2026-08-22
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
   and this note retires the count rather than correcting it.** The change carrying
@@ -9,6 +9,37 @@
   the promoted surface that are neither in §1's enumeration nor the gateway's own
   now number **five**, where the note below put them at three and the clause itself
   says "one".
+- **Partially superseded: 2026-08-27 by ADR-0200 — §1's operation enumeration and
+  §1's deadline carve-out, and nothing else.** ADR-0200 adds `converse_spoken` to
+  the promoted engine surface and a `POST /ask/spoken` route reaching it, so §1's
+  first clause — "A browser request resolves to calls on exactly these **thirty**
+  operations of the promoted engine surface and no others" — becomes **thirty-one**,
+  and §1's fifth clause — "On this surface the class has exactly two members" —
+  becomes **three**, the addition being that operation's turn budget. §1's own
+  arithmetic ("Thirty-two less those two non-browser members leaves thirty") moves
+  with the first of those and is history rather than a live count.
+
+  **Replaced — the two enumerations, and nothing else of §1 or of this ADR.** A
+  reader now acts differently, which is ADR-0070 §1's test, so this is a
+  supersession rather than an amendment, and it is **partial** in ADR-0070 §3's
+  sense. Every other clause of §1 binds the thirty-first exactly as it binds the
+  thirty: it is reached "with the arguments the promoted surface declares and with
+  no others", the gateway "derives none of them, defaults none of them, composes no
+  operation out of two, and synthesises no result from a call it did not make", and
+  §1's `learn` and `next_notification` clauses stand where §1 put them. §§2–12 are
+  untouched, §3's two-operation narrowing most of all.
+
+  **The deadline addition is by a ratified decision, not by resemblance.** §1's
+  fifth clause ends "No lane widens it by resemblance, and no browser value reaches
+  either" — and neither does here: ADR-0200 names the member, the budget stays
+  ADR-0029 §4's caller-owned deadline, and no browser value reaches it.
+
+  **What this did not change.** ADR-0175 §6 is not superseded by ADR-0200 and
+  carries no record for it: its third clause writes its own route — "no lane may
+  add one without its own ratified decision" — and ADR-0200 is that decision. The
+  `Amended: 2026-08-24 by ADR-0186` note above is untouched and stays where it is;
+  this line was already a leading-token line, so ADR-0082 §2's fourth paragraph has
+  no operation to perform here.
 
   **Do not read that as the number to fix next time.** The count was never what
   §1's third clause obliges, and writing a third dated note to move it to six would
