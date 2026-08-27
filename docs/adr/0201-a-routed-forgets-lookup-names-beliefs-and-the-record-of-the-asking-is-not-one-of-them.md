@@ -1,6 +1,6 @@
 # 201. A routed forget's lookup names beliefs, and the record of the asking is not one of them
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 - **Partially supersedes:**
   [ADR-0197](0197-an-ask-reaches-the-hubs-own-operations-through-a-routing-stage-and-a-routed-operation-is-never-re-read.md)
@@ -352,14 +352,46 @@ The implementation is one lane in `orchestration`, briefed after this ADR merges
    this ADR, not deleted — the sentence is still true of the store, and what
    changes is the kinds.
 3. **The three tests of §6.**
-4. **This ADR's ADR-0082 §1 record on ADR-0197** — the `Status` line's partial
-   form (ADR-0070 §4, `docs/adr/template.md`) and the appended dated note
-   (ADR-0070 §1). It is not made here because this ADR's PR is fenced to its own
-   file, and that is the corpus's own sequence rather than a shortcut: ADR-0198's
-   records on ADR-0042, ADR-0052 and ADR-0197 were applied by its **implementation**
-   PR (#1643, "apply ADR-0198's ADR-0082 §1 records to 0042, 0052 and 0197"), as
-   ADR-0197's four records on three ADRs were before it.
+4. **This ADR's ADR-0082 §1 record on ADR-0197**, which is the item below.
 5. **Closing #1637**, whose three records are what this decision answers.
+
+**The record on ADR-0197 is a specified operation, not an append, and it is
+specified here so the lane applying it cannot get it wrong.** ADR-0197's `Status`
+reads `Accepted, §7 amended by ADR-0198` — a plain `Accepted` line carrying an
+amendment qualifier and no leading token. Recording this partial supersession
+makes it a **leading-token** line, and ADR-0082 §2's fourth paragraph then governs
+what happens to the qualifier already on it.
+
+> **Normative.** The record owed on ADR-0197 is one change making three edits
+> together: the `Status` line takes the leading `Partially superseded by ADR-0201
+> (<scope>)` form (ADR-0070 §4, `docs/adr/template.md`), the existing `§7 amended
+> by ADR-0198` qualifier **moves off that line into the dated note** (ADR-0082
+> §2), and an appended dated note records this supersession (ADR-0070 §1). The
+> scope parenthesis names §5's first clause as the header of this ADR names it.
+> Applying any one of the three without the others is not a partial record: it
+> either leaves ADR-0070 §4's extraction invariant reading `ADR-0198` as a
+> supersession target, or drops a ratified record off the corpus.
+
+> **Normative.** That change is owed by the **first** change after this one to
+> touch ADR-0197, and the implementing lane of §§1–6 is that change unless a
+> nearer one arrives. It is not conditional on the implementation landing: it
+> records a decision, and the decision is ratified when this ADR merges.
+
+**Why it is not made in this ADR's own PR, stated rather than assumed.** ADR-0082
+§1 decides **whether** a record is owed and §2 decides **where on the earlier ADR
+it goes**; neither decides which *change* carries it, and §1 says in terms that
+what the later ADR owes in its own text is naming the clause and applying the
+test — "the judgement is made in the later ADR's text, which is where it is
+reviewed". This ADR does that, in its header and in §9. The corpus's two most
+recent worked cases both put the application in the implementation lane rather
+than the ADR lane: ADR-0197's own four records on three ADRs (`91fd1dae`, in PR
+#1634) and ADR-0198's three records on ADR-0042, ADR-0052 and ADR-0197
+(`46ac2680`, in PR #1643, "apply ADR-0198's ADR-0082 §1 records to 0042, 0052 and
+0197"). Nothing forbids the other order — ADR-0082 §7 is explicit that §1's
+condition is that the superseding ADR **exists**, not that it is ratified, so the
+record may be written beside a `Proposed` one — and a lane whose fence admits both
+files may make it atomically. What is **not** permitted is the record never being
+made, which is what the clause above closes.
 
 ### 9. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
