@@ -696,7 +696,10 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
     - **a demonstrative**, only where what follows it is more framing or nothing at all.
       "That I drive a green estate car" opens on the connective the router copies out of
       the sentence; "that dog bites" opens on a word that says *which dog*, and a rule
-      that dropped it would name the belief "this dog bites";
+      that dropped it would name the belief "this dog bites". A run of them is settled by
+      the first word that is neither, in **one pass** rather than by looking ahead from
+      each: the query is model-authored, and this walk is not the place a thousand of
+      anything becomes a ``RecursionError`` or a quadratic scan;
     - **a first- or second-person pronoun or possessive**, unconditionally — the speaker
       and the assistant, which is what a copied span drags along and what differs between
       a user speaking and a belief stored about them. The third person is absent for the
@@ -721,29 +724,27 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
     terms = _terms(query)
     reference = _REFERENCE | _KINDS_OF[operation] if _opens_on_a_record(terms, operation) else None
     start = 0
-    while start < len(terms) and _is_framing(terms, start, reference):
-        start += 1
+    held = 0
+    while start + held < len(terms):
+        term = terms[start + held]
+        if reference is not None and term in reference:
+            start += held + 1
+            held = 0
+        elif term in _DEMONSTRATIVES:
+            # A demonstrative is framing or subject depending on what follows it, so it is
+            # *held* rather than decided, and the run of them is settled by the first word
+            # that is neither.
+            held += 1
+        elif term in _FRAMING:
+            start += held + 1
+            held = 0
+        else:
+            break
+    else:
+        # The query ran out inside a run of demonstratives, so there was no subject for
+        # them to introduce and they were framing after all.
+        start += held
     return frozenset(terms[start:])
-
-
-def _is_framing(terms: tuple[str, ...], at: int, reference: frozenset[str] | None) -> bool:
-    """Whether ``terms[at]`` is part of the opening rather than the subject.
-
-    ``reference`` is the vocabulary a record reference may use — this operation's own,
-    never every operation's — or ``None`` where the query does not open on one. Built per
-    call rather than shared, because a union over the operations would strip one route's
-    record kind out of another route's subject: "the question about grants" is a question
-    *about grants*, and a ``grants`` taken from ``revoke``'s vocabulary would leave the
-    query naming nothing at all.
-    """
-    term = terms[at]
-    if reference is not None and term in reference:
-        return True
-    if term in _DEMONSTRATIVES:
-        # A demonstrative opens either a connective ("that I …") or a subject ("that
-        # dog"), and what follows is what says which.
-        return at + 1 == len(terms) or _is_framing(terms, at + 1, reference)
-    return term in _FRAMING
 
 
 def _opens_on_a_record(terms: tuple[str, ...], operation: RoutableOperation) -> bool:
@@ -861,7 +862,7 @@ _WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
 #: The demonstratives, which open either a connective the router copied ("**that** I
 #: drive a green estate car") or a subject ("**that** dog bites"). Which one they opened
-#: is read off what follows them (:func:`_is_framing`), never off the word alone.
+#: is read off what follows them (:func:`_wanted`), never off the word alone.
 _DEMONSTRATIVES: Final[frozenset[str]] = frozenset(("this", "that", "these", "those"))
 
 #: What can stand in front of a record kind and make it a reference to a record
@@ -914,7 +915,7 @@ _FRAMING: Final[frozenset[str]] = frozenset(
 #: the route is ``forget_question`` and is something the user believes when the route is
 #: ``forget``, and a route over beliefs that stripped ``question`` would hand that query
 #: to the belief "I hate taxes". And the reference's *vocabulary* is this entry alone
-#: (:func:`_is_framing`), never the union: "the question about grants" is a question
+#: (:func:`_wanted`), never the union: "the question about grants" is a question
 #: whose subject is grants, and a ``grants`` borrowed from ``revoke``'s kinds would strip
 #: the query down to nothing and read no store at all.
 _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
