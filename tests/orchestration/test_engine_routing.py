@@ -39,6 +39,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    Belief,
     EpisodicMemory,
     MemorySource,
     MemoryWrite,
@@ -78,11 +79,14 @@ _QUERY = "jazz"
 
 #: What the user says to reach a routed ``forget``. Asserted **verbatim** in the captured
 #: episode (ADR-0197 §10), so it is spelled once — and deliberately carrying neither
-#: :data:`_QUERY` nor :data:`_BELIEF`: a routed pass captures its exchange as an episode in
-#: the same store §5's lookup reads, and ``list_beliefs`` enumerates every kind, so an
-#: utterance echoing the query would make the *next* pass's lookup ambiguous against the
-#: record of the previous ask. The router is scripted, so the query need not appear in the
-#: sentence at all.
+#: :data:`_QUERY` nor :data:`_BELIEF`, which is what lets the cases below assert that no
+#: part of the routed account reached a prompt: a sentence sharing the query's words could
+#: not tell the account apart from the ask. The router is scripted, so the query need not
+#: appear in the sentence at all.
+#:
+#: It was also the reason a repeat ask stayed unambiguous, back when §5's lookup enumerated
+#: every kind and so read the episode of the previous ask beside the belief — the loop
+#: ADR-0201 §1 closes, pinned on its own constants at the foot of this module.
 _UTTERANCE = "please forget that preference"
 
 #: A source name carrying the composing prompt's own container syntax. ADR-0197 §12's
@@ -1602,3 +1606,134 @@ async def test_converse_streaming_routes_identically_and_carries_routed_on_the_t
     assert terminal.routed is not None
     assert terminal.routed.outcome is RouteOutcome.PERFORMED
     assert terminal.reply == "".join(chunk.text for chunk in chunks)
+
+
+# --- ADR-0201: the lookup names beliefs, not the record of the ask -----------
+
+
+#: ADR-0201 §6's representative input: the sentence a user actually types, the query the
+#: router copies out of it, and the belief it names. The utterance **contains** the query,
+#: which :data:`_UTTERANCE` and :data:`_QUERY` deliberately do not — and that is the whole
+#: shape, because ADR-0074 §3 captures the exchange as an episode quoting the utterance, so
+#: the record of *asking* carries every word the query is made of.
+#:
+#: New constants rather than a change to that pair, per §6: the existing one is load-bearing
+#: for the cases it was written for, which assert that no part of the routed account reaches
+#: a prompt and need a query no captured sentence echoes.
+_ECHOED_BELIEF = "rec-estate-car"
+_ECHOED_CONTENT = "I drive a green estate car"
+_ECHOED_QUERY = "green estate car"
+_ECHOED_UTTERANCE = "please forget that I drive a green estate car"
+
+
+def _echoing_harness() -> _RoutedHarness:
+    """A harness routing every utterance to ``forget`` on :data:`_ECHOED_QUERY`."""
+    return _routed_harness(router=_names(RoutableOperation.FORGET, _ECHOED_QUERY))
+
+
+async def _quoted(harness: Harness) -> tuple[EpisodicMemory, ...]:
+    """Every captured episode whose content carries all of the query's own words.
+
+    The precondition ADR-0201 §6 requires named rather than assumed: an episode that did
+    **not** quote the ask would leave the case passing for the wrong reason, because there
+    would be nothing for the next lookup to be ambiguous against.
+    """
+    return tuple(
+        episode
+        for episode in await _episodes(harness)
+        if all(word in episode.content for word in _ECHOED_QUERY.split())
+    )
+
+
+async def test_a_second_routed_forget_resolves_past_the_episode_of_the_first() -> None:
+    """ADR-0201 §6's first case: a repeat ask reaches the belief, not ``AMBIGUOUS``.
+
+    "Two routed ``forget`` asks whose **utterance contains the query**, with the first
+    ask's exchange captured before the second is routed, over a store holding one matching
+    belief. The second ask resolves to that one belief and reaches the confirmation, not
+    ``RouteOutcome.AMBIGUOUS``."
+
+    This is #1637 as a user meets it, and the loop is the ADR's own: the first ask parks a
+    card, the user abandons it, and asking again finds the belief **and the episode of
+    having asked** — over which §5 ends the route, inviting a rephrase that captures one
+    more. Every wording that names the belief is a subset of the sentence the episodes
+    quote, so the door closes and stays closed.
+
+    The captured episode is asserted **before** the second ask rather than after, because a
+    capture that had not landed yet would make this pass against the unfiltered lookup too.
+    """
+    harness = _echoing_harness()
+    await _seed_belief(harness.memory, _ECHOED_BELIEF, _ECHOED_CONTENT)
+
+    first = await harness.engine.converse(_ECHOED_UTTERANCE, timeout=PATIENT)
+    assert first.routed is not None
+    assert first.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    assert first.conversation_id is not None
+    assert await _quoted(harness), "the ask's own episode is the record this case is about"
+
+    second = await harness.engine.converse(
+        _ECHOED_UTTERANCE, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.routed is not None
+    assert second.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    assert second.routed.confirmation is not None
+    (subject,) = second.routed.confirmation.subject
+    assert isinstance(subject, Belief)
+    assert subject.id == _ECHOED_BELIEF
+
+
+async def test_a_routed_forget_resolves_past_an_earlier_conversations_episode() -> None:
+    """ADR-0201 §6's second case: the same shape across **two** conversations.
+
+    "The same shape is pinned a second time with the two asks in different conversations,
+    the earlier conversation's episode still in the store. This is the arm the narrower
+    alternative would have left open, and it is the arm the milestone-26 re-verification
+    actually observed, so it is pinned separately rather than assumed to follow."
+
+    The narrower alternative #1637 opened with — exclude the conversation the ask is part
+    of — passes the case above and fails this one, which is why the two are separate. It is
+    also the worse failure of the two, because it makes the first repeat work: a user who
+    comes back next week asks in words last week's episodes already quote.
+    """
+    harness = _echoing_harness()
+    await _seed_belief(harness.memory, _ECHOED_BELIEF, _ECHOED_CONTENT)
+
+    first = await harness.engine.converse(_ECHOED_UTTERANCE, timeout=PATIENT)
+    assert first.routed is not None
+    assert first.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    assert await _quoted(harness)
+
+    second = await harness.engine.converse(_ECHOED_UTTERANCE, timeout=PATIENT)
+
+    assert second.conversation_id != first.conversation_id
+    assert second.routed is not None
+    assert second.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    assert second.routed.confirmation is not None
+    (subject,) = second.routed.confirmation.subject
+    assert isinstance(subject, Belief)
+    assert subject.id == _ECHOED_BELIEF
+
+
+async def test_the_typed_forget_still_destroys_an_episodic_record_by_id() -> None:
+    """ADR-0201 §6's third case: §1 is a rule of *naming*, never of destroying.
+
+    "An episodic record whose id is passed to the typed ``forget`` is still destroyed. §1
+    must not be implementable by a store-side or façade-side refusal, and this is what
+    makes that mechanical rather than argued."
+
+    That refusal is the one alternative ADR-0201 calls forbidden rather than merely worse:
+    ADR-0074 §8 rules that "the store deletes what it is told to delete", because "a store
+    that can refuse a data-rights operation is a store where ADR-0004 §6 is conditional".
+    The episode is the one a routed pass captured, so the record this asserts over is
+    exactly the record the lookup above declines to name.
+    """
+    harness = _echoing_harness()
+    await _seed_belief(harness.memory, _ECHOED_BELIEF, _ECHOED_CONTENT)
+    await harness.engine.converse(_ECHOED_UTTERANCE, timeout=PATIENT)
+    (episode,) = await _quoted(harness)
+
+    assert await harness.engine.forget(episode.id) is True
+
+    assert await harness.memory.get(episode.id) is None
+    assert await harness.memory.get(_ECHOED_BELIEF) is not None

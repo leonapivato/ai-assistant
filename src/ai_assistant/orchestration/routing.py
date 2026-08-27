@@ -49,6 +49,7 @@ import structlog
 from ai_assistant.core.errors import ModelError, RoutingTrailError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    MemoryKind,
     Message,
     Role,
     RoutableOperation,
@@ -105,6 +106,44 @@ ARGUMENT_OF: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET_QUESTION: "id",
     RoutableOperation.REVOKE: "source",
 }
+
+#: Which kinds a routed ``forget``'s lookup enumerates (ADR-0201 §1): every
+#: :class:`~ai_assistant.core.types.MemoryKind` **except** ``EPISODIC``. An episodic
+#: record is never a candidate of that lookup, never its display subject, never the
+#: record whose identity becomes the facade call's argument, and never an entry in an
+#: ``AMBIGUOUS`` or ``AMBIGUOUS_TRUNCATED`` listing.
+#:
+#: **Why the lookup reads less than** ``forget`` **destroys.** ADR-0074 §3 captures
+#: every exchange as an episode whose ``content`` quotes the user's own utterance, so
+#: the record of *asking* to forget something matches the words that asked for it: a
+#: repeat ask reached ``AMBIGUOUS`` over the belief and the episodes of every earlier
+#: ask, and the remedy that rendering invites — say it again, differently — captured
+#: another one, so the candidate set grew on every attempt and the routed door closed
+#: behind the user (#1637). Excluding the kind closes that loop rather than its first
+#: turn: every wording that names the belief is a subset of the sentence each earlier
+#: ask quoted, so the episodes reached are not confined to this conversation.
+#:
+#: **Nothing about what** ``forget`` **destroys moves** (ADR-0201 §2). The exclusion
+#: sits upstream of the facade call, in the resolution step the typed door does not
+#: have because it is handed an id; ``AssistantEngine.forget`` still relays
+#: ``MemoryStore.delete`` and still destroys an episodic record whose id it is given.
+#: The lookup already read less than ``forget`` destroys — retired and expired records
+#: are unnameable by phrase and destroyable by id (ADR-0073 §3, ADR-0045 §6) — and this
+#: decides where that line falls rather than drawing it for the first time.
+#:
+#: **Derived rather than spelled out**, so a fifth ``MemoryKind`` is a candidate by
+#: default rather than silently omitted by a list nobody updated. That is
+#: ``interfaces.cli._DEFAULT_BELIEF_KINDS``' own rule and its own reason (ADR-0074 §6),
+#: applied one seam over.
+#:
+#: Passed as the ``kinds`` argument of the ``MemoryStore.list_beliefs`` read behind
+#: :meth:`RoutedOperations.beliefs`, so the store applies it **before** the page cut
+#: (ADR-0073 §2) and an excluded record is never read into ``orchestration``, never
+#: projected into a :class:`~ai_assistant.core.types.Belief`, and never discarded after
+#: a page has come back (ADR-0201 §3).
+FORGET_LOOKUP_KINDS: Final[tuple[MemoryKind, ...]] = tuple(
+    kind for kind in MemoryKind if kind is not MemoryKind.EPISODIC
+)
 
 #: The system turn. It renders the closed vocabulary and the two legal envelope
 #: shapes, and it renders **no** retrieved memory, context facet, belief, trail row,
@@ -445,6 +484,12 @@ class RoutedOperations(Protocol):
     :class:`~ai_assistant.core.types.Belief` records because that is the arm §8 gives
     the operation. The promoted ``AssistantEngine.beliefs`` answers
     :class:`~ai_assistant.core.types.BeliefSummary` rows and so cannot serve it.
+
+    **It reads that store with** :data:`FORGET_LOOKUP_KINDS`, not whole (ADR-0201 §1).
+    The store is the one ``forget`` reads, exactly as §5 said; what ADR-0201 replaces is
+    the kinds enumerated from it — every ``MemoryKind`` but ``EPISODIC``, because the
+    episode of an ask quotes the words that asked and so matched the query that would
+    name the belief.
     """
 
     async def beliefs(self, *, limit: int, offset: int) -> tuple[Belief, ...]:
@@ -533,6 +578,14 @@ async def resolve(
     scored, and no second model call is made — "no clause of this ADR permits choosing
     among candidates by rank, recency, score, best match, or a second model call.
     Ambiguity ends the route."
+
+    **For** ``forget`` **the store is read by kind** (ADR-0201 §1): the candidates are
+    live beliefs of every ``MemoryKind`` but ``EPISODIC``, per :data:`FORGET_LOOKUP_KINDS`.
+    That is not a rank and does not choose among candidates — it decides what the
+    question ranges over, once and in the open, before the lookup runs. A query naming
+    only episodic records therefore reaches ``NOT_FOUND``, §5's existing arm applied to a
+    lookup that now finds nothing, and no surface distinguishes that from a query that
+    matched nothing at all (ADR-0201 §5).
 
     **What the query is matched against.** Every **distinctive** term of the query — its
     words, less the run of framing it opens on and less a reference naming this
