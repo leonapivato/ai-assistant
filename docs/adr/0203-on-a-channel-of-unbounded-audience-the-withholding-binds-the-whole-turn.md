@@ -20,9 +20,11 @@
   licence for a second difference". The turn such an operation returns now also
   differs — it carries the context, the memories and the plan of the turn that
   actually ran on that channel — and so does **the step that plan drives**, which
-  is not independent of it. §3 below states the whole of that difference, names
-  the step as part of it, and bounds it: everything the plan does not determine is
-  unchanged. Everything else §4 decides — `SpokenTurn`'s four members, the
+  is not independent of it. A **degradation flag** is likewise no longer pinned to
+  a value, since each is computed from something this decision may change; its
+  rule and its shape are untouched. §3 below states the whole of that difference
+  and bounds it: the conversation, its resolution, the routing account, `heard`
+  and `TurnResult.memory_degraded` are unchanged. Everything else §4 decides — `SpokenTurn`'s four members, the
   `heard`/`outcome` pairing, the blank-transcript shape, the byte-for-byte
   transcript, and every clause of the degradation ladder — is untouched. §9
   classifies both records and the ADRs against which none is owed.
@@ -345,12 +347,25 @@ look for it.
 > implementation neither is obliged to nor may attempt to reproduce the step a
 > wider supply would have chosen.
 
-> **Normative.** Everything the plan does not determine is unchanged, and that is
-> the bound on this replacement: the conversation the turn runs under and its
-> resolution, the routing account of a routed pass, `heard`,
-> `TurnResult.memory_degraded`, and every degradation flag ADR-0200 §4 places on
-> `SpokenTurn`. No lane reads this section as licence for a difference outside
-> what §1's subtraction and the plan it feeds produce.
+> **Normative.** Everything decided before the turn planned, or outside what the
+> plan determines, is unchanged: the conversation the turn runs under and its
+> resolution, the routing account of a routed pass, `heard`, and
+> `TurnResult.memory_degraded` — which `LearningLoop.respond` computes from the
+> history read and the retrieval, both of them upstream of the subtraction.
+
+> **Normative.** A **degradation flag keeps its rule and its shape and is not
+> pinned to a value.** `TurnOutcome.reply_degraded`, `TurnOutcome.capture_degraded`
+> and `SpokenTurn.spoken_degraded` are each computed from a value this decision may
+> change — the composed reply, the rendering capture wrote, the audio synthesis
+> was handed — so each may read differently on this channel from what the same
+> transcript would have produced on `converse`. No clause of ADR-0170, of ADR-0074
+> §3 or of ADR-0200 §4's degradation ladder is relaxed, no new degradation is
+> introduced, and no implementation suppresses, forces or second-guesses a flag to
+> hold one stable.
+
+> **Normative.** No lane reads this section as licence for a difference outside
+> what §1's subtraction, the plan it feeds, and the values computed from those two
+> produce.
 
 **This is #1693 answered in the direction that costs nothing.** The issue frames
 the choice as "is the withholding a property of what the composing stage is
@@ -383,10 +398,23 @@ at all — the no-action branch, which composes and captures without reserving
 capacity. An ADR that subtracted from the planner's supply and then required the
 step to be unchanged would be asking for the plan's consequence to be independent
 of the plan. So the step moves with the plan and the clause above says so; what
-does *not* move is everything decided before the turn planned or outside it, which
-is the rest of §4's list. The negative arm of §6 is what keeps this from becoming
-an excuse: on a store holding only speakable records the plan, and therefore the
-step, is what the same transcript produces on either channel.
+does *not* move is everything decided before the turn planned or outside it. The
+negative arm of §6 is what keeps this from becoming an excuse: on a store holding
+only speakable records the plan, and therefore the step, is what the same
+transcript produces on either channel.
+
+**The degradation flags are the same argument one step further, and pinning them
+would have been the same mistake.** ADR-0200 §4 already admits that `reply`
+differs, and `TurnOutcome.reply_degraded` is a fact about composing *that* reply;
+`capture_degraded` is a fact about writing the rendering capture built from that
+turn; `SpokenTurn.spoken_degraded` is a fact about synthesising that reply, within
+a payload budget measured over the whole result. A model provider that refuses the
+wider prompt and accepts the narrower one, or a reply that crosses §6's audio bound
+on one channel and not the other, moves a flag without any rule having moved. So
+the clause above pins the **rule** and leaves the **value** to its inputs, which is
+the only version of it an implementation can keep — and it forbids the compensating
+move, an implementation quietly holding a flag stable, because that would be
+reporting a degradation that did not happen or hiding one that did.
 
 ### 4. What the capture carries, and why no episode is marked
 
@@ -396,24 +424,33 @@ step, is what the same transcript produces on either channel.
 > channel on a turn, and adds no condition under which a turn is not captured.
 
 > **Normative.** No episode is marked, filtered or withheld on the ground that a
-> withholding occurred during the turn that produced it. With §1 in force there is
-> nothing to mark: every record and every facet the captured rendering's plan half
-> was derived from was placed as speakable on that channel before any stage saw
-> it.
+> withholding occurred during the turn that produced it. With §1 in force the
+> withholding has put nothing in the episode to mark: every record and every facet
+> the captured rendering's plan half was derived from was placed as speakable on
+> that channel before any stage saw it.
 
-> **Normative.** The turn's own **goal statement** is the owner's utterance,
-> carried unrewritten (ADR-0074 §3, `LearningLoop.respond`). It is the turn's
-> subject and is not a member of the supply §1 subtracts from, so §1 does not
-> reach it: no implementation omits it from the capture, trims it, or withholds it
-> from the stages of the turn that asked it — which ADR-0199 §5's third clause
-> requires, since a stage that was not given the question has no question to
-> compose an answer to.
+> **Normative.** The turn's own **goal statement** is the turn's subject and is
+> not a member of the supply §1 subtracts from, so §1 does not reach it. It
+> reaches the stages of the turn that asked it, which ADR-0199 §5's third clause
+> requires — a stage that was not given the question has no question to compose an
+> answer to — and ADR-0199 §2's third clause is not read as withholding it from
+> them, since that reading would make no turn on such a channel answerable at all.
 
-> **Normative.** What a **later** turn on such a channel may do with the episode
-> carrying that statement is decided by ADR-0199 §3's placement of that episode,
-> exactly as §3 places it today. This ADR neither widens nor narrows that
-> placement and issues no permission about it; §8 defers whether the record of an
-> asking should be withholdable, with the conditions that fire it.
+> **Normative.** Beyond that, **this ADR decides nothing about the goal
+> statement**. What the capture carries of it, and what a later turn on such a
+> channel may do with the episode carrying it, are governed by ADR-0074 §3 and by
+> ADR-0199 §3's placement of that episode exactly as they are today. This ADR
+> neither widens nor narrows that placement, requires no capture to carry or omit
+> anything, and issues no permission about either.
+
+> **Normative.** The residual path is **recorded as open rather than closed**: on
+> an operation of this class the owner's own question is captured into an episode
+> whose recorded origin ADR-0199 §3 places as speakable, so a later turn on such a
+> channel may repeat it, and nothing on ADR-0200 §3's surface establishes that the
+> recording it arrived in was ever audible in the room the answer is emitted into.
+> No lane, implementation or later ADR cites this ADR as authority that the path is
+> safe, as a placement of the goal statement, or as a reason not to decide it. It
+> is tracked as its own question (**#1703**) and fired by §8's conditions.
 
 > **Normative.** Should a later decision put content ADR-0199 §3 withholds in
 > front of any stage of a turn on such a channel again, that decision owes the
@@ -426,62 +463,67 @@ step, is what the same transcript produces on either channel.
 > the turn was supplied.
 
 **This is #1692's first question — "what a turn's capture may carry when a
-withholding occurred" — answered by making the question empty.** The episode's
+withholding occurred" — answered for what the withholding removed.** The episode's
 content is the goal statement and the plan rationale (`_exchange_of`, in
-`orchestration/engine.py`). With
-§1 in force the rationale is authored over a supply from which §3's classes were
-already removed, so the episode carries no span of withheld content and no value
-derived from one. Nothing about capture changes; what changed is what capture is
-handed.
+`orchestration/engine.py`). With §1 in force the rationale is authored over a
+supply from which §3's classes were already removed, so the episode carries no
+span of withheld content and no value derived from one — which is the half #1692
+recorded, the half that named "her birthday, gift preference, and medical
+allergies". Nothing about capture changes; what changed is what capture is handed.
 
-**The goal-statement clauses are stated because the residue is honest, and because
-a reader would otherwise find it and think the fix incomplete.** After this
-decision the episode of the QA run's first turn still reads *"The user asked: What
-do you know about Alice?"*, and a later spoken turn may draw on it, because
-ADR-0199 §3 places that episode as speakable. Three things are true of that, and
-the third is the one that matters.
+**What it does not answer is the residue, and the clauses above record that rather
+than paper over it.** After this decision the episode of the QA run's first turn
+still reads *"The user asked: What do you know about Alice?"*, and a later spoken
+turn may draw on it, because ADR-0199 §3 places that episode as speakable. Three
+things are true of that, and the third is why this section rules on none of it.
 
-It is not the withheld content and not a value derived from it. The beliefs about
-Alice reached no stage of that turn, so the rendering paraphrases nothing,
-summarises nothing and counts over nothing — which is the property ADR-0199 §5's
-fourth clause names and the one #1692 recorded as defeated.
+*It is not the withheld content and not a value derived from it.* The beliefs
+about Alice reached no stage of that turn, so the rendering paraphrases nothing,
+summarises nothing and counts over nothing — the property ADR-0199 §5's fourth
+clause names and the one #1692 recorded as defeated.
 
-It cannot be withheld from the turn that asked it. ADR-0199 §5's third clause
+*It cannot be withheld from the turn that asked it.* ADR-0199 §5's third clause
 obliges the composing stage to be told a withholding occurred and to compose an
 answer that states it; a stage that was not given the question has nothing to
 compose about, and `composing`'s prompt opens with "The user said, in their own
 words". So the current turn's goal statement reaching its own stages is ADR-0199's
-own requirement, not a permission this ADR invents.
+own requirement rather than a permission this ADR invents, and reading §2's third
+clause as withholding it would leave no turn on this channel answerable at all.
 
-And what a **later** turn may do with it is genuinely open, so this ADR declines
-to settle it rather than arguing it away. The tempting argument — the owner said
-those words aloud into the same room, so repeating them discloses nothing new —
-does not survive ADR-0199 §1's third clause, which rules that the posture "is not
-a function of the modality, the transport, the device, the authority the request
-carried, the session that admitted the request, or the identity of whoever asked".
-ADR-0200 §3 fixes that this operation takes a `SpokenAudio` from a **caller** and
-asserts nothing about where that recording came from; nothing on the surface
-establishes that the utterance was ever audible in the room the answer is emitted
-into, and deriving a permission from how the input arrived is exactly the
-inference ADR-0199 §1 refuses in terms. What is true instead is narrower and is
-all this decision needs: the goal statement is not a member of the supply §1
-subtracts from, so §1 leaves it where it found it, and whether ADR-0199 §3 should
-place the episode carrying it differently is §8's deferral rather than this
-section's ruling.
+*And what a later turn may do with it is genuinely open.* The tempting argument —
+the owner said those words aloud into the same room, so repeating them discloses
+nothing new — does not survive ADR-0199 §1's third clause, which rules that the
+posture "is not a function of the modality, the transport, the device, the
+authority the request carried, the session that admitted the request, or the
+identity of whoever asked". ADR-0200 §3 fixes that this operation takes a
+`SpokenAudio` from a **caller** and asserts nothing about where that recording
+came from; nothing on that surface establishes that the utterance was ever audible
+in the room the answer is emitted into, and deriving a permission from how the
+input arrived is exactly the inference ADR-0199 §1 refuses in terms. Rounds 1 and 2
+of this ADR's own review pressed that point, and the right response was to withdraw
+a ruling rather than to defend it: earlier drafts of this section required the
+capture to carry the goal statement, which would have described today's behaviour
+accurately and foreclosed every remedy while looking like a decision. So the
+clauses above rule on the turn's own stages, decline the rest, and record the path
+as open under **#1703**.
 
-**Withholding it would not be free either, which is what makes that a real
-question rather than a formality.** The goal statement is in *every* episode
-ADR-0074 §3 writes — it is what makes an episode "citable and retrievable" and it
-is the substrate the whole conversation seam rests on (ADR-0074 §5) — so a rule
-omitting it would end continuity on the spoken channel for every turn, withheld or
-not. A decision there has to be about the record of an asking specifically and
-needs a way to recognise one, which is why §8 fires it on conditions rather than
-leaving it to a lane. It would arrive as a rule about **capture**, or about §3's
-placement of an episode, and not as a widening of ADR-0199 §3's placements of the
-records a turn retrieves. ADR-0201 already ruled the adjacent question in the other direction —
-that a routed `forget`'s lookup does not name the record of the asking — and this
-ADR neither extends nor contradicts it, because §1 there is about what a phrase
-may name and this is about what may be spoken.
+**Every remedy is outside this decision, which is why #1703 is a question and not a
+lane.** Marking the episode of a withholding turn is decidable at capture with no
+content inspection — and is an additive field on `EpisodicMemory` or on
+`Provenance`, `core` surface behind its own ratified ADR (golden rule 5, ADR-0015
+§5), which ADR-0200 §8 declines in terms. Narrowing ADR-0199 §3's placement so an
+episode is not speakable on such a channel is its own decision and over-withholds
+badly: the conversation's recent turns *are* episodes, so it would end continuity
+on the spoken channel for every turn, withheld or not. Omitting the goal statement
+from a withholding turn's capture is available inside `orchestration` with no
+`core` change, and makes an episode's `content` depend on the channel its turn
+arrived on — reaching every consumer of `content`, the observer's citations
+included, and producing the silent hole in the conversation record ADR-0197 §10
+warns a lane will leave. Each is a real candidate; none is this ADR's, and #1703
+carries all three with the conditions §8 fires them on. ADR-0201 ruled the adjacent
+question in the other direction — that a routed `forget`'s lookup does not name the
+record of the asking — and this ADR neither extends nor contradicts it, because §1
+there is about what a phrase may name and this is about what may be spoken.
 
 **And the deferral above is ADR-0074 §11's form, deliberately.** §11 records
 "nothing on a turn records where it came from" and names the additive field as the
@@ -551,6 +593,14 @@ material actually seen, which is the direction that cannot weaken it.
 > once rather than inferred, and so that a later lane cannot quietly restore the
 > wider supply to keep the step stable.
 
+> **Normative.** The lane pins **the degradation rules unmoved**, which is what
+> §3's unpinning of their values must not be read as relaxing: on such a turn a
+> forced composition failure yields `TurnOutcome.reply_degraded` exactly as it does
+> on `converse`, and a forced capture failure yields `TurnOutcome.capture_degraded`
+> exactly as it does. Both are deterministic over the canonical fakes, and the arm
+> exists so that "the value follows its inputs" cannot become "the flag is this
+> operation's to decide".
+
 > **Normative.** The lane pins **the bounded channel unchanged**: the same
 > utterance through `converse`, over the same store, reaches the planner with the
 > whole supply. A subtraction that leaked into every operation would pass every
@@ -585,7 +635,7 @@ The implementation is one lane in `orchestration`, briefed after this ADR merges
    ("**The** `TurnResult` **the turn produced is unchanged**"). Each is re-pointed
    at this ADR rather than deleted: the sentences are still true of a bounded
    channel, and what changes is where the subtraction sits on an unbounded one.
-3. **The five tests of §6.**
+3. **The six tests of §6.**
 4. **The record on ADR-0200**, which is the item below.
 5. **Closing #1692 and #1693**, which this decision answers and that lane fixes.
 
@@ -630,8 +680,9 @@ being made, which the clause above closes.
 - **ADR-0199 §3's placements.** Which classes are speakable on an unbounded
   channel is untouched, in both directions. This decision changes *when* the
   placement is applied and nothing about *what* it places.
-- **Whether the record of an asking is withholdable** (§4). Deferred with two
-  conditions, either of which fires it. **Person identity and household
+- **Whether the record of an asking is withholdable** (§4), filed as **#1703**
+  with the three candidate remedies and why each is outside this decision.
+  Deferred with two conditions, either of which fires it. **Person identity and household
   disclosure** (#691, ADR-0199 §7), which is the setting in which a second person
   in the room a day later makes it a live question. And **the first caller of an
   operation of this class whose utterance did not reach the room the answer is
@@ -699,11 +750,15 @@ either way. No lane reads this clause as licence for a second difference." Under
 and **the step is not independent of the plan** — `Engine._run_turn` drives
 `turn.plan.steps[0]`, so a plan authored over a narrower supply can drive a
 different step or none. The sentence becomes false of two of the five things it
-names, and a reader holding only ADR-0200 would refuse the implementation this ADR
-requires — so the test comes out at supersession, narrowly and on that clause
-alone. The three it names that the plan does not determine — the conversation, the
-routing account and the degradation flags — stay true, and §3 above says so as a
-bound rather than leaving the scope open. Everything else §4 decides stands: `SpokenTurn`'s four
+names — the turn and the step — and unpinnable of a third, since
+`reply_degraded`, `capture_degraded` and `spoken_degraded` are each computed from
+a value this decision may change. A reader holding only ADR-0200 would refuse the
+implementation this ADR requires, so the test comes out at supersession, narrowly
+and on that clause alone. The two the plan does not determine — the conversation
+and the routing account — stay true word for word, and §3 above states them as the
+bound rather than leaving the scope open. Nothing about the degradation *rules*
+moves: §4's ladder, its exactly-when clause for `spoken_degraded`, its two payload
+measurements and its `OversizedValueError` arms are untouched, and §3 says so. Everything else §4 decides stands: `SpokenTurn`'s four
 members, the `heard`/`outcome` pairing, the blank-transcript shape, the local
 refusals ordered ahead of it, the byte-for-byte transcript, `spoken` as the
 rendering of `outcome.reply` and of nothing else, and every clause of the
@@ -811,8 +866,11 @@ implements against §§1–7 until this has merged (ADR-0015 §5, golden rule 5)
 
 **Milestone 19's exit criterion becomes provable rather than argued.** "A content
 class ruled unspeakable is deflected, not read aloud" held on turn one and failed
-on turn two; after this decision it holds on both, and §6's two-turn test is what
-holds it there. #1692 and #1693 close with the implementing lane.
+on turn two; after this decision it holds on both for the content ADR-0199 §3
+withholds, and §6's two-turn test is what holds it there. #1692 and #1693 close
+with the implementing lane. What does **not** close is #1703 — the owner's own
+question is still captured into an episode §3 places as speakable — and §4 records
+that as open rather than letting the exit ruling absorb it.
 
 **The disclosure posture gets one site instead of two.** Today the subtraction
 happens in `Engine._composed_spoken` and the turn survives it; afterwards it
@@ -843,7 +901,9 @@ on either ADR is pointed here.
 **What would trigger revisiting this.** A bounded spoken channel (ADR-0200 §3
 defers it), which would give the same modality two postures and make §1's keying on
 the operation load-bearing in a way it is not today. Person identity landing
-(#691), which is when the record-of-the-asking question in §4 becomes real. And a
+(#691), which is when the record-of-the-asking question in §4 and #1703 becomes
+real — as does the first caller of this operation whose recording did not come from
+the room the answer is emitted into. And a
 stage arriving between retrieval and planning — an intent classifier, a reranker,
 a summarizer — which would have to sit on the subtracted side of the line, and
 which §1's first clause already says.
@@ -851,9 +911,12 @@ which §1's first clause already says.
 ## Alternatives considered
 
 **Mark the episode a withholding turn produced, and withhold it later.** The
-repair the finding suggests. Rejected in the Context above and again in §4: it does
-not reach #1693, it is `core` surface for a question that does not need one, and it
-leaves the same rationale in the `PlanStore` and on the rendered surface. It also
+repair the finding suggests. Rejected in the Context above and again in §4 **for
+the question this ADR answers**: it does not reach #1693 at all, it is `core`
+surface where a filter one stage earlier needs none, and it leaves the same
+rationale in the `PlanStore` and on the rendered surface. It is not rejected as an
+instrument — #1703 carries it as a live candidate for the residue §4 declines to
+decide, where it would be the marking and not a substitute for §1. It also
 requires §2's recorded-origin discipline to gain a notion of "derived from
 withheld", which is the one thing an origin cannot record about a model completion
 without the completion's producer recording it.
