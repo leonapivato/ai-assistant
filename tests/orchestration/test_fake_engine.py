@@ -39,6 +39,7 @@ from assistant_engine_contract import (
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    RoutedParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -67,6 +68,7 @@ from ai_assistant.core.types import (
     GrantScope,
     MemoryKind,
     QuestionState,
+    RoutableOperation,
     TurnOutcome,
 )
 from ai_assistant.testing import FakeAssistantEngine
@@ -191,6 +193,22 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         for index in range(_OVERFULL_GRANTS):
             engine.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
         return engine
+
+    @pytest.fixture
+    def routed_park(self) -> RoutedParkSubject:
+        """One fake engine holding a single answerable routed park, on a ``forget``.
+
+        The card is assembled by ``park_routed`` from the operation and the belief the
+        engine already holds, so what the shared suite holds this fake to is the type's
+        own invariants rather than a pre-built member — ``park``'s arrangement one
+        operation over.
+        """
+        engine = FakeAssistantEngine()
+        held = engine.hold("rec-routed", content="the user likes jazz")
+        engine.park_routed("routed-1", operation=RoutableOperation.FORGET, subject=(held,))
+        return RoutedParkSubject(
+            engine=engine, token=ContinuationToken(handle="routed-1"), belief_id=held.id
+        )
 
     @pytest.fixture
     def parked_engine(self) -> AssistantEngine:

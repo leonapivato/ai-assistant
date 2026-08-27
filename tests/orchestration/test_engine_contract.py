@@ -20,6 +20,7 @@ the composition root would.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
@@ -45,6 +46,7 @@ from assistant_engine_contract import (
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    RoutedParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -67,11 +69,20 @@ from ai_assistant.core.types import (
     Disposition,
     GrantScope,
     Idempotency,
+    MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
+    Message,
     PlanStep,
+    Provenance,
     Reversibility,
     RiskLevel,
+    Role,
+    RoutableOperation,
+    SemanticMemory,
     ToolCost,
     ToolDefinition,
+    Validity,
 )
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -85,6 +96,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RoutingStage,
     StepExecutor,
     StepRunner,
 )
@@ -103,6 +115,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeObserver,
     FakePlanStore,
+    FakeRoutingRecorder,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
@@ -295,6 +308,34 @@ class _SucceedsBound:
         """Accept the binding the ruling fixed, and succeed with no output."""
 
 
+class _RoutingProvider:
+    """A ``ModelProvider`` that always answers the routing stage the same way.
+
+    ADR-0197 §4 gives the router's envelope two legal shapes; this yields the route one
+    for a scripted query and the decline one otherwise, which is what lets one ``_wire``
+    knob produce either a deployment that routes a ``forget`` or the ordinary deployment
+    that routes nothing at all.
+
+    It is the routing stage's **only** collaborator (§2), so a double this small is the
+    whole of what a subject holding a routed park needs — no planner, no tool and no
+    policy is reached on a routed pass.
+    """
+
+    def __init__(self, query: str | None) -> None:
+        """Answer with a ``forget`` on ``query``, or decline where it is ``None``."""
+        self._query = query
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        """Return one envelope, ignoring what was asked."""
+        del messages, model
+        envelope = (
+            {"no_operation": True}
+            if self._query is None
+            else {"operation": RoutableOperation.FORGET.value, "query": self._query}
+        )
+        return Message(role=Role.ASSISTANT, content=json.dumps(envelope))
+
+
 def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subject in
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -307,6 +348,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     reads: SourceReadTrail | None = None,
     real_invoker: bool = False,
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
+    routes: str | None = None,
+    memory: FakeMemoryStore | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -327,6 +370,17 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``reads`` is the source-read trail the two ADR-0186 §10 reads relay, a knob for
     the same reason one turn over: a read is authored on the seam that gated it
     (ADR-0185 §5), so nothing on this surface appends one either.
+
+    ``routes`` scripts the operation-routing stage to route every utterance to a
+    ``forget`` on that query (ADR-0197 §1), which is the only way to reach the routed
+    resume path: a routed park is minted inside a turn and, unlike a tool park, is not
+    enumerable afterwards (§7). ``None`` — the default — wires the stage and its recorder
+    as a deployment that never routes anything, so every other case in the shared suite
+    is driven over a pipeline that behaves exactly as it did before ADR-0197.
+
+    ``memory`` is the record store, a knob so a routed ``forget``'s subject can be seeded:
+    §5 resolves the argument by reading the store the operation itself reads, so a
+    resolvable park needs a belief in it before the turn runs.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -366,29 +420,29 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             identity="work@example.com",
             transport_endpoint="test://endpoint/one",
         )
-    memory = FakeMemoryStore(now=lambda: AT)
+    records = FakeMemoryStore(now=lambda: AT) if memory is None else memory
     conversation_store = FakeConversationStore(now=conversation_clock)
     conversations = ConversationLifecycle(
         conversations=conversation_store,
-        memory=memory,
+        memory=records,
         retention=RETENTION,
         now=conversation_clock,
     )
-    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+    writer = FakeMemoryWriter(store=records, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
     writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-    questions = QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT)
+    questions = QuestionStage(writer=writer, deferrals=deferrals, memory=records, now=lambda: AT)
     observation = ObservationStage(
         observer=FakeObserver(),
         conversations=conversation_store,
-        memory=memory,
+        memory=records,
         writes=writes,
         batch_size=OBSERVATION_BATCH,
         route=OBSERVER_ROUTE,
     )
     loop = LearningLoop(
         context=FakeContextProvider(),
-        memory=memory,
+        memory=records,
         writes=writes,
         planner=_OneStepPlanner() if parks else _NoStepPlanner(),
         feedback=FakeFeedbackProcessor(),
@@ -414,7 +468,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         trail=audit,
         spend=audit,
         reads=read_trail,
-        memory=memory,
+        memory=records,
         deferrals=deferrals,
         # The narrow deletion seam (ADR-0119 §7), with the horizon the composition
         # root would pass. The contract suite exercises the request surface rather
@@ -426,6 +480,14 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         conversations=conversations,
         observation=observation,
         questions=questions,
+        # ADR-0197's routing stage and the write-only half of §9's trail, wired together
+        # or not at all — the engine refuses the half-wiring, because a stage with no
+        # recorder could take no route while the deployment looked configured. A
+        # `_ScriptedRouter` over a provider that always names one operation is what makes
+        # a routed park reachable at all: §7 rules that `pending_confirmations` does not
+        # list one and that no durable store recovers it.
+        routing=RoutingStage(model=_RoutingProvider(routes)),
+        routing_recorder=FakeRoutingRecorder(),
         # The **same** store object the drivers would be given, and the only holder
         # of the wide seam (ADR-0097 §3). A second store here would let a grant land
         # somewhere the gate never reads.
@@ -592,6 +654,51 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def routed_park(self) -> AsyncIterator[RoutedParkSubject]:
+        """One wired engine holding a single answerable routed park.
+
+        Reached by driving a **real** turn through the routing stage, so the card the
+        suite then answers is the one ADR-0197 §5 resolved and §7 registered — not a
+        fixture's idea of one. That is the only way to reach it: §7 rules that a routed
+        park is not listed by ``pending_confirmations`` and not recovered across a
+        restart, so nothing on the surface can produce or re-mint its token afterwards.
+
+        The belief is seeded before the turn because §5's lookup reads the store the
+        operation itself reads; without it the route would resolve to nothing and end in
+        ``NOT_FOUND`` rather than parking.
+        """
+        records = FakeMemoryStore(now=lambda: AT)
+        await records.write_atomic(
+            [
+                MemoryWrite(
+                    record=SemanticMemory(
+                        id="rec-routed",
+                        content="the user likes jazz",
+                        fact="the user likes jazz",
+                        validity=Validity(),
+                        provenance=Provenance(
+                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                        ),
+                    ),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                )
+            ]
+        )
+        built = _wire(routes="jazz", memory=records)
+        await built.start()
+        try:
+            outcome = await built.converse("forget that I like jazz", timeout=timedelta(seconds=30))
+            assert outcome.routed is not None
+            assert outcome.routed.confirmation is not None
+            yield RoutedParkSubject(
+                engine=built,
+                token=outcome.routed.confirmation.token,
+                belief_id="rec-routed",
+            )
         finally:
             await built.aclose()
 
