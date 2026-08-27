@@ -33,12 +33,12 @@
   clause of ADR-0004 — the data-handling decision — for a Tier 0 value, and it
   decides the transport of a ratified egress boundary. ADR-0172 took both lenses
   for the first of those and ADR-0174 for the second.
-- **One consequence is named up front because it is a new disclosure.** On the
-  route available in practice, the certificate comes from a publicly trusted
-  authority through the overlay's control plane, so the gateway machine's overlay
-  name becomes **public** where it was previously held by the overlay's operator
-  alone. §4 states that delta, states what the one other admitted route discloses
-  instead, accepts both in ADR-0124 §3's own terms, and names the exits.
+- **One consequence is named up front because it is a new disclosure.** The
+  certificate comes from a publicly trusted authority, obtained through the
+  overlay's control plane, so the gateway machine's overlay name becomes **public**
+  where it was previously held by the overlay's operator alone. §4 states that
+  delta and the issuance event beside it, accepts both in ADR-0124 §3's own terms,
+  and names the one exit.
 
 ## Context
 
@@ -140,26 +140,23 @@ spent the mechanism to buy its output.
 
 ## Decision
 
-### 1. The scheme is a certificate the overlay issues for the machine's own overlay name
+### 1. The scheme is a certificate the overlay obtains for the machine's own overlay name
 
 > **Normative.** The gateway's remote browser listener serves **HTTPS**, and
 > terminates TLS in the gateway's own process. Its certificate is one the
-> **overlay issues for a name the overlay assigns to the machine that runs the
+> **overlay obtains for a name the overlay assigns to the machine that runs the
 > gateway**, and its private key is generated on that machine and never leaves it.
 
-> **Normative.** That certificate must **chain to a root the browsing device
-> already trusts**, with nothing installed on that device for this purpose and
-> nothing for the owner to overrule. An issuance route that yields a chain the
-> browser does not already trust does **not** satisfy this ADR, whoever operates it
-> and whatever name it carries: it produces a warning instead of a secure context,
-> which makes it the self-signed route under another name and refuses with it.
-
-> **Normative.** That root is either a **publicly trusted** one or one the **owner
-> administers**, and no third. A root some other party administers — an employer's
-> device-management root, say — is **not** a route this ADR authorises even where
-> the browsing device already trusts it: it lets that party mint a certificate for
-> the gateway's own name and stand between the owner and their assistant, and
-> nothing records that it did.
+> **Normative.** That certificate chains to a **publicly trusted** authority — one
+> the browsing device already trusts out of the box, with nothing installed on that
+> device for this purpose and nothing for the owner to overrule. A chain the
+> browser does not already trust does **not** satisfy this ADR, whoever operates
+> it: it produces a warning instead of a secure context, which makes it the
+> self-signed route under another name and refuses with it. A chain the browsing
+> device trusts because some **other party** administers a root on it — an
+> employer's device-management root, say — does not satisfy it either: it lets that
+> party mint a certificate for the gateway's own name and stand between the owner
+> and their assistant, with nothing recording that it did.
 
 > **Normative.** No other issuance route is authorised. A **self-signed**
 > certificate is refused; a certificate for a name outside the overlay, from a
@@ -189,7 +186,10 @@ MagicDNS name — `laptop.tailnet-name.ts.net` — from a public certificate
 authority, using the control plane to prove the name, and writes the certificate
 and the private key as files on the machine that asked. That is the worked case of
 the clause above, and it is named the way ADR-0124 §2 named Tailscale: as the
-first implementation of a property, not as the property.
+first implementation of a property, not as the property. **"The overlay issues" in
+this ADR's title names that act** — the overlay proves the name and hands back the
+certificate — and the clauses above say the rest: the signature comes from a
+publicly trusted authority, and the key is the machine's own.
 
 **The trust requirement is what makes the vendor-neutral clause mean anything, and
 architecture review was right that without it the clause was empty.** An earlier
@@ -202,29 +202,27 @@ have made this decision buy nothing. Stating the requirement as a property of th
 no vendor, no named authority, no issuance API in the clause — while ruling out
 the routes that do not deliver the classification this ADR exists to obtain.
 
-**In practice that means a publicly trusted authority, and §4's disclosure follows
-from it rather than sitting beside it.** The only chains a phone trusts out of the
-box are the public ones, so requiring an already-trusted chain is what puts the
-name in front of a public authority — and, because the major browsers require
-certificate transparency of publicly trusted certificates, into a public log. The
-requirement and the disclosure are therefore one decision taken twice, and §4
-accepts the second half knowing it is the price of the first.
+**§4's disclosure follows from this clause rather than sitting beside it.**
+Requiring a chain the phone already trusts is what puts the name in front of a
+public authority — and, because the major browsers require certificate
+transparency of publicly trusted certificates, into a public log. The requirement
+and the disclosure are one decision taken twice, and §4 accepts the second half
+knowing it is the price of the first.
 
-**The other case is a device that already trusts a root, and *who administers it*
-is what decides whether that helps.** Both lenses found the gap on the same round,
-from opposite sides: an already-trusted private root satisfies the trust
-requirement and is neither public nor logged, so §4's account was true of one
-route and not the other. Splitting the roots is what makes both true. A root the
-**owner** administers is the strictly better outcome this ADR should not forbid —
-the secure context arrives with no public authority in it and nothing disclosed
-beyond the owner's own machines. A root **somebody else** administers is the worse
-outcome that looks identical from the browser: the trust the browser reports is
-that party's judgement rather than the owner's, and that party can mint a
-certificate for the gateway's own name whenever it likes. A public authority can
-also mis-issue, which is exactly why the public ecosystem is logged and audited;
-an employer's root is neither. **That is why the clause names the owner rather
-than the trust store**: "the device already trusts it" is a fact about the device
-and the rule needs a fact about who decides.
+**A second admitted root was drafted and then withdrawn, and the reason is worth
+recording rather than quietly dropping.** An intermediate draft also admitted a
+root the *owner* administers, on the ground that a device already trusting one
+gets the secure context with nothing published anywhere — a strictly better
+privacy outcome that a decision should not forbid. It did not survive its own
+consequences. It split the issuance requirement from the trust requirement, since
+an owner's authority issuing the leaf is not the overlay obtaining it; it split
+§4's disclosure account in two; and review found a fresh contradiction in each of
+the two rounds that followed. Against that, its beneficiary is an owner whose
+browsing device *already* trusts an authority they run and who did not install it
+for this — and installing one for this is what the clause above refuses. **One
+route, stated once, is the better decision**, and an owner who really is in that
+position has the ordinary remedy: a superseding ADR, on evidence this one does not
+have.
 
 **Why the other two stay refused, in ADR-0174 §7's own words rather than
 paraphrased.** A self-signed certificate "trains the owner to click through a
@@ -438,40 +436,38 @@ that it is on the owner's own machine, owned by the owner's own user.
 > clause of this ADR obliges a reload, and no lane may present the gateway as
 > renewing, watching or reloading anything.
 
-> **Normative.** On **both** of §1's routes the certificate is issued for a name the
-> overlay assigns, so the overlay's control plane learns that one was issued for
-> that machine and when. Where that control plane is a third party's, that is a
-> disclosure beyond ADR-0124 §3's enumeration — which names what the operator holds
-> about devices and networks and does not name an issuance event — and it is
-> **accepted** here rather than read into §3's acceptance.
+> **Normative.** The certificate is obtained for a name the overlay assigns, so the
+> overlay's **control plane learns that one was obtained** for that machine and
+> when. Where that control plane is a third party's, that is a disclosure beyond
+> ADR-0124 §3's enumeration — which names what the operator holds about devices and
+> networks and does not name an issuance event — and it is **accepted** here rather
+> than read into §3's acceptance.
 
-> **Normative.** What differs between the routes is **publication**, and only that.
-> **On the publicly trusted route** — the one available in practice — issuance makes
-> the gateway machine's overlay name **public**, in the certificate itself and in
-> the transparency logs such an authority publishes to. **On the
-> owner-administered route** nothing about the machine becomes public: the issuing
-> authority is the owner's, and no log outside the owner's own systems records it.
+> **Normative.** §1's publicly trusted authority then makes the gateway machine's
+> overlay name **public**, in the certificate itself and in the transparency logs
+> such an authority publishes to. That is a second disclosure and it too is
+> **accepted**.
 
-> **Normative.** Both consequences are **accepted**, on the same terms ADR-0124 §3
-> accepted the coordination metadata: each is the owner's act, each is bounded and
-> enumerable, and each discloses a name and an instant and nothing else — no
-> request, no response, no byte of the store, and no address that is reachable from
-> the public internet.
+> **Normative.** Both are accepted on the same terms ADR-0124 §3 accepted the
+> coordination metadata: each is the owner's act, each is bounded and enumerable,
+> and each discloses a name and an instant and nothing else — no request, no
+> response, no byte of the store, and no address that is reachable from the public
+> internet.
 
 **The delta is smaller than it first looks, and naming it exactly is what makes it
 acceptable.** ADR-0124 §3 already has the overlay's operator holding "each
 device's name, platform and public key", and the times at which each device is
 online. The name is therefore not newly known to the operator, and neither is the
 fact that the machine was doing something at a given instant; what §3's
-enumeration does not name is an **issuance**, and what is new on the public route
-is that the name goes **public** rather than staying with that one party.
-Adversarial review found the first half on the round after the two routes were
-split — an owner running someone else's control plane and their own authority
-still tells that operator a certificate was issued — which is why the clause above
-covers both routes and the publication clause covers only one. An overlay name that is
-derived from the owner's account is the case where that matters most, and an owner
-for whom it matters has the vendor's own remedy — the tailnet name is theirs to
-choose — as well as this ADR's exit below.
+enumeration does not name is an **issuance**, and what is new beyond that is that
+the name goes **public** rather than staying with that one party. Adversarial
+review found the first half while an intermediate draft still admitted a second
+root — an owner running someone else's control plane and their own authority still
+tells that operator a certificate was obtained — and the point outlived the draft,
+which is why the two disclosures are stated separately above. An overlay name
+derived from the owner's account is the case where the second matters most, and an
+owner for whom it matters has the vendor's own remedy: the tailnet name is theirs
+to choose.
 
 **What the public name does not give anyone is a way in.** The listener binds an
 overlay address under ADR-0174 §2, unchanged; the name resolves outside the
@@ -497,20 +493,17 @@ does. This is precisely why the first clause of this section forbids the gateway
 invoke it — the convenience of a gateway that provisions its own certificate would
 have cost ADR-0004 §2's residency question, and it is not for sale at that price.
 
-**The exits are named rather than taken, and the smaller one is the only one
-available today.** The **name** is the owner's to choose — an overlay name that
-says nothing about them discloses nothing about them, and that costs an operating
-act they are performing anyway. A control plane the owner hosts removes the vendor
-from the issuance path but **not** the public authority from it, because §1's
-trust requirement is a fact about the browsing device and not about who runs the
-overlay; an owner who self-hosts still ends up in a public log. **The exit that
-removes the log entirely is §1's second root**, and it is genuinely narrow: it
-needs a browsing device that already trusts an authority the *owner* administers,
-which is a deployment an owner either has or does not, and which this ADR admits
-without asking anyone to build. What is **not** an exit is installing such a root
-to obtain one — §1 refuses that in terms, and it is the self-signed hazard wearing
-a better hat. **Revisit when** the trust requirement can be met some third way, or
-when what an overlay's issuance discloses stops matching this section.
+**The one exit is the name itself, and the two that look like exits are not.** An
+overlay name that says nothing about the owner discloses nothing about them, and
+choosing it costs an operating act they are performing anyway. A control plane the
+owner hosts removes the vendor from the issuance path but **not** the public
+authority from it, because §1's requirement is a fact about the browsing device
+and not about who runs the overlay: an owner who self-hosts still ends up in a
+public log. And a privately trusted root, which would remove the log entirely, is
+refused by §1 — installing one for this purpose is the self-signed hazard wearing
+a better hat, and relying on one somebody else installed hands that party the
+gateway's own name. **Revisit when** the trust requirement can be met some third
+way, or when what an overlay's issuance discloses stops matching this section.
 
 ### 5. What the gateway discloses when it binds, and what that disclosure is not
 
@@ -584,8 +577,9 @@ requires on every connection.
 > set the owner configured, and it asks no resolver what any name means. This ADR
 > adds no name-admission rule, no resolution step and no clause to ADR-0174 §6.
 
-> **Normative.** The gateway refuses at start, and reports why, when no element of
-> `gateway_remote_host_names` is a name the configured certificate presents.
+> **Normative.** The gateway refuses at start, and reports why, unless **every**
+> element of `gateway_remote_host_names` is a name the configured certificate
+> presents, and the list is non-empty. It names the elements that failed.
 
 **Whose resolver participates is the question #912 is about, and the answer is
 unchanged by this ADR.** #912 records that `wire.address.check_remote_address`
@@ -625,12 +619,33 @@ instruction already covers what an owner should do about it — "pick one author
 and stay on it" — and `docs/guide/phone.md` already says the same in the owner's
 words.
 
-**Refusing at start when the certificate names nothing the owner configured turns
-a silent dead end into a sentence.** Without that clause the failure surfaces as a
+**Refusing at start when the certificate does not name what the owner configured
+turns a silent dead end into a sentence.** Without it the failure surfaces as a
 phone that cannot load a page, from a gateway that started cleanly, for a reason
 visible only in the certificate. It is ADR-0174 §8's own move — refuse at start
 what only the running machine can decide — applied to the one new way this
 configuration can be internally inconsistent.
+
+**Every element rather than one, and adversarial review is why.** An earlier
+draft asked only that *some* configured name match, which starts a gateway whose
+list still carries an authority the certificate does not cover — a name ADR-0174
+§6 dutifully admits as a `Host` value and no browser can ever reach, because it
+refuses the certificate before the request exists. That is the same dead end the
+clause exists to remove, hidden behind a list member that happens to work; a stale
+name left over from a rename is the ordinary way to get one. Requiring every
+element costs an owner nothing they can use, since an uncovered name is
+unreachable either way, and it turns a page that will not load into a line at
+start-up naming the element.
+
+**This adds a condition to `gateway_remote_host_names` and falsifies no sentence
+of ADR-0174 §8, which is why §10 records it as a stacked addition rather than a
+second supersession.** §6 of that ADR delegates the field entirely — "§8 is the
+single statement of what it holds, what its default is and when it is refused …
+This section states only what the gateway does with it, and adds no condition on
+it" — so a new condition belongs beside §8's, and §8's own sentences stay true: the
+field still holds the additional authorities §6 admits, and a non-empty list while
+`gateway_remote_address` is unset is still refused at load. What §8 could not have
+spoken to is a certificate, because under ADR-0174 there was none.
 
 **That refusal supersedes one sentence of ADR-0174 §8 and the record is owed, so
 it is named here rather than absorbed** (§10). §8 says of
@@ -898,7 +913,14 @@ than reading it into §3's.
 on ADR-0168 §6's cookie half. §6's clause lists what the cookie carries and stays
 true of one carrying more.
 
-**A third, likewise**: §5's ordering of ADR-0174 §3's identity check ahead of the
+**A third, likewise**: §6's requirement that every element of
+`gateway_remote_host_names` be a name the certificate presents. ADR-0174 §6
+delegates that field's conditions to its §8 in terms, and every sentence of §8
+stays true of a list this ADR additionally requires the certificate to cover — §8
+could not have spoken to a certificate, because under ADR-0174 there was none. §6
+of this ADR carries the argument.
+
+**A fourth, likewise**: §5's ordering of ADR-0174 §3's identity check ahead of the
 TLS handshake. Every clause of §3 stays true — the identity is still obtained
 before anything is served, still before ADR-0168 §7's checks and before any session
 is read, and still from the agent on the gateway's own machine. What is added is an
@@ -985,10 +1007,9 @@ it is then permitted to do is that surface's own ADR's business (§9).
 **What gets harder.** A gateway with a remote listener now has one more way to fail
 to start, and an expired certificate takes the whole gateway down rather than
 degrading it — deliberately (§2), and stated as a residual there. An owner who
-never renews discovers it at a restart rather than at the moment of expiry. And on
-the publicly trusted route — the one available in practice — the machine's overlay
-name becomes public where it was the overlay operator's alone; on §1's other route
-it does not, and on both the operator learns that a certificate was issued (§4).
+never renews discovers it at a restart rather than at the moment of expiry. And the
+machine's overlay name becomes public where it was the overlay operator's alone,
+with that operator learning the issuance besides (§4).
 
 **What gets easier.** Every secure-context capability the browser surface may later
 want — push, service workers, `crypto.subtle` — becomes reachable on the remote
@@ -1008,6 +1029,15 @@ ADR-0174 §6 already told them to make.
   so teaching the owner to overrule it spends what it buys. A trusted local root
   installed on the phone is the same objection one step further along, and it adds
   an operating act on every browsing device rather than one on the gateway host.
+- **A root the owner administers, admitted beside the public one.** Drafted after
+  round 5's finding and withdrawn at round 9, and §1 records why: it is a genuinely
+  better privacy outcome for whoever has it — a secure context with nothing
+  published — but it splits the issuance requirement from the trust requirement,
+  splits §4's disclosure account in two, and drew a fresh contradiction in each of
+  the two rounds it survived. *Rejected* in §1: its beneficiary is an owner whose
+  device already trusts an authority they run and who did not install it for this,
+  and installing one for this is what §1 refuses. An owner who really is in that
+  position has a superseding ADR available, on evidence this one lacks.
 - **An overlay's own private certificate authority.** The shape architecture review
   found in an earlier draft's vendor-neutral clause, and the reason §1 now carries a
   trust requirement: an overlay may well issue for a name it assigns, and if the
