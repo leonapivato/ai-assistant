@@ -787,6 +787,75 @@ async def test_a_query_the_user_negated_or_quantified_does_not_name_its_opposite
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+async def test_a_term_does_not_name_a_longer_word_it_is_merely_part_of() -> None:
+    """A word, and not a fragment of one — with a store holding **one** record.
+
+    The singleton is the case, not a detail. Ambiguity is only a safety net where a
+    second record exists to be ambiguous with, so a term matching part of an unrelated
+    word resolves to that record *alone* and parks a destructive confirmation on it:
+    ``car`` would name ``carpet``, and the only thing between the user and a forgotten
+    belief they never named would be their reading of the card.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I own a carpet"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I own a car")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+@pytest.mark.parametrize(
+    ("query", "content", "resolved"),
+    [
+        pytest.param("that I like jazz", "the user likes jazz", True, id="a-plural-verb"),
+        pytest.param("about my commute", "how long are your commutes?", True, id="a-plural-noun"),
+        pytest.param("that I sail", "the user is sailing", True, id="a-participle"),
+        pytest.param("that I go sailing", "the user sails", False, id="a-word-that-is-not-there"),
+        pytest.param("that I ran to work", "the user runs to work", False, id="an-irregular-verb"),
+    ],
+)
+async def test_the_tolerance_is_an_ending_and_stops_there(
+    query: str, content: str, resolved: bool
+) -> None:
+    """What :data:`~ai_assistant.orchestration.routing._INFLECTIONS` buys, and what it does not.
+
+    A user speaks in the first person and a stored belief is often written in the third,
+    so ``like``/``likes`` and ``commute``/``commutes`` are the same word to a reader and
+    have to be the same word here. What is refused is everything past a closed suffix
+    list — a word the record simply does not carry, and the irregular forms a stemmer
+    would reach. ``NOT_FOUND`` is the honest answer to those: the user says the record's
+    own word and the next pass finds it, which is a sentence they can act on, while a
+    vocabulary of exceptions is a dependency and a set of surprises inside a lookup that
+    ends in a destructive confirmation.
+    """
+    held = belief("b-1", content)
+    operations = Operations(beliefs_held=(held,))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    expected = (
+        Resolved(subject=(held,), argument="b-1")
+        if resolved
+        else Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+    )
+    assert resolution == expected
+
+
+async def test_a_query_joining_its_terms_differently_does_not_name_the_record() -> None:
+    """A conjunction is part of what a record asserts, so it is not framing.
+
+    "I like tea or coffee" and "I like tea and coffee" are different claims about the
+    user, and a lookup that dropped the joining word would offer the second to a user
+    who said the first — one candidate, so §7 would park a confirmation on it. The same
+    reasoning keeps ``if``, ``when`` and ``where`` out of the framing set: each says
+    something about the proposition rather than about how it was referred to.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I like tea and coffee"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I like tea or coffee")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 
@@ -809,7 +878,7 @@ async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
 
 
 @pytest.mark.parametrize(
-    "query", ["that", "the fact", "  the thing you told me  ", "?!", "the question"]
+    "query", ["that", "the fact", "  the thing you asked me about  ", "?!", "the question"]
 )
 async def test_a_query_that_is_nothing_but_framing_names_no_record(query: str) -> None:
     """A query with no distinctive term of its own resolves to nothing, reading no store.

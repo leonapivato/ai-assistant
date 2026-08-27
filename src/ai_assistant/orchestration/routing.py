@@ -677,10 +677,10 @@ def _wanted(query: str) -> frozenset[str]:
 def _names(wanted: frozenset[str], value: str) -> bool:
     """Whether ``value``'s own words carry **every** distinctive term of the query.
 
-    The rule, whole: each term of ``wanted`` must appear inside some word of ``value``.
-    It is a **lookup, not a generation** (§5) — total, order-independent, and free of
-    rank, score, best-match and any second model call, so the same query and the same
-    store give the same candidates on every run.
+    The rule, whole: each term of ``wanted`` must be one of ``value``'s words, give or
+    take one of :data:`_INFLECTIONS`. It is a **lookup, not a generation** (§5) — total,
+    order-independent, and free of rank, score, best match and any second model call, so
+    the same query and the same store give the same candidates on every run.
 
     **Term-wise rather than whole-span**, which is what #1647 records: the router is
     asked for the user's own words and copies the connective the sentence carried, so
@@ -689,22 +689,50 @@ def _names(wanted: frozenset[str], value: str) -> bool:
     ended in ``NOT_FOUND``. Requiring each word instead of one span costs nothing that
     matters here and makes the framing a copied span drags along harmless.
 
-    **Inside a word rather than equal to it**, so this matches everything the whole-span
-    rule matched and more: a term matching a longer word (``like`` in ``likes``, ``sail``
-    in ``sailing``) keeps the tolerance the substring rule happened to have, and the
-    spurious pairs it also admits (``car`` in ``carpet``) end in ``AMBIGUOUS`` over a
-    listing the user reads, which is the outcome §5 designed for and the direction #1647
-    argues for: "it degrades toward ``AMBIGUOUS`` … which is the behaviour §5 already
-    designed for and which a ``NOT_FOUND`` gives them nothing to act on".
+    **A word, and not a fragment of one.** ``car`` does not name ``carpet``, and the
+    tolerance stops at the closed suffix list rather than at "appears inside": a store
+    holding one belief has no second candidate to be ambiguous against, so a term that
+    matched part of an unrelated word would resolve to it alone and park a destructive
+    confirmation on it. Degrading toward ``AMBIGUOUS`` is only a safety net where a
+    second record exists to be ambiguous *with*, so it is not one, and the match is
+    narrow where it can be and generous only where a person would say the two words are
+    the same word.
 
-    **Widening the match widens what may be confirmed, and that is where the guard
-    already is.** A one-candidate resolution parks (§7) on a card carrying the typed
-    record, and ADR-0073 §5's show-then-confirm binds a routed ``forget`` whole — so
-    the user reads the record this resolved to before anything is destroyed.
+    **Widening the match widens what may be confirmed, and that is where the remaining
+    guard is.** A one-candidate resolution parks (§7) on a card carrying the typed
+    record, and ADR-0073 §5's show-then-confirm binds a routed ``forget`` whole — so the
+    user reads the record this resolved to before anything is destroyed, and a match this
+    rule admits that the user did not mean is declined rather than performed.
     """
-    words = _terms(value)
-    return all(any(term in word for word in words) for term in wanted)
+    return all(any(_same_word(term, word) for word in _terms(value)) for term in wanted)
 
+
+def _same_word(term: str, word: str) -> bool:
+    """Whether ``term`` and ``word`` are the same word, give or take one inflection.
+
+    Equality, or one is the other followed by a suffix of :data:`_INFLECTIONS` — which is
+    what keeps ``like`` naming ``likes``, ``sail`` naming ``sailing`` and ``commute``
+    naming ``commutes`` while ``car`` names nothing of ``carpet``. Deliberately a closed
+    suffix list and not a stemmer: a stemmer is a dependency, a vocabulary and a set of
+    surprises, and the tolerance this needs is the difference between the person a user
+    speaks in and the person a stored belief is written in.
+
+    What it does not reach — ``ran`` for ``run``, ``feet`` for ``foot``, ``commuting``
+    for ``commute`` — ends in ``NOT_FOUND``, which is the honest answer and the one the
+    user can act on by saying the record's own word.
+    """
+    if term == word:
+        return True
+    longer, shorter = (word, term) if len(word) > len(term) else (term, word)
+    return any(longer == shorter + suffix for suffix in _INFLECTIONS)
+
+
+#: The endings one word of a query may differ from a record's word by, and the whole of
+#: the tolerance :func:`_same_word` has. Small on purpose: every entry widens what a
+#: destructive operation may resolve to, and the cost of an ending that is missing is a
+#: ``NOT_FOUND`` the user can answer, while the cost of one too many is a confirmation
+#: card naming a record they did not mean.
+_INFLECTIONS: Final = ("s", "es", "d", "ed", "ing")
 
 #: One word of a record or a query: a run of letters or digits. Underscores are
 #: separators rather than word characters, so a source named ``google_calendar`` is two
@@ -712,48 +740,52 @@ def _names(wanted: frozenset[str], value: str) -> bool:
 _WORD: Final = re.compile(r"[^\W_]+")
 
 #: The words a **query** carries as framing rather than as subject, dropped from the
-#: query side of the comparison and from that side only (#1647). Two closed classes,
-#: and nothing else belongs here:
+#: query side of the comparison and from that side only (#1647).
 #:
-#: 1. **English function words** — articles, demonstratives, pronouns and possessives,
-#:    the common prepositions and conjunctions, the copulas and auxiliaries, and the
-#:    one-letter fragments an apostrophe leaves (``user's`` reads as ``user`` and
-#:    ``s``). These discriminate nothing: a belief store's records are sentences, so
-#:    ``the`` narrows a listing not at all, while a query that carried one and a record
-#:    that did not was the whole of the miss #1647 recorded. **Negations and
-#:    quantifiers are not among them** — ``no``, ``none``, ``all``, ``any``, ``every``
-#:    and their kind say what a record asserts rather than frame it, and a query the
-#:    user negated must not name the record that says the opposite.
-#: 2. **The words that name a record rather than its content** — a person refers to
-#:    what the assistant holds by its kind ("the question you asked me about my
-#:    commute"), and those words are about the record's *existence*, which is not what
-#:    ``Question.content`` or ``Belief.content`` says.
+#: **The test for membership is one question**: can the word be dropped without changing
+#: *which* proposition the query is about? Only two classes pass it — the closed-class
+#: function words that hold a sentence together (articles, demonstratives, pronouns and
+#: possessives, the framing prepositions, the copulas, auxiliaries and modals, and the
+#: fragments an apostrophe leaves, so ``user's`` reads as ``user`` and ``s``), and the
+#: words that name a **record** rather than say what it holds, because a person refers
+#: to what the assistant keeps by its kind ("the question you asked me about my
+#: commute") and those words are about the record's existence rather than about what
+#: ``Question.content`` says.
+#:
+#: **What is deliberately absent matters as much as what is here**, because a term
+#: dropped from the query stops constraining the match, and a query that no longer
+#: constrains can name the record that says the opposite:
+#:
+#: - **negations and quantifiers** — ``no``, ``none``, ``all``, ``any``, ``every`` —
+#:   without which "I have no pets" names the belief "I have pets";
+#: - **conjunctions** — ``and``, ``or``, ``but``, ``if``, ``when``, ``where`` — without
+#:   which "tea or coffee" names the belief that says "tea and coffee";
+#: - **particles and directional prepositions** — ``into``, ``over``, ``under``, ``up``,
+#:   ``out``, ``off``, ``down`` — which say where a thing is or went;
+#: - **the mental-state and reporting verbs** — ``know``, ``remember``, ``think``,
+#:   ``say``, ``tell``, ``told`` — which are what a belief asserts, not how it is
+#:   referred to.
 #:
 #: The record side keeps all of its words, which is what makes the asymmetry safe: a
 #: record whose own words are ``the`` and ``about`` is still matched by a query naming
-#: them, because the containment is tested against everything the record says.
+#: them, because the match is tested against everything the record says.
 _FRAMING: Final[frozenset[str]] = frozenset(
     word
     for group in (
-        # articles and demonstratives — and **no quantifier and no negation**, which
-        # say what a record asserts rather than frame it: dropping `no` would let
-        # "I have no pets" name the belief "I have pets" and park a destructive
-        # confirmation on the record that says the opposite.
+        # articles and demonstratives
         "a an the this that these those",
         # pronouns and possessives
         "i me my mine myself we us our ours you your yours he him his she her hers",
-        "it its they them their theirs who whom whose which what",
-        # prepositions and conjunctions
-        "about of for to from on in at with by as and or but so than then if when",
-        "where into over under up out off down",
+        "it its they them their theirs",
+        # the prepositions that frame a reference rather than place a thing
+        "about of to from for on in at with by as",
         # copulas, auxiliaries and modals
         "am is are was were be been being do does did done have has had",
         "will would shall should can could may might must",
         # the words that name a record rather than say what it holds
-        "ask asks asked asking belief beliefs fact facts grant grants know knows",
-        "memory memories note notes question questions record records remember",
-        "remembers said say says source sources tell tells told thing things think",
-        "thinks",
+        "belief beliefs fact facts question questions memory memories note notes",
+        "record records source sources grant grants thing things",
+        "ask asks asked asking",
         # the fragments an apostrophe leaves
         "s t d ll re ve m",
     )
