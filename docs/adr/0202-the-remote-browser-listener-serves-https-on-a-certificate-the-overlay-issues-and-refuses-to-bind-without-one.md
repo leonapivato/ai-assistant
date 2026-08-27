@@ -1,6 +1,6 @@
 # 202. The remote browser listener serves HTTPS on a certificate the overlay issues, and refuses to bind without one
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 
 - **This is the scheme decision ADR-0174 §7 demanded and §11 deferred** (#1668).
