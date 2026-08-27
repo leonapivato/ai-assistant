@@ -5663,6 +5663,21 @@ class Engine:
         resolves anything, so a park past its lifetime raises whether or not any capacity
         has been sought and whether or not ``pending_confirmations`` has run since.
 
+        **A claimed park keeps its ``route_id`` until its answer row has landed**, and
+        that is ADR-0197 §9 read from its purpose rather than from its shortest sentence.
+        §9 holds the reservation "for exactly as long as the park is live" and releases it
+        "in the same critical section that claims or evicts the park" — and an *evicted*
+        park is released here, because no answer is coming. A *claimed* one is not
+        finished: §9 orders the row before the effect precisely so the pair is one act, so
+        the park's lifecycle ends when its answer is recorded. Releasing at the pop instead
+        opens a window a repeating id factory reaches — the second route mints the same id,
+        registers its own ``OWED`` row, and the approved park's ``GIVEN`` then collides
+        with it and returns ``UNRECORDED``, spending the user's yes on nothing. §9 forbids
+        exactly that outcome in terms: "a pruned row costs history and **never costs a
+        resolution**". A collision here is caught where §9 puts every other one, at the
+        reserve rather than at the store, because at a small ``routing_trail_max_rows`` the
+        retained rows are not a census of live routes.
+
         Returns:
             The park, or ``None`` where this token names no routed park at all — which is
             the ordinary case for a token naming a parked *step*, and is why this answers
@@ -5678,14 +5693,19 @@ class Engine:
             if park is None:
                 return None
             self._routed_parks.pop(token.handle, None)
-            self._reserved_routes.discard(park.route_id)
             if self._now() - park.registered_at >= self._routed_ttl:
+                # An **evicted** park releases its identity here: no answer is coming, so
+                # nothing will be written under it and the next route may have it.
+                self._reserved_routes.discard(park.route_id)
                 msg = (
                     "this token names a routed confirmation that has expired; nothing has "
                     "happened yet — the operation was never performed — so ask for it again "
                     "rather than resuming this token"
                 )
                 raise UnknownContinuationError(msg)
+            # A **claimed** park keeps its identity until its answer row has landed, which
+            # :meth:`_resume_routed` releases in a ``finally``. The park's ceiling slot is
+            # already free — it left the table above — and only the id is held.
             return park
 
     async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> TurnOutcome:
@@ -5698,6 +5718,12 @@ class Engine:
         exception. That is ADR-0197 §13's partial supersession of ADR-0042 §4, scoped to
         exactly this case: a ``resume`` continuing a parked *step* still raises.
 
+        **The claim keeps the route's identity and this releases it**, in a ``finally``
+        once the answer has landed or failed to (:meth:`_claim_routed_park`). Between the
+        two, no second route may mint this id — which is what stops a repeating factory
+        registering an ``OWED`` row that the approved park's ``GIVEN`` then collides with,
+        the failure §9 forbids when it rules that a pruned row "never costs a resolution".
+
         **A row whose write fails ends in** ``UNRECORDED`` **with the park already
         claimed**, because §9 orders the write before the effect and §7 orders the claim
         before the write. The token is spent, the slot released, and nothing performed. The
@@ -5707,18 +5733,26 @@ class Engine:
         ``UnknownContinuationError``.
         """
         approval = RouteApproval.GIVEN if approved else RouteApproval.REFUSED
-        if not await self._record_route(
-            park.route_id,
-            operation=park.operation,
-            approval=approval,
-            subject=park.argument,
-            conversation_id=park.conversation_id,
-        ):
-            routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.UNRECORDED)
-        elif not approved:
-            routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.REFUSED)
-        else:
-            routed = await self._perform_route(park.operation, argument=park.argument)
+        try:
+            if not await self._record_route(
+                park.route_id,
+                operation=park.operation,
+                approval=approval,
+                subject=park.argument,
+                conversation_id=park.conversation_id,
+            ):
+                routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.UNRECORDED)
+            elif not approved:
+                routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.REFUSED)
+            else:
+                routed = await self._perform_route(park.operation, argument=park.argument)
+        finally:
+            # The identity the claim kept, given back once the answer has been written —
+            # or once writing it has failed, which is equally the end of this route. Held
+            # across the await above and released on every path out of it, including a
+            # cancellation: an identity that could leak would exhaust the retry budget for
+            # every later route (ADR-0197 §9).
+            self._reserved_routes.discard(park.route_id)
         composed = await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome
         )

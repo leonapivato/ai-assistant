@@ -8166,8 +8166,12 @@ class AssistantEngine(Protocol):
         that case (ADR-0197 §13). And its ``turn`` is ``None`` for ADR-0197 §8's reason
         rather than ADR-0052 §3's. **Everything else is unchanged**, the ``timeout``
         argument's meaning and ``UnknownContinuationError`` included, and every resume
-        that continues a parked step is ruled exactly as it was before — carrying its
-        step, and raising ``PermissionDeniedError`` on a refusal.
+        that continues a parked step is ruled exactly as it was before: it carries its
+        step, and ``approved=False`` becomes the ``DENY`` *ruling* ADR-0042 §4
+        guarantees — a :attr:`~ai_assistant.core.types.Disposition.DENIED` disposition in
+        the outcome, never an exception. ADR-0197 §13's own record on ADR-0042 supersedes
+        that guarantee **only** "as it reaches a resume answering a routed park", which is
+        what leaves it whole here.
 
         ``resume`` **routes nothing**: it carries an opaque token and a boolean and no
         utterance, so there is no input a router could consume, and what it performs is
