@@ -256,24 +256,35 @@ class _ScriptedRecorder:
 
 
 class _BlockingRecorder:
-    """A ``RoutingRecorder`` that parks inside ``record`` until it is released.
+    """A ``RoutingRecorder`` that parks inside a chosen ``record`` until it is released.
 
-    The lever ADR-0197 §7's cancellation case needs: a pass cancelled at an await between
-    the reservation and the registration. A cancelled task never resumes past the
-    ``await`` below, so the row never lands — which is what makes the later route's id
-    draw a clean one rather than a collision with a row the cancelled pass wrote anyway.
+    The lever two of ADR-0197's timing cases need. §7's cancellation case wants a pass
+    cancelled at an await between the reservation and the registration — a cancelled task
+    never resumes past the ``await`` below, so the row never lands, which is what makes
+    the later route's id draw a clean one rather than a collision with a row the cancelled
+    pass wrote anyway. §9's claim-to-write case wants the *answer* row held open while
+    another route tries to mint the identity the claimed park is still writing under.
+
+    ``hold_at`` is which call to block on, counted from one, so a case can let the park's
+    own ``OWED`` row through and stop at the ``GIVEN`` that answers it. **Exactly one call
+    is ever held**: a write arriving while the first is parked has to run to its own
+    answer, since it is what the case is driving *at* the held one.
     """
 
-    def __init__(self) -> None:
-        """Create a recorder holding nothing, with both gates closed."""
+    def __init__(self, *, hold_at: int = 1) -> None:
+        """Create a recorder holding nothing, blocking on the ``hold_at``-th call."""
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.rows: list[RoutedOperationRecord] = []
+        self._hold_at = hold_at
+        self._calls = 0
 
     async def record(self, record: RoutedOperationRecord) -> None:
-        """Signal arrival, wait to be let go, then append."""
-        self.entered.set()
-        await self.release.wait()
+        """Append at once, or — on the one call this was armed for — wait to be let go."""
+        self._calls += 1
+        if self._calls == self._hold_at:
+            self.entered.set()
+            await self.release.wait()
         self.rows.append(record)
 
 
@@ -1175,6 +1186,81 @@ async def test_two_races_under_one_repeating_route_id_register_at_most_one_park(
     assert resumed.routed is not None
     assert resumed.routed.outcome is RouteOutcome.PERFORMED
     assert [row.approval for row in _rows(harness)] == [RouteApproval.GIVEN]
+
+
+def _scripted_ids(*values: str) -> Callable[[], str]:
+    """An id factory yielding ``values`` in order, then unique ones.
+
+    A routed pass draws its ids from one factory in a fixed order — the continuation
+    handle (on a confirm-owed route only), then the ``route_id``, then the row's own id —
+    so a script is how a case puts a **chosen** collision at a chosen moment. A
+    ``_repeating`` factory cannot: it collides the row ids too, and the retry budget is
+    spent by whichever pass draws first rather than by the one the case is about.
+    """
+    remaining = list(values)
+    drawn = 0
+
+    def mint() -> str:
+        nonlocal drawn
+        drawn += 1
+        return remaining.pop(0) if remaining else f"u-{drawn}"
+
+    return mint
+
+
+async def test_an_approved_park_keeps_its_identity_until_its_answer_lands() -> None:
+    """§9: a pruned row "costs history and **never costs a resolution**".
+
+    The interleaving is the one a claim that released the identity at the pop admits, and
+    it costs a user the operation they had **just approved**: a ``forget`` parks under
+    ``R``; the park is resumed ``True``, so it is claimed and its slot freed; its ``GIVEN``
+    write is held open; and a second ``forget`` then routes while the factory offers ``R``
+    again. If the identity went back at the pop, the second route registers an ``OWED`` row
+    under ``R`` and the held ``GIVEN`` collides with a row about a different subject —
+    ``UNRECORDED``, the token spent, the belief still there, and the user's yes spent on
+    nothing.
+
+    **The recorder here is unbounded and keeps no state machine of its own**, which is what
+    makes the case about the *reserve* rather than about the store: there is no retained
+    row for a store rule to catch the collision with, so the only thing that can refuse the
+    second route its id is the engine's own fence. That is §9's own reasoning — "the park
+    table is the state and knows exactly which ids are live, so the reservation is where a
+    collision is caught".
+
+    A blocking recorder rather than a sequential pair, for §12's reason one clause over:
+    the window is between two awaits, and a case that resumed and then routed would pass
+    against an implementation with no fence at all.
+    """
+    recorder = _BlockingRecorder(hold_at=2)
+    harness = _routed_harness(
+        recorder=recorder,
+        max_outstanding_confirmations=4,
+        # handle, route id and row id for the park; the answer row's id; then the second
+        # route's handle and a run of ``R`` long enough to exhaust its retry budget.
+        id_factory=_scripted_ids("h-1", "R", "row-1", "row-2", "h-2", *["R"] * 8),
+    )
+    await _seed_belief(harness.memory)
+    parked = await _parked(harness)
+
+    answering = asyncio.ensure_future(
+        harness.engine.resume(_token(parked), approved=True, timeout=PATIENT)
+    )
+    await recorder.entered.wait()
+    colliding = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+    recorder.release.set()
+    resumed = await answering
+
+    # The approved answer is honoured, which is the whole of the clause: the user said yes
+    # and the belief is gone.
+    assert resumed.routed is not None
+    assert resumed.routed.outcome is RouteOutcome.PERFORMED
+    assert await harness.engine.belief(_BELIEF) is None
+    assert [row.approval for row in recorder.rows] == [RouteApproval.OWED, RouteApproval.GIVEN]
+    # The second route found the identity held and gave up rather than taking it: nothing
+    # parked, no token minted, and no row written under ``R``.
+    assert colliding.routed is not None
+    assert colliding.routed.outcome is RouteOutcome.UNRECORDED
+    assert {row.route_id for row in recorder.rows} == {"R"}
 
 
 async def test_a_failed_route_releases_the_identity_it_reserved() -> None:
