@@ -92,6 +92,8 @@ from ai_assistant.core.types import (
     Message,
     ReplyChunk,
     Role,
+    RoutableOperation,
+    RouteOutcome,
     band_of,
     rests_on_recorded_external_content,
 )
@@ -437,6 +439,108 @@ class ComposingStage:
         # blankness test above and the value carried agree byte for byte.
         return ComposedReply(text=text, degraded=False)
 
+    async def compose_routed(
+        self, *, operation: RoutableOperation, outcome: RouteOutcome
+    ) -> ComposedReply:
+        """Compose the answer for a routed pass, from two enum values (ADR-0197 §6).
+
+        **Exactly two values, and they are the whole of what this stage is given.** The
+        result of a routed operation — the value the operation returned, the candidates
+        a lookup produced, and the subject a confirmation showed — never enters a model
+        prompt: not in the pass that produced it, not in a later pass of the same
+        conversation, and not through the conversation history a later turn retrieves.
+        No query, no resolved argument, no candidate, no record, no listing and no count
+        reaches here, and the signature is what makes that structural rather than
+        careful: there is no parameter for one to arrive through.
+
+        **The two clauses behind that do different work and neither implies the other.**
+        The first is about the *data*: a read trail row carries a source name a stranger
+        wrote, a permission decision carries a tool description an MCP server supplied
+        (ADR-0147), and a belief carries whatever was ingested into it — so a routed
+        result is exactly the class of content ADR-0098 §2 exists for, and the cheapest
+        conformance with §2 is not to render it. The second is about the *authority*: a
+        model that can see what ``recent_decisions`` returned is a model reading the
+        control surface, and a system that then let it route again would have built the
+        chain ADR-0197 §1 forbids structurally.
+
+        **What the user loses is the part worth losing.** A reply composed from an
+        operation and an outcome cannot summarise the trail; it can say *that* the
+        assistant looked, and what it found in the coarsest terms the enum carries. The
+        listing itself is on screen beside it, rendered by the adapter from typed values
+        with the renderer that adapter already has for that operation — ADR-0170 §6's
+        shape exactly, and stronger here, because the model never saw the record at all.
+
+        Originates **exactly one** ``ModelProvider.complete()`` call, as
+        :meth:`compose` does and for its reasons.
+
+        Args:
+            operation: Which of ADR-0197 §3's nine operations the ask was routed to.
+            outcome: What became of it. Never ``AWAITING_CONFIRMATION``: a routed park
+                owes no answer, is not composed for, and originates no model call
+                (ADR-0197 §10) — the engine decides that before this stage is reached,
+                exactly as it decides a parked step's.
+
+        Returns:
+            The answer, or a degraded report where the call raised a ``ModelError`` or
+            came back unusable as an answer.
+        """
+        try:
+            answer = await self._model.complete(_routed_prompt(operation, outcome))
+        except ModelError:
+            _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
+            return ComposedReply(text=None, degraded=True)
+        text = answer.content.strip()
+        if not text:
+            _log.warning("reply_composition_failed", reason="blank_completion")
+            return ComposedReply(text=None, degraded=True)
+        return ComposedReply(text=text, degraded=False)
+
+    async def compose_routed_streaming(
+        self, *, operation: RoutableOperation, outcome: RouteOutcome, room: int
+    ) -> AsyncIterator[ReplyChunk | ComposedReply]:
+        """Stream :meth:`compose_routed`'s answer (ADR-0173, ADR-0197 §10).
+
+        ``converse_streaming`` routes identically to ``converse``, so a routed reply
+        streams as any other reply does and ``routed`` rides the terminal
+        ``TurnOutcome``. Every clause of :meth:`compose_streaming` binds here unchanged
+        — one ``stream()`` call and no ``complete()`` call, coalescing that preserves
+        the answer's text, and ``room`` bounding what is held as well as what is emitted
+        — and every clause of :meth:`compose_routed` binds too: the prompt is assembled
+        from two enum values and nothing else.
+
+        Args:
+            operation: Which operation the ask was routed to.
+            outcome: What became of it; never ``AWAITING_CONFIRMATION``.
+            room: How many **escaped** bytes the terminal ``TurnOutcome`` has left for
+                its ``reply``, as :meth:`compose_streaming` takes it.
+
+        Yields:
+            Each chunk as it is composed, and then the report naming the whole answer.
+        """
+        conversation = _routed_prompt(operation, outcome)
+        answer = _Coalescing(room=room)
+        stopped = False
+        try:
+            async with closing_stream(self._streaming.stream(conversation)) as deltas:
+                async for delta in deltas:
+                    completed = answer.take(delta)
+                    if completed is not None:
+                        yield ReplyChunk(text=completed)
+                    if answer.breached:
+                        stopped = True
+                        break
+        except ModelError:
+            _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
+            stopped = True
+        if not answer.published:
+            if not stopped:
+                _log.warning("reply_composition_failed", reason="blank_completion")
+            yield ComposedReply(text=None, degraded=True)
+            return
+        if stopped:
+            _log.warning("reply_composition_truncated", chunks=len(answer.published))
+        yield ComposedReply(text=answer.text, degraded=stopped)
+
     async def compose_streaming(
         self,
         *,
@@ -544,6 +648,94 @@ class ComposingStage:
         if stopped:
             _log.warning("reply_composition_truncated", chunks=len(answer.published))
         yield ComposedReply(text=answer.text, degraded=stopped)
+
+
+#: The system turn for a routed pass (ADR-0197 §6, §10). A second prompt rather than a
+#: branch inside :data:`_SYSTEM_PROMPT`, because the two describe different passes: that
+#: one instructs the model about a plan, a step account and a block of remembered
+#: material, none of which a routed pass has. Its ADR-0098 §2 paragraph is absent for the
+#: same reason — this prompt renders no external content, so there is no span to mark.
+_ROUTED_SYSTEM_PROMPT: Final = """\
+You are the answering stage of an AI assistant, speaking to its own user in the \
+assistant's voice. The user asked the assistant to do something to its own records, \
+and it has already been done. You are told which operation ran and how it turned out, \
+and nothing else at all.
+
+Write one or two sentences telling the user what happened, in their terms. Plain \
+prose, addressed to the user. No JSON, no headings, no bullet lists.
+
+You have NOT been shown what the operation found or destroyed, and you must not \
+pretend otherwise. Never state, guess at or summarise a belief, a source, a question, \
+a reading, a decision, a cost or a count. Where the operation produced a listing, the \
+user is looking at it beside your reply: refer to it, and never describe its contents.
+
+Say only what the two facts below support."""
+
+#: What each operation is called in a sentence the user reads, and what each outcome
+#: means. Two closed vocabularies this system owns, rendered from members and never from
+#: anything a model or a store produced — which is what keeps ADR-0197 §6's second clause
+#: true of the assembled prompt as well as of the call.
+_OPERATION_PHRASE: Final[dict[RoutableOperation, str]] = {
+    RoutableOperation.QUESTIONS: "list the questions the assistant is waiting on",
+    RoutableOperation.RECENT_READS: "list what the assistant has read from the user's sources",
+    RoutableOperation.RECENT_INVOCATIONS: "list what the assistant has done on an authorisation",
+    RoutableOperation.RECENT_DECISIONS: "list what the permission layer has ruled",
+    RoutableOperation.STANDING_GRANTS: "list which sources the user currently authorises",
+    RoutableOperation.SPEND_TOTALS: "report what the assistant's actions have cost",
+    RoutableOperation.FORGET: "destroy one thing the assistant believed about the user",
+    RoutableOperation.REVOKE: "withdraw the user's grant on one source",
+    RoutableOperation.FORGET_QUESTION: "destroy one question the assistant was waiting on",
+}
+
+_OUTCOME_PHRASE: Final[dict[RouteOutcome, str]] = {
+    RouteOutcome.PERFORMED: "it was done",
+    RouteOutcome.AWAITING_CONFIRMATION: "the user has been asked to confirm it",
+    RouteOutcome.REFUSED: "the user declined, so nothing was done",
+    RouteOutcome.AMBIGUOUS: (
+        "more than one record matched what the user said, so nothing was done and the "
+        "matches are shown beside this reply"
+    ),
+    RouteOutcome.AMBIGUOUS_TRUNCATED: (
+        "more records matched what the user said than can be shown, so nothing was done "
+        "and the first of them are shown beside this reply"
+    ),
+    RouteOutcome.NOT_FOUND: "nothing matched what the user said, so nothing was done",
+    RouteOutcome.UNRECORDED: (
+        "the assistant could not record the decision, so it did not act on it and nothing "
+        "was changed"
+    ),
+    RouteOutcome.FAILED: ("it was attempted and failed; whether it took effect is not known"),
+}
+
+
+def _routed_prompt(operation: RoutableOperation, outcome: RouteOutcome) -> tuple[Message, ...]:
+    """Assemble the conversation for a routed pass, from two enum values (ADR-0197 §6).
+
+    Every span is this repository's own: the system turn is a constant, and the user
+    turn is two phrases selected by enum member from two tables declared above. Nothing
+    the model produced, nothing a store holds and nothing a stranger wrote can reach it —
+    which is why ADR-0197 §6's "no adapter, setting, later ADR or implementing lane
+    relaxes the two clauses above by rendering a routed result into text and supplying
+    that text to a model" is a property of this function's *signature* rather than of its
+    body.
+
+    Args:
+        operation: The routed operation.
+        outcome: What became of it.
+
+    Returns:
+        The system turn and the user turn, in that order.
+    """
+    return (
+        Message(role=Role.SYSTEM, content=_ROUTED_SYSTEM_PROMPT),
+        Message(
+            role=Role.USER,
+            content=(
+                f"The user asked the assistant to {_OPERATION_PHRASE[operation]}.\n"
+                f"What happened: {_OUTCOME_PHRASE[outcome]}."
+            ),
+        ),
+    )
 
 
 def _render_request(

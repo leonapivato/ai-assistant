@@ -95,6 +95,7 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     NotificationBudgetError,
     PlanningError,
+    RoutingTrailError,
     TraceStoreError,
     UnknownContinuationError,
 )
@@ -115,11 +116,17 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
+    OperationConfirmation,
     OriginUnrecordedBinding,
     ParkedBinding,
     QueuedQuestion,
     QueueOutcome,
     ReplyChunk,
+    RoutableOperation,
+    RouteApproval,
+    RoutedOperation,
+    RoutedOperationRecord,
+    RouteOutcome,
     StepOutcome,
     StepStatus,
     TraceOutcome,
@@ -145,6 +152,16 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.questions import question_state
+from ai_assistant.orchestration.routing import (
+    Resolved,
+    RoutingStage,
+)
+from ai_assistant.orchestration.routing import (
+    perform as perform_route,
+)
+from ai_assistant.orchestration.routing import (
+    resolve as resolve_route,
+)
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
@@ -158,6 +175,7 @@ if TYPE_CHECKING:
         NotificationPolicy,
         NotificationStore,
         PlanStore,
+        RoutingRecorder,
         SourceReadTrail,
         SpendLedger,
         TraceRetention,
@@ -188,6 +206,7 @@ if TYPE_CHECKING:
         PermissionDecision,
         Question,
         RecordedInvocation,
+        RoutedListing,
         SecretValue,
         SourceGrant,
         SourceReadRecord,
@@ -208,6 +227,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recovery import RecoveryScan
+    from ai_assistant.orchestration.routing import RoutedRoute
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
@@ -220,6 +240,23 @@ _log = structlog.get_logger(__name__)
 #: :data:`~ai_assistant.core.types.NonBlankEncodableText` has no spelling for the
 #: empty answer and a ``None`` reply would encode as ``null`` rather than a string.
 _ROOM_PROBE: Final[str] = "x"
+
+#: ``Settings.routed_confirmation_ttl``'s own default, restated where the invariant
+#: is used so an engine built in a test that reads no setting still has a bounded
+#: routed park (ADR-0197 §7). A routed park is invisible — ``pending_confirmations``
+#: does not list it and no durable store recovers it — so without a lifetime a client
+#: that disconnected between the park and its token would hold a ceiling slot nothing
+#: could ever free.
+_DEFAULT_ROUTED_CONFIRMATION_TTL: Final = timedelta(minutes=15)
+
+#: How many times a colliding ``route_id`` is retried from the injected factory inside
+#: the reserving critical section before the pass gives up (ADR-0197 §9). Small,
+#: because the budget exists for a *repeating* factory rather than for a collision
+#: probability: a random factory does not reach two, and a factory that repeats every
+#: value is not made to work by trying it eight more times. Exhausting it ends the pass
+#: in ``UNRECORDED`` with nothing reserved, nothing parked, no row written, no token
+#: minted and the operation never called.
+_ROUTE_ID_ATTEMPTS: Final = 8
 
 
 def _note_failure(turn: asyncio.Task[TurnOutcome]) -> None:
@@ -1119,6 +1156,127 @@ def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: 
     return "\n".join(lines)
 
 
+def _routed_outcome_of(outcome: RouteOutcome) -> str:  # noqa: PLR0911 — one return per RouteOutcome member; collapsing them would hide the totality `assert_never` rests on
+    """How a routed exchange turned out, as the captured episode's ``outcome`` (§10).
+
+    Total over :class:`~ai_assistant.core.types.RouteOutcome` and mechanically so — the
+    wildcard does nothing but ``assert_never`` — so a member added without a phrase here
+    fails the gate rather than recording an exchange whose outcome reads as empty.
+
+    **Every phrase is about the route and none is about its subject** (ADR-0197 §10).
+    The captured episode carries no part of the routed account: not the listing, not the
+    display subject, not the scalar argument, and not the candidates. That is §6's second
+    sentence made mechanical rather than hoped for — a conversation's recent turns are
+    retrieved into the next turn's prompt (ADR-0074 §5, ADR-0158 §5), so a capture that
+    folded a routed listing into the episode would deliver the routed result to a model
+    one turn later, satisfying every same-pass clause of §6 while breaking §6.
+    """
+    match outcome:
+        case RouteOutcome.PERFORMED:
+            return "the assistant performed the operation the user asked for"
+        case RouteOutcome.AWAITING_CONFIRMATION:
+            return "the operation was parked for the user to confirm"
+        case RouteOutcome.REFUSED:
+            return "the user declined, so the operation was not performed"
+        case RouteOutcome.AMBIGUOUS:
+            return "more than one record matched, so nothing was performed"
+        case RouteOutcome.AMBIGUOUS_TRUNCATED:
+            return "more records matched than could be shown, so nothing was performed"
+        case RouteOutcome.NOT_FOUND:
+            return "nothing matched, so nothing was performed"
+        case RouteOutcome.UNRECORDED:
+            return "the decision could not be recorded, so nothing was performed"
+        case RouteOutcome.FAILED:
+            return "the operation was attempted and failed"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(outcome)
+
+
+def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
+    """The canonical text rendering of a routed exchange (ADR-0074 §4, ADR-0197 §10).
+
+    **The utterance is threaded here rather than read off a turn**, because a routed
+    pass produces no ``TurnResult`` — which is the one obligation ADR-0197 §10 warns a
+    lane will discover the hard way: ``Engine._capture`` builds its episode content from
+    the turn, so a lane that wired routing without threading the utterance would produce
+    a captured exchange with the user's own sentence missing from it, a silent hole in
+    the conversation record visible only to the next person to resume that conversation.
+
+    A resume answering a routed park has no utterance of its own — the adapter relays an
+    opaque token and a boolean — so its episode says what it is, exactly as a resumed
+    step's does.
+    """
+    lines: list[str] = []
+    if utterance is not None:
+        lines.append(f"The user asked: {utterance}")
+    if resumed:
+        lines.append("The user answered the confirmation this operation was parked on.")
+    return "\n".join(lines)
+
+
+#: How a routed pass composes its answer: the operation, the outcome and the
+#: conversation the room is measured against. Two shapes satisfy it —
+#: :meth:`Engine._composed_routed_whole` and a closure over
+#: :meth:`Engine._compose_routed_streaming` — and it is a parameter rather than a flag
+#: for :meth:`Engine._run_turn`'s own reason: a second copy of the routing driver would
+#: be two places for the reservation's release and the capture point to drift apart.
+type _RoutedComposer = Callable[
+    [RoutableOperation, RouteOutcome, str], Awaitable["ComposedReply | None"]
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _RoutedPark:
+    """The private state one routed continuation token names (ADR-0197 §7).
+
+    Never seen by an adapter, never enumerated by ``pending_confirmations``, and never
+    recovered across a restart: a token presented to an engine that cannot resolve it
+    yields ``UnknownContinuationError`` and never a denial (ADR-0084 §7). What a lost
+    routed park costs is **one repeated sentence** — nothing has happened yet, the
+    operation has not run, no side effect is pending, and the resolution is a lookup the
+    next ask redoes in the same way.
+
+    Attributes:
+        operation: Which confirm-owed operation is waiting on the user's answer.
+        subject: The display subject the card rendered, as a one-element listing.
+        argument: The scalar identity the façade will be called with (ADR-0197 §5).
+        route_id: The route's identity, carried from the ``OWED`` row so the ``resume``
+            can write the answer under it (ADR-0197 §9).
+        conversation_id: The conversation the ask ran under, so the resumption is
+            captured where the question was asked.
+        registered_at: When the park was registered, read from the **injected** clock
+            (ADR-0009), which is what lets a test advance the lifetime rather than wait
+            it out.
+    """
+
+    operation: RoutableOperation
+    subject: RoutedListing
+    argument: str
+    route_id: str
+    conversation_id: str
+    registered_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteReservation:
+    """The two resources one route holds, taken together and released together (§7, §9).
+
+    A ceiling slot and an identity, "under one acquisition and one ``finally``". The
+    handle is ``None`` on a read-only route, which parks nothing and so takes no slot
+    (ADR-0197 §1); the ``route_id`` is reserved by **every** route, read-only ones
+    included, because a read-only route's ``NOT_OWED`` row under a live park's id would
+    collide with that park's own answer exactly as a second park's ``OWED`` row would.
+
+    Attributes:
+        route_id: The reserved identity.
+        handle: The reserved continuation handle, which is also the ceiling slot, or
+            ``None`` on a read-only route.
+    """
+
+    route_id: str
+    handle: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class _Parked:
     """The private state one continuation token names (never seen by an adapter).
@@ -1135,6 +1293,88 @@ class _Parked:
     execution_id: str
     step_id: str
     confirmation_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RoutedSurface:
+    """The engine's own operations, as ADR-0197 §2's third clause reaches them.
+
+    Structurally satisfies :class:`~ai_assistant.orchestration.routing.RoutedOperations`,
+    and every member but one **relays the engine's own façade method untouched** — which
+    is §2's third clause and the reason it is stated rather than assumed: "perform the
+    operation" could mean *call the façade method* or *do what the façade method does*,
+    and only the first keeps one implementation of ``forget``. The second would put a
+    second ``MemoryStore.delete`` call site behind a different set of preconditions, which
+    is how two doors to one operation stop behaving the same way. Relaying through the
+    façade is also what gives a routed listing the promoted surface's own defaults, its own
+    bound and its own payload measurement for free.
+
+    The exception is :meth:`beliefs`, which is not a routable operation at all: ADR-0197
+    §5's ``forget`` lookup needs :class:`~ai_assistant.core.types.Belief` records, which is
+    the arm §8 gives that operation, and the promoted ``beliefs`` answers
+    :class:`~ai_assistant.core.types.BeliefSummary` rows.
+
+    A separate object rather than the engine itself, so the engine's own public surface
+    gains nothing: ADR-0197 §9 and §11 are explicit that ``AssistantEngine`` gains no
+    method and no signature moves, and a public ``Engine`` member answering a different
+    type from the Protocol's same-named one is the substitutability trap ADR-0084 §4
+    names.
+    """
+
+    engine: Engine
+
+    async def beliefs(self, *, limit: int, offset: int) -> tuple[Belief, ...]:
+        """Enumerate live beliefs as §8's ``forget`` arm, for §5's lookup only."""
+        return await self.engine._routed_beliefs(limit=limit, offset=offset)
+
+    async def questions(self, *, limit: int, offset: int) -> tuple[Question, ...]:
+        """Relay the promoted ``questions``."""
+        return await self.engine.questions(limit=limit, offset=offset)
+
+    async def recent_reads(self, *, limit: int) -> tuple[SourceReadRecord, ...]:
+        """Relay the promoted ``recent_reads``."""
+        return await self.engine.recent_reads(limit=limit)
+
+    async def recent_invocations(self, *, limit: int) -> tuple[RecordedInvocation, ...]:
+        """Relay the promoted ``recent_invocations``."""
+        return await self.engine.recent_invocations(limit=limit)
+
+    async def recent_decisions(self, *, limit: int) -> tuple[PermissionDecision, ...]:
+        """Relay the promoted ``recent_decisions``."""
+        return await self.engine.recent_decisions(limit=limit)
+
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """Relay the promoted ``standing_grants`` — unpaged, complete or refused."""
+        return await self.engine.standing_grants()
+
+    async def spend_totals(self) -> tuple[SpendTotal, ...]:
+        """Relay the promoted ``spend_totals`` — unpaged."""
+        return await self.engine.spend_totals()
+
+    async def forget(self, record_id: str) -> bool:
+        """Relay the promoted ``forget``."""
+        return await self.engine.forget(record_id)
+
+    async def revoke(self, source: str) -> SourceGrant | None:
+        """Relay the promoted ``revoke``."""
+        return await self.engine.revoke(source)
+
+    async def forget_question(self, question_id: str) -> bool:
+        """Relay the promoted ``forget_question``."""
+        return await self.engine.forget_question(question_id)
+
+
+def _query_of(route: RoutedRoute) -> str:
+    """The query a confirm-owed route must carry, or a defect.
+
+    :func:`~ai_assistant.orchestration.routing._with_query` declines a confirm-owed
+    envelope with no usable query, so a ``None`` here means the router produced a route
+    the envelope reader could not have returned.
+    """
+    if route.query is None:  # pragma: no cover — a defect, not a reachable state
+        msg = f"a routed {route.operation.value} arrived with no query to resolve from"
+        raise AssertionError(msg)
+    return route.query
 
 
 class Engine:
@@ -1174,6 +1414,9 @@ class Engine:
         notification_policy: NotificationPolicy | None = None,
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
+        routing: RoutingStage | None = None,
+        routing_recorder: RoutingRecorder | None = None,
+        routed_confirmation_ttl: timedelta = _DEFAULT_ROUTED_CONFIRMATION_TTL,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
@@ -1509,6 +1752,25 @@ class Engine:
                 rather than as ``core``'s ``NotificationOutbox``, because §3b
                 gives the latter "exactly one method" and that one is the
                 *producer's*; see that module for why the seam is local.
+            routing: The operation-routing stage (ADR-0197 §1, §2), or ``None`` on a
+                deployment that routes nothing — where the pipeline is exactly what it was
+                before this decision, and every ask plans. Wired **together with**
+                ``routing_recorder`` or not at all; the two are one obligation, because a
+                stage with no recorder can take no route (ADR-0197 §9 stops the act the
+                row precedes) and a recorder with no stage records nothing.
+            routing_recorder: The write-only half of ADR-0197 §9's trail — the seam the
+                stage holds, and the reason it can neither read nor ``clear`` what it
+                wrote. One ``permissions/`` store satisfies it and ``RoutingTrail`` alike,
+                so the composition root passes one object here and to a future read
+                surface.
+            routed_confirmation_ttl: ``Settings.routed_confirmation_ttl`` (ADR-0197 §7).
+                How long a routed park stays answerable before it is evicted and its
+                ceiling slot released. Positive and finite, with no spelling for "never":
+                a routed park is invisible — nothing enumerates it and no durable store
+                recovers it — so without a lifetime a client that disconnected between the
+                park and its token would hold a slot nothing could ever free. Elapse is
+                measured against ``now``, never a wall clock read at the seam, so a test
+                advances it rather than waits.
             recovery: ADR-0014 §4's startup scan, or ``None`` where a deployment
                 composes none. Built by the composition root over the **same**
                 plan store and audit store this façade holds, and driven once from
@@ -1694,13 +1956,37 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._max_notification_budget = max_notification_budget
+        # ADR-0197 §1 and §9 are one wiring obligation rather than two. A stage with no
+        # recorder could never take a route — §9 stops the act a row precedes, so every
+        # pass would end `UNRECORDED` while the deployment looked configured — and a
+        # recorder with no stage is a store nothing writes to. Refused at construction
+        # rather than discovered at the first "forget that I ...".
+        if (routing is None) != (routing_recorder is None):
+            msg = (
+                "routing and routing_recorder are wired together or not at all: a routing "
+                "stage with no recorder can take no route, because ADR-0197 §9 stops the act "
+                "the row precedes, and a recorder with no stage records nothing"
+            )
+            raise ConfigurationError(msg)
+        if routed_confirmation_ttl <= timedelta(0):
+            msg = (
+                f"routed_confirmation_ttl must be positive, got {routed_confirmation_ttl!r}: a "
+                f"zero or negative lifetime produces a card unusable the instant it is "
+                f"rendered, and there is no spelling for 'never' (ADR-0197 §7)"
+            )
+            raise ConfigurationError(msg)
+        self._routing = routing
+        self._routing_recorder = routing_recorder
+        self._routed_ttl = routed_confirmation_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
         self._max_payload_bytes = max_payload_bytes
         self._drain_timeout = drain_timeout
         self._parked: dict[str, _Parked] = {}
+        self._routed_parks: dict[str, _RoutedPark] = {}
         self._reserved: set[str] = set()
+        self._reserved_routes: set[str] = set()
         self._recovery_lock = asyncio.Lock()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._closing = False
@@ -3634,8 +3920,24 @@ class Engine:
         review). Recovery and resolution are both off the latency-critical path
         (human-paced confirmations, a cold restart path), so serializing them costs
         nothing that matters.
+
+        **A routed park is not listed here, and is not recovered across a restart**
+        (ADR-0197 §7). ADR-0052 §1's algorithm walks ``plans.active_executions()`` and
+        reads the pending ``CONFIRM`` out of the audit trail; a routed park has neither, so
+        recovery would mean a second durable park store built for this one shape. What a
+        lost routed park costs is one repeated sentence: **nothing has happened yet** — the
+        operation has not run, no side effect is pending, and the resolution is a lookup
+        the next ask redoes in the same way. An enumeration is refused rather than merely
+        omitted, because it would have to render the card again and §7's card is
+        engine-assembled from a resolution this process still holds.
+
+        What this call *does* do for a routed park is evict the expired ones, which
+        reclaims their ceiling slots earlier. That is opportunistic housekeeping and is
+        never what makes an expired park unusable — :meth:`_claim_routed_park`'s check,
+        inside the claim and under this same lock, is.
         """
         async with self._recovery_lock:
+            self._evict_expired_routes()
             recovered: list[Confirmation] = []
             live: set[tuple[str, str]] = set()
             for state in await self._plans.active_executions():
@@ -4770,6 +5072,15 @@ class Engine:
         by :meth:`_converse` once the turn parks (moving into ``_parked``, which
         then counts it) or does not.
 
+        **A routed park counts, and it takes no exemption** (ADR-0197 §7). It is exactly
+        the shape the ceiling exists for — "a client that requests confirmable actions and
+        abandons every token would grow the table without bound" — so it is counted here,
+        the ceiling gets no second setting and no routed-only variant, and a route that
+        cannot reserve a slot meets the same backpressure a step-driving turn does, in the
+        same form. Expired routed parks are evicted first, which reclaims their slots
+        earlier; that is opportunistic housekeeping and is never what makes an expired park
+        unusable, which is :meth:`_claim_routed_park`'s check under the lock.
+
         **Recovered entries do not count.** The ceiling bounds the memory a client
         can pin by requesting confirmable actions and abandoning their tokens — the
         *converse* path, whose entries carry the turn (``turn is not None``). An
@@ -4787,7 +5098,9 @@ class Engine:
             RuntimeError: If ``max_outstanding_confirmations`` confirmations are
                 already outstanding or reserved.
         """
+        self._evict_expired_routes()
         outstanding = sum(1 for parked in self._parked.values() if parked.turn is not None)
+        outstanding += len(self._routed_parks)
         if outstanding + len(self._reserved) >= self._max_outstanding:
             msg = (
                 f"{self._max_outstanding} confirmations are already awaiting an answer; resolve "
@@ -4815,7 +5128,7 @@ class Engine:
         """
         handle = self._id_factory()
         suffix = 0
-        while handle in self._parked or handle in self._reserved:
+        while handle in self._parked or handle in self._routed_parks or handle in self._reserved:
             suffix += 1
             handle = f"{self._id_factory()}#{suffix}"
         self._reserved.add(handle)
@@ -4834,6 +5147,7 @@ class Engine:
             timeout=timeout,
             conversation_id=conversation_id,
             compose=self._composed_whole,
+            compose_routed=self._composed_routed_whole,
         )
 
     async def _converse_streaming(
@@ -4872,8 +5186,17 @@ class Engine:
         ) -> ComposedReply | None:
             return await self._compose_streaming(turn, step, conversation, chunks)
 
+        async def compose_routed(
+            operation: RoutableOperation, outcome: RouteOutcome, conversation: str
+        ) -> ComposedReply | None:
+            return await self._compose_routed_streaming(operation, outcome, conversation, chunks)
+
         return await self._run_turn(
-            utterance, timeout=timeout, conversation_id=conversation_id, compose=compose
+            utterance,
+            timeout=timeout,
+            conversation_id=conversation_id,
+            compose=compose,
+            compose_routed=compose_routed,
         )
 
     async def _composed_whole(
@@ -4899,19 +5222,41 @@ class Engine:
         compose: Callable[
             [TurnResult | None, StepOutcome | None, str], Awaitable[ComposedReply | None]
         ],
+        compose_routed: _RoutedComposer,
     ) -> TurnOutcome:
-        """Resolve the conversation, plan the turn, drive its step, record it.
+        """Route the ask, or resolve the conversation, plan the turn and drive its step.
 
         ``compose`` is how this pass's answer is produced — atomically for
-        :meth:`converse`, as a stream for :meth:`converse_streaming`. It is a
-        parameter rather than a flag because the two differ in nothing else: a
-        second copy of this method would be two places for the confirmation ceiling,
-        the reservation's release and the capture point to drift apart.
+        :meth:`converse`, as a stream for :meth:`converse_streaming` — and
+        ``compose_routed`` is its twin for a pass that took a route, which composes from
+        ADR-0197 §6's two enum values instead of from a turn. Both are parameters rather
+        than a flag because the streaming and whole paths differ in nothing else: a second
+        copy of this method would be two places for the confirmation ceiling, the
+        reservation's release and the capture point to drift apart.
+
+        **The routing stage runs first, and a taken route ends the pipeline there**
+        (ADR-0197 §1). Nothing after it runs on such a pass: no history is read, no goal is
+        minted, no context is assembled, no memories are retrieved, no plan is made or
+        persisted, and no step is driven. A **declined** route is not a failure and is not
+        reported as one — the pass proceeds exactly as it does today and the outcome it
+        returns carries no trace of the stage having run.
+
+        **The conversation is resolved before the route is taken**, which ADR-0197 §1
+        neither requires nor forbids and ADR-0074 §2 does require: "every turn runs under a
+        conversation, and the outcome reports which", resolved "**before** the turn's
+        work". A routed pass is a turn — it is captured (§10) and its row names the
+        conversation (§9) — so an unknown ``conversation_id`` is refused before anything is
+        routed, exactly as it is refused before anything is planned.
         """
         # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
         # does and a continuation marks the conversation active before a reclaim
         # could judge it idle.
         conversation = await self._conversations.begin(conversation_id)
+        route = None if self._routing is None else await self._routing.route(utterance)
+        if route is not None:
+            return await self._routed_pass(
+                utterance, route, conversation=conversation.id, compose=compose_routed
+            )
         history = await self._conversations.history(conversation.id)
         turn = await self._loop.respond(
             utterance, history=history.records, history_degraded=history.degraded
@@ -4977,6 +5322,520 @@ class Engine:
         return await self._capture(
             conversation.id, turn=turn, step=step, resumed=False, parked=parked, composed=composed
         )
+
+    # --- ADR-0197's routing stage, driven --------------------------------
+
+    async def _routed_pass(
+        self,
+        utterance: str,
+        route: RoutedRoute,
+        *,
+        conversation: str,
+        compose: _RoutedComposer,
+    ) -> TurnOutcome:
+        """Drive one taken route to its end (ADR-0197 §1, §5, §7, §9).
+
+        **A taken route ends the pipeline here.** No goal is minted, no context is
+        assembled, no memories are retrieved, no plan is made or persisted, no step is
+        driven and no ``ToolRegistry``, ``ActionPolicy`` or ``ToolInvoker`` is reached.
+        The composing stage still runs, on ADR-0197 §6's two inputs — unless the route
+        parks, which owes no answer at all.
+
+        **The two resources a route holds are taken together and released together**
+        (§7, §9): a ceiling slot, on a confirm-owed route that may park, and a
+        ``route_id``, on every route including a read-only one. Both are reserved in one
+        synchronous section with no ``await`` in it, and both are released in a
+        ``finally`` — the row failing to write, the id factory raising, the resolution
+        raising, the pass being cancelled at any await between the reservation and the
+        registration, and any defect in the code between them. "A slot that can be
+        reserved and never released is the memory-exhaustion vector the ceiling exists to
+        close, reintroduced through the ceiling itself."
+        """
+        operation = route.operation
+        reservation = self._admit_route(operation)
+        if reservation is None:
+            # §9's retry budget exhausted: nothing reserved, nothing parked, no row
+            # written, no token minted and the operation never called.
+            _log.warning("route_unrecorded", reason="no_route_id", operation=operation.value)
+            return await self._finish_route(
+                conversation,
+                utterance,
+                RoutedOperation(operation=operation, outcome=RouteOutcome.UNRECORDED),
+                compose=compose,
+            )
+        registered = False
+        try:
+            outcome = await self._drive_route(
+                route, conversation=conversation, reservation=reservation
+            )
+            registered = outcome.outcome is RouteOutcome.AWAITING_CONFIRMATION
+            if registered:
+                # §10: a routed park is not composed for. The confirmation is what the
+                # user must answer, and prose beside it competes with the question.
+                return await self._finish_route(conversation, utterance, outcome, compose=None)
+            return await self._finish_route(conversation, utterance, outcome, compose=compose)
+        finally:
+            # Held across every await above and released here on every path, which is
+            # what `Engine._converse` already does with the handle it reserves before
+            # driving a step. A live park keeps both: it is holding the slot the ceiling
+            # counts and the identity its answer will be written under.
+            if not registered:
+                self._release_route(reservation)
+
+    async def _drive_route(
+        self,
+        route: RoutedRoute,
+        *,
+        conversation: str,
+        reservation: _RouteReservation,
+    ) -> RoutedOperation:
+        """Resolve, record and then act — in that order, always (ADR-0197 §9).
+
+        **The row is written before the act it precedes**, which is this repository's own
+        pattern rather than a new one: ``ConversationTurn``'s index entry lands before the
+        episode it names for the same reason. The alternative ordering cannot be made true
+        by any amount of care — the two writes are to two stores, and a failure or a
+        cancellation between them leaves a destroyed belief with no row. Ordering it this
+        way inverts the residual into the safe direction: a cancellation between the write
+        and the call leaves a **row for an operation that did not happen**, and an
+        over-recorded trail is one an operator can reconcile where an under-recorded one
+        is a trail nobody can trust.
+        """
+        operation = route.operation
+        if not operation.confirm_owed:
+            if not await self._record_route(
+                reservation.route_id,
+                operation=operation,
+                approval=RouteApproval.NOT_OWED,
+                subject=None,
+                conversation_id=conversation,
+            ):
+                return RoutedOperation(operation=operation, outcome=RouteOutcome.UNRECORDED)
+            return await self._perform_route(operation, argument=None)
+        resolution = await resolve_route(self._routed_surface(), operation, _query_of(route))
+        if not isinstance(resolution, Resolved):
+            # §5: ambiguity and absence both end the route. Nothing is performed, nothing
+            # is confirmed, and §9 writes no row — the route decided nothing to do.
+            return RoutedOperation(
+                operation=operation, outcome=resolution.outcome, listing=resolution.listing
+            )
+        if not await self._record_route(
+            reservation.route_id,
+            operation=operation,
+            approval=RouteApproval.OWED,
+            subject=resolution.argument,
+            conversation_id=conversation,
+        ):
+            return RoutedOperation(operation=operation, outcome=RouteOutcome.UNRECORDED)
+        return self._register_routed_park(
+            operation, resolution, reservation=reservation, conversation=conversation
+        )
+
+    def _register_routed_park(
+        self,
+        operation: RoutableOperation,
+        resolution: Resolved,
+        *,
+        reservation: _RouteReservation,
+        conversation: str,
+    ) -> RoutedOperation:
+        """Move the reservation into a live park and mint its card (ADR-0197 §7).
+
+        Runs to completion with no ``await``, so the entry is in the table before any
+        other caller can observe the slot as free. The handle was reserved and is now
+        spent: it is the continuation token the adapter relays back, and nothing else
+        resolves this park.
+
+        **The card carries no model-written text.** Its content is the operation and the
+        resolved subject as a typed value, and every word the user reads around them is
+        the adapter's own, selected by the enum member. No free text the router produced —
+        the query included — reaches it.
+        """
+        handle = reservation.handle
+        if handle is None:  # pragma: no cover — a defect: a confirm-owed route reserves one
+            msg = f"a routed {operation.value} reached its park with no reserved handle"
+            raise AssertionError(msg)
+        self._routed_parks[handle] = _RoutedPark(
+            operation=operation,
+            subject=resolution.subject,
+            argument=resolution.argument,
+            route_id=reservation.route_id,
+            conversation_id=conversation,
+            registered_at=self._now(),
+        )
+        return RoutedOperation(
+            operation=operation,
+            outcome=RouteOutcome.AWAITING_CONFIRMATION,
+            confirmation=OperationConfirmation(
+                operation=operation,
+                subject=resolution.subject,
+                token=ContinuationToken(handle=handle),
+            ),
+        )
+
+    async def _perform_route(
+        self, operation: RoutableOperation, *, argument: str | None
+    ) -> RoutedOperation:
+        """Call the operation and classify what came back (ADR-0197 §2, §8).
+
+        ``FAILED`` means the operation was **called and raised**, and nothing is asserted
+        about whether it took effect — which is the opposite statement from ``UNRECORDED``,
+        where the row was not written so the operation was never called at all. A surface
+        that rendered the two alike would tell a user their belief might be gone when this
+        decision guarantees it is not.
+
+        Every exception is classified, ``BaseException`` deliberately excluded: a
+        cancellation is not an operation that failed, and swallowing one here would break
+        ADR-0060 §1's propagation clause.
+        """
+        try:
+            listing = await perform_route(self._routed_surface(), operation, argument)
+        except Exception:
+            _log.warning("route_failed", operation=operation.value, exc_info=True)
+            return RoutedOperation(operation=operation, outcome=RouteOutcome.FAILED)
+        return RoutedOperation(operation=operation, outcome=RouteOutcome.PERFORMED, listing=listing)
+
+    async def _record_route(
+        self,
+        route_id: str,
+        *,
+        operation: RoutableOperation,
+        approval: RouteApproval,
+        subject: str | None,
+        conversation_id: str | None,
+    ) -> bool:
+        """Write one row of ADR-0197 §9's trail, and say whether the act may proceed.
+
+        The row's own id is minted **here**, from the id factory the engine already holds
+        injected, before ``record`` is called: the store mints nothing, because a store
+        that minted the id could not be handed a frozen record and a retry could not name
+        the row it was retrying. ``decided_at`` comes from the injected clock (ADR-0009),
+        never from the store.
+
+        Returns:
+            Whether the row landed. ``False`` is ADR-0197 §9's refuse-to-act: the pass ends
+            in ``UNRECORDED``, the operation is not called, no park is registered and no
+            token is minted. It applies to read-only members as well as confirm-owed ones
+            — one ordering, one failure mode, and no partial mode in which some routed
+            operations are recorded and others are not.
+        """
+        recorder = self._routing_recorder
+        if recorder is None:  # pragma: no cover — the pairing check forbids this wiring
+            msg = "a route was taken with no routing recorder wired"
+            raise AssertionError(msg)
+        try:
+            row = RoutedOperationRecord(
+                id=self._id_factory(),
+                route_id=route_id,
+                decided_at=self._now(),
+                operation=operation,
+                approval=approval,
+                subject=subject,
+                conversation_id=conversation_id,
+            )
+            await recorder.record(row)
+        except RoutingTrailError:
+            _log.warning(
+                "route_unrecorded",
+                operation=operation.value,
+                approval=approval.value,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    def _admit_route(self, operation: RoutableOperation) -> _RouteReservation | None:
+        """Reserve this route's ceiling slot and its identity, atomically (§7, §9).
+
+        **One synchronous section with no** ``await`` **in it**, which is how
+        :meth:`_admit_and_reserve` already obtains the ceiling's atomicity on a single
+        event loop: the two resources a route holds are taken under one acquisition, and
+        the Nth concurrent route sees the N-1 already reserved.
+
+        **A check that is not atomic with the registration is not a check, and the window
+        here is wide rather than theoretical** (ADR-0197 §9). Between deciding an id is
+        free and registering the park sit §9's row write and the prune it performs — two
+        awaits on a durable store — so two routes can each find an empty table, each be
+        handed the same id by a repeating factory, and each register. Worse, the prune
+        performed by the second is what removes the first's evidence, so the store's
+        retained-row rule cannot catch what the in-memory check just missed. Reserving here
+        closes the window without adding a second lock.
+
+        **Liveness is checked where liveness lives.** The candidate is tested against every
+        ``route_id`` currently *reserved* — those of registered parks and those of routes
+        still in flight alike — because the trail's retained rows are not a census of live
+        routes at a small ``routing_trail_max_rows``.
+
+        **A read-only route reserves an identity and no slot.** It parks nothing, so it
+        takes no capacity (ADR-0197 §1); it reserves an id anyway, because its ``NOT_OWED``
+        row under a live park's id would collide with that park's own answer exactly as a
+        second park's ``OWED`` row would.
+
+        Returns:
+            The reservation, or ``None`` where the retry budget was exhausted — which ends
+            the pass in ``UNRECORDED`` with nothing held.
+
+        Raises:
+            RuntimeError: If the outstanding-confirmation ceiling is full and this route
+                could park. The same backpressure a step-driving turn meets there, in the
+                same form (ADR-0197 §7).
+        """
+        handle = self._admit_and_reserve() if operation.confirm_owed else None
+        live = {park.route_id for park in self._routed_parks.values()}
+        for _attempt in range(_ROUTE_ID_ATTEMPTS):
+            candidate = self._id_factory()
+            if candidate not in live and candidate not in self._reserved_routes:
+                self._reserved_routes.add(candidate)
+                return _RouteReservation(route_id=candidate, handle=handle)
+        if handle is not None:
+            self._reserved.discard(handle)
+        return None
+
+    def _release_route(self, reservation: _RouteReservation) -> None:
+        """Release both of a route's reservations (ADR-0197 §7, §9).
+
+        Called from a ``finally`` on every path that does not end in a live park. "A
+        reservation that could leak would exhaust the retry budget for every later route,
+        which is the ceiling's own failure mode arriving through the identity instead of
+        the slot."
+        """
+        self._reserved_routes.discard(reservation.route_id)
+        if reservation.handle is not None:
+            self._reserved.discard(reservation.handle)
+
+    def _evict_expired_routes(self) -> None:
+        """Drop every routed park past its lifetime, releasing its slot (ADR-0197 §7).
+
+        **Opportunistic housekeeping and never the thing that makes an expired park
+        unusable.** That is :meth:`_claim_routed_park`'s check, inside the claim and under
+        the same lock; this only reclaims slots earlier, when capacity is sought and when
+        ``pending_confirmations`` runs its existing reconciliation. This decision adds no
+        scheduler and no background job.
+
+        Synchronous and with no ``await`` in it, so it composes with
+        :meth:`_admit_and_reserve`'s own atomicity rather than opening a window inside it.
+        """
+        now = self._now()
+        expired = [
+            handle
+            for handle, park in self._routed_parks.items()
+            if now - park.registered_at >= self._routed_ttl
+        ]
+        for handle in expired:
+            park = self._routed_parks.pop(handle)
+            self._reserved_routes.discard(park.route_id)
+
+    async def _claim_routed_park(self, token: ContinuationToken) -> _RoutedPark | None:
+        """Claim the routed park ``token`` names, once and atomically (ADR-0197 §7).
+
+        Runs under ``_recovery_lock``, the same lock the engine's existing park resolution
+        runs under, and **the claim is what evicts it**: the entry is removed before §9's
+        row is written, before the operation is called, and before anything is composed. A
+        second ``resume`` presenting the same token — concurrent or later, and whatever its
+        ``approved`` value — resolves nothing and raises ``UnknownContinuationError``, so
+        one park yields one answer, one row pair and at most one operation.
+
+        **Expiry is checked inside the claim**, under the same lock and before the token
+        resolves anything, so a park past its lifetime raises whether or not any capacity
+        has been sought and whether or not ``pending_confirmations`` has run since.
+
+        Returns:
+            The park, or ``None`` where this token names no routed park at all — which is
+            the ordinary case for a token naming a parked *step*, and is why this answers
+            rather than raising.
+
+        Raises:
+            UnknownContinuationError: If the token names a routed park whose lifetime has
+                elapsed. The entry is evicted and its slot released on the way out, as
+                ADR-0084 §7 requires of every unresolvable token: never a denial.
+        """
+        async with self._recovery_lock:
+            park = self._routed_parks.get(token.handle)
+            if park is None:
+                return None
+            self._routed_parks.pop(token.handle, None)
+            self._reserved_routes.discard(park.route_id)
+            if self._now() - park.registered_at >= self._routed_ttl:
+                msg = (
+                    "this token names a routed confirmation that has expired; nothing has "
+                    "happened yet — the operation was never performed — so ask for it again "
+                    "rather than resuming this token"
+                )
+                raise UnknownContinuationError(msg)
+            return park
+
+    async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> TurnOutcome:
+        """Answer a routed park, and perform what the answer authorised (ADR-0197 §7).
+
+        **The refusal is returned, never raised.** ``approved`` ``False`` yields
+        ``RouteOutcome.REFUSED`` and **no** ``PermissionDeniedError``, because no
+        ``ActionPolicy`` was consulted and no ``PermissionDecision`` recorded — so there is
+        no ruling for a refusal to be, and a refusal is a ``REFUSED`` row rather than an
+        exception. That is ADR-0197 §13's partial supersession of ADR-0042 §4, scoped to
+        exactly this case: a ``resume`` continuing a parked *step* still raises.
+
+        **A row whose write fails ends in** ``UNRECORDED`` **with the park already
+        claimed**, because §9 orders the write before the effect and §7 orders the claim
+        before the write. The token is spent, the slot released, and nothing performed. The
+        remedy is this section's own sentence: nothing has happened yet, and the operation
+        is asked for again rather than resumed again — a surface that told the user to
+        retry the token would be telling them to present one that now raises
+        ``UnknownContinuationError``.
+        """
+        approval = RouteApproval.GIVEN if approved else RouteApproval.REFUSED
+        if not await self._record_route(
+            park.route_id,
+            operation=park.operation,
+            approval=approval,
+            subject=park.argument,
+            conversation_id=park.conversation_id,
+        ):
+            routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.UNRECORDED)
+        elif not approved:
+            routed = RoutedOperation(operation=park.operation, outcome=RouteOutcome.REFUSED)
+        else:
+            routed = await self._perform_route(park.operation, argument=park.argument)
+        composed = await self._composing.compose_routed(
+            operation=routed.operation, outcome=routed.outcome
+        )
+        return await self._capture(
+            park.conversation_id,
+            turn=None,
+            step=None,
+            resumed=True,
+            composed=composed,
+            routed=routed,
+        )
+
+    async def _finish_route(
+        self,
+        conversation: str,
+        utterance: str,
+        routed: RoutedOperation,
+        *,
+        compose: _RoutedComposer | None,
+    ) -> TurnOutcome:
+        """Compose what the pass owes, then capture the exchange (ADR-0197 §10).
+
+        ``compose`` is ``None`` on a routed park, which owes no answer: the composing stage
+        is not reached, originates no model call, and ``reply_degraded`` stays ``False``.
+        """
+        composed = (
+            None
+            if compose is None
+            else await compose(routed.operation, routed.outcome, conversation)
+        )
+        return await self._capture(
+            conversation,
+            turn=None,
+            step=None,
+            resumed=False,
+            composed=composed,
+            routed=routed,
+            utterance=utterance,
+        )
+
+    async def _composed_routed_whole(
+        self, operation: RoutableOperation, outcome: RouteOutcome, conversation: str
+    ) -> ComposedReply | None:
+        """Compose a routed answer atomically, ignoring the room its streaming twin needs."""
+        del conversation
+        return await self._composing.compose_routed(operation=operation, outcome=outcome)
+
+    async def _compose_routed_streaming(
+        self,
+        operation: RoutableOperation,
+        outcome: RouteOutcome,
+        conversation: str,
+        chunks: asyncio.Queue[ReplyChunk],
+    ) -> ComposedReply | None:
+        """Stream a routed answer onto ``chunks`` (ADR-0173, ADR-0197 §10).
+
+        The routed twin of :meth:`_compose_streaming`, measuring its ceiling against the
+        outcome this pass will actually build — which carries ``routed`` and no ``turn``,
+        so the room is genuinely different from a step-driving turn's.
+
+        Raises:
+            RuntimeError: If the stage ended without reporting, which is a defect in it
+                rather than a composition failure (ADR-0170 §8).
+        """
+        composed: ComposedReply | None = None
+        stream = self._composing.compose_routed_streaming(
+            operation=operation,
+            outcome=outcome,
+            room=self._routed_reply_room(operation, outcome, conversation_id=conversation),
+        )
+        async with closing_stream(stream) as composing:
+            async for produced in composing:
+                if isinstance(produced, ReplyChunk):
+                    check_payload(
+                        produced,
+                        max_bytes=self._max_payload_bytes,
+                        subject="a chunk of the reply to converse_streaming()",
+                    )
+                    chunks.put_nowait(produced)
+                else:
+                    composed = produced
+        if composed is None:  # pragma: no cover — the stage always reports last
+            msg = "the composing stage ended without reporting what it composed"
+            raise RuntimeError(msg)
+        return composed
+
+    def _routed_reply_room(
+        self, operation: RoutableOperation, outcome: RouteOutcome, *, conversation_id: str
+    ) -> int:
+        """How many escaped bytes a routed outcome has left for its reply (ADR-0173 §3).
+
+        :meth:`_reply_room`'s routed twin, and it is measured rather than reused because
+        the two outcomes differ in what they carry: this one has no ``turn`` at all and a
+        ``routed`` member whose listing may be a page of the user's own records.
+
+        **The probe carries no listing, and that under-states the room in the safe
+        direction.** A listing is measured by ``check_payload`` on the way out (ADR-0085
+        §8, §8c) and is refused rather than truncated if it breaches; measuring it here as
+        well would double-count nothing but would make this method's probe depend on a
+        value the caller already holds. What matters is that the room can only be
+        over-stated by a member this probe omits — so the probe carries the listing where
+        the pass has one, which is why the caller passes the whole outcome's shape rather
+        than two enum values alone.
+        """
+        probe = TurnOutcome(
+            turn=None,
+            conversation_id=conversation_id,
+            capture_degraded=False,
+            reply=_ROOM_PROBE,
+            reply_degraded=False,
+            routed=RoutedOperation(operation=operation, outcome=outcome),
+        )
+        fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
+        return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
+
+    def _routed_surface(self) -> _RoutedSurface:
+        """The engine's own operations, as ADR-0197 §2's third clause reaches them.
+
+        A thin adapter rather than ``self``, for one reason: ``AssistantEngine.beliefs``
+        answers ``BeliefSummary`` rows and §5's ``forget`` lookup needs ``Belief`` records,
+        which is the arm §8 gives that operation. Every other member relays the engine's
+        own façade method untouched, so a routed ``forget`` and a typed-door ``forget``
+        are one implementation behind one set of preconditions — which is what §2's third
+        clause exists to keep true.
+        """
+        return _RoutedSurface(self)
+
+    async def _routed_beliefs(self, *, limit: int, offset: int) -> tuple[Belief, ...]:
+        """Enumerate live beliefs as §8's ``forget`` arm, for §5's lookup only.
+
+        Reads the store ``forget`` itself reads (ADR-0197 §5) and projects each record
+        exactly as :meth:`belief` does, so the candidate a card renders is the same value
+        a user would have seen through the typed door. It is **not** a routable operation
+        and reaches no surface: ``beliefs`` is deliberately outside §3's vocabulary,
+        because "what do you know about me?" is milestone 17's ruled exit test and routing
+        it would replace a ruled behaviour with a worse one.
+        """
+        records = await self._memory.list_beliefs(
+            bands=None, kinds=None, limit=limit, offset=offset
+        )
+        return tuple([await self._project(record) for record in records])
 
     async def _compose(
         self, turn: TurnResult | None, step: StepOutcome | None
@@ -5169,7 +6028,20 @@ class Engine:
         ``pending_confirmations`` and a listing that needs no model at all. Capture
         runs outside it for the same reason and on ``converse``'s own precedent,
         which captures under no lock whatever.
+
+        **A routed park is claimed first, and it is claimed under the same lock**
+        (ADR-0197 §7). :meth:`_claim_routed_park` answers ``None`` where the token names no
+        routed park at all, which is the ordinary case for a token naming a parked step, so
+        the two kinds of park share one method and one token space without either knowing
+        about the other. A routed park that resolves differs from a step's in exactly three
+        respects and in no others: its outcome carries ``step`` ``None`` and ``routed``
+        non-``None``, its refusal is returned as ``RouteOutcome.REFUSED`` rather than raised
+        as a ``PermissionDeniedError``, and its ``turn`` is ``None`` for ADR-0197 §8's
+        reason rather than ADR-0052 §3's.
         """
+        routed = await self._claim_routed_park(token)
+        if routed is not None:
+            return await self._resume_routed(routed, approved=approved)
         parked, step = await self._resolve_park(token, approved=approved, timeout=timeout)
         composed = await self._compose(parked.turn, step)
         return await self._capture_resumption(parked, step, composed)
@@ -5259,7 +6131,7 @@ class Engine:
             origin.conversation_id, turn=parked.turn, step=step, resumed=True, composed=composed
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account and the utterance a routed pass has no turn to carry; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
@@ -5268,6 +6140,8 @@ class Engine:
         resumed: bool,
         composed: ComposedReply | None,
         parked: ParkedBinding | None = None,
+        routed: RoutedOperation | None = None,
+        utterance: str | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -5283,11 +6157,28 @@ class Engine:
         nothing else: what is captured is the exchange, and whether the composed
         answer joins the episode is ADR-0170 §9's deferral to ``track:memory``
         (#1314) rather than this method's to decide.
+
+        **A routed pass is captured too, and its content is threaded rather than read off
+        a turn it does not have** (ADR-0197 §10). ``utterance`` is that thread: a lane that
+        wired routing without it would produce a captured exchange with the user's own
+        sentence missing from it, a silent hole in the conversation record visible only to
+        the next person to resume that conversation. What the episode carries is the
+        utterance and a phrase for the route's outcome, and **no part of the routed
+        account** — not the listing, not the display subject, not the scalar argument, and
+        not the candidates. That is §6's second sentence made mechanical: a conversation's
+        recent turns are retrieved into the next turn's prompt (ADR-0074 §5, ADR-0158 §5),
+        so a capture that folded a routed listing into the episode would deliver the routed
+        result to a model one turn later, satisfying every same-pass clause of §6 while
+        breaking §6.
         """
         report = await self._conversations.capture(
             conversation_id,
-            content=_exchange_of(turn, step, resumed=resumed),
-            outcome=_outcome_of(step),
+            content=(
+                _exchange_of(turn, step, resumed=resumed)
+                if routed is None
+                else _routed_exchange_of(utterance, resumed=resumed)
+            ),
+            outcome=_outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome),
             parked=parked,
         )
         return TurnOutcome(
@@ -5297,6 +6188,7 @@ class Engine:
             capture_degraded=report.degraded,
             reply=None if composed is None else composed.text,
             reply_degraded=composed is not None and composed.degraded,
+            routed=routed,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
