@@ -658,8 +658,27 @@ class FakeAssistantEngine:
         Returns:
             The restated outcome.
 
+        **The refusal names both remedies, because at this point the two kinds of
+        park are indistinguishable.** A handle reaching here is a step park unknown,
+        aged out of ADR-0198 §4's bound or minted by an earlier engine — for which
+        ``pending_confirmations`` re-mints a token — *or* a routed park already
+        claimed, for which ADR-0197 §7 rules that ``pending_confirmations`` "does
+        **not** list a routed park" and the remedy is §7's own sentence: nothing has
+        happened yet, so the operation is asked for again rather than resumed again.
+        Naming only the first would teach a surface the one remedy that cannot help a
+        routed token, and this fake is what every interface adapter's tests are
+        written against — so it states what ``Engine._restate`` states (#1653).
+
+        Args:
+            handle: The continuation handle presented, naming no park.
+
+        Returns:
+            The restated outcome.
+
         Raises:
-            UnknownContinuationError: If the handle names no settled record either.
+            UnknownContinuationError: If the handle names no settled record either —
+                unknown, minted by an earlier engine, discarded under ADR-0198 §4's
+                bound, or a **routed** park already claimed (ADR-0197 §7).
                 **Never a denial** (ADR-0084 §7).
             PlanningError: If the settled binding's execution is no longer held.
         """
@@ -667,8 +686,13 @@ class FakeAssistantEngine:
         if settled is None:
             msg = (
                 "this token names no step awaiting confirmation in this engine, and no answer "
-                "this engine still holds; call pending_confirmations() to re-mint a token for "
-                "any park that is still answerable"
+                "this engine still holds; it may be from an earlier run of the process, or its "
+                "answer may have aged out. If it named a routed operation, this engine can no "
+                "longer say whether that operation ran: a routed park is evicted the moment it "
+                "is claimed, is never listed and is never re-minted, so ask for the operation "
+                "again rather than resuming this token, and the answer will say what it finds. "
+                "If it named a parked step, pending_confirmations() re-mints a token for any "
+                "park that is still answerable"
             )
             raise UnknownContinuationError(msg)
         state = self.executions.get(settled.execution_id)
