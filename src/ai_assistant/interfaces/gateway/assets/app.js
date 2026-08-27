@@ -1327,9 +1327,9 @@ function decisionWords(outcome) {
 // exists, is held, is live, is unrevoked or covers anything now — ADR-0186 §8's
 // first clause, read on this fact.
 //
-// **A row whose pointers contradict each other never reaches here** — it is refused
-// whole by `renderDecisionFields`, which is what keeps this function to §11's three
-// states and stops a fourth being invented in the gap.
+// **A row whose pointers contradict each other never reaches here** — `unreadable`
+// keeps it out of the listing entirely, which is what holds this function to §11's
+// three states and stops a fourth being invented in the gap.
 function authorisationWords(decision) {
   if (decision.authorised_by === null) {
     return "the policy's own rules, resting on no decision of yours";
@@ -1393,27 +1393,6 @@ function renderRecordedBinding(item, binding) {
 // printed rather than assumed**, because the reader who most needs it is the one
 // treating this as a permissions screen.
 function renderDecisionFields(item, decision) {
-  // **A row whose pointers contradict each other is not read at all** (ADR-0193 §11,
-  // and adversarial review's round-2 blocker). §11 names exactly three authorisation
-  // states and a ruling that answers one decision while resting on another is none of
-  // them; the trail refuses to record one, so such a row is a value no store this
-  // system wrote would hold. `interfaces/cli` raises there and the listing ends —
-  // this ends the **row**, because a routed listing rides a turn and raising would
-  // take the reply and the routed account with it. What matters is the same either
-  // way: no authorisation is stated, neither pointer is presented as one, and none of
-  // the row's other fields is rendered beside a ruling this surface will not read.
-  if (decision.unreadable) {
-    line(
-      item,
-      `This row is not a ruling I will read: it answers ${decision.resolves} and rests ` +
-        `on ${decision.authorised_by}, and no ruling an audit trail accepts carries ` +
-        "both. Nothing here states what authorised the call — 'assistant " +
-        "export-decisions' writes the record as it stands.",
-      "failed"
-    );
-    line(item, `id: ${decision.id}`, "hint");
-    return;
-  }
   line(item, `${decisionWords(decision.outcome)} — ${decision.decided_at}`, "reply");
   line(item, `Tool: ${decision.tool_id} (capability ${decision.capability})`, "hint");
   line(item, `Why: ${decision.reason}`, "hint");
@@ -1708,21 +1687,62 @@ function renderRouted(body, routed) {
   }
 }
 
+// A ruling that answers one decision while resting on another (ADR-0193 §11, and
+// adversarial review's rounds 2 and 4).
+//
+// **It is not rendered, and it is not rendered in part.** ADR-0186 §7 is that "a
+// surface that cannot render a row whole renders fewer rows, not partial ones", and
+// §11 names exactly three authorisation states of which this pair is none. The trail
+// refuses to record one, so a row reaching a reader with it is a value no store this
+// system wrote would hold. `interfaces/cli._authorisation_line` raises and the whole
+// listing ends there.
+//
+// **This drops the row rather than the answer, and says so.** Refusing the routed
+// outcome through `_relay_fault` was the other way, and it was declined for a reason
+// on this page rather than a preference: its two conditions are `hub-unreachable` and
+// `assistant-declined`, and this page renders the second as "The hub received the
+// request and declined it" — which would be false, since the hub answered. ADR-0168
+// §9 requires those two to stay distinguishable and forbids presenting either as
+// something it is not, and minting a third condition is a gateway-surface decision
+// this consumer lane does not own. So the row goes, nothing of it is shown, and the
+// listing states that it went — the one thing a dropped row must not be is silent.
+const UNREADABLE_RULINGS =
+  "Some rulings in this record could not be read and are not shown: a ruling that " +
+  "answers one decision while resting on another is not one an audit trail accepts, " +
+  "and nothing of what such a row says is shown in part. 'assistant export-decisions' " +
+  "writes the record as it stands.";
+
+// Whether a record is one this page will render at all. Nothing else is filtered:
+// this is the single condition ADR-0186 §7 makes a row unrenderable, and every other
+// record of every arm is rendered whole.
+function unreadableRecord(record) {
+  return record.unreadable === true;
+}
+
 // Every record the listing carries, in the order it carries them.
 //
 // **Never fewer, and never a summary of them** (ADR-0197 §5's last clause, which is
 // ADR-0186 §7's rule for a trail row applied to a candidate listing). A narrow
-// screen gets a longer page, not a shorter list.
+// screen gets a longer page, not a shorter list. The one row that is not rendered is
+// the one §7 itself makes unrenderable, and the listing says when that happened.
 function renderRoutedListing(body, operation, listing) {
   const list = document.createElement("div");
   list.className = "routed-listing";
+  let dropped = 0;
   listing.forEach((record) => {
+    if (unreadableRecord(record)) {
+      dropped += 1;
+      return;
+    }
     const item = document.createElement("div");
     item.className = "routed-row";
     renderRoutedRecord(item, operation, record);
     list.appendChild(item);
   });
   body.appendChild(list);
+  if (dropped > 0) {
+    line(body, UNREADABLE_RULINGS, "failed");
+  }
 }
 
 // One record, rendered with the renderer this page already has for its arm — which
