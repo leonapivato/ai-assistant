@@ -2140,10 +2140,15 @@ def test_an_answer_in_flight_cannot_undo_the_owners_own_choice() -> None:
     assert "outcome.conversation_id && chose === chosenAt" in functions["renderOutcome"]
     # Every outcome rendered carries a count; one that did not would silently stop
     # continuing the conversation rather than fail.
+    #
+    # Read as the **second** argument rather than as the last one, which is what #1621
+    # made the difference: ``answerConfirmation`` now passes a third — the caveat a
+    # re-answered park carries — and a check anchored on the end of the call would have
+    # gone on passing while asking nothing.
     rendered = re.findall(r"renderOutcome\(([^)]*)\)", script)
     assert rendered
     for call in rendered:
-        assert call.endswith(", chosenAt") or call == "outcome, chosenAt", call
+        assert [one.strip() for one in call.split(",")][1] == "chosenAt", call
 
 
 def test_a_stale_selection_is_dropped_where_the_gateway_names_the_condition() -> None:
@@ -2759,11 +2764,12 @@ def test_a_body_never_read_is_not_a_response_whatever_the_status_said() -> None:
     # stand between an unread body and a caller's catch.
     assert relaying.index("if (response.ok) {") < relaying.index("await readBody(response)")
     assert relaying.count("readBody(") == 1
-    # And the one caller whose catch keeps a consent token is reached by that rejection:
-    # it is inside the ``try``, and the branch it takes records the park as unresolved.
+    # And the one caller whose catch turns on a consent token is reached by that
+    # rejection: it is inside the ``try``, and the branch it takes strands the park —
+    # recording that its answer went unread and giving the token back for it (#1621).
     answering = functions["answerConfirmation"]
     assert answering.index("await relay(") < answering.index("} catch (_) {")
-    assert answering.index("} catch (_) {") < answering.index("unresolved.add(token);")
+    assert answering.index("} catch (_) {") < answering.index("strand(token);")
 
 
 def test_an_amendment_is_two_requests_and_sends_no_grant_after_an_unresolved_one() -> None:
@@ -3938,8 +3944,12 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
     (ADR-0197 §7). A routed confirmation carries a ``ContinuationToken`` exactly as a
     tool confirmation does and is answered through the same ``resume``, so §8's rule
     reaches it unchanged — it hands the handle straight to ``offerApproval`` and
-    renders nothing of it. The set is asserted rather than the members, so a fifth
+    renders nothing of it. The set is asserted rather than the members, so a sixth
     function reaching for a token fails here rather than being noticed.
+
+    **``strand`` is the fifth** (#1621): the one act that gives a token back and records
+    that its answer went unread. It compares the handle against two sets and puts it in
+    no node, which is §8 obeyed exactly as the four above obey it.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -3949,6 +3959,7 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
         "renderOperationConfirmation",
         "offerApproval",
         "answerConfirmation",
+        "strand",
     }
     assert {name for name, body in functions.items() if "token" in body} == touching
     assert not re.search(r"textContent\s*=[^;]*token", script)
@@ -4447,20 +4458,23 @@ def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock(
     assert "answerConfirmation(" not in handler[: handler.index("\n  });")]
 
 
-def test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act() -> None:
-    """The consent question #1536 says a taker has to answer, and the answer is no.
+def test_an_abandoned_park_answer_asserts_no_outcome_and_offers_the_pair_again() -> None:
+    """The consent question #1536 asked, answered again now that ADR-0198 has landed.
 
     ADR-0177 §7's fourth clause makes an answer whose reply was never read an outcome
     that is **not known** — "the request was sent and no response was read" — and
     ADR-0139 §4 forbids the surface inferring the state from the unresolved act, in
-    either direction. Handing the token back on the strength of that act infers the
-    most dangerous of the three: that the answer did not land.
+    either direction. **That prohibition is about what the page asserts, and this branch
+    still asserts nothing**: ``strand`` records that the answer went unread, the row says
+    so, and the sentence beside it says the action may have been carried out.
 
-    And the page is where the cost falls. A second ``resume`` on a token the first
-    already resolved raises ``UnknownContinuationError``; ``_relay_fault`` renders every
-    ``AssistantError`` as ``assistant-declined``, which this page reads as "The hub
-    received the request and declined it" — a denial announced for an action that ran,
-    which ADR-0084 §7 refuses in terms ("never a denial").
+    What #1612 additionally did — keep the token spent for the life of the page — was
+    never that prohibition. It was the consequence of a second ``resume`` raising
+    ``UnknownContinuationError``, which ``_relay_fault`` renders as
+    ``assistant-declined`` and this page read as "The hub received the request and
+    declined it": a denial announced for an action that ran, which ADR-0084 §7 refuses in
+    terms. ADR-0198 §1 ends that — a token whose binding is settled restates the recorded
+    answer — so the token comes back and the pair is answerable again (#1621).
     """
     script = _code("app.js")
     body = _functions(script)["answerConfirmation"]
@@ -4470,12 +4484,37 @@ def test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act() -> N
     # Round 4's first blocker was a branch: the owner's abort kept the token and an
     # ordinary rejection released it, though ADR-0177 §7's fourth clause covers both in
     # one sentence. So there is no branch left — only the wording differs.
-    assert "unresolved.add(token);" in caught
-    assert "spent.delete(token);" not in caught
+    assert "strand(token);" in caught
     assert "GATEWAY_GONE" not in caught
-    assert caught.index("unresolved.add(token);") < caught.index("stopping.signal.aborted")
+    assert caught.index("strand(token);") < caught.index("stopping.signal.aborted")
     assert "const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;" in caught
     assert "unresolved" not in _functions(script)["relay"]
+
+
+def test_the_two_halves_of_stranding_a_token_are_one_act() -> None:
+    """#1621. Giving the token back and recording that its answer went unread are only
+    safe together, so they are one function and every not-known ending calls it.
+
+    Half of it alone is a defect in either direction. A token given back without the
+    record re-offers the pair beside a row that says nothing — the silent surface #1536
+    is about with the sign reversed, since the owner reads an enabled control as the page
+    announcing that nothing happened, which is exactly the inference ADR-0139 §4 refuses.
+    The record without the token back is the state ADR-0198 was decided to end.
+
+    It takes the token and no reason: which ending it was is said once, at the ending, in
+    the fault line beside the row, and what is still true is the row's own sentence.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "function strand(token) {\n  unresolved.add(token);\n  spent.delete(token);\n}" in script
+    # The three branches that read no outcome, and no fourth: the one both endings that
+    # read no reply at all share — the owner's abort and the connection's own failure,
+    # which ADR-0177 §7's fourth clause does not distinguish — the refusal §7's third
+    # clause leaves not known, and the ``2xx`` whose body carried no outcome this page
+    # could render.
+    assert len(re.findall(r"\bstrand\(token\);", script)) == 3
+    assert len(re.findall(r"\bstrand\(", functions["answerConfirmation"])) == 3
 
 
 def test_a_listing_read_never_re_offers_a_park_whose_answer_is_unaccounted_for() -> None:
@@ -4496,34 +4535,43 @@ def test_a_listing_read_never_re_offers_a_park_whose_answer_is_unaccounted_for()
     minting a token that invalidates an outstanding one, is reachable from nowhere under
     ``interfaces/gateway/``. That is #1536's residual and is filed as #1621.
 
-    So the token stays spent for the life of the page and the route back is a reload,
-    which starts both sets empty over an engine that still holds the binding.
+    **ADR-0198 closed that at the seam it belonged to, and this prohibition survives it
+    whole** (#1621). A settled binding restates rather than raises, so the race is gone —
+    but a listing snapshot is still not evidence about a request in flight, and the page
+    still un-spends nothing on one. What gives a token back is ``strand``, at the ending,
+    on this page's own record of what it did; and the listing could not answer the case
+    ADR-0198 exists for in any event, since a settled binding is never listed and never
+    re-minted (§4, ADR-0052 §1 step 2).
     """
     script = _code("app.js")
     functions = _functions(script)
     offer = functions["offerApproval"]
 
     # Nothing un-spends a token on a listing's evidence — not in the function that
-    # builds a row from one, and not anywhere else in the page.
+    # builds a row from one, not in the read that renders the listing, and not in the
+    # render of a turn's own confirmation.
     assert "unresolved.delete" not in script
-    assert "spent.delete" not in offer
-    # Three writes and no delete at all: the two endings that read no reply, the refusal
-    # the gateway answered whose condition ADR-0177 §7's third clause still makes not
-    # known, and the ``2xx`` whose body carried no outcome (round 9).
-    assert len(re.findall(r"unresolved\.add\(", script)) == 3
-    # The single ``spent.delete`` is the one ending that is known *not* to have landed —
-    # a refusal the gateway named and this page can read — and it lives in the relay,
-    # never in the render.
-    assert len(re.findall(r"spent\.delete\(", script)) == 1
+    for named in ("offerApproval", "readPending", "renderConfirmation"):
+        assert "spent.delete" not in functions[named], named
+        assert "strand(" not in functions[named], named
+    # The token is given back in exactly two places, and each is an ending this page
+    # reached by reading a response or failing to: ``strand``, for the four not-known
+    # endings, and the one arm that is known *not* to have landed.
+    assert len(re.findall(r"spent\.delete\(", script)) == 2
     assert "spent.delete(token);" in functions["answerConfirmation"]
+    assert "spent.delete(token);" in functions["strand"]
     # Read as a use rather than as a mention, because ``_functions`` attributes the
     # declaration itself — it sits between two functions — to whichever one precedes it.
     assert {name for name, body in functions.items() if "unresolved." in body} == {
         "offerApproval",
         "answerConfirmation",
+        "strand",
     }
     # ``offerApproval``'s only use is the read that picks the row's sentence.
     assert re.findall(r"unresolved\.\w+", offer) == ["unresolved.has"]
+    # And ``answerConfirmation``'s is the one read that separates a first answer from a
+    # second — taken *before* the claim, so it cannot see this request's own record.
+    assert re.findall(r"unresolved\.\w+", functions["answerConfirmation"]) == ["unresolved.has"]
 
 
 def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing() -> None:
@@ -4577,9 +4625,10 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
         # It does not promise the answer did not land, and does not promise it did.
         assert "may have carried the action out" in said
         assert "may never have received the " in said
-        # Both reach the owner's route back, and reach the *same* one — the ask's own
-        # device, so two endings cannot drift into two different instructions.
-        assert said.rstrip().endswith("PARK_ROUTE_BACK")
+        # Both reach the owner's account of what answering again does, and reach the
+        # *same* one — the ask's own device, so two endings cannot drift into two
+        # different instructions.
+        assert said.rstrip().endswith("PARK_ASK_AGAIN")
     # Their openings are what differ, because only one of them was an act of the owner's.
     assert unresolved.startswith('\nconst PARK_UNRESOLVED =\n  "You stopped waiting')
     assert "You stopped waiting" not in lost
@@ -4591,22 +4640,36 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     # recorded, where "the step stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM``
     # unresolved and its row intact… The park is unanswerable, not erased." A page
     # reading absence as a resolution would tell the owner the opposite of the state.
-    route = _constant(script, "PARK_ROUTE_BACK")
+    route = _constant(script, "PARK_ASK_AGAIN")
     assert "Press Confirmations" in route
     assert "can still be answered" in route
     assert "nothing here calls it resolved" in route
     assert "was answered" not in route
 
-    # **And it promises no re-offer on this page**, which is round 7's blocker: the
-    # controls do not come back while the page is open, so a route back that said they
-    # did would send the owner to press a button that will still be disabled. It says
-    # what is true instead — the pair stays as it is, and a reload is what makes the
-    # park answerable again — so the disabled control gives an account of itself rather
-    # than being a silent refusal one step removed.
-    assert "will not offer that park again while this page is open" in route
-    assert "what makes the park answerable again." in route
-    assert "Press Confirmations after a reload" in route
-    assert "controls come back" not in route
+    # **And it no longer sends the owner to a reload** (#1621), which is the whole of
+    # what ADR-0198 changed here. The reload was #1612's answer to round 7 and it could
+    # never reach the case the page most needs: a settled binding is never listed and
+    # never re-minted (ADR-0198 §4, ADR-0052 §1 step 2), so where the first answer *did*
+    # land no reload hands the park back. What can ask is the token, and after §1 a
+    # ``resume`` presenting it restates rather than raises.
+    assert "Reloading" not in route
+    assert "after a reload" not in route
+    assert "will not offer that park again" not in route
+
+    # **Three things it has to say, and each is a way of getting it wrong.** That a
+    # second answer performs nothing (§1, ADR-0044 §2b) — without which the pair reads
+    # as a way to carry the action out twice. That a recorded answer stands even where
+    # it disagrees with the one being sent — without which the pair reads as a way to
+    # *change* an answer, which is an act the engine does not have. And that the
+    # assistant may hold neither the park nor its answer any longer (§4), which is the
+    # arm this page must not render as a refusal.
+    assert "answered once" in route
+    assert "never carries the action out a second time" in route
+    assert "stands even where it is not the one you send now" in route
+    assert "this is not a way" in route
+    assert "send the answer you want rather than a question" in route
+    assert "it can no longer say what" in route
+    assert "rather than call it refused" in route
 
     # And the wait says there is no deadline, rather than implying one.
     waiting = _constant(script, "PARK_WAITING")
@@ -4735,10 +4798,10 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # condition this page cannot read is a refusal it cannot classify, and ADR-0139 §4's
     # third outcome is what an unclassifiable one is".
     assert 'const named = refusal !== null && typeof refusal.fault === "string";' in answering
-    assert "if (!named || UNKNOWN_FAULTS.has(refusal.fault)) {" in answering
-    kept = answering[answering.index("if (!named ||") :]
+    assert "if (unaccounted || !named || UNKNOWN_FAULTS.has(refusal.fault)) {" in answering
+    kept = answering[answering.index("if (unaccounted ||") :]
     unknown = kept[: kept.index("\n    }\n")]
-    assert "unresolved.add(token);" in unknown
+    assert "strand(token);" in unknown
     assert "spent.delete(token);" not in unknown
     assert answering.index("UNKNOWN_FAULTS.has(") < answering.index("spent.delete(token);")
     # The same two-armed shape the grant surface already carries, so neither can be
@@ -4777,17 +4840,21 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     script = _code("app.js")
     answering = _functions(script)["answerConfirmation"]
 
-    assert "try {\n    renderOutcome(body.outcome, chosenAt);\n  } catch (_) {" in answering
+    assert "  } catch (_) {" in answering
+    assert "renderOutcome(body.outcome, chosenAt, " in answering
+    render = answering[answering.index("renderOutcome(body.outcome, chosenAt, ") :]
+    assert render[: render.index("\n")].endswith(");")
+    assert answering[: answering.index("renderOutcome(body.outcome")].rstrip().endswith("try {")
     # No shape check stands in front of it: enumerating members is the thing round 10
     # refuted, so a re-introduced list would be the same defect wearing a guard.
     assert "Array.isArray(outcome)" not in answering
     # The ending is the not-known one, in the order every other arm uses, and it clears
     # whatever the throw left half-rendered rather than leaving it beside the sentence.
-    caught = answering[answering.index("renderOutcome(body.outcome, chosenAt);") :]
+    caught = answering[answering.index("renderOutcome(body.outcome, chosenAt, ") :]
     caught = caught[: caught.index("readPending(true)")]
     for step in (
         'show("answer", false);',
-        "unresolved.add(token);",
+        "strand(token);",
         "readPending(false);",
         'fault(PARK_REPLY_UNREADABLE, "confirmations");',
     ):
@@ -4800,10 +4867,139 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     assert "could not read an outcome from" in said
     assert "not known" in said
     assert "Nothing was re-sent and nothing was cancelled." in said
-    assert said.rstrip().endswith("PARK_ROUTE_BACK")
+    assert said.rstrip().endswith("PARK_ASK_AGAIN")
     # It does not borrow a cause it has not established.
     for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
         assert attributed not in said, attributed
+
+
+def test_a_park_whose_answer_went_unread_is_answerable_again_and_says_what_that_means() -> None:
+    """#1621's softer half, which #1612 shipped closed and ADR-0198 makes safe to open.
+
+    Before it, a token whose answer this page never read back stayed spent for the life
+    of the page: a second ``resume`` on a binding the first had resolved raised
+    ``UnknownContinuationError``, which reaches this page as ``assistant-declined`` and
+    reads as "The hub received the request and declined it" — the denial ADR-0084 §7
+    refuses in terms. ADR-0198 §1 retains the binding and restates the recorded answer
+    instead, so the pair can come back.
+
+    **What it must not come back as is a silent statement that nothing happened.** A row
+    that simply re-enabled would be announcing by omission the one thing ADR-0139 §4
+    forbids a surface to assert about an unresolved act, so the enabled pair carries a
+    sentence saying what pressing it now does — and, because a park is answered once
+    (ADR-0044 §2b), that it is not a way to change an answer that landed.
+    """
+    script = _code("app.js")
+    words = _functions(script)["parkWords"]
+
+    # The row is stranded and answerable, which before #1621 was not a state: ``spent``
+    # and ``unresolved`` moved together, so every stranded row was a disabled one.
+    assert 'return stranded ? PARK_NOT_KNOWN : "";' in words
+    said = _constant(script, "PARK_NOT_KNOWN")
+    assert "not known" in said
+    assert "Nothing was re-sent and nothing was cancelled." in said
+    assert said.rstrip().endswith("PARK_ASK_AGAIN")
+    # The pair's enabled state is still computed from ``spent`` alone, so a row that is
+    # answerable again is answerable wherever it was built.
+    offer = _functions(script)["offerApproval"]
+    assert "const answered = spent.has(token);" in offer
+    assert offer.count("disabled = out || answered;") == 2
+
+
+def test_a_refusal_of_a_second_answer_is_never_read_as_a_denial_of_the_first() -> None:
+    """The arm the re-offer opens, and the one it would be worst to get wrong (#1621).
+
+    Where the assistant holds neither the park nor its answer any longer — a restart, a
+    binding ``pending_confirmations``' own reconciliation evicted (ADR-0052 §2), or a
+    settled record discarded under ADR-0198 §4's bound — ``resume`` raises
+    ``UnknownContinuationError``. ``_relay_fault`` renders every ``AssistantError`` as
+    ``assistant-declined`` and ``FAULTS`` reads that as "The hub received the request and
+    declined it": a denial announced for an action that may well have run, which
+    ADR-0084 §7 refuses in terms and which is what round 7 blocked #1612 over.
+
+    A refusal of the **second** request establishes nothing about the **first**, so the
+    branch is decided on this page's own record and not on the condition — the condition
+    is about the wrong request. It is over-cautious in exactly one arm, a park refused
+    past its deadline by ``StepRunner._check_fresh`` (ADR-0198 §5), and for a consent
+    surface that is the right direction.
+    """
+    script = _code("app.js")
+    answering = _functions(script)["answerConfirmation"]
+
+    assert "if (unaccounted || !named || UNKNOWN_FAULTS.has(refusal.fault)) {" in answering
+    # ``unaccounted`` is read first, so a named condition can never reach the
+    # known-not-landed arm on a re-answer.
+    guard = answering[answering.index("if (unaccounted ||") :]
+    assert guard.index("strand(token);") < guard.index("spent.delete(token);")
+    # And it gets its own sentence, because ``PARK_REFUSAL_NOT_KNOWN``'s reasoning — the
+    # failure was between the gateway and the hub, or the condition could not be read —
+    # is false of a condition this page read perfectly well.
+    said = _constant(script, "PARK_REFUSAL_AFTER_UNKNOWN")
+    assert "does not say what" in said
+    assert "not a park it declined" in said
+    assert "still not known" in said
+    assert said.rstrip().endswith("PARK_ASK_AGAIN")
+    assert said != _constant(script, "PARK_REFUSAL_NOT_KNOWN")
+
+
+def test_a_re_answered_park_never_claims_the_record_is_the_answer_just_sent() -> None:
+    """A ``resume`` that resolves a recovered park and one that restates a settled
+    binding come back in the **same** shape — ``turn`` ``None``, ``routed`` ``None``,
+    ``reply`` ``None``, ``reply_degraded`` ``False``, a ``step`` — which is ADR-0170 §4's
+    second shape that ADR-0198 §2 obeys rather than widens.
+
+    So nothing on the wire tells the page which it read, and the page does not guess. The
+    one structural tell it could reach for — a resume whose outcome names no conversation
+    and reports no degraded capture — is an inference from the members the body does
+    **not** carry, which is the move ADR-0139 §4 spends five clauses refusing; and
+    manufacturing the fact in ``server.py`` would be the gateway authoring a claim the
+    engine did not make (ADR-0168 §1). ADR-0198 §7 rules the engine lane touches no file
+    under ``interfaces/`` and adds no such member, so there is nothing to read.
+
+    What the page does hold is a fact about **its own** history: it knows this token
+    already carried an answer whose reply it never read. That is what it says.
+    """
+    script = _code("app.js")
+    answering = _functions(script)["answerConfirmation"]
+
+    # Read from the page's own record, and read **before** the claim below it — ``strand``
+    # writes ``unresolved`` at an ending, so a value read later could be this request's
+    # own record rather than the earlier one's.
+    assert "const unaccounted = unresolved.has(token);" in answering
+    assert answering.index("const unaccounted =") < answering.index("spent.add(token);")
+    # Nothing about the body decides it. These are the members a structural guess would
+    # have had to read, and none of them is read here.
+    for guessed in ("capture_degraded", "conversation_id", "reply_degraded", "outcome.reply"):
+        assert guessed not in answering, guessed
+    # The caveat is handed to the render rather than appended after it: ``renderOutcome``
+    # clears its panel on the way in, and a caveat that changes how everything below it
+    # reads belongs above them.
+    assert (
+        "renderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null);"
+        in answering
+    )
+    render = _functions(script)["renderOutcome"]
+    assert "function renderOutcome(outcome, chosenAt, provenance) {" in render
+    assert render.index("clearNode(body);") < render.index("if (provenance) {")
+    assert render.index("if (provenance) {") < render.index("if (outcome.capture_degraded) {")
+    # It is passed and never derived: nothing in the renderer reads a member to decide
+    # where the outcome came from.
+    assert "line(body, provenance" in render
+
+    # The sentence claims neither reading. It says the answer shown is the one the
+    # assistant has **recorded**, that it may be the earlier answer rather than the one
+    # just sent, and that this browser cannot tell which.
+    said = _constant(script, "PARK_SETTLED_AFTER_UNKNOWN")
+    assert "never read back" in said
+    assert "the assistant has recorded" in said
+    assert "may be that earlier" in said
+    assert "cannot tell which of the two" in said
+    # And the row carries it too, so a park re-answered from one row does not tell the
+    # other that it was simply answered.
+    assert (
+        "return stranded ? PARK_SETTLED_AFTER_UNKNOWN : PARK_ANSWERED;"
+        in _functions(script)["parkWords"]
+    )
 
 
 def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
@@ -4823,10 +5019,11 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
     script = _code("app.js")
     words = _functions(script)["parkWords"]
 
-    assert "return stranded ? PARK_NOT_KNOWN : PARK_ANSWERED;" in words
+    assert "return stranded ? PARK_SETTLED_AFTER_UNKNOWN : PARK_ANSWERED;" in words
+    assert 'return stranded ? PARK_NOT_KNOWN : "";' in words
     neutral = _constant(script, "PARK_NOT_KNOWN")
     assert "not known" in neutral
-    assert neutral.rstrip().endswith("PARK_ROUTE_BACK")
+    assert neutral.rstrip().endswith("PARK_ASK_AGAIN")
     # Cause-neutral: none of the three endings' own openings appears in it.
     for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
         assert attributed not in neutral, attributed
@@ -4836,6 +5033,7 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
         "PARK_UNRESOLVED",
         "PARK_LOST",
         "PARK_REFUSAL_NOT_KNOWN",
+        "PARK_REFUSAL_AFTER_UNKNOWN",
         "PARK_REPLY_UNREADABLE",
     ):
         assert named not in words, named
