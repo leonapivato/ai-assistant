@@ -1220,6 +1220,15 @@ def test_a_spoken_wait_that_never_settles_does_not_hold_the_owners_control_for_e
     assert 'el("stop-talking").addEventListener("click", abandonSpoken)' in script
     assert "new AbortController()" in sending
     assert "signal: mine.stopping.signal" in sending
+    # **And it is armed with nothing awaited between there and the request** (round 2's
+    # first major). `SPOKEN_ABANDONED` says the recording was sent and the turn may have
+    # run; offering it while the base64 was still being made would have said that of a
+    # press no request had gone out for. The window is closed rather than given a second
+    # sentence — encoding is arithmetic and cannot stall the way a socket can.
+    assert sending.index("await base64Of(") < sending.index("new AbortController()")
+    assert sending.index('el("stop-talking").hidden = false') < sending.index("await fetch(")
+    armed = sending.index("new AbortController()")
+    assert "await" not in sending[armed : sending.index("await fetch(")]
     assert "mine.stopping.abort()" in abandoning
     assert "fault(SPOKEN_ABANDONED," in abandoning
     # The control comes back through one function, which is what makes it come back on the
@@ -1254,6 +1263,28 @@ def test_the_audio_context_is_built_inside_the_press_that_leads_to_the_playback(
     assert script.count("new AudioContext()") == 1
     # Held rather than closed, which is the whole of what makes the *next* playback work.
     assert ".close()" not in playing
+
+
+def test_a_late_playback_failure_cannot_land_under_a_later_answer() -> None:
+    """Adversarial review, round 2, major. ``playSpoken`` awaits the decoder, and while
+    that is pending the owner can ask again — ``renderOutcome`` clears ``#answer-body``,
+    so a rejection landing after that appended "could not play" under an answer whose
+    audio played perfectly, attributing one turn's silence to another.
+
+    The turn keeps a slot of its own for the notice it may owe, and the next render
+    detaches it, so ``isConnected`` is the whole test — ``abandonAsk``'s own device for
+    the same question about the same panel.
+    """
+    script = _code("app.js")
+    rendering = _functions(script)["renderSpokenTurn"]
+    writing = _functions(script)["couldNotPlay"]
+
+    assert 'const slot = line(el("answer-body"), "", "notice")' in rendering
+    assert "void playSpoken(turn.spoken, slot)" in rendering
+    assert "if (!slot.isConnected) {" in writing
+    # The notice is written through that one function and nowhere else, so a later caller
+    # cannot reach the panel around the check.
+    assert script.count("COULD_NOT_PLAY") == 2
 
 
 def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
