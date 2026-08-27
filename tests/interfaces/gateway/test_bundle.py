@@ -4203,16 +4203,89 @@ def test_the_routed_listing_renders_every_record_and_summarises_none() -> None:
     The renderer walks the listing whole, and the stylesheet has no rule that could
     hide part of it: a page that rendered them all can still show a few if a fixed
     box scrolls the rest out of sight, which is what the second half checks.
+
+    **The one count read is the zero test and it renders prose rather than a
+    figure** (#1648). This case used to forbid ``length`` outright, which was the
+    right rule for the wrong reason: what §5 forbids is a *summary standing in for
+    the records*, and "3 rows" is that where "the record is empty" is not. So the
+    read is pinned to the single occurrence rather than banned, and a second one --
+    a slice bound, a count in a sentence, a "and N more" -- still fails here.
     """
     body = _functions(_code("app.js"))["renderRoutedListing"]
 
     assert "listing.forEach((record) =>" in body
     assert "slice(" not in body
-    assert "length" not in body, "no count stands in for the records"
+    assert re.findall(r"[\w.]+\.length[^\n]*", body) == ["listing.length === 0) {"], (
+        "no count stands in for the records; the only one read chooses the empty state"
+    )
     listing_rule = re.search(r"\.routed-listing\s*\{[^}]*\}", _style("app.css"))
     assert listing_rule is not None
     assert "max-height" not in listing_rule.group(0)
     assert "overflow" not in listing_rule.group(0)
+
+
+def test_an_empty_routed_listing_says_the_record_is_empty_rather_than_nothing() -> None:
+    """A defect the browser found once the routed account reached this page (#1648).
+
+    ADR-0197 §10's first Normative is that an adapter renders the routed account "in
+    addition to any composed reply, never instead of it, and never in place of it",
+    and this renderer built its ``div``, looped zero times over an empty listing and
+    appended the empty ``div``. What reached the screen was the composed reply saying
+    "you can see it right beside this message", the account saying the record was
+    read, and then nothing -- so a reader could not tell **the trail is empty** from
+    **the page failed to render the trail**, which are different answers to the same
+    question. The CLI has never had the hole: ``_render_routed_listing`` delegates to
+    the renderer the typed door already has, and each of those carries its own
+    empty-state prose.
+
+    **Empty is the common state**, not an edge: four of the six read-only members are
+    empty on a hub with no sources configured.
+
+    **The map is total over ADR-0197 §3's nine operations and every entry speaks.**
+    An operation added under §3's widening rule with no entry falls back to a
+    sentence rather than to a blank -- the opposite of ``ROUTED_ARM``'s deliberate
+    missing key, because there a wrong renderer is worse than none and here silence
+    *is* the defect.
+
+    **A bounded record says so.** ``recent_reads`` and ``recent_invocations`` are
+    both windows that drop their oldest rows, so an empty one is not a claim that
+    nothing ever happened, and saying only the first half would be a stronger claim
+    than the record supports.
+
+    Driven in Chromium at 1100x900 and at 390x844 against a real ``Gateway`` over a
+    seeded ``FakeAssistantEngine`` before this shipped; #1645 is the standing gap
+    that no case here executes the page.
+    """
+    script = _code("app.js")
+    body = _functions(script)["renderRoutedListing"]
+    empty = _functions(script)["renderEmptyListing"]
+
+    assert "if (listing.length === 0) {" in body
+    assert "renderEmptyListing(list, operation);" in body
+    assert body.index("renderEmptyListing") < body.index("listing.forEach"), (
+        "the empty listing is answered before the loop, never by counting what it rendered"
+    )
+
+    block = re.search(r"const ROUTED_EMPTY = \{(.*?)\n\};", script, re.DOTALL)
+    assert block is not None
+    named = re.findall(r"\n  (\w+): \[", block.group(1))
+    assert set(named) == {one.value for one in RoutableOperation}
+    assert len(named) == len(set(named))
+
+    assert "Nothing recorded. No attempt to read a source is in this record." in script
+    assert "Nothing recorded. No act on an authorisation is in this record." in script
+    assert "Nothing recorded. No ruling has been made yet." in script
+    assert "Nothing is waiting on your answer." in script
+    assert "You have not granted anything. I am allowed to read no source at all." in script
+    assert len(re.findall(r"That is not a claim that nothing was ever ", block.group(1))) == 2, (
+        "a bounded record that is empty is not a claim that nothing ever happened"
+    )
+
+    assert "|| [ROUTED_EMPTY_UNEXPLAINED]" in empty, "a missing key says something, never nothing"
+    assert re.findall(r"line\(", empty) == ["line("], (
+        "every sentence reaches the DOM as a text node (ADR-0042 §4, ADR-0168 §6)"
+    )
+    assert "innerHTML" not in empty
 
 
 def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None:
