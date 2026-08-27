@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
