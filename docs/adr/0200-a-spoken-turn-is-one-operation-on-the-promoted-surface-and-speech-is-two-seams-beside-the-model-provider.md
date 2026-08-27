@@ -6,12 +6,13 @@
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `wire/`, from `interfaces/gateway/`, from `models/`, or from an issue — is of
   its text as it stood at this ADR's base, `5510efe8`, not of its text on any
-  later day, **except ADR-0199**, which merged and was ratified after that base
-  and is quoted as it stands at `62724fe1`. Every other ADR this decision
-  composes with reads `Accepted` at both. Where a later ADR changes one of the
-  ADRs cited, this ADR
-  is read against the text quoted here and that ADR's own record says what
-  moved. This is ADR-0143's clause, taken for its reason.
+  later day, with **two exceptions**. Each merged and was ratified after that
+  base and is quoted as it stands at the commit named: **ADR-0199** at
+  `62724fe1`, and **ADR-0201** at `c318e089`, the commit that ratified it and
+  this branch's base when §12 came to cite it. Every other ADR this decision
+  composes with reads `Accepted` at all three. Where a later ADR changes one of
+  the ADRs cited, this ADR is read against the text quoted here and that ADR's
+  own record says what moved. This is ADR-0143's clause, taken for its reason.
 
 ## Context
 
@@ -881,11 +882,33 @@ path, which is a change to how a refusal is *rendered* and not to what the codec
 
 > **Normative.** The gateway gains one route, `POST /ask/spoken`, mapped onto
 > `converse_spoken` in `_ASSISTANT_PATHS` beside `/ask` and `/ask/stream`. Its
-> body is one JSON object carrying the call's arguments, exactly as every other
-> assistant route's is, bounded whole by `gateway_max_request_bytes`. It is a
-> third entry rather than a replacement, and the gateway never chooses between
-> the three, never falls back from one to another, and never retries silently
-> (ADR-0168 §9).
+> body is one JSON object carrying the **browser-owned** arguments of §3's
+> signature and no others — `utterance`, `plays` and `conversation_id` — bounded
+> whole by `gateway_max_request_bytes`. It is a third entry rather than a
+> replacement, and the gateway never chooses between the three, never falls back
+> from one to another, and never retries silently (ADR-0168 §9).
+
+> **Normative.** **`timeout` is not on that list and no browser value reaches
+> it.** The gateway supplies the fourth argument of its own, as ADR-0177 §1's
+> fifth clause requires and §12(b) admits for this operation: the fixed turn
+> budget `Gateway._ask` already passes to `converse` — `_TURN_BUDGET` — passed
+> here to `converse_spoken`. That is the class widened to its third member by
+> this ratified decision and by nothing else; no lane widens it further, and no
+> lane makes the budget configurable per request, per browser or per session.
+
+> **Normative.** The gateway reads those three members from the body by name and
+> reads no fourth. A `timeout` a body carries is therefore **never read**: it
+> does not reach `converse_spoken`, it does not displace the gateway's own
+> budget, and it changes no response.
+
+**Never read rather than refused, and the difference is deliberate.** No other
+assistant route inspects a member it does not use — `Gateway._ask` selects
+`utterance` and `conversation_id` by name and is silent about the rest of the
+body — so rejecting one key on one route would be machinery the surface does not
+otherwise have, added by resemblance to a clause that does not ask for it. What
+ADR-0177 §1's fifth clause forbids is a browser value *reaching* the deadline,
+and a member nothing reads reaches nothing. §13's row pins that over a body which
+carries one, so the property is tested rather than asserted.
 
 > **Normative.** The recording is uploaded complete, in one request, and the
 > rendering comes back on that request's response. No WebSocket, no protocol
@@ -1050,8 +1073,11 @@ re-deciding it: "§1's condition is that the superseding ADR **exists**, not tha
 it is ratified — the hazard §1 names is a `Status` line pointing at nothing, and
 an atomic pair makes that unreachable." ADR-0201 §8 restates the same reading and
 draws the consequence this change takes: "a lane whose fence admits both files may
-make it atomically." So the record rides here, `Proposed` or not, and #1667 —
-opened when it could not — closes with this PR.
+make it atomically." That ADR ratified after this one's declared base, so the
+durability clause names it and the commit it is quoted at; nothing rests on it
+that ADR-0082 §7 does not already settle at the base itself. So the record rides
+here, `Proposed` or not, and #1667 — opened when it could not — closes with this
+PR.
 
 Three near misses, named so that a reviewer can check them rather than take
 them:
@@ -1149,6 +1175,7 @@ each wave must contain if it exists.
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
+| §10 (deadline) | `/ask/spoken` reads `utterance`, `plays` and `conversation_id` from the body and nothing else; the gateway passes `_TURN_BUDGET` as `timeout` | A test posting a body that also carries `timeout`, asserting the engine is called with the gateway's own budget and that the body's value reaches neither the call nor the response |
 | §10 (secure context) | Nothing capturing a microphone on a non-loopback origin ships before ADR-0174 §11's decision | The lane's own precondition, checked at briefing rather than by a test |
 | §12 | Nothing — ADR-0177's record is made in this ADR's own change, not by an implementing lane | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0177 reaches ADR-0200 from its header |
 
