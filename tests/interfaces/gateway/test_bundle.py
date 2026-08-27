@@ -1193,6 +1193,69 @@ def test_a_recorder_that_refuses_to_start_does_not_wedge_the_control() -> None:
     assert starting.count("press = null") == 4
 
 
+def test_a_spoken_wait_that_never_settles_does_not_hold_the_owners_control_for_ever() -> None:
+    """Issue #1500's condition on the third turn entry, found by adversarial review.
+
+    ``sendRecording`` disables ``#talk-button`` before the request goes out and re-enables
+    it in a ``finally``; ``fetch`` carries no deadline of its own, so a socket that dies
+    without settling leaves that ``await`` pending for ever, the ``finally`` never runs,
+    and the owner's one way into the assistant by voice stays greyed out until the page is
+    reloaded.
+
+    **The remedy is a control and not a bound** — ADR-0182 §7's fifth clause has the page
+    re-issue no request of its own motion, so "offering the owner a visible retry costs
+    one control and removes the class". It sends nothing and cancels nothing: a control
+    that re-recorded would be the silent retry ADR-0168 §9 forbids wearing a button's
+    clothes.
+
+    **Its own control rather than a share of the Ask panel's**, because an owner with a
+    typed question out and a recording out has two waits to leave and needs one control
+    each.
+    """
+    script = _code("app.js")
+    sending = _functions(script)["sendRecording"]
+    abandoning = _functions(script)["abandonSpoken"]
+
+    assert "hidden" in _tag(_markup("index.html"), "stop-talking")
+    assert 'el("stop-talking").addEventListener("click", abandonSpoken)' in script
+    assert "new AbortController()" in sending
+    assert "signal: mine.stopping.signal" in sending
+    assert "mine.stopping.abort()" in abandoning
+    assert "fault(SPOKEN_ABANDONED," in abandoning
+    # The control comes back through one function, which is what makes it come back on the
+    # endings that never settle as well as the ones that do.
+    assert "releaseTalk()" in abandoning
+    assert "if (press === mine) {" in sending
+    # And the wait that was stopped does not then report the gateway as gone: an abort the
+    # owner asked for is an act rather than a failure, and `abandonSpoken` has already
+    # said what happened.
+    assert "if (mine.stopping === null || !mine.stopping.signal.aborted) {" in sending
+
+
+def test_the_audio_context_is_built_inside_the_press_that_leads_to_the_playback() -> None:
+    """Adversarial review, round 1, major. A browser enforcing *transient* activation for
+    Web Audio starts a context created after the upload suspended and refuses the
+    ``resume`` — so a perfectly good rendering came back and was reported as one this
+    browser could not play.
+
+    That is not hypothetical on the browser milestone 19's exit test names: WebKit holds
+    the strict rule and the exit test is a phone. ``startTalking`` runs inside the
+    ``pointerdown`` or ``keydown`` handler, so the context is built there, **before any
+    await**, and held for the life of the page — closing it after a rendering would put
+    the next playback back outside a gesture, which is the defect.
+    """
+    script = _code("app.js")
+    starting = _functions(script)["startTalking"]
+    playing = _functions(script)["playSpoken"]
+
+    assert starting.index("readyToPlay()") < starting.index("await navigator.mediaDevices")
+    assert "new AudioContext()" not in playing
+    assert "const context = listeningContext" in playing
+    assert script.count("new AudioContext()") == 1
+    # Held rather than closed, which is the whole of what makes the *next* playback work.
+    assert ".close()" not in playing
+
+
 def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
     """``getUserMedia``'s refusals are read off the error's ``name``, the one member the
     specification fixes — never off its ``message``, which is the browser's own prose.
@@ -1477,14 +1540,21 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     assert "the question was sent and nothing here read a " in script
     assert "so the assistant did receive the " in script
     assert "how it ended is what is not known" in script
-    # What neither of them may drop: the act is the same act, so the three things about
-    # it that do not depend on how far the answer got are said in both.
-    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 4
-    assert script.count("new question rather than retrying that one") == 4
-    # The route back is one constant read by both, so the two endings cannot drift apart
-    # on it — and it points rather than promises, because a turn that ran is not thereby
-    # a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9 item 6).
-    assert script.count("WHERE_TO_LOOK") == 4
+    # What none of them may drop: the act is the same act, so the three things about
+    # it that do not depend on how far the answer got are said in all of them.
+    #
+    # **Five rather than four since ADR-0200 §10**, and the arithmetic is the same one:
+    # each constant carries the clause once and is named once at its site, and the third
+    # abandonment sentence is `SPOKEN_ABANDONED` — the spoken entry's own, which is
+    # `ASK_ABANDONED`'s state rather than `ASK_ABANDONED_MIDWAY`'s because a spoken turn
+    # streams nothing and so has no partial reply this browser could have read.
+    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 5
+    assert script.count("new question rather than retrying that one") == 5
+    # The route back is one constant read by all of them, so the endings cannot drift
+    # apart on it — and it points rather than promises, because a turn that ran is not
+    # thereby a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9
+    # item 6).
+    assert script.count("WHERE_TO_LOOK") == 5
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
 

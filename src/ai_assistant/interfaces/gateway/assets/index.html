@@ -99,6 +99,18 @@
         -->
         <button type="button" id="talk-button" hidden>Hold to talk</button>
         <!--
+          The way out of a spoken wait, and the reason it is a second control rather than
+          a share of the Ask panel's (#1500, ADR-0182 §7's fifth clause). `fetch` carries
+          no deadline of its own, so a socket that dies without settling leaves the page
+          waiting for ever with the button greyed out; this is what ends that wait. It
+          sends nothing and cancels nothing — a control that re-recorded would be the
+          silent retry ADR-0168 §9 forbids, wearing a button's clothes.
+
+          Hidden until there is a wait to leave. It is `type="button"` and outside the
+          ask form, so nothing about it can submit a question.
+        -->
+        <button type="button" id="stop-talking" hidden>Stop waiting</button>
+        <!--
           What this browser can and cannot do about a microphone, and what is happening
           while the button is held. One line rather than two, because they are never
           both true: a page that cannot record never gets to be listening.

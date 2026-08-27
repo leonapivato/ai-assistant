@@ -3583,6 +3583,49 @@ const COULD_NOT_PLAY =
   "That answer was spoken and this browser could not play the audio. The answer above " +
   "is the same words, complete.";
 
+// What stopping a spoken wait says. #1500's condition on the third entry, and the
+// wording is `ASK_ABANDONED`'s because the state is the same one: the request went out
+// and no response was read, so the turn may have run and was certainly never called
+// back. It is **not** `ASK_ABANDONED_MIDWAY` — a spoken turn streams nothing, so there
+// is no partial reply this browser could have read.
+const SPOKEN_ABANDONED =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "What became of the turn is not known: the recording was sent and nothing here read a " +
+  "reply, so the assistant may have carried it out and may never have received it. " +
+  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
+  "Holding the button again asks a new question rather than retrying that one. " +
+  WHERE_TO_LOOK;
+
+// **One audio context for the page, built and resumed inside the press.**
+//
+// Adversarial review found the fix for a defect this replaces: a context created after
+// the upload had settled is created *outside* the gesture that led to it, and a browser
+// enforcing transient activation for Web Audio starts it suspended and refuses the
+// `resume` — so a perfectly good rendering came back and was reported as one this
+// browser could not play. That is not a hypothetical on the browser milestone 19's exit
+// test names: WebKit's rule is the strict one, and the exit test is a phone.
+//
+// So it is built where the activation is: `startTalking` runs inside the `pointerdown`
+// or `keydown` handler, and `readyToPlay` is its first act, before any `await`. It is
+// then held for the life of the page rather than closed after a rendering, because
+// closing it would put the next playback back outside a gesture — which is the defect.
+let listeningContext = null;
+
+function readyToPlay() {
+  try {
+    if (listeningContext === null) {
+      listeningContext = new AudioContext();
+    }
+    if (listeningContext.state === "suspended") {
+      void listeningContext.resume();
+    }
+  } catch (_) {
+    // A browser with no Web Audio at all. The recording still goes up and the answer is
+    // still shown and read; what is lost is hearing it, which `playSpoken` says.
+    listeningContext = null;
+  }
+}
+
 // The press being served, or `null` between presses.
 //
 // **A record rather than a flag**, because a release can land before the browser has
@@ -3646,6 +3689,7 @@ function offerTalk() {
     recordableFormat() !== null;
   button.hidden = false;
   button.disabled = !usable;
+  el("stop-talking").hidden = true;
   saying(usable ? "" : NO_MICROPHONE);
 }
 
@@ -3683,9 +3727,19 @@ async function startTalking() {
   if (format === null) {
     return;
   }
+  // **First, and before any `await`**: this function is running inside the press, and
+  // the audio context has to be built where that activation is.
+  readyToPlay();
   fault(null, "console");
   heardWas(null);
-  const mine = { format, released: false, recorder: null, stream: null, chunks: [] };
+  const mine = {
+    format,
+    released: false,
+    recorder: null,
+    stream: null,
+    chunks: [],
+    stopping: null,
+  };
   press = mine;
   saying(LISTENING);
   let stream;
@@ -3770,13 +3824,49 @@ function stopTalking() {
   }
 }
 
+// The control handed back and the press ended, whatever ended it — including the
+// endings that never settle, which is why this is a function and not a `finally` body.
+// It is the invariant #1500 is about, on the third entry: it runs on every exit a spoken
+// turn has, and it is the only thing that re-enables the button.
+function releaseTalk() {
+  press = null;
+  el("talk-button").disabled = false;
+  el("stop-talking").hidden = true;
+  // Only the sentence this wait put there. `NOTHING_RECORDED` and `HEARD_NOTHING` are
+  // both written on the way out and are the answer rather than a state to clear.
+  if (el("talk-state").textContent === SENDING) {
+    saying("");
+  }
+}
+
+// The owner's act, and the only thing that ends a spoken turn's wait early (#1500,
+// ADR-0182 §7's fifth clause).
+//
+// **It aborts and it announces, and it sends nothing.** The abort is what makes the
+// pending `fetch` settle, so the promise this page is waiting on stops being one that
+// never resolves; the sentence is what keeps the restored control from reading as an act
+// that finished. A control that quietly re-recorded would be the silent retry ADR-0168 §9
+// forbids wearing a button's clothes — `abandonAsk` says the same of itself one entry
+// over, and this is that entry's copy because the two waits are different waits: an owner
+// with a question out and a recording out has two things to stop and one control each.
+function abandonSpoken() {
+  const mine = press;
+  if (mine === null || mine.stopping === null) {
+    return;
+  }
+  // Released before the abort, so the rejection it provokes finds this press already
+  // settled and `sendRecording`'s own `finally` leaves the control alone.
+  releaseTalk();
+  mine.stopping.abort();
+  show("answer", false);
+  fault(SPOKEN_ABANDONED, "console");
+}
+
 async function sendRecording(mine) {
   releaseMicrophone(mine.stream);
-  const button = el("talk-button");
   const half = headerHalf();
   if (half === null) {
-    press = null;
-    saying("");
+    releaseTalk();
     showBootstrap();
     return;
   }
@@ -3788,7 +3878,14 @@ async function sendRecording(mine) {
       return;
     }
     saying(SENDING);
-    button.disabled = true;
+    el("talk-button").disabled = true;
+    // **The way out, armed before the request goes out and offered while it is out.**
+    // `fetch` carries no deadline of its own, so a socket that dies without settling
+    // leaves the `await` below pending for ever and the `finally` never runs: without
+    // this the owner's one way into the assistant by voice stays greyed out until the
+    // page is reloaded, which is #1500 exactly.
+    mine.stopping = new AbortController();
+    el("stop-talking").hidden = false;
     // Read before the request goes out, so what is compared on the way back is the
     // selection this turn was sent under and not the one it is landing into — `ask`'s
     // own rule, and the reason is the same on either entry.
@@ -3802,8 +3899,17 @@ async function sendRecording(mine) {
       method: "POST",
       headers: admitted(half, true),
       body: JSON.stringify(asked),
+      signal: mine.stopping.signal,
     });
     const body = await readBody(response);
+    // **A body abandoned part-way through is not a body this page can read**, and
+    // `readBody` cannot tell the difference: it answers anything unreadable with an
+    // empty object, which is the right rule for a body the gateway wrote badly and the
+    // wrong one for a read the owner stopped. The owner has already been told what
+    // happened.
+    if (mine.stopping.signal.aborted) {
+      return;
+    }
     if (!response.ok) {
       show("answer", false);
       conversationLost(body, asked.conversation_id);
@@ -3812,16 +3918,24 @@ async function sendRecording(mine) {
     }
     renderSpokenTurn(body.turn, chosenAt);
   } catch (_) {
-    // `fetch` rejects when the connection itself failed — the gateway is gone, which is
-    // a different fault from the hub being gone and is said as one. `ask`'s own catch
-    // draws the same line for the same reason.
-    show("answer", false);
-    fault(GATEWAY_GONE, "console");
+    // An abort this owner asked for is not the gateway having gone, and saying it was
+    // would be a wrong explanation rather than a missing one; `abandonSpoken` has
+    // already said what happened, in the one place that knows it was an act rather than
+    // a failure. Everything else lands here — `fetch` rejecting because the connection
+    // itself failed, which is a different fault from the hub being gone and is said as
+    // one, exactly as `ask`'s own catch draws the line.
+    if (mine.stopping === null || !mine.stopping.signal.aborted) {
+      show("answer", false);
+      fault(GATEWAY_GONE, "console");
+    }
   } finally {
-    press = null;
-    button.disabled = false;
-    if (el("talk-state").textContent === SENDING) {
-      saying("");
+    // **Only while this press is still the one being waited on.** An owner who stopped
+    // waiting leaves this promise to settle afterwards, and a `finally` that re-enabled
+    // the button then could hand it back in the middle of a later press — and hide that
+    // press's own way out. The comparison is against the record rather than a flag, so
+    // it is the identity of the press that decides it (`ask`'s own rule).
+    if (press === mine) {
+      releaseTalk();
     }
   }
 }
@@ -3868,27 +3982,22 @@ function renderSpokenTurn(turn, chosenAt) {
 // control work. `decodeAudioData` takes the octets directly, engages no fetch and no
 // URL, and is subject to no directive at all.
 //
-// `resume` before the source starts because an `AudioContext` built outside a gesture
-// can start suspended; the press that led here is a gesture, so this is the ordinary
-// case going through rather than a workaround for a blocked one.
+// **The context is `readyToPlay`'s and is never built here**, because here is after the
+// upload and outside the gesture that led to it — see that function for the defect this
+// arrangement exists to avoid.
 async function playSpoken(spoken) {
-  let context = null;
+  const context = listeningContext;
+  if (context === null) {
+    line(el("answer-body"), COULD_NOT_PLAY, "notice");
+    return;
+  }
   try {
-    context = new AudioContext();
-    await context.resume();
     const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
     const source = context.createBufferSource();
     source.buffer = decoded;
     source.connect(context.destination);
-    const closing = context;
-    source.addEventListener("ended", () => {
-      void closing.close();
-    });
     source.start();
   } catch (_) {
-    if (context !== null) {
-      void context.close();
-    }
     line(el("answer-body"), COULD_NOT_PLAY, "notice");
   }
 }
@@ -7234,6 +7343,7 @@ talkButton.addEventListener("keyup", (event) => {
   event.preventDefault();
   stopTalking();
 });
+el("stop-talking").addEventListener("click", abandonSpoken);
 el("new-conversation").addEventListener("click", startFresh);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
