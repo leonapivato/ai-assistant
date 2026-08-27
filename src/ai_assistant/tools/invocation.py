@@ -34,6 +34,8 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import (
     UNREPRESENTABLE_FAULT_CLASS,
+    ReportedOutput,
+    ToolCost,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -48,6 +50,13 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import EgressBinding, FrozenJson, ToolCall, ToolDefinition
 
+    #: What either callable shape may hand back: the output bare, or the output
+    #: with what the call cost, in the envelope ADR-0195 §2 mints. A **widening**
+    #: rather than a replacement, so every registered tool in the tree keeps
+    #: type-checking untouched — a return type is covariant, and a callable
+    #: returning ``FrozenJson`` satisfies this union already.
+    ReportedReturn = FrozenJson | ReportedOutput
+
     #: What enters the bound callable once the claim has landed: a zero-argument
     #: callable returning the coroutine to await. :func:`checked_pairing` builds
     #: one, having decided the shape — so nothing about the callable is read again
@@ -57,13 +66,13 @@ if TYPE_CHECKING:
     #: signature and never a value: every use is an annotation, which
     #: ``from __future__ import annotations`` leaves unevaluated, so binding it at
     #: runtime would buy three imports nothing else in this module needs.
-    EntersCallable = Callable[[], Coroutine[Any, Any, FrozenJson]]
+    EntersCallable = Callable[[], Coroutine[Any, Any, ReportedReturn]]
 
     #: What a registration will enter, read off the object **once at
     #: registration** (:func:`resolved_implementation`). Spelled with an ellipsis
     #: because it is called only through ``functools.partial`` below, which
     #: supplies whichever keywords the resolved shape declares.
-    EnteredCallable = Callable[..., Coroutine[Any, Any, FrozenJson]]
+    EnteredCallable = Callable[..., Coroutine[Any, Any, ReportedReturn]]
 
 _log = structlog.get_logger(__name__)
 
@@ -86,6 +95,12 @@ class ToolImplementation(Protocol):
     failure returns nothing useful by raising — it should be given the vocabulary
     of :class:`~ai_assistant.core.types.ToolFailureKind` by a future integration
     ADR, which this one does not decide.
+
+    **It may also report what the call cost**, by returning its output inside a
+    :class:`~ai_assistant.core.types.ReportedOutput` rather than bare (ADR-0195
+    §2). The union is a widening and obliges nobody: returning ``FrozenJson`` is
+    what every registered tool in this tree does and keeps doing. A tool that
+    cannot price its own call returns bare, and the row records ``UNKNOWN``.
     """
 
     async def __call__(
@@ -93,8 +108,8 @@ class ToolImplementation(Protocol):
         parameters: Mapping[str, FrozenJson],
         *,
         idempotency_key: str | None,
-    ) -> FrozenJson:
-        """Perform the call and return its JSON-shaped output."""
+    ) -> ReportedReturn:
+        """Perform the call and return its JSON-shaped output, priced or bare."""
         ...
 
 
@@ -125,6 +140,11 @@ class EgressToolImplementation(Protocol):
     callable in the language and so could not tell the two shapes apart at all. A
     distinct name makes the discrimination structural and total.
 
+    **The cost channel is orthogonal to this split and no third shape is minted
+    for it** (ADR-0195 §2): both shapes widen in the *return* position, which they
+    already share, so the registry's resolution stays a two-way branch instead of
+    becoming a two-by-two matrix.
+
     Nothing else moves. ADR-0029 §6 still holds — no credential crosses this seam
     in either direction, and a binding carries none (ADR-0148 §6's exclusion
     clause). And choosing this shape is ADR-0029 §1's to give away: "How the
@@ -139,8 +159,8 @@ class EgressToolImplementation(Protocol):
         *,
         idempotency_key: str | None,
         egress_binding: EgressBinding,
-    ) -> FrozenJson:
-        """Perform the bound egress call and return its JSON-shaped output."""
+    ) -> ReportedReturn:
+        """Perform the bound egress call and return its output, priced or bare."""
         ...
 
 
@@ -587,6 +607,167 @@ def _interruption(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _ReportedRead:
+    """What one pass over a returned envelope's two fields captured (ADR-0195 §2).
+
+    A record rather than a tuple because the ``output`` a defect leaves behind is
+    not an output: the two states are "both fields read" and "the output read
+    raised", and a caller that had to tell them apart by a sentinel would have to
+    pick one out of ``FrozenJson``, which has none to spare — ``None`` is a
+    perfectly ordinary tool output.
+    """
+
+    #: The local the single guarded read of ``output`` captured. Meaningful only
+    #: where :attr:`defect` is ``None``.
+    output: FrozenJson = None
+    #: The validated, detached figure, or ``None`` where the tool reported none,
+    #: where the round-trip refused it, or where reading it raised (ADR-0195 §4).
+    cost: ToolCost | None = None
+    #: What the read of ``output`` raised, where it did. The seam has nothing to
+    #: record as the call's result, so this takes the ``INTERNAL`` path.
+    defect: Exception | None = None
+
+
+def _revalidated_cost(envelope: ReportedOutput) -> ToolCost | None:
+    """Round-trip the reported figure, or answer ``None`` (ADR-0195 §4).
+
+    **Revalidated rather than read**, in ADR-0032 §6's own idiom and for its own
+    reason: ``ToolCost.model_construct`` bypasses every validator while satisfying
+    ``isinstance``, so a ``PER_CALL`` basis with no amount, a ``NaN``, a negative
+    amount or a ``str`` where a ``CostBasis`` belongs would otherwise reach a
+    completion row and, through it, ADR-0194's arithmetic. What crosses is
+    ``ToolCost.model_validate(cost.model_dump())`` — a validated, detached value.
+
+    **The whole read runs under one ``Exception`` guard**, and that is the half
+    that makes the round-trip safe rather than a refinement of it. Every step
+    executes tool-authored code: the attribute access can be a property, and
+    ``model_dump`` can be overridden by a ``ToolCost`` subclass — which ADR-0032
+    §6 rules legitimate, "the round-trip's result is what crosses". So a raise
+    from the access, the dump or the validation is caught *here* and yields the
+    same ``None`` a value failing validation yields.
+
+    That guard is load-bearing because of **where** this sits: after ADR-0192
+    §1's claim has been appended. An exception escaping it would leave a claim
+    with no completion — the state ADR-0192 §3 requires a completion attempt on
+    every exit to prevent — over an accounting field, on a call that already ran.
+
+    A ``BaseException`` that is not an ``Exception`` — a ``CancelledError``
+    delivered from outside above all — is **propagated unchanged**, exactly as
+    ADR-0029 §3, ADR-0032 §4 and ADR-0194 §4 each propagate it: a cancellation is
+    not an accounting fact.
+
+    Nothing derived from the ``ValidationError`` a refusal produces reaches a
+    message or a log (ADR-0032 §5, ADR-0195 §4): it is raised *about* the reported
+    value and would render it.
+
+    Returns:
+        The validated figure, or ``None`` — which the row records as an
+        ``UNKNOWN`` basis, the pessimistic direction ADR-0194 §2 already fixes.
+    """
+    try:
+        return ToolCost.model_validate(envelope.incurred_cost.model_dump())
+    except Exception:
+        return None
+
+
+def _reported_read(envelope: ReportedOutput) -> _ReportedRead:
+    """Read the envelope's two fields **once each**, under their guards (ADR-0195 §2).
+
+    ``isinstance`` admits a **subclass**, so both fields are tool-authored reads
+    and neither is read bare: a subclass overriding ``__getattribute__``, or a
+    field shadowed by a property, is a defect this frame absorbs rather than an
+    exception escaping after the claim has been appended.
+
+    **One read per field, captured into locals**, because the caller must not
+    find two instructions to choose between: a subclass whose first access
+    succeeds and whose second raises or answers differently would otherwise put a
+    different value on the ``ToolResult`` than the one this frame judged.
+
+    **The two defects resolve differently, on their subject rather than on their
+    severity.** A cost that cannot be read or does not survive the round-trip is
+    discarded **alone** — the outcome, the output and the row all stand, and the
+    row records ``UNKNOWN``. An ``output`` that cannot be read leaves the seam
+    with nothing to record as the call's result, so it takes the ``INTERNAL``
+    path an unrepresentable output already takes (ADR-0029 §3) — and the reported
+    cost goes with it, unread, because the two came off one object and keeping
+    half of a misbehaving carrier would be arbitrating between two accounts a
+    tool gave of its own call, which ADR-0032 §6 declines to do.
+    """
+    try:
+        output = envelope.output
+    except Exception as exc:
+        return _ReportedRead(defect=exc)
+    return _ReportedRead(output=output, cost=_revalidated_cost(envelope))
+
+
+def _succeeded(
+    returned: ReportedReturn,
+    *,
+    definition: ToolDefinition,
+    timeout: timedelta,
+    deadline: asyncio.Timeout,
+    entered_with: int,
+) -> ToolResult:
+    """Classify a normal return, unwrapping a reported cost if one came with it.
+
+    **The order is fixed, and it is two interruption checks rather than one
+    moved** (ADR-0195 §4). The caller's check keeps its place *before any
+    tool-authored value is read* — that is what stops a callable which swallowed
+    its own cancellation from having its accessors entered at all, the property
+    ``invoke`` has today. The check here is the second one, and it exists because
+    reading a tool-authored value can itself deliver a cancellation or let the
+    deadline expire: a seam that checked only beforehand would build a result
+    carrying a figure obtained after it had stopped waiting.
+
+    Where that second check answers, the values read are discarded together with
+    the classification they accompanied — the figure with the outcome, because
+    one carrier has one fate and a row citing a report the seam ruled
+    inadmissible would attribute to the tool a statement about a call the seam
+    has just said it did not get to finish.
+
+    **A malformed cost does not turn a successful call into ``INTERNAL``**, and
+    the difference from the output case is the subject rather than the severity:
+    discarding a real success — an act that already happened, possibly
+    irreversibly — over an accounting field would destroy the record ADR-0192
+    exists to write, to reach a fail-closed state the row already reaches.
+
+    Args:
+        returned: What the callable handed back — bare, or in ADR-0195 §2's
+            envelope. Discriminated by ``isinstance`` and by no other test: a
+            tool returning JSON that happens to carry an ``incurred_cost`` key
+            returns JSON.
+        definition: The registry's own declaration, used for classification.
+        timeout: The figure an expiry message names.
+        deadline: This seam's deadline, whose expiry only it can report.
+        entered_with: The cancellation count this invocation was entered with.
+
+    Returns:
+        The classified outcome, carrying the reported figure where one survived.
+
+    Raises:
+        CancelledError: If a cancellation of the invoking task is pending — a
+            read of a tool-authored value delivering one included.
+    """
+    cost: ToolCost | None = None
+    if isinstance(returned, ReportedOutput):
+        read = _reported_read(returned)
+        interrupted = _interruption(definition, timeout, deadline, entered_with)
+        if interrupted is not None:
+            return interrupted
+        if read.defect is not None:
+            return internal_failure(definition, read.defect)
+        returned, cost = read.output, read.cost
+
+    try:
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=returned, incurred_cost=cost)
+    except ValidationError as exc:
+        # The tool returned something `FrozenJsonValue` refuses — a set, a NaN.
+        # The tool is broken, and saying so is more useful than storing
+        # something unserialisable (ADR-0029 §3).
+        return internal_failure(definition, exc)
+
+
 async def run_bound_call(
     implementation: BoundImplementation,
     *,
@@ -652,6 +833,11 @@ async def run_prepared_call(
       see :func:`_interruption`. Without that, a cancelled turn comes back
       ``SUCCEEDED``, and a side-effecting call that outran its deadline comes
       back as though it had met it.
+    - **A normal return may be an envelope**, and :func:`_succeeded` owns what
+      happens then: ADR-0195 §2's ``ReportedOutput`` is unwrapped here and
+      travels no further, its figure revalidated onto
+      ``ToolResult.incurred_cost``. The interruption check stays *before* any
+      field of it is read, and a second one follows the reads (§4).
 
     ``BaseException`` otherwise propagates unchanged, which is the boundary
     ADR-0026 §2 drew for ``checked_clock``: a guard whose own failure modes
@@ -707,17 +893,20 @@ async def run_prepared_call(
             definition, exc
         )
 
+    # ADR-0195 §4's **first** interruption check, keeping the place it already
+    # had: a call this seam has ruled interrupted has nothing read off what it
+    # returned, so a hostile accessor on the envelope is never entered at all.
     interrupted = _interruption(definition, named, deadline, entered_with)
     if interrupted is not None:
         return interrupted
 
-    try:
-        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=output)
-    except ValidationError as exc:
-        # The tool returned something `FrozenJsonValue` refuses — a set, a NaN.
-        # The tool is broken, and saying so is more useful than storing
-        # something unserialisable (ADR-0029 §3).
-        return internal_failure(definition, exc)
+    return _succeeded(
+        output,
+        definition=definition,
+        timeout=named,
+        deadline=deadline,
+        entered_with=entered_with,
+    )
 
 
 __all__ = [
