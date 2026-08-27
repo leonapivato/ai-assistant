@@ -807,7 +807,7 @@ async def test_a_term_does_not_name_a_longer_word_it_is_merely_part_of() -> None
     ("query", "content", "resolved"),
     [
         pytest.param("that I like jazz", "the user likes jazz", True, id="a-plural-verb"),
-        pytest.param("about my commute", "how long are your commutes?", True, id="a-plural-noun"),
+        pytest.param("my commute", "how long are your commutes?", True, id="a-plural-noun"),
         pytest.param("that I sail", "the user is sailing", True, id="a-participle"),
         pytest.param("that I go sailing", "the user sails", False, id="a-word-that-is-not-there"),
         pytest.param("that I ran to work", "the user runs to work", False, id="an-irregular-verb"),
@@ -946,6 +946,54 @@ async def test_a_reference_word_away_from_the_start_still_constrains(
     operations = Operations(beliefs_held=(belief("b-1", content),))
 
     resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        pytest.param("that I am a doctor", "I was a doctor", id="tense"),
+        pytest.param("that I can swim", "I will swim", id="modality"),
+    ],
+)
+async def test_a_query_does_not_name_the_record_that_says_it_of_another_time(
+    query: str, content: str
+) -> None:
+    """Copulas, auxiliaries and modals carry tense and modality, so they are not framing.
+
+    "I am a doctor" and "I was a doctor" are different claims about the user, and with
+    one of them held there is no second candidate for the difference to show as
+    ambiguity: the route would resolve to the record about another time and park a
+    destructive confirmation on it. The contractions are absent from the framing set for
+    the same reason — the copula is inside ``I'm``.
+
+    What this costs is stated rather than hidden: a query saying "I am a doctor" no
+    longer reaches a belief stored as "the user is a doctor", and ends in ``NOT_FOUND``.
+    That is the fail-closed direction — nothing is performed, nothing is confirmed, and
+    the user is told plainly — while the other is a card naming a record they did not
+    mean.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", content),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+async def test_a_record_kind_word_after_the_subject_has_begun_is_not_a_reference() -> None:
+    """The reference opening is an article and a kind, and not a kind wherever it lands.
+
+    "that I question authority" opens with the connective and the subject, and only then
+    reaches ``question`` — as a **verb**. A leading run that went on stripping reference
+    words past the subject would leave ``authority`` alone and resolve the belief "I
+    respect authority", which asserts close to the opposite. The opening is what makes a
+    reference recognisable without parsing anything, and the question arm above is the
+    same words in the position that is one.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I respect authority"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I question authority")
 
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
