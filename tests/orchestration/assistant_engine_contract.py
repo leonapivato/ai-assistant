@@ -72,6 +72,7 @@ import pytest
 from pydantic import SecretStr
 
 from ai_assistant.core import errors as error_module
+from ai_assistant.core import protocols as protocols_module
 from ai_assistant.core.errors import (
     AssistantError,
     AuditError,
@@ -1966,6 +1967,24 @@ class AssistantEngineContract(ABC):
             initialiser = kind.__init__
             if initialiser is AssistantError.__init__ or initialiser is object.__init__:
                 continue  # carries a message and nothing else, so it sends no details
+            if not _takes_a_message(initialiser):
+                # §10a reconstructs "by calling the named type with the message
+                # positionally", so a subtype whose initialiser takes no message
+                # is not a failure that rule can reach at all. §9 gives the test
+                # for which those are: the ones "no Protocol method declares".
+                # ADR-0032 §1's `ClassifiedToolError` is the case — a carrier
+                # `ToolInvoker.invoke` translates into a `ToolResult`, and which
+                # "never escapes `invoke`", so nothing can hand one to the wire.
+                #
+                # **Asserted rather than skipped**, which is what keeps this a
+                # rule rather than the stale table the docstring warns about: the
+                # moment a Protocol method declares such a type, it owes §10a's
+                # reconstructable shape and this fails until it has one.
+                assert name not in _protocol_declarations(), (
+                    f"{name} is named in core/protocols.py but its initialiser takes no "
+                    f"message, so ADR-0085 §10a could not reconstruct it across the wire"
+                )
+                continue
             parameters = [
                 parameter
                 for parameter in inspect.signature(initialiser).parameters.values()
@@ -4062,6 +4081,21 @@ async def page_after_mutating_the_filter(
     bands.clear()
     page = await running
     return page, await engine.beliefs(bands=every_band)
+
+
+def _takes_a_message(initialiser: object) -> bool:
+    """Whether ``initialiser`` accepts ADR-0085 §10a's message as its first argument."""
+    following = [
+        parameter
+        for parameter in inspect.signature(initialiser).parameters.values()  # type: ignore[arg-type]
+        if parameter.name != "self"
+    ]
+    return bool(following) and following[0].name == "message"
+
+
+def _protocol_declarations() -> str:
+    """The source of ``core/protocols.py``, so a ``Raises:`` clause is searchable."""
+    return inspect.getsource(protocols_module)
 
 
 def _sample_for(parameter: str) -> object:
