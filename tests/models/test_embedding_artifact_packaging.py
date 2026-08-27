@@ -50,6 +50,7 @@ from ai_assistant.models.embedding_artifact import (
     AUDITED_PACKAGES,
     packaged_artifact_dir,
 )
+from ai_assistant.models.speech_artifact import SPEECH_ARTIFACTS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -198,17 +199,25 @@ def _notices_in_the_checkout() -> bytes:
     return (_PROJECT_ROOT / _NOTICES).read_bytes()
 
 
-def test_the_notices_name_the_revision_that_ships() -> None:
-    """The notices describe *these* bytes, not the model in general.
+def test_the_notices_name_every_revision_that_ships() -> None:
+    """The notices describe *these* bytes, not the models in general.
 
-    A re-pin that moved the artifact without moving the notices would leave the
+    A re-pin that moved an artifact without moving the notices would leave the
     file naming a commit the distribution no longer carries, which is the one way
     an accurate notice goes stale on its own. The *declared* commit is what a
-    recipient reads, so this pins that row rather than any mention of the SHA.
+    recipient reads, so this pins those rows rather than any mention of a SHA.
+
+    Compared as a set against every artifact this distribution redistributes —
+    the embedding model and, since ADR-0200, the two speech models — so that
+    adding a fourth without its notice fails here rather than shipping silently.
     """
     notices = _notices_in_the_checkout().decode()
     declared = re.findall(r"^\|\s*Pinned commit\s*\|\s*`([0-9a-f]+)`\s*\|$", notices, re.MULTILINE)
-    assert declared == [ARTIFACT_REVISION]
+
+    assert set(declared) == {ARTIFACT_REVISION} | {
+        artifact.revision for artifact in SPEECH_ARTIFACTS
+    }
+    assert len(declared) == len(set(declared))
 
 
 def test_the_notices_are_declared_as_a_licence_file() -> None:

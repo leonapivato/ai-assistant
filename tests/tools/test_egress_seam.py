@@ -162,6 +162,12 @@ TRANSPORT_BEARING = frozenset(
     {
         "anthropic",
         "anyio",
+        # Its bundled ffmpeg is built with network protocols: `av.open("http://…")`
+        # resolves and connects, which was verified rather than assumed. Nothing in
+        # this project hands it a name — `models/speech_container.py` passes an
+        # in-memory buffer and never a path or a URL — but the *capability* is what
+        # this set is about, and the contract already confines it to `models/`.
+        "av",
         "fastembed",
         "fsspec",
         "genai_prices",
@@ -247,6 +253,12 @@ NOT_TRANSPORT_BEARING = frozenset(
         "rich",
         "rpds_py",
         "secretstorage",
+        # On-device inference over files it is handed, with no client of any kind:
+        # the wheel is the ONNX runtime and the model plumbing, and the model files
+        # are a build input this project vendors rather than anything it fetches
+        # (`models/speech_artifact.py`).
+        "sherpa_onnx",
+        "sherpa_onnx_core",
         "shellingham",
         "six",
         "sniffio",
