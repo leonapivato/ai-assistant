@@ -1307,12 +1307,14 @@ def test_a_press_ends_the_answer_that_is_still_being_spoken() -> None:
     script = _code("app.js")
     starting = _functions(script)["startTalking"]
     interrupting = _functions(script)["interruptPlayback"]
+    stopping = _functions(script)["stopPlaying"]
 
     assert starting.index("interruptPlayback()") < starting.index("if (press !== null")
     assert starting.index("interruptPlayback()") < starting.index("readyToPlay()")
-    assert "mine.source.stop()" in interrupting
-    assert "playbackInterrupted(mine.slot)" in interrupting
+    assert "mine.source.stop()" in stopping
+    assert "playbackInterrupted(ended.slot)" in interrupting
     assert "fault(" not in interrupting
+    assert "fault(" not in stopping
     # Written through that one function and nowhere else, which is `couldNotPlay`'s rule
     # for the other notice this panel takes: a slot the next render detached belongs to an
     # answer that is no longer on screen.
@@ -1336,13 +1338,39 @@ def test_a_decode_the_press_overtook_starts_no_source() -> None:
     """
     script = _code("app.js")
     playing = _functions(script)["playSpoken"]
-    interrupting = _functions(script)["interruptPlayback"]
+    stopping = _functions(script)["stopPlaying"]
 
     assert "playing = mine" in playing
-    assert interrupting.index("playing = null") < interrupting.index("mine.source.stop()")
+    assert stopping.index("playing = null") < stopping.index("mine.source.stop()")
     assert playing.index("await context.decodeAudioData(") < playing.index("if (playing !== mine)")
     assert playing.index("if (playing !== mine)") < playing.index("source.start()")
     assert playing.index("source.start()") < playing.index("mine.source = source")
+
+
+def test_one_playback_is_in_the_air_and_taking_the_record_over_ends_it() -> None:
+    """Adversarial review, round 1, ``major``.
+
+    The record names the playback this page has in the air, and writing a new one over it
+    without ending the old one is a page with two answers sounding at once — where a
+    press would then stop only the later of them, leaving the earlier audible into the
+    microphone the same press opens.
+
+    **The sequence the finding describes is unreachable through the control**: every
+    spoken answer arrives from a press, and the press interrupted before its request went
+    out, so there is never a first playback left for the second answer to land on. That
+    is why the invariant is stated where the record is taken over rather than left to be
+    inferred from the only caller there happens to be today — and it is stated silently,
+    because a replacement is not an interruption and the slot the old answer kept has
+    been detached by the render that replaced it.
+    """
+    script = _code("app.js")
+    playing = _functions(script)["playSpoken"]
+
+    assert playing.index("stopPlaying()") < playing.index("playing = mine")
+    assert playing.index("stopPlaying()") < playing.index("await ")
+    # Through the one function that ends a playback, so there is no second way to leave a
+    # source sounding with nothing holding it.
+    assert script.count("mine.source.stop()") == 1
 
 
 def test_the_audio_context_is_resumed_from_every_state_that_is_not_running() -> None:
