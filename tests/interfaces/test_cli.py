@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
     NotificationReach,
     ObservationReport,
     ObservedProposal,
+    OperationConfirmation,
     PlanStep,
     Provenance,
     Question,
@@ -214,6 +215,18 @@ OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 PATIENT = timedelta(seconds=30)
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
+
+
+def _no_routed_card(_card: OperationConfirmation) -> bool:
+    """The routed approver for a turn that is not expected to route (ADR-0197 §7).
+
+    Every case in this file that predates routing drives an ordinary turn, so
+    reaching this is a case whose engine started parking a routed operation without
+    the case saying what to answer — which would otherwise pass silently on whichever
+    of ``True`` or ``False`` a placeholder happened to return. The cases that *do*
+    answer a routed card pass their own.
+    """
+    raise AssertionError("this turn was not expected to park a routed operation")
 
 
 @pytest.fixture
@@ -913,7 +926,9 @@ async def test_ask_executes_an_allowed_step(output: StringIO) -> None:
         approved += 1
         return True
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=approve)
+    code = await cli._drive_turn(
+        engine, "send it", timeout=PATIENT, approver=approve, confirm_operation=_no_routed_card
+    )
     assert code == 0
     assert approved == 0  # no confirmation was needed, so the approver was never called
     assert "Done" in output.getvalue()
@@ -929,7 +944,9 @@ async def test_ask_prompts_and_relays_the_token_on_a_confirmation(output: String
         seen.append(confirmation)
         return True
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=approve)
+    code = await cli._drive_turn(
+        engine, "send it", timeout=PATIENT, approver=approve, confirm_operation=_no_routed_card
+    )
     assert code == 0
     assert len(seen) == 1  # the adapter was asked to approve exactly one confirmation
     assert isinstance(seen[0].token, ContinuationToken)  # it relayed the opaque token
@@ -942,7 +959,11 @@ async def test_ask_renders_a_refused_confirmation_as_declined(output: StringIO) 
     """Answering no yields a DENY the CLI reports, exit 0 (a valid outcome)."""
     engine = _engine(tools=(confirmable(),))
     code = await cli._drive_turn(
-        engine, "send it", timeout=PATIENT, approver=lambda _confirmation: False
+        engine,
+        "send it",
+        timeout=PATIENT,
+        approver=lambda _confirmation: False,
+        confirm_operation=_no_routed_card,
     )
     assert code == 0
     assert "Declined" in output.getvalue()
@@ -953,7 +974,11 @@ async def test_ask_surfaces_an_error_with_a_nonzero_exit(output: StringIO) -> No
     """A blank utterance is a PlanningError the CLI surfaces, exit 1 (§7)."""
     engine = _engine(tools=(tool(),))
     code = await cli._drive_turn(
-        engine, "   ", timeout=PATIENT, approver=lambda _confirmation: True
+        engine,
+        "   ",
+        timeout=PATIENT,
+        approver=lambda _confirmation: True,
+        confirm_operation=_no_routed_card,
     )
     assert code == 1
     assert "Error" in output.getvalue()
@@ -2593,7 +2618,11 @@ async def test_ask_names_the_conversation_it_ran_under(output: StringIO) -> None
     engine, conversations = _conversation_engine()
 
     code = await cli._drive_turn(
-        engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
     )
 
     assert code == 0
@@ -2608,7 +2637,13 @@ async def test_ask_names_the_conversation_it_ran_under(output: StringIO) -> None
 async def test_ask_continues_the_conversation_it_is_given(output: StringIO) -> None:
     """§10: continuation is an option on ``ask``, never a second meaning for ``resume``."""
     engine, conversations = _conversation_engine()
-    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     existing = (await conversations.recent())[0].id
 
     code = await cli._drive_turn(
@@ -2617,6 +2652,7 @@ async def test_ask_continues_the_conversation_it_is_given(output: StringIO) -> N
         timeout=timedelta(seconds=5),
         approver=lambda _c: True,
         conversation_id=existing,
+        confirm_operation=_no_routed_card,
     )
 
     assert code == 0
@@ -2637,6 +2673,7 @@ async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
         timeout=timedelta(seconds=5),
         approver=lambda _c: True,
         conversation_id="nobody",
+        confirm_operation=_no_routed_card,
     )
 
     assert code == cli._EXIT_ERROR
@@ -2669,7 +2706,11 @@ async def test_ask_prints_the_composed_answer(output: StringIO) -> None:
     engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
 
     code = await cli._drive_turn(
-        engine, "what do you know about me?", timeout=PATIENT, approver=lambda _c: True
+        engine,
+        "what do you know about me?",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
     )
 
     assert code == 0
@@ -2687,7 +2728,13 @@ async def test_the_answer_is_rendered_in_addition_to_the_step_account(
     """
     engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "send it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert "You prefer hiking." in rendered
@@ -2764,7 +2811,13 @@ async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
         ),
     )
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "send it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert "no answer could be composed" in rendered
@@ -3071,7 +3124,13 @@ async def test_a_markup_token_split_across_a_chunk_boundary_carries_no_live_mark
     """
     engine = _ScriptedStream(*SPLIT_TAG)
 
-    code = await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "say it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert code == 0
@@ -3108,7 +3167,13 @@ async def test_every_split_of_an_answer_renders_it_the_way_one_write_would(
         output.truncate(0)
         output.seek(0)
 
-        await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+        await cli._drive_turn(
+            engine,
+            "say it",
+            timeout=PATIENT,
+            approver=lambda _c: True,
+            confirm_operation=_no_routed_card,
+        )
 
         assert output.getvalue().startswith(expected), f"split at {cut}"
 
@@ -3185,7 +3250,13 @@ async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
     """
     engine = _engine(tools=(tool(),), composing=_answering("Sent it.", "Sent ", "it."))
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "send it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert code == 0
@@ -3217,7 +3288,13 @@ async def test_an_answer_that_began_and_did_not_finish_is_shown_and_called_incom
         ),
     )
 
-    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "send it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert code == 0, "a composition that stopped is not a failure of the step (§10)"
@@ -3259,7 +3336,13 @@ async def test_the_terminal_reply_is_the_answer_where_the_chunks_disagree(
     """
     engine = _ScriptedStream("You should ", "resign.", outcome=_outcome_replying("Take a walk."))
 
-    code = await cli._drive_turn(engine, "advise me", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "advise me",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert code == 0
@@ -3283,7 +3366,13 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
         composing=_answering("Still here.", "Still ", "here.")
     )
 
-    first = await cli._drive_turn(engine, "hello", timeout=PATIENT, approver=lambda _c: True)
+    first = await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     assert "Still here." in output.getvalue(), "the opening turn streamed its answer"
     opened = (await conversations.recent())[0].id
     output.truncate(0)
@@ -3295,6 +3384,7 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
         timeout=PATIENT,
         approver=lambda _c: True,
         conversation_id=opened,
+        confirm_operation=_no_routed_card,
     )
 
     rendered = output.getvalue()
@@ -3315,7 +3405,13 @@ async def test_ask_drives_the_streaming_entry_and_relays_its_budget_unchanged() 
     """
     engine = _ScriptedStream("done")
 
-    await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "say it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     assert engine.timeouts == [PATIENT]
     assert [call[0] for call in engine.calls] == ["converse_streaming"]
@@ -3331,7 +3427,13 @@ async def test_reading_to_the_terminal_frame_closes_the_iterator(output: StringI
     """
     engine = _ScriptedStream("all ", "done")
 
-    await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "say it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     assert engine.closed
 
@@ -3348,7 +3450,13 @@ async def test_an_interrupted_stream_still_closes_the_iterator(output: StringIO)
     stall = asyncio.Event()
     engine = _ScriptedStream("half an ", "answer", stall=stall)
     turn = asyncio.create_task(
-        cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+        cli._drive_turn(
+            engine,
+            "say it",
+            timeout=PATIENT,
+            approver=lambda _c: True,
+            confirm_operation=_no_routed_card,
+        )
     )
     await engine.stalled.wait()
 
@@ -3376,7 +3484,13 @@ async def test_an_interrupted_stream_closes_the_line_it_was_writing(output: Stri
     """
     engine = _ScriptedStream("half an ", "answer", stall=asyncio.Event())
     turn = asyncio.create_task(
-        cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+        cli._drive_turn(
+            engine,
+            "say it",
+            timeout=PATIENT,
+            approver=lambda _c: True,
+            confirm_operation=_no_routed_card,
+        )
     )
     await engine.stalled.wait()
 
@@ -3401,7 +3515,13 @@ async def test_a_stream_that_ends_without_an_outcome_is_reported_not_invented(
     """
     engine = _ScriptedStream("half an answer", terminal=False)
 
-    code = await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_turn(
+        engine,
+        "say it",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
 
     rendered = output.getvalue()
     assert code == 1
@@ -3442,7 +3562,13 @@ async def test_the_conversations_listing_shows_what_a_person_chooses_from(
 ) -> None:
     """§2: the id, when it started, and when it was last active."""
     engine, conversations = _conversation_engine()
-    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     started = (await conversations.recent())[0]
 
     code = await cli._drive_conversations(engine, limit=50, offset=0)
@@ -3466,7 +3592,13 @@ async def test_the_conversations_listing_never_shows_a_deleted_conversation(
 ) -> None:
     """§8: not because this surface filters, but because the stamp hides it."""
     engine, conversations = _conversation_engine()
-    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     stamped = (await conversations.recent())[0].id
     assert await conversations.stamp_deleted(stamped) is True
     output.truncate(0)
@@ -3483,7 +3615,13 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
 ) -> None:
     """§8: the ceremony is the count and span, not every turn — what a person can judge."""
     engine, conversations = _conversation_engine()
-    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     existing = (await conversations.recent())[0].id
     await cli._drive_turn(
         engine,
@@ -3491,6 +3629,7 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
         timeout=timedelta(seconds=5),
         approver=lambda _c: True,
         conversation_id=existing,
+        confirm_operation=_no_routed_card,
     )
     output.truncate(0)
     output.seek(0)
@@ -3511,7 +3650,13 @@ async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(
 ) -> None:
     """A refusal is a valid outcome, and it exits 0 — nothing went wrong."""
     engine, conversations = _conversation_engine()
-    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        confirm_operation=_no_routed_card,
+    )
     existing = (await conversations.recent())[0].id
 
     code = await cli._drive_forget_conversation(engine, existing, confirm=lambda _digest: False)
@@ -3845,7 +3990,11 @@ async def test_an_observed_belief_is_immediately_inspectable(output: StringIO) -
     engine, conversations = _conversation_engine()
     try:
         await cli._drive_turn(
-            engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+            engine,
+            "hello",
+            timeout=timedelta(seconds=5),
+            approver=lambda _c: True,
+            confirm_operation=_no_routed_card,
         )
         conversation = (await conversations.recent())[0].id
 
@@ -3947,7 +4096,11 @@ async def test_an_observed_belief_reads_back_with_the_episodes_behind_it(
     engine, conversations = _conversation_engine()
     try:
         await cli._drive_turn(
-            engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+            engine,
+            "hello",
+            timeout=timedelta(seconds=5),
+            approver=lambda _c: True,
+            confirm_operation=_no_routed_card,
         )
         conversation = (await conversations.recent())[0].id
         assert await cli._drive_observe(engine, conversation) == 0

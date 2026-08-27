@@ -244,7 +244,7 @@ import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Final, NamedTuple, TextIO, assert_never, final
+from typing import TYPE_CHECKING, Final, NamedTuple, TextIO, assert_never, cast, final
 
 import typer
 from pydantic import SecretStr
@@ -272,6 +272,7 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
     AnswerKind,
+    Belief,
     BeliefBand,
     ClassReach,
     CostBasis,
@@ -287,18 +288,27 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     OriginUnrecordedBinding,
+    PermissionDecision,
     PermissionOutcome,
     ProvisioningState,
+    Question,
     QuestionState,
     QueueOutcome,
     QuietWindow,
     ReadOutcome,
+    RecordedInvocation,
     ReplyChunk,
+    RoutableOperation,
+    RouteOutcome,
     SecretScope,
+    SourceGrant,
+    SourceReadRecord,
     SpendPeriod,
+    SpendTotal,
     StepStatus,
     ToolOutcome,
     encodable_text,
+    routed_listing_arm,
     secret_value,
 )
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
@@ -324,7 +334,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         AnswerOutcome,
-        Belief,
         BeliefSummary,
         CanonicalDestination,
         Confirmation,
@@ -344,13 +353,10 @@ if TYPE_CHECKING:
         NotificationCandidate,
         ObservationReport,
         ObservedProposal,
-        PermissionDecision,
-        Question,
+        OperationConfirmation,
         QueuedQuestion,
-        RecordedInvocation,
-        SourceGrant,
-        SourceReadRecord,
-        SpendTotal,
+        RoutedListing,
+        RoutedOperation,
         StepOutcome,
         ToolCost,
         ToolInvocation,
@@ -2867,6 +2873,12 @@ async def _ask(
     approver: Callable[[Confirmation], bool] = (
         (lambda _confirmation: True) if assume_yes else _prompt_for_approval
     )
+    # A routed card is rendered by `_render_turn` before this is reached (ADR-0197 §7,
+    # ADR-0073 §5), so `--yes` supplies the answer and never the rendering here either:
+    # a non-interactive approval must not destroy what the user never saw.
+    confirm_operation: Callable[[OperationConfirmation], bool] = (
+        (lambda _card: True) if assume_yes else _confirm_operation
+    )
     try:
         engine = await _open_engine()
     except (AssistantError, TransportError) as exc:
@@ -2874,7 +2886,12 @@ async def _ask(
         return _EXIT_ERROR
 
     return await _drive_turn(
-        engine, utterance, timeout=timeout, approver=approver, conversation_id=conversation_id
+        engine,
+        utterance,
+        timeout=timeout,
+        approver=approver,
+        confirm_operation=confirm_operation,
+        conversation_id=conversation_id,
     )
 
 
@@ -3747,12 +3764,13 @@ async def _drive_resume(
     return _EXIT_ERROR if failed else _EXIT_OK
 
 
-async def _drive_turn(
+async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is driven through, and the two approvers are two card types
     engine: AssistantEngine,
     utterance: str,
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
     approver: Callable[[Confirmation], bool],
+    confirm_operation: Callable[[OperationConfirmation], bool],
     conversation_id: str | None = None,
 ) -> int:
     """Stream a turn, render it, and relay a confirmation if the engine parks one.
@@ -3783,6 +3801,15 @@ async def _drive_turn(
     :class:`AssistantError`. That is the whole of what the last handler below does:
     the exception's own path is unchanged, and what would otherwise be left is the
     owner's next shell prompt on the same line as half a sentence (#1352).
+
+    **A routed park is answered through the same method and is not the same park**
+    (ADR-0197 §7). It carries an ``OperationConfirmation`` rather than a
+    ``Confirmation``, its refusal comes back as ``RouteOutcome.REFUSED`` on the
+    outcome rather than as a raised ``PermissionDeniedError``, and it is never both:
+    §8 makes ``routed`` and ``step`` mutually exclusive, so exactly one of the two
+    branches below can be taken. It is also **not recoverable** — §7 keeps a routed
+    park out of ``pending_confirmations`` and out of a restart — so ``assistant
+    resume`` never meets one and this is the only place a routed card is answered.
 
     A turn drives at most one step today (ADR-0042 §3), so at most one
     confirmation can arise; ``resume`` resolves it to ``EXECUTED`` or ``DENIED``.
@@ -3815,10 +3842,20 @@ async def _drive_turn(
         outcome = settled
         failed = _render_turn(outcome, streamed=streamed)
         step = outcome.step
+        routed = outcome.routed
         if step is not None and step.confirmation is not None:
             approved = approver(step.confirmation)
             outcome = await engine.resume(
                 step.confirmation.token, approved=approved, timeout=timeout
+            )
+            failed = _render_turn(outcome)
+        elif routed is not None and routed.confirmation is not None:
+            # The card is already on screen — `_render_turn` put it there above, which
+            # is what makes `--yes` safe (ADR-0073 §5) — so `confirm_operation` reads
+            # the answer and renders nothing.
+            answered = confirm_operation(routed.confirmation)
+            outcome = await engine.resume(
+                routed.confirmation.token, approved=answered, timeout=timeout
             )
             failed = _render_turn(outcome)
     except (AssistantError, TransportError) as exc:
@@ -5328,6 +5365,14 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     which is §10's third clause and is the same obligation ADR-0170 §6 already
     carried.
 
+    **A routed pass renders its routed account and nothing else** (ADR-0197 §10). It
+    drove no plan and no step — §1 ends the pipeline at a taken route and §8 makes
+    ``routed`` and ``step`` mutually exclusive — so the plan and step blocks below
+    are not merely empty for it, they describe a pass that did not happen. The
+    account is rendered *after* the reply and in addition to it, never instead of it:
+    where the two disagree the account is correct by construction, and no flag here
+    resolves that disagreement in the reply's favour.
+
     ``outcome.turn`` is ``None`` on a resume driven from a **recovered** park
     (ADR-0052 §3) — a confirmation reconstructed from durable state after a restart
     has no live turn to render — so only the step is shown there. The action itself
@@ -5345,8 +5390,9 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     in the reply's favour.
 
     Returns:
-        Whether a step ran and did not succeed, which the caller folds into the
-        process exit code (#531).
+        Whether this turn's deterministic account says the system failed to do what
+        was asked, which the caller folds into the process exit code (#531). On a
+        routed pass that is :func:`_render_routed`'s answer.
     """
     turn = outcome.turn
     if outcome.capture_degraded:
@@ -5362,6 +5408,12 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
             "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
         )
     _render_reply(outcome, streamed=streamed)
+    routed = outcome.routed
+    if routed is not None:
+        # ADR-0197 §8: `routed` and `step` are never both present, and a routed pass
+        # carries no turn — so there is no plan below and no step account, and the
+        # routed account is the whole of what this turn deterministically did.
+        return _render_routed(routed)
     if turn is not None:
         plan = turn.plan
         if plan.rationale:
@@ -5529,6 +5581,357 @@ def _step_headline(status: StepStatus, tool: str) -> str:
     # Anything else that is not `SUCCEEDED` after an `EXECUTED` disposition: still
     # not success, and said as plainly as the status allows.
     return f"[yellow]Not finished.[/] {tool} is {_safe(status.value)}."
+
+
+# --- the routed account (ADR-0197 §10) --------------------------------------
+#
+# **Rendered beside the reply, never instead of it, and never suppressed.** ADR-0197
+# §10 binds here for ADR-0170 §6's reason and sharpens it: on a routed pass the
+# composing stage saw two enum values and nothing else (§6), so the worst prose it
+# can produce is prose about the wrong thing, while the account beside it is typed
+# data from the store that no prompt influenced. Where the two disagree the account
+# is correct by construction, and nothing here — no setting, no flag — resolves that
+# disagreement in the reply's favour.
+#
+# **Every word around the values is this adapter's own, selected by the enum
+# member** (§7's card clause, read across the whole account). No free text the
+# router produced reaches the screen: the operation and the outcome are closed
+# vocabularies, and the listing is records the store already held. Each is put
+# through :func:`_safe` on the way out (§10's last clause) — a stored `source` is
+# whatever a reader declared it to be, and a belief's content is the user's own
+# words, neither of which this terminal may be handed unescaped.
+
+
+#: What the ask was routed to, in words, for the one line that says what was asked
+#: for. Total over :class:`RoutableOperation` so a member added under ADR-0197 §3's
+#: widening rule fails here rather than rendering as its enum value.
+_ROUTED_ASKED: Final[Mapping[RoutableOperation, str]] = {
+    RoutableOperation.QUESTIONS: "list what is waiting on your answer",
+    RoutableOperation.RECENT_READS: "list the attempts to read your sources",
+    RoutableOperation.RECENT_INVOCATIONS: "list what I did on an authorisation",
+    RoutableOperation.RECENT_DECISIONS: "list what the permission layer ruled",
+    RoutableOperation.STANDING_GRANTS: "list the sources you allow me to read",
+    RoutableOperation.SPEND_TOTALS: "report what the world has cost",
+    RoutableOperation.FORGET: "forget one belief",
+    RoutableOperation.REVOKE: "withdraw the grant on one source",
+    RoutableOperation.FORGET_QUESTION: "forget one deferred question",
+}
+
+#: What did **not** happen, for every ending that performed nothing. Total for the
+#: same reason, and phrased per operation because "nothing was done" is the sentence
+#: a user cannot act on: what they need to know is that the belief is still held.
+_ROUTED_UNDONE: Final[Mapping[RoutableOperation, str]] = {
+    RoutableOperation.QUESTIONS: "nothing was listed",
+    RoutableOperation.RECENT_READS: "nothing was listed",
+    RoutableOperation.RECENT_INVOCATIONS: "nothing was listed",
+    RoutableOperation.RECENT_DECISIONS: "nothing was listed",
+    RoutableOperation.STANDING_GRANTS: "nothing was listed",
+    RoutableOperation.SPEND_TOTALS: "no total was reported",
+    RoutableOperation.FORGET: "the belief is still held",
+    RoutableOperation.REVOKE: "the grant still stands",
+    RoutableOperation.FORGET_QUESTION: "the question is still there",
+}
+
+#: What a confirm-owed operation did, once it has run. Total over the three members
+#: ADR-0197 §3 tags confirm-owed, and reached only from :attr:`RouteOutcome.PERFORMED`
+#: — a read-only ``PERFORMED`` renders its listing instead, and has one to render.
+_ROUTED_DONE: Final[Mapping[RoutableOperation, str]] = {
+    RoutableOperation.FORGET: "That belief is destroyed.",
+    RoutableOperation.REVOKE: "That grant is withdrawn — I may no longer read that source.",
+    RoutableOperation.FORGET_QUESTION: "That question is destroyed.",
+}
+
+#: The two endings on which this system failed to do what was asked, which is what
+#: the process exit code carries (#531's rule, read one surface over). Everything
+#: else — a refusal, an ambiguity, a lookup that matched nothing — is an **answer**
+#: to the request rather than a failure of it, exactly as a non-``EXECUTED``
+#: disposition is, and exits ``0``.
+_ROUTED_FAILURES: Final[frozenset[RouteOutcome]] = frozenset(
+    {RouteOutcome.UNRECORDED, RouteOutcome.FAILED}
+)
+
+
+def _routed_records[T](
+    operation: RoutableOperation, listing: RoutedListing, arm: type[T]
+) -> tuple[T, ...]:
+    """Read a routed listing as the arm ``operation`` names (ADR-0197 §8).
+
+    **The discriminator is the operation and never the value's shape**, which is §8
+    in terms: "an empty tuple is a legal value of every arm, so the shape decides
+    nothing on exactly the case a listing is most likely to take". So the caller
+    names the arm it is about to render, this checks that against
+    :func:`~ai_assistant.core.types.routed_listing_arm` — ``core``'s own mapping,
+    not a second copy of it here — and the cast states to the type checker what the
+    check established.
+
+    Args:
+        operation: The routed operation, which is the discriminator.
+        listing: The listing carried beside it.
+        arm: The element type the caller is about to render.
+
+    Returns:
+        The same tuple, typed as the arm.
+
+    Raises:
+        AssertionError: If ``operation`` names a different arm, which is unreachable
+            through :class:`~ai_assistant.core.types.RoutedOperation`'s own validator
+            and is therefore a defect in this dispatch rather than a state.
+    """
+    if routed_listing_arm(operation) is not arm:  # pragma: no cover - see below
+        # Unreachable through `RoutedOperation`'s own validator, which holds every
+        # element of a listing to the arm `operation` names. Raised rather than
+        # silently rendered, because the alternative is a renderer reading one
+        # record type's fields off another's.
+        raise AssertionError(f"{operation.value} does not list {arm.__name__}")
+    return cast("tuple[T, ...]", listing)
+
+
+def _render_routed(routed: RoutedOperation) -> bool:
+    """Render what one routed pass did — operation, outcome, and any listing (§10).
+
+    **A park renders as the question and nothing else.** ADR-0197 §10's third clause
+    keeps the composing stage out of a routed park entirely, "for its own reason: the
+    confirmation is what the user must answer, and prose beside it competes with the
+    question" — so the card is the whole of the account here, exactly as
+    :func:`_render_turn` renders no step account for a parked step.
+
+    **The card is rendered here rather than by the approver**, which is what makes
+    ``--yes`` safe: :func:`_drive_turn` calls this before it collects the answer, so
+    a non-interactive approval cannot destroy something the user was never shown
+    (ADR-0073 §5, ADR-0052 §4, and ADR-0197 §7's last clause naming §5 by hand).
+
+    Returns:
+        Whether this system failed to do what was asked, which the caller folds into
+        the process exit code. ``UNRECORDED`` and ``FAILED`` are that failure and
+        nothing else is: a refusal is the user's own ruling, and an ambiguity or a
+        lookup that matched nothing is an answer to the request.
+    """
+    card = routed.confirmation
+    if card is not None:
+        _render_operation_confirmation(card)
+        return False
+    console.print(_routed_headline(routed))
+    listing = routed.listing
+    if listing is not None:
+        _render_routed_listing(routed.operation, routed.outcome, listing)
+    return routed.outcome in _ROUTED_FAILURES
+
+
+def _routed_headline(routed: RoutedOperation) -> str:  # noqa: PLR0911 — one return per RouteOutcome, and the enumeration is the point
+    """Say what became of the routed operation, in this adapter's own words.
+
+    Total over :class:`RouteOutcome`, so a ninth member fails
+    :func:`~typing.assert_never` here rather than rendering as its enum value.
+
+    **``UNRECORDED`` and ``FAILED`` say opposite things and are worded to** (ADR-0197
+    §8, and §12's discrimination clause, which requires a surface that renders the
+    two alike to fail a test). ``UNRECORDED`` means the operation was never called
+    and nothing was destroyed; ``FAILED`` means it was called and raised, and whether
+    it took effect is not asserted. Rendering them alike would tell a user their
+    belief might be gone when this decision guarantees it is not.
+
+    **``UNRECORDED`` says to ask again and never to try the token again** (§7). The
+    park is already claimed by the time that ending is reached, so a surface offering
+    a retry would be offering a token that now raises ``UnknownContinuationError``.
+
+    **``REFUSED`` is a ruling and not an error** (§7). No ``ActionPolicy`` was
+    consulted and no ``PermissionDecision`` recorded, so there is nothing here for a
+    refusal to be *except* the answer the user gave, and it is worded as one.
+    """
+    asked = _ROUTED_ASKED[routed.operation]
+    undone = _ROUTED_UNDONE[routed.operation]
+    match routed.outcome:
+        case RouteOutcome.PERFORMED:
+            if routed.operation.confirm_owed:
+                return f"\n[green]Done.[/] {_ROUTED_DONE[routed.operation]}"
+            return f"\n[bold]I read my own record for that[/] — you asked me to {asked}."
+        case RouteOutcome.AWAITING_CONFIRMATION:  # pragma: no cover - the card is rendered above
+            return f"\n[bold yellow]Waiting on your answer[/] before I {asked}."
+        case RouteOutcome.REFUSED:
+            return f"\n[yellow]Not done.[/] You said no, so {undone}."
+        case RouteOutcome.AMBIGUOUS:
+            return (
+                f"\n[yellow]More than one thing matches that.[/] I will not guess "
+                f"which you meant, so {undone}. Here is everything that matched — "
+                f"say which one, or use the command for it directly."
+            )
+        case RouteOutcome.AMBIGUOUS_TRUNCATED:
+            return (
+                f"\n[yellow]More than one thing matches that, and more than I can "
+                f"show.[/] I will not guess which you meant, so {undone}. Here are "
+                f"the matches I can show — narrow it down, or use the command for it "
+                f"directly."
+            )
+        case RouteOutcome.NOT_FOUND:
+            return f"\n[yellow]Nothing matches that.[/] I found nothing to act on, so {undone}."
+        case RouteOutcome.UNRECORDED:
+            return (
+                f"\n[red]Not attempted.[/] I could not write the record that has to "
+                f"exist before I act, so I did not act: {undone}. Nothing is waiting "
+                f"on you and there is nothing to retry — ask me again."
+            )
+        case RouteOutcome.FAILED:
+            return (
+                f"\n[red]Failed.[/] I tried to {asked} and it raised. Whether it took "
+                f"effect is not something I can tell you."
+            )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(routed.outcome)
+
+
+def _render_routed_listing(
+    operation: RoutableOperation, outcome: RouteOutcome, listing: RoutedListing
+) -> None:
+    """Render a routed listing with the renderer this adapter already has for it.
+
+    ADR-0197 §12's last Normative is why there is no new renderer here: "each renders
+    the routed account beside the reply with the renderer it already has for the
+    operation". Every arm of :data:`~ai_assistant.core.types.RoutedListing` is a type
+    ``assistant questions``, ``reads``, ``invocations``, ``decisions``, ``granted``,
+    ``spend`` and ``beliefs`` already render, so a routed answer and the same
+    operation's typed-door answer read alike — which is ADR-0197 §2's third clause
+    surviving as far as the screen.
+
+    **The bound handed to the paged renderers is the promoted surface's own.** §5 is
+    explicit that a routed read-only operation is performed "exactly as the promoted
+    surface declares it, with that surface's own defaults and that surface's own
+    bound", and routing gets no setting of its own — so ``DEFAULT_PAGE_SIZE`` is what
+    a full page is measured against here, exactly as it is on the typed door.
+
+    **A candidate listing is rendered per record rather than as a page**, because it
+    is not one: an ambiguity carries what the lookup matched, and the "that is a full
+    page, ask for the next" footers a listing surface prints would be an invitation
+    to page through something that has no next page. What §5 forbids is rendering
+    fewer candidates than the outcome carries or summarising in place of them, and
+    nothing here does either.
+    """
+    if outcome in (RouteOutcome.AMBIGUOUS, RouteOutcome.AMBIGUOUS_TRUNCATED):
+        _render_routed_candidates(operation, listing)
+        return
+    match operation:
+        case RoutableOperation.QUESTIONS:
+            _render_questions(
+                _routed_records(operation, listing, Question),
+                (),
+                limit=DEFAULT_PAGE_SIZE,
+                offset=0,
+            )
+        case RoutableOperation.RECENT_READS:
+            _render_reads(
+                _routed_records(operation, listing, SourceReadRecord), limit=DEFAULT_PAGE_SIZE
+            )
+        case RoutableOperation.RECENT_INVOCATIONS:
+            _render_invocations(
+                _routed_records(operation, listing, RecordedInvocation), limit=DEFAULT_PAGE_SIZE
+            )
+        case RoutableOperation.RECENT_DECISIONS:
+            _render_decisions(
+                _routed_records(operation, listing, PermissionDecision), limit=DEFAULT_PAGE_SIZE
+            )
+        case RoutableOperation.STANDING_GRANTS:
+            _render_standing(_routed_records(operation, listing, SourceGrant))
+        case RoutableOperation.SPEND_TOTALS:
+            _render_spend(_routed_records(operation, listing, SpendTotal))
+        case _:  # pragma: no cover - unreachable by RoutedOperation's own validator
+            # A confirm-owed operation carries a listing on exactly the two ambiguous
+            # outcomes, which returned above. Reaching here would mean the validator
+            # admitted a confirm-owed `PERFORMED` with a listing, which it does not.
+            raise AssertionError(f"{operation.value} carries no listing on {outcome.value}")
+
+
+def _render_routed_candidates(operation: RoutableOperation, listing: RoutedListing) -> None:
+    """Render what an ambiguous lookup matched, whole (ADR-0197 §5).
+
+    **Every candidate, and never a summary of them.** §5's last clause is "no surface
+    renders fewer candidates than the outcome carries or summarises in place of
+    them", which is ADR-0186 §7's rule for a trail row applied to a candidate
+    listing. A narrow terminal therefore gets a longer screen, not a shorter list.
+
+    **A belief candidate is rendered in full, warrant included**, for the reason
+    :func:`_render_belief` states: the user is about to say which of these to
+    destroy, and the citations are the warrant they are judging.
+    """
+    match operation:
+        case RoutableOperation.FORGET:
+            for belief in _routed_records(operation, listing, Belief):
+                _render_belief(belief)
+        case RoutableOperation.FORGET_QUESTION:
+            for question in _routed_records(operation, listing, Question):
+                _render_question(question)
+        case RoutableOperation.REVOKE:
+            for grant in _routed_records(operation, listing, SourceGrant):
+                console.print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
+                console.print(f"    [green]allowed for[/] {_scope_phrase(grant.scope)}")
+                console.print(f"    [dim]granted {_when(grant.decided_at)}[/]")
+        case _:  # pragma: no cover - unreachable by RoutedOperation's own validator
+            # A read-only operation admits exactly `PERFORMED`, `UNRECORDED` and
+            # `FAILED` (ADR-0197 §8), so neither ambiguous outcome reaches it.
+            raise AssertionError(f"{operation.value} is never ambiguous")
+
+
+def _render_operation_confirmation(card: OperationConfirmation) -> None:
+    """Show what a routed operation would do, before it is answered (ADR-0197 §7).
+
+    **This is not a** :class:`~ai_assistant.core.types.Confirmation` **and it is not
+    rendered as one.** A routed act has no tool, no arguments and no policy ruling,
+    so three of that type's four content members would have to be filled with
+    something invented — the falsehood-in-durable-state failure ADR-0170 §3 refused,
+    arriving in a value a user reads. What is on screen instead is exactly what §7
+    says the card carries: the operation, and the resolved subject as a typed value.
+
+    **No model-written text reaches it.** The router's query is not shown, the
+    operation is an enum member, and every word around the subject is selected by
+    that member — which is what makes a card a person can trust to describe the act
+    rather than to describe how the act was asked for.
+
+    **The subject is rendered by the renderer this adapter already has**, and for
+    ``forget`` that renderer is the whole ADR-0073 §5 ceremony (:func:`_render_forget_prompt`):
+    the belief in full, the band-appropriate warning, what destroying it costs, and
+    the window between the show and the delete. ADR-0197 §7's last clause binds that
+    ceremony to the routed ``forget`` "whole, including its band-appropriate warning
+    and its ``--yes`` idiom, which renders before acting rather than skipping the
+    render" — so this runs before the answer is collected on every path.
+
+    **``revoke`` and ``forget_question`` get a card here although the typed door
+    gives them none, and that is ADR-0197 §3 rather than a contradiction.** ADR-0102
+    §4 keeps a prompt out of ``assistant revoke`` because nothing may stand between a
+    user and their own remedy, and ADR-0078 §1 keeps one out of
+    ``assistant forget-question`` because a question is not a belief. Neither reason
+    reaches here: what §7 guards is not the risk of the operation but the fact that a
+    **model** selected it and its subject from a sentence, and "the direction of a
+    write does not change its tag".
+    """
+    if card.operation is RoutableOperation.FORGET:
+        for belief in _routed_records(card.operation, card.subject, Belief):
+            _render_forget_prompt(belief)
+        return
+    console.print(f"\n[bold yellow]About to {_ROUTED_ASKED[card.operation]}[/]")
+    if card.operation is RoutableOperation.REVOKE:
+        for grant in _routed_records(card.operation, card.subject, SourceGrant):
+            console.print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
+            console.print(f"    [green]currently allowed for[/] {_scope_phrase(grant.scope)}")
+            console.print(f"    [dim]granted {_when(grant.decided_at)}[/]")
+        console.print(
+            "\n  This stops me reading that source from now on. It destroys nothing "
+            "I have already learned from it, and you can grant it again."
+        )
+        return
+    for question in _routed_records(card.operation, card.subject, Question):
+        _render_question(question)
+    console.print(
+        "\n  This destroys the record of having been asked. Nothing I believe "
+        "changes, and you can tell me the same thing again yourself."
+    )
+
+
+def _confirm_operation(_card: OperationConfirmation) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    :func:`_drive_turn` renders the card through :func:`_render_turn` before it
+    reaches here, so rendering again would show the belief twice (I/O; ADR-0042 §6).
+    The counterpart of :func:`_confirm` on the routed side.
+    """
+    return typer.confirm("Proceed?", default=False)
 
 
 def _render_conversation_footer(outcome: TurnOutcome) -> None:
