@@ -153,6 +153,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.routing import (
+    FORGET_LOOKUP_KINDS,
     Resolved,
     RoutingStage,
 )
@@ -6094,15 +6095,25 @@ class Engine:
     async def _routed_beliefs(self, *, limit: int, offset: int) -> tuple[Belief, ...]:
         """Enumerate live beliefs as §8's ``forget`` arm, for §5's lookup only.
 
-        Reads the store ``forget`` itself reads (ADR-0197 §5) and projects each record
-        exactly as :meth:`belief` does, so the candidate a card renders is the same value
-        a user would have seen through the typed door. It is **not** a routable operation
-        and reaches no surface: ``beliefs`` is deliberately outside §3's vocabulary,
-        because "what do you know about me?" is milestone 17's ruled exit test and routing
-        it would replace a ruled behaviour with a worse one.
+        Reads the store ``forget`` itself reads (ADR-0197 §5), **enumerating the kinds
+        ADR-0201 §1 names** rather than every kind, and projects each record exactly as
+        :meth:`belief` does, so the candidate a card renders is the same value a user
+        would have seen through the typed door. It is **not** a routable operation and
+        reaches no surface: ``beliefs`` is deliberately outside §3's vocabulary, because
+        "what do you know about me?" is milestone 17's ruled exit test and routing it
+        would replace a ruled behaviour with a worse one.
+
+        :data:`~ai_assistant.orchestration.routing.FORGET_LOOKUP_KINDS` is where the
+        derivation and its reasons live, beside the lookup it is for. It is passed to the
+        store rather than applied to what comes back, so the filter binds before the page
+        cut (ADR-0073 §2) and an excluded record is never read here, never projected
+        through :meth:`_project` — one ``get_many`` per record — and never discarded after
+        the fact (ADR-0201 §3). Nothing about what :meth:`forget` destroys moves: it still
+        relays ``MemoryStore.delete`` and still destroys an episodic record by id
+        (ADR-0201 §2).
         """
         records = await self._memory.list_beliefs(
-            bands=None, kinds=None, limit=limit, offset=offset
+            bands=None, kinds=FORGET_LOOKUP_KINDS, limit=limit, offset=offset
         )
         return tuple([await self._project(record) for record in records])
 
