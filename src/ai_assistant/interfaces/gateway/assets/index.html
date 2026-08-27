@@ -75,6 +75,49 @@
           <button type="submit" id="ask-button">Ask</button>
         </form>
         <!--
+          Push to talk (ADR-0200 §10). One button, held down for as long as you are
+          speaking: the press ends before the request begins, which is why this needs
+          no socket, no upgrade and no chunked upload — the recording goes up complete
+          on one POST and the rendering comes back on that request's response.
+
+          **This page runs no speech engine of its own.** It records with
+          `MediaRecorder` and plays what the hub sent back, and it never reaches for
+          the browser's `SpeechRecognition` or its `speechSynthesis`. Three reasons,
+          and the third survives the other two being argued away: some implementations
+          of those APIs transmit to the browser vendor, which is an egress no boundary
+          in ADR-0174 §1 authorises; recognition in the page would make the edge decide
+          what a submission means, which ADR-0094 §6 forbids; and synthesis in the page
+          would speak text the hub's disclosure ruling never saw — which is exactly the
+          failure milestone 19's exit test is written to catch, performed by the browser
+          instead of by us.
+
+          It ships `hidden` and `app.js` reveals it: whether this browser will hand the
+          page a microphone at all is a fact only a script can ask for, and a control
+          that appeared regardless would be an offer the page cannot keep. Where the
+          answer is no it is revealed **disabled**, beside the sentence saying why —
+          absent-and-unexplained is the state an owner cannot act on.
+        -->
+        <button type="button" id="talk-button" hidden>Hold to talk</button>
+        <!--
+          What this browser can and cannot do about a microphone, and what is happening
+          while the button is held. One line rather than two, because they are never
+          both true: a page that cannot record never gets to be listening.
+        -->
+        <p class="hint" id="talk-state" hidden></p>
+        <!--
+          What the hub heard (ADR-0200 §4). Disclosed on every call that produced a
+          transcript, and it is a clause rather than a courtesy: "a push-to-talk surface
+          that cannot show the user what it heard cannot be corrected by them, and a
+          transcript the hub acted on but never showed is the one part of this path a
+          user has no other way to inspect".
+
+          **Outside the answer panel**, because it is not part of the answer:
+          `renderOutcome` clears that panel on every turn, and a transcript written into
+          it would be destroyed by the next question — including the typed one an owner
+          asks *because* they read what was heard and it was wrong.
+        -->
+        <p class="hint" id="heard" hidden></p>
+        <!--
           Which conversation the next question lands in (#1371's first clause). Filled
           by `app.js` on load as well as after a turn, because the id is now kept in
           the session's own key family and survives a reload.
