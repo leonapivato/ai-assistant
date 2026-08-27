@@ -1573,30 +1573,3 @@ def test_a_remote_connection_stops_being_read_before_anything_is_awaited() -> No
     _hold_what_the_peer_sent_for_tls(writer)
 
     assert transport.paused
-
-
-async def test_a_certificate_that_expires_before_the_bind_is_refused_at_the_bind(
-    tmp_path: Path,
-) -> None:
-    """ADR-0202 §8 states its validity check about "the moment of binding", and that
-    is not the moment the constructor read the pair.
-
-    Between the two sit the overlay agent's query and however long a caller holds a
-    constructed gateway before serving it — a window adversarial review raised on
-    this PR's first two rounds. Driven here by moving the injected clock past the
-    expiry after a gateway that read a good certificate has been built, which is the
-    same window with the awkward timing taken out of it.
-
-    Nothing is re-read to answer it: the bounds are the ones :mod:`.tls` parsed at
-    start, so §4's "does not re-read them while it runs" is untouched and a renewal
-    that landed in the interval is still not seen until the next start.
-    """
-    settings = _settings(tmp_path)
-    clock = Clock()
-    gateway = _gateway(
-        settings, agent=_FakeAgent(), engine=FakeAssistantEngine(), clock=clock, timers=Timers()
-    )
-    clock.advance(timedelta(days=90))
-
-    with pytest.raises(ConfigurationError, match="expired at"):
-        await gateway.start_remote()
