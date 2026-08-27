@@ -132,7 +132,7 @@ from importlib import resources
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from ai_assistant.core.errors import (
     AssistantError,
@@ -142,6 +142,7 @@ from ai_assistant.core.errors import (
     IncompleteProvisioningError,
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
+    TranscriptionFailedError,
     UnknownConnectionError,
     UnusableIdentityError,
 )
@@ -181,7 +182,11 @@ from ai_assistant.core.types import (
     RecordedInvocation,
     SourceGrant,
     SourceReadRecord,
+    SpeechFailure,
     SpendTotal,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenTurn,
     StepOutcome,
     SuccessorLink,
     TurnOutcome,
@@ -301,6 +306,20 @@ _ASK_PATH: Final = "/ask"
 #: same fallback one layer in. A second attempt is the front end asking again.
 _ASK_STREAM_PATH: Final = "/ask/stream"
 
+#: ADR-0200 §10's spoken turn. A **third** entry beside the two above and never a
+#: replacement for either: "It is a third entry rather than a replacement, and the
+#: gateway never chooses between the three, never falls back from one to another, and
+#: never retries silently (ADR-0168 §9)."
+#:
+#: **One request, answered whole.** The recording is uploaded complete and the
+#: rendering comes back on that request's response — no WebSocket, no protocol
+#: upgrade, no ``EventSource`` and no chunked upload, the first three forbidden by
+#: ADR-0175 §1 and the fourth by ``http.py``'s refusal of ``Transfer-Encoding``. Push
+#: to talk needs none of them: the press ends before the request begins. So this is
+#: **not** in :data:`_STREAMED_SHAPES` and it is a plain entry in
+#: :attr:`Gateway._unary` beside :data:`_ASK_PATH`.
+_ASK_SPOKEN_PATH: Final = "/ask/spoken"
+
 #: ADR-0175 §4's delivery stream. ``GET`` because it carries no argument: the poll
 #: is the gateway's own and takes none from a browser.
 _DELIVERIES_PATH: Final = "/deliveries"
@@ -416,6 +435,7 @@ _CONNECTION_ACTS_PATH: Final = "/connections/recent"
 _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _ASK_PATH): "converse",
     ("POST", _ASK_STREAM_PATH): "converse_streaming",
+    ("POST", _ASK_SPOKEN_PATH): "converse_spoken",
     ("GET", _DELIVERIES_PATH): "delivery-stream",
     ("POST", _CONVERSATIONS_PATH): "recent_conversations",
     ("POST", _CONVERSATION_PATH): "conversation",
@@ -1067,6 +1087,7 @@ class Gateway:
         #: no third entry that performs both.
         self._unary: Mapping[str, Callable[[Request], Awaitable[Response]]] = {
             _ASK_PATH: self._ask,
+            _ASK_SPOKEN_PATH: self._ask_spoken,
             _CONVERSATIONS_PATH: self._recent_conversations,
             _CONVERSATION_PATH: self._conversation,
             _FORGET_CONVERSATION_PATH: self._forget_conversation,
@@ -2227,6 +2248,49 @@ class Gateway:
             )
         )
         return _rendered({"outcome": _outcome_view(outcome)})
+
+    async def _ask_spoken(self, request: Request) -> Response:
+        """Relay one spoken turn to the hub and render what came back (ADR-0200 §10).
+
+        **Three members read by name, and no fourth.** §10 admits "the **browser-owned**
+        arguments of §3's signature and no others — ``utterance``, ``plays`` and
+        ``conversation_id``". The fourth argument of that signature is the deadline, and
+        the gateway supplies it: a turn budget is the **caller's** (ADR-0029 §4), which
+        ADR-0177 §1's fifth clause makes the one class of argument this adapter supplies
+        of itself and ADR-0200 §12(b) widens to its third member for this call and by
+        this ratified decision alone.
+
+        **A ``timeout`` in the body is therefore never *read*, rather than refused.** No
+        other assistant handler inspects a member it does not use — :meth:`_ask` selects
+        two members by name and is silent about the rest — so rejecting one key on one
+        route would be machinery this surface does not otherwise have. What ADR-0177 §1
+        forbids is a browser value *reaching* the deadline, and a member nothing reads
+        reaches nothing.
+
+        **The body is bounded whole before any member of it is read**, by
+        ``gateway_max_request_bytes`` in :meth:`_next` — so a body big enough to breach
+        that bound is refused on its *size*, whether the surplus bytes sit in
+        ``utterance``, in a member no clause names, or in whitespace. That refusal says
+        nothing about the member carrying them, and no ``timeout`` is read on that path
+        either.
+
+        **Emptiness of ``plays`` is not decided here**, on :func:`_uses`' precedent:
+        ADR-0200 §3 makes an empty ``plays`` a local ``ValueError`` at the promoted
+        surface, "before any I/O", so every client gets one answer and a second rule at
+        this layer could only differ from it.
+        """
+        payload = _payload(request)
+        turn = await self._relayed(
+            partial(
+                self._engine.converse_spoken,
+                _utterance(payload),
+                plays=_plays(payload),
+                timeout=_TURN_BUDGET,
+                conversation_id=_optional_string(payload, "conversation_id"),
+            ),
+            fault=_spoken_fault,
+        )
+        return _rendered({"turn": _spoken_view(turn)})
 
     def _ask_streaming(self, request: Request, handle: SessionHandle) -> Response | _Streamed:
         """Relay one turn as a stream, one value per instalment (ADR-0175 §3).
@@ -3524,6 +3588,96 @@ def _credential(payload: Mapping[str, Any]) -> SecretStr:
         ) from exc
 
 
+def _utterance(payload: Mapping[str, Any]) -> SpokenAudio:
+    """One recording, and **never** the recording inside the refusal (ADR-0200 §9).
+
+    §9's last clause binds "every entry point that constructs a ``SpokenAudio`` from a
+    value it did not author — the wire server's argument adapter and **the gateway's
+    body parse** among them", and it is stated because ``Base64Audio``'s own validator
+    naming only the defect and the position "is necessary and not sufficient: a pydantic
+    ``ValidationError`` carries the rejected **input** whatever the message says". So the
+    construction failure is caught here and answered with a refusal this project wrote,
+    ``from None``, carrying no input value and no chained cause.
+
+    **The detail is a fixed sentence rather than the validator's**, which is where this
+    differs from :func:`_credential`. ADR-0125 §6 guarantees that a rejected secret's
+    message "names neither the value nor its length", so that reader may relay it; §9
+    makes the opposite guarantee about this one, and a near-valid clip with one bad
+    character is exactly the input an attacker or an unlucky browser produces. What is
+    left is the class of defect, which is what a person holding a broken recording can
+    act on and is the whole of what they need.
+
+    **Its own condition rather than ``malformed-request``**, on :func:`_credential`'s
+    test: ``malformed-request`` says the page and the gateway disagree about the shape
+    (ADR-0168 §10), and a recording the browser encoded and this gateway would not take
+    is not that disagreement. A member that is absent or is not a JSON object *is*, so
+    that half is :func:`_malformed`.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The recording, ready to relay.
+
+    Raises:
+        _Refused: If the member is absent or is not a JSON object, or if it is one the
+            promoted surface's own type will not admit.
+    """
+    value = payload.get("utterance")
+    if not isinstance(value, dict):
+        raise _malformed()
+    try:
+        return SpokenAudio.model_validate(value)
+    except ValidationError:
+        raise _Refused(
+            _fault(
+                400,
+                "Bad Request",
+                "recording-unusable",
+                detail=(
+                    "That recording is not one this gateway can carry. It must name a "
+                    "container this surface serves and hold padded, canonical RFC 4648 "
+                    "base64 (ADR-0200 §9)."
+                ),
+                close=False,
+            )
+        ) from None
+
+
+def _plays(payload: Mapping[str, Any]) -> tuple[SpokenAudioFormat, ...]:
+    """What the browser says it can render, in the preference order it sent them.
+
+    :func:`_uses`' shape and its reasoning, one surface over. **Emptiness is not decided
+    here**: ADR-0200 §3 makes ``plays`` "required with no default, and non-empty", and
+    the promoted surface refuses an empty one locally and before any I/O — so every
+    client gets the same answer and a second rule at this layer could only differ from
+    it. What is refused here is a member of no vocabulary at all, which is not a format
+    the surface has an answer for.
+
+    **Absent is refused rather than defaulted.** ADR-0177 §1 has the gateway default no
+    argument expressing what the user asked for, and this one says what the *browser* can
+    play — a value only the browser holds. A gateway that filled it in would be
+    promising, on the browser's behalf, to render something it may not be able to.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The formats, in the order the browser sent them (ADR-0200 §3: the engine renders
+        in the first of them its synthesizer also names).
+
+    Raises:
+        _Refused: If the member is absent, is not a list, or names a format that is not
+            a member of :class:`~ai_assistant.core.types.SpokenAudioFormat`.
+    """
+    if "plays" not in payload:
+        raise _malformed()
+    selected = _members(payload, "plays", SpokenAudioFormat)
+    if selected is None:  # pragma: no cover — the membership check above precedes it
+        raise _malformed()
+    return selected
+
+
 def _token(payload: Mapping[str, Any]) -> ContinuationToken:
     """One continuation, relayed opaquely (ADR-0042 §4, ADR-0177 §8).
 
@@ -3668,6 +3822,74 @@ def _relay_fault(exc: Exception) -> Response:
     return _fault(400, "Bad Request", "rejected", detail=str(exc), close=False)
 
 
+#: What this project says about each way a transcription can fail (ADR-0200 §4). A
+#: table rather than a rendering of the exception, because §8's authorship rule reaches
+#: whatever handler renders one: what may be written for a seam failure "is §4's
+#: ``SpeechFailure`` classification and this project's own message for it".
+#:
+#: The messages are the owner's, not an operator's: the person reading this pressed a
+#: button and spoke, and what they can do about it is press it again or type instead.
+_TRANSCRIPTION_DETAIL: Final[Mapping[SpeechFailure, str]] = {
+    SpeechFailure.TIMED_OUT: (
+        "The recording was not turned into words in time. A shorter press is the "
+        "thing most likely to work; typing the question works either way."
+    ),
+    SpeechFailure.UNCLASSIFIED: (
+        "The recording could not be turned into words. Nothing was asked and nothing "
+        "was answered; ask again, or type the question."
+    ),
+}
+
+
+def _spoken_fault(exc: Exception) -> Response:
+    """One failed spoken turn, named as ADR-0200 §4 classifies it.
+
+    **The classification is the answer and no message carries it.** §4 puts a
+    ``SpeechFailure`` on :class:`~ai_assistant.core.errors.TranscriptionFailedError`
+    precisely because the seam's own exception does not cross — the error is raised
+    ``from None`` so that "neither its message, nor its class name, nor its traceback
+    reaches a caller" — and "what a caller can act on travels here instead". A gateway
+    that flattened it into :func:`_relay_fault`'s single ``assistant-declined`` would
+    leave the page inferring it from prose, which is the inference ADR-0151 §7 forbids
+    one surface over for the same reason.
+
+    **And the detail is this project's own text, never the exception's** (ADR-0200 §8).
+    "No component on this path writes an exception message it did not author … not into a
+    surfaced error", and that binds "whatever handler renders an exception that escapes
+    them" — this one. :data:`_TRANSCRIPTION_DETAIL` is what is written instead;
+    ``details_elided`` needs no reading here, because ``UNCLASSIFIED`` is answered with
+    the same sentence whether the classification was lost in ADR-0085 §10a's reduction or
+    the seam raised a bare ``SpeechError``, and neither gives the owner a different act.
+
+    **A ``ValidationError`` is answered by its class and nothing else**, which is §8's
+    own instruction for a handler that cannot render an exception without its message: a
+    pydantic error carries the rejected input whatever the message says (ADR-0200 §9),
+    and on this path that input is a recording. It reaches here only from a defect —
+    :func:`_utterance` has already answered the browser's own malformed value — so what
+    is owed is that it not carry audio out, not that it be classified.
+
+    Everything else is ADR-0168 §9's three conditions, unchanged.
+
+    Args:
+        exc: What the relayed call raised.
+
+    Returns:
+        The response to answer instead.
+    """
+    if isinstance(exc, TranscriptionFailedError):
+        return _fault(
+            422,
+            "Unprocessable Content",
+            "transcription-failed",
+            detail=_TRANSCRIPTION_DETAIL[exc.failure],
+            failure=exc.failure.value,
+            close=False,
+        )
+    if isinstance(exc, ValidationError):
+        return _fault(400, "Bad Request", "rejected", detail=type(exc).__name__, close=False)
+    return _relay_fault(exc)
+
+
 def _stream_fault(exc: Exception) -> dict[str, Any]:
     """The same three conditions, as a stream's terminal value (ADR-0175 §2, §3).
 
@@ -3691,6 +3913,7 @@ def _fault(  # noqa: PLR0913 — one parameter per member a fault body may carry
     detail: str | None = None,
     limit: str | None = None,
     reference: str | None = None,
+    failure: str | None = None,
     close: bool = True,
 ) -> Response:
     """A machine-readable refusal or failure the front end renders as its own condition."""
@@ -3701,6 +3924,8 @@ def _fault(  # noqa: PLR0913 — one parameter per member a fault body may carry
         body["limit"] = limit
     if reference is not None:
         body["reference"] = reference
+    if failure is not None:
+        body["failure"] = failure
     return Response(status, reason, body=_json(body), content_type="application/json", close=close)
 
 
@@ -3842,6 +4067,55 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "step": _step_view(outcome.step),
         "routed": _routed_view(outcome.routed),
     }
+
+
+def _spoken_view(turn: SpokenTurn) -> dict[str, Any]:
+    """Translate one spoken turn into what the page renders (ADR-0200 §4).
+
+    An enumeration for :func:`_outcome_view`'s reason, and **the turn inside it is that
+    function's own answer** rather than a second rendering of one: ADR-0200 §4 makes the
+    ``outcome`` "an ordinary ``TurnOutcome``, under every clause ADR-0170 §4, ADR-0173 §6
+    and ADR-0197 §8 place on one", and "this call composes a turn; it does not create a
+    second kind of one". A view that forked would be the second place #1337's failure can
+    happen — a member added to the turn's own view reaching two of the three ask entries.
+
+    **``heard`` crosses on every call that produced a transcript**, which is §4's own
+    disclosure clause and not a convenience: "a push-to-talk surface that cannot show the
+    user what it heard cannot be corrected by them, and a transcript the hub acted on but
+    never showed is the one part of this path a user has no other way to inspect". It
+    crosses byte for byte — nothing here strips, trims or case-folds it — and reaches the
+    page as text and never as markup, exactly as ``reply`` does (ADR-0168 §6).
+
+    **``spoken_degraded`` is carried rather than inferred from a ``None`` ``spoken``**,
+    for the reason ``reply_degraded`` is: §4 gives ``spoken`` two ``None`` shapes and only
+    one of them is an answer that could not be spoken, so the flag is what lets the page
+    tell "there was nothing to say" from "there was, and saying it did not complete".
+
+    Args:
+        turn: What the promoted surface returned.
+
+    Returns:
+        The four members, with the outcome rendered by :func:`_outcome_view`.
+    """
+    return {
+        "heard": turn.heard,
+        "outcome": None if turn.outcome is None else _outcome_view(turn.outcome),
+        "spoken": None if turn.spoken is None else _audio_view(turn.spoken),
+        "spoken_degraded": turn.spoken_degraded,
+    }
+
+
+def _audio_view(audio: SpokenAudio) -> dict[str, Any]:
+    """One rendering, as the two members ADR-0200 §9 gives it.
+
+    The base64 text crosses **unchanged**, which is `Base64Audio`'s own posture: "what a
+    caller passed is what crosses the wire and what ``decoded()`` reverses", and a value
+    this adapter re-encoded would be a second spelling of one recording. Nothing here
+    decodes it either — §4 is explicit that "no component decodes, re-transcribes or
+    otherwise inspects a rendering", and a gateway that measured one would be doing so
+    on the one path ADR-0200 §8 keeps audio off every record of.
+    """
+    return {"content": audio.content, "media_type": audio.media_type.value}
 
 
 def _step_view(step: StepOutcome | None) -> dict[str, Any] | None:
