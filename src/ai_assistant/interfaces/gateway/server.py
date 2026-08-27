@@ -161,6 +161,7 @@ from ai_assistant.core.types import (
     SuccessorLink,
     TurnOutcome,
     Warrant,
+    routed_listing_arm,
     secret_value,
 )
 from ai_assistant.interfaces.gateway import streams
@@ -202,8 +203,11 @@ from ai_assistant.wire.overlay import (
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from collections.abc import Awaitable, Callable, Mapping
 
+    from pydantic import BaseModel
+
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.core.types import RoutableOperation, RoutedListing, RoutedOperation
     from ai_assistant.wire.overlay import OverlayAgent
 
 _log = structlog.get_logger(__name__)
@@ -3525,6 +3529,7 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "rationale": None if plan is None else plan.rationale,
         "steps": [{"intent": one.intent, "capability": one.capability} for one in steps],
         "step": _step_view(outcome.step),
+        "routed": _routed_view(outcome.routed),
     }
 
 
@@ -3988,6 +3993,109 @@ def _successor_view(successor: SuccessorLink | None) -> dict[str, Any] | None:
     if successor is None:
         return None
     return {"id": successor.id, "state": successor.state.value}
+
+
+#: Which of ADR-0197 §8's arms this surface has a record view for, and the view for
+#: each. The three the browser can render are the three its own panels already
+#: render — a belief, a question and a source grant — which is every arm an
+#: **ambiguity** listing can take (§5's lookup runs only for the three confirm-owed
+#: operations) plus the read-only ``questions`` and ``standing_grants``.
+#:
+#: The four that are absent — ``SourceReadRecord``, ``RecordedInvocation``,
+#: ``PermissionDecision`` and ``SpendTotal`` — are absent because ADR-0177 §1's
+#: enumeration has never admitted ``recent_reads``, ``recent_invocations``,
+#: ``recent_decisions`` or ``spend_totals`` to a browser request, so this surface has
+#: no view, no renderer and no rendering obligations discharged for any of them.
+#: Minting them here would be the browser's first trail surface decided inside a
+#: rendering lane, which is what ADR-0197 §12's "with the renderer it already has for
+#: the operation" bounds this lane against. The page says so rather than
+#: summarising, counting or silently dropping the listing (§5's last clause).
+_ROUTED_ARM_VIEWS: Final[Mapping[type[BaseModel], Callable[[Any], dict[str, Any]]]] = {
+    Belief: _belief_view,
+    Question: _question_view,
+    SourceGrant: _grant_view,
+}
+
+
+def _routed_view(routed: RoutedOperation | None) -> dict[str, Any] | None:
+    """Translate what one routed pass did into what the page renders (ADR-0197 §10).
+
+    An enumeration for :func:`_outcome_view`'s reason, and the roster guard in
+    ``tests/interfaces/gateway/test_gateway.py`` is what makes the decision to carry
+    it visible: ``routed`` reached ``TurnOutcome`` in PR #1634 and was recorded there
+    as "not in this change", which this lane flips.
+
+    **The discriminator is** ``operation`` **and never the value's shape** (§8). The
+    arm is read through :func:`~ai_assistant.core.types.routed_listing_arm` — ``core``'s
+    own total mapping — because "an empty tuple is a legal value of every arm, so the
+    shape decides nothing on exactly the case a listing is most likely to take".
+
+    **A listing this surface cannot render crosses as an absence that says so.**
+    ``listing`` ``null`` beside ``listing_unrendered`` ``true`` is a listing that was
+    carried and that this page has no renderer for; ``listing`` ``null`` beside
+    ``listing_unrendered`` ``false`` is a pass that carried none. Collapsing the two
+    would let the page render "nothing was listed" over records the hub returned,
+    which is the falsehood-about-what-happened ADR-0170 §6 exists to refuse. Nothing
+    here summarises the withheld records, counts them, or renders a subset of them
+    (§5's last clause).
+
+    **The token crosses because the page has to relay it back and for no other
+    reason** (ADR-0177 §8), exactly as :func:`_confirmation_view`'s does: it is
+    disclosed as the opaque handle it is, the page parses no part of it, renders it
+    nowhere and stores it nowhere, and this gateway mints none and rewrites none.
+
+    Every value crosses as **data** and is neutralised on the page by being inserted
+    through a text node (ADR-0042 §4, ADR-0197 §10's last clause). A belief's content
+    is the user's own words and a grant's source is the identity a reader declared,
+    neither of which may reach a browser as markup.
+
+    Args:
+        routed: What the pass routed to, or ``None`` where it routed nothing.
+
+    Returns:
+        The routed account, or ``None`` where there is none.
+    """
+    if routed is None:
+        return None
+    listing = None if routed.listing is None else _routed_records(routed.operation, routed.listing)
+    confirmation = routed.confirmation
+    return {
+        "operation": routed.operation.value,
+        "outcome": routed.outcome.value,
+        "listing": listing,
+        "listing_unrendered": routed.listing is not None and listing is None,
+        "confirmation": (
+            None
+            if confirmation is None
+            else {
+                "operation": confirmation.operation.value,
+                "token": confirmation.token.handle,
+                "subject": _routed_records(confirmation.operation, confirmation.subject),
+            }
+        ),
+    }
+
+
+def _routed_records(
+    operation: RoutableOperation, listing: RoutedListing
+) -> list[dict[str, Any]] | None:
+    """Render one routed listing, or answer ``None`` where this surface cannot.
+
+    ADR-0197 §8's discriminator rule in one place: the arm is read off ``operation``,
+    and :data:`_ROUTED_ARM_VIEWS` decides whether this surface has a view for it.
+
+    Args:
+        operation: The routed operation, which is the discriminator.
+        listing: The records carried beside it.
+
+    Returns:
+        One view per record, in the order the listing carries them — never a subset
+        and never a summary — or ``None`` where the browser renders no such record.
+    """
+    view = _ROUTED_ARM_VIEWS.get(routed_listing_arm(operation))
+    if view is None:
+        return None
+    return [view(one) for one in listing]
 
 
 def _answer_view(outcome: AnswerOutcome) -> dict[str, Any]:

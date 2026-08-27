@@ -439,9 +439,23 @@ code {
 .question-row,
 .notification-row,
 .connection-row,
+.routed-row,
 .confirmation-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
+}
+
+/*
+ * The routed account's listing (ADR-0197 §10). It carries the records a routed
+ * operation returned or a routed lookup matched, and it has no rule that could hide
+ * part of one for the reason the rows above have none: ADR-0197 §5's last clause is
+ * that "no surface renders fewer candidates than the outcome carries or summarises
+ * in place of them", and a stylesheet is where a page that renders them all can
+ * still show a few. So no `max-height`, no `overflow`, no clamp — a long listing
+ * makes the answer taller.
+ */
+.routed-listing {
+  margin: 0.3rem 0 0;
 }
 
 /*
