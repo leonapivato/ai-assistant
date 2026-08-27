@@ -821,14 +821,39 @@ and a renderer.
 
 > **Normative.** A `route_id`'s rows form a **state machine, and `record` enforces
 > it** inside the same critical section, refusing with `RoutingTrailError` and
-> appending nothing on any other sequence. A read-only route is exactly one
-> `NOT_OWED` row and admits no second row of any kind. A confirm-owed route is an
-> `OWED` row and then **at most one** of `GIVEN` or `REFUSED`: a `GIVEN` or
-> `REFUSED` arriving under a `route_id` holding no `OWED` row is refused, a second
-> answer of either member under an already-answered route is refused, and a second
-> `OWED` row is refused. Without this the trail could hold a `GIVEN` and a `REFUSED`
-> for one route — two incompatible claims about what one person decided — or a
-> `GIVEN` for a confirmation nobody was ever offered.
+> appending nothing on any other sequence. What it enforces is exactly what it can
+> see in the rows it **retains**, and never a fact about a park it is not the
+> authority for. A read-only route is exactly one `NOT_OWED` row: a second row of
+> any kind under a `route_id` retaining a `NOT_OWED` row is refused, an answer
+> included. A confirm-owed route holds **at most one** `OWED` row and **at most
+> one** answer: a second `OWED` row is refused, and a `GIVEN` or `REFUSED` under a
+> `route_id` already retaining either answer is refused. Without these the trail
+> could hold a `GIVEN` and a `REFUSED` for one route — two incompatible claims
+> about what one person decided — or two answers to one question.
+
+> **Normative.** An answer arriving under a `route_id` that retains **no** row is
+> **accepted**, and `record` requires no `OWED` row to admit one. This is forced by
+> the bound: pruning is by recording order alone (below), so a live park's `OWED`
+> row can be pruned while the park is still registered and still claimable — at
+> `routing_trail_max_rows` of one, a single routed read between the park and the
+> user's yes is enough. Requiring the row would make a **retention** setting decide
+> whether a user's approval of a live confirmation is honoured, which is a
+> correctness dependency on a bound and the strictly worse failure of the two: an
+> orphan `GIVEN` costs an operator one join that finds no `OWED`, where the refusal
+> costs the user the operation they had just approved and leaves the park claimed,
+> its slot released and nothing done.
+
+**The dropped check is the mistake, not the bound.** It is tempting to exempt a
+live park's `OWED` row from pruning instead, and that is the wrong half to move:
+a bound with an exception is a bound an adversary chooses the shape of, and a
+client that opens parks and abandons them would pin rows the bound exists to
+evict. What the check was actually buying was never authority over the park —
+§9 above is explicit that `OWED` does **not** state a card was rendered,
+delivered or seen, so the pair was never evidence about what the user saw. It
+bought consistency between two rows of one route, and every clause of that
+consistency that `record` can see without being the park's authority is kept. The
+park is the **state**, held in memory under the engine's own lock (§7); the trail
+is the **record**, and a record that can refuse the thing it records is not one.
 
 > **Normative.** `core/protocols.py` gains `RoutingTrail`, the durable store, with
 > exactly four members on ADR-0185 §12's shape and no others:
@@ -879,9 +904,12 @@ and a renderer.
 
 > **Normative.** Pruning is by recording order alone and takes no account of a
 > route's state: an unanswered park's `OWED` row is pruned at the bound like any
-> other. The park is in memory and the trail is the record rather than the state, so
-> a pruned row costs history and never costs a resolution — and a bound with an
-> exception is a bound an adversary chooses the shape of.
+> other, and pruning it neither evicts the park, releases its slot, nor makes its
+> token unresolvable. The park is in memory and the trail is the record rather than
+> the state, so a pruned row costs history and never costs a resolution — which is
+> true only because the state machine above admits an answer under a `route_id`
+> retaining no row. The two clauses are one decision read from its two ends, and a
+> lane may not implement one without the other.
 
 > **Normative.** `AssistantEngine` gains **no method** for this trail in this
 > decision, and the trail is therefore unreachable from the CLI and from a browser.
@@ -1166,11 +1194,26 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > pinned as over the whole record rather than over the id.
 
 > **Normative.** The same lane ships the route state machine as conformance cases,
-> each asserting `RoutingTrailError` and an unchanged trail: `GIVEN` as a route's
-> first row; `REFUSED` as a route's first row; `GIVEN` after `REFUSED` and `REFUSED`
-> after `GIVEN`; a second `OWED`; and a second row of any kind on a `NOT_OWED`
-> route. The two valid sequences — `OWED`→`GIVEN` and `OWED`→`REFUSED` — are
-> asserted beside them.
+> each asserting `RoutingTrailError` and an unchanged trail: `GIVEN` after
+> `REFUSED` and `REFUSED` after `GIVEN`; a second `GIVEN` and a second `REFUSED`; a
+> second `OWED`; and a second row of any kind — an answer included — on a route
+> retaining a `NOT_OWED` row. The two valid sequences — `OWED`→`GIVEN` and
+> `OWED`→`REFUSED` — are asserted beside them.
+
+> **Normative.** The same lane ships the **admitted** case beside those refusals,
+> and it is the one that fails on the natural wrong implementation: a `GIVEN`, and
+> a `REFUSED`, recorded under a `route_id` the trail retains **no** row for, each
+> asserted to append. A suite that only pins the refusals passes against a `record`
+> that requires an `OWED` row.
+
+> **Normative.** The same lane ships the bounded-trail park→prune→resume path
+> end-to-end at `routing_trail_max_rows=1`: a confirm-owed route parks and records
+> `OWED`; a routed read-only operation records its `NOT_OWED` row and prunes the
+> `OWED`; the still-live token is then resumed with `approved` `True`, asserting
+> that the operation **is** performed, that the pass returns `PERFORMED`, and that
+> the `GIVEN` row is appended. This is the case a bound and a state machine written
+> in one change can each pass alone and fail together, so it is required of the
+> lane landing §9 rather than left to the engine's own tests.
 
 > **Normative.** The same lane ships `record`'s atomicity as a **concurrency** test
 > in the shared conformance suite, so every implementation pays it: two `record`
