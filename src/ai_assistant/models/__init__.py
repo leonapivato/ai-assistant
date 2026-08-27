@@ -15,11 +15,21 @@ needed.
 ``BoundedEmbedder`` *is* re-exported: it wraps whichever ``Embedder`` the
 composition root builds, so it is imported on every path including the one that
 must not pay for fastembed, and it costs nothing to import (ADR-0118 §2).
+
+The two speech implementations (``MoonshineTranscriber``, ``VitsSynthesizer``)
+are kept out for exactly ``FastEmbedEmbedder``'s reason: importing either pulls in
+``sherpa_onnx`` and, through it, a second inference runtime. Their deadline
+decorators are re-exported for ``BoundedEmbedder``'s reason — the composition root
+wraps whatever it built with them, and they cost nothing to import (ADR-0200 §1).
 """
 
 from __future__ import annotations
 
 from ai_assistant.models.bounded_embedder import BoundedEmbedder
+from ai_assistant.models.bounded_speech import (
+    BoundedSpeechSynthesizer,
+    BoundedSpeechTranscriber,
+)
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.models.provider import (
     PydanticAIProvider,
@@ -32,6 +42,8 @@ from ai_assistant.models.streaming import PydanticAIStreamingCompleter
 
 __all__ = [
     "BoundedEmbedder",
+    "BoundedSpeechSynthesizer",
+    "BoundedSpeechTranscriber",
     "HashingEmbedder",
     "PydanticAIProvider",
     "PydanticAIStreamingCompleter",
