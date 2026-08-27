@@ -115,6 +115,7 @@ from ai_assistant.core.types import (
     ReplyChunk,
     Reversibility,
     RiskLevel,
+    RouteOutcome,
     SourceReadRecord,
     SpendPeriod,
     ToolCost,
@@ -985,6 +986,39 @@ class ReadSubject:
     trail: SeededReadTrail
 
 
+@dataclass(frozen=True, slots=True)
+class RoutedParkSubject:
+    """An engine holding one answerable **routed** park, and what it is about (§7).
+
+    ADR-0197 §12 puts the routed resume's coverage in this shared suite rather than in
+    one implementation's own tests, "because every implementation of that surface owes
+    it": ``resume``'s *contract* moved, and a contract that moved for one implementation
+    only is not a contract.
+
+    **A subject rather than a bare engine**, because the clauses are about what did and
+    did not happen to the user's own data, and the only way to ask that through the
+    promoted surface is to know which record the park is about. Everything the cases
+    below read is on the surface itself — ``belief`` says whether the destruction ran,
+    ``export_decisions`` says whether a ruling was recorded — so the three bindings
+    arrange the *premise* and share every assertion.
+
+    Attributes:
+        engine: The subject under test.
+        token: The continuation the routed park is answered by. It is the card's own
+            token, handed over rather than re-minted: ADR-0197 §7 makes a routed park
+            doubly unreachable from the surface — ``pending_confirmations`` does not
+            list it and no durable store recovers it — so a case that had to ask for
+            the token could not exist.
+        belief_id: The belief the parked ``forget`` would destroy. ``forget`` is the
+            member chosen because its effect is observable through the promoted surface
+            in both directions: ``belief`` answers the record before and ``None`` after.
+    """
+
+    engine: AssistantEngine
+    token: ContinuationToken
+    belief_id: str
+
+
 class AssistantEngineContract(ABC):
     """What every ``AssistantEngine`` implementation must do."""
 
@@ -1132,6 +1166,23 @@ class AssistantEngineContract(ABC):
         client measures a payload it is about to serialise, and the in-process ones
         measure a payload nobody will. ADR-0084 §4 requires them to agree anyway,
         and only a shared clause at a reachable limit says whether they do.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def routed_park(self) -> RoutedParkSubject:
+        """A subject holding **exactly one** answerable routed park, on a ``forget``.
+
+        The routed twin of :attr:`parked_engine`, and it is a fixture for that one's
+        reason twice over. A park is reached inside a turn, so an implementation has to
+        be handed to the suite already holding one — and a *routed* park is not reachable
+        even then: ADR-0197 §7 rules that ``pending_confirmations`` does not list it and
+        that it is not recovered across a restart, so there is no surface call that
+        produces or re-mints its token.
+
+        The belief the park is about must be **held** by the subject, so a case can ask
+        the surface whether the destruction ran. The subject must have recorded no
+        permission decision for the park, so ``export_decisions`` is a usable control.
         """
 
     @pytest.fixture
@@ -1892,6 +1943,126 @@ class AssistantEngineContract(ABC):
         assert resumed.step is not None
         assert resumed.step.disposition is Disposition.DENIED
         assert resumed.step.confirmation is None
+
+    # --- ADR-0197 §7 and §13: the routed resume, and how narrow it is --------
+
+    async def test_a_routed_park_resumed_yes_performs_its_operation(
+        self, routed_park: RoutedParkSubject
+    ) -> None:
+        """ADR-0197 §7: the operation runs only on a ``resume`` whose ``approved`` is ``True``.
+
+        Three assertions, and each is one of the three respects §7 says a routed resume
+        differs in. ``step`` is ``None`` and ``routed`` is present, which is ADR-0197 §8's
+        mutual exclusion read from the resume end and the half ADR-0052 §3's "the step …
+        is always present" no longer reaches. And the operation was **performed**, which
+        is what makes the first two facts about a resume that did something rather than
+        about a shape.
+
+        The effect is read through the promoted surface rather than through a double, so
+        the same case binds an in-process engine, a fake and a client over a socket: a
+        destroyed belief is one ``belief`` no longer answers.
+        """
+        assert await routed_park.engine.belief(routed_park.belief_id) is not None
+
+        resumed = await routed_park.engine.resume(
+            routed_park.token, approved=True, timeout=_PATIENT
+        )
+
+        assert resumed.step is None
+        assert resumed.routed is not None
+        assert resumed.routed.outcome is RouteOutcome.PERFORMED
+        assert resumed.turn is None
+        assert await routed_park.engine.belief(routed_park.belief_id) is None
+
+    async def test_a_routed_park_resumed_no_returns_its_refusal_and_performs_nothing(
+        self, routed_park: RoutedParkSubject
+    ) -> None:
+        """ADR-0197 §7, §13: the refusal is **returned, never raised**.
+
+        ``approved`` ``False`` yields ``RouteOutcome.REFUSED`` on that member and **no**
+        :class:`~ai_assistant.core.errors.PermissionDeniedError`, because no
+        ``ActionPolicy`` is consulted and no ``PermissionDecision`` is recorded — so
+        there is no ruling for a refusal to *be*. That is ADR-0197 §13's partial
+        supersession of ADR-0042 §4's "only ``approved=False → DENY`` is guaranteed",
+        scoped to exactly this case.
+
+        The ruling count is the assertion that separates "returned a refusal" from "ruled
+        a denial and reported it": an implementation that ran the routed park through the
+        permission layer would satisfy every other line here and leave a decision behind.
+        """
+        before = len(await routed_park.engine.export_decisions())
+
+        resumed = await routed_park.engine.resume(
+            routed_park.token, approved=False, timeout=_PATIENT
+        )
+
+        assert resumed.routed is not None
+        assert resumed.routed.outcome is RouteOutcome.REFUSED
+        assert resumed.step is None
+        assert await routed_park.engine.belief(routed_park.belief_id) is not None
+        assert len(await routed_park.engine.export_decisions()) == before
+
+    async def test_a_routed_park_is_answered_once(self, routed_park: RoutedParkSubject) -> None:
+        """ADR-0197 §7: one park yields one answer and at most one operation.
+
+        The park is **claimed** before anything is performed, and the claim is what evicts
+        it — so a second presentation of the token, whatever its ``approved`` value,
+        resolves nothing and raises ``UnknownContinuationError``. Never a denial: nobody
+        ruled on this action (ADR-0084 §7), and a routed park's unknown, expired,
+        already-claimed and cross-restart token each yield the same refusal.
+        """
+        await routed_park.engine.resume(routed_park.token, approved=False, timeout=_PATIENT)
+
+        with pytest.raises(UnknownContinuationError):
+            await routed_park.engine.resume(routed_park.token, approved=True, timeout=_PATIENT)
+
+    async def test_a_routed_park_is_not_listed_among_pending_confirmations(
+        self, routed_park: RoutedParkSubject
+    ) -> None:
+        """ADR-0197 §7: ``pending_confirmations`` does **not** list a routed park.
+
+        Refused rather than merely omitted, and §7 says why: an enumeration would have to
+        render the card again, and §7's card is engine-assembled from a resolution the
+        process still holds. What a lost routed park costs is one repeated sentence —
+        nothing has happened yet — and that is stated as the trade rather than hidden.
+
+        The listing's element type is the other half of the reason: ``pending_confirmations``
+        answers ``Confirmation`` values, whose four content members are tool-shaped, and a
+        routed act has no tool and no policy ruling to fill three of them with.
+        """
+        assert await routed_park.engine.pending_confirmations() == ()
+
+    async def test_an_ordinary_parked_step_is_ruled_exactly_as_before(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """The case that pins ADR-0197 §13's supersession as **narrow** rather than general.
+
+        Beside the two routed cases above, and "not decoration": without it the suite pins
+        the new behaviour and not its scope, and an implementation that stopped carrying a
+        step on *every* refusal would pass. A ``resume`` continuing a parked step still
+        carries its ``step``, still carries no ``routed``, and is ruled exactly as ADR-0052
+        §3 and ADR-0042 §4 ruled it.
+
+        **ADR-0197 §12 writes this case as "still raises ``PermissionDeniedError``", and
+        the tree says otherwise.** ADR-0042 §4's own rule is that a denial is a *ruling* —
+        "the adapter conveys consent; the policy rules on it; the engine records and
+        executes" — and this suite has pinned the consequence since ADR-0084:
+        :meth:`test_a_refusal_is_a_result_and_not_an_exception` asserts that a refused
+        resume returns a ``DENIED`` disposition and raises nothing, and every
+        implementation obeys it. ``core/protocols.py``'s ``resume`` docstring still
+        declares ``PermissionDeniedError: If the human refused``, which is the sentence
+        §12 was read off and which no implementation has ever satisfied; it is filed
+        rather than refreshed in place. So the clause is discharged in the direction the
+        tree actually goes — the ordinary refusal is **unchanged**, which is the property
+        §12 is asking to see — and the divergence is recorded here rather than absorbed.
+        """
+        pending = await parked_engine.pending_confirmations()
+
+        resumed = await parked_engine.resume(pending[0].token, approved=False, timeout=_PATIENT)
+
+        assert resumed.step is not None
+        assert resumed.step.disposition is Disposition.DENIED
+        assert resumed.routed is None
 
     async def test_a_token_is_answered_once(self, parked_engine: AssistantEngine) -> None:
         """A resolved park is evicted, so a replay is a clean unknown token.

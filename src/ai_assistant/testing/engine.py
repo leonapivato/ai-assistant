@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, Final, assert_never, cast
 
 from ai_assistant.core.errors import (
     GrantError,
@@ -70,12 +70,16 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     ObservationReport,
+    OperationConfirmation,
     Provenance,
     Question,
     QuestionState,
     RecordedInvocation,
     ReplyChunk,
     Retirement,
+    RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     SkipReason,
     SourceGrant,
     SpendTotal,
@@ -126,6 +130,7 @@ if TYPE_CHECKING:
         NotificationDelivery,
         NotificationPreferences,
         PermissionDecision,
+        RoutedListing,
         SecretValue,
         SourceReadRecord,
     )
@@ -147,6 +152,12 @@ _BEFORE_A_WORD: Final = re.compile(r"(?<=\s)(?=\S)")
 #: ``DERIVED``-banded record would still validate, and unadjusted because nothing
 #: in this fake loses evidence.
 _CONFIDENCE = 0.9
+
+
+#: The answer a routed pass this fake resolved carries. Fixed rather than composed,
+#: because a fake originates no model call — and present rather than ``None`` because
+#: ADR-0197 §8 makes a routed pass that is not a park owe one.
+_ROUTED_REPLY: Final = "the assistant did what you asked."
 
 
 class FakeAssistantEngine:
@@ -186,6 +197,13 @@ class FakeAssistantEngine:
         self.notification_store = FakeNotificationStore()
         self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
+        #: The routed parks this engine will resolve, by continuation handle
+        #: (ADR-0197 §7). Deliberately a **second** table beside ``parked``: a routed
+        #: park and a tool park are answered through one method and one token space,
+        #: and what tells them apart is which table the handle is in — which is the
+        #: arrangement the real engine has, so a consumer's test cannot pass here on a
+        #: shape no implementation may take.
+        self.routed_parked: dict[str, OperationConfirmation] = {}
         self.questions_open: dict[str, Question] = {}
         self.questions_interrupted: dict[str, Question] = {}
         #: Questions in a terminal state — declined, applied, stale, re-deferred.
@@ -431,7 +449,14 @@ class FakeAssistantEngine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
     ) -> TurnOutcome:
-        """Answer a parked confirmation, or refuse a token this engine cannot resolve."""
+        """Answer a parked confirmation, or refuse a token this engine cannot resolve.
+
+        **Two kinds of park, one method and one token space** (ADR-0197 §7). A handle in
+        :attr:`routed_parked` answers a routed operation and its outcome carries ``step``
+        ``None`` and ``routed`` non-``None``; every other handle answers a parked step and
+        is ruled exactly as it was before ADR-0197. A token in neither is unresolvable and
+        yields ``UnknownContinuationError`` and never a denial (ADR-0084 §7).
+        """
         check_arguments(
             "resume",
             max_bytes=self._max_payload_bytes,
@@ -440,6 +465,8 @@ class FakeAssistantEngine:
             timeout=timeout,
         )
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
+        if token.handle in self.routed_parked:
+            return await self._resume_routed(token.handle, approved=approved)
         if token.handle not in self.parked:
             msg = (
                 "this token names no step awaiting confirmation in this engine; call "
@@ -1538,6 +1565,93 @@ class FakeAssistantEngine:
         )
         self.parked[handle] = confirmation
         return confirmation
+
+    def park_routed(
+        self, handle: str, *, operation: RoutableOperation, subject: RoutedListing
+    ) -> OperationConfirmation:
+        """Park one routed confirmation this engine will resolve, and return it (§7).
+
+        The routed twin of :meth:`park`, and it exists for that method's reason: a park
+        is reached inside a turn, so an implementation has to be handed to a suite
+        already holding one. ADR-0197 §7 makes a routed park doubly unreachable from the
+        surface — ``pending_confirmations`` does not list it, and no durable store
+        recovers it — so a lever is the *only* way a conformance case can reach the
+        resume path at all.
+
+        The card is assembled here rather than accepted pre-built, so what the shared
+        suite holds this fake to is the type's own invariants: exactly one subject, of
+        the arm ``operation`` names.
+
+        Args:
+            handle: The continuation handle this park is answered by.
+            operation: Which confirm-owed operation is waiting on the user's answer.
+            subject: The display subject, as a one-element listing.
+
+        Returns:
+            The parked confirmation, whose token the caller relays back to
+            :meth:`resume`.
+        """
+        confirmation = OperationConfirmation(
+            operation=operation, subject=subject, token=ContinuationToken(handle=handle)
+        )
+        self.routed_parked[handle] = confirmation
+        return confirmation
+
+    async def _resume_routed(self, handle: str, *, approved: bool) -> TurnOutcome:
+        """Answer a routed park, and perform what the answer authorised (ADR-0197 §7).
+
+        **Claimed once**: the entry is removed before anything is performed, so a second
+        presentation of the token — whatever its ``approved`` value — falls through to
+        :meth:`resume`'s unknown-token refusal.
+
+        **The refusal is returned, never raised.** ``approved`` ``False`` yields
+        ``RouteOutcome.REFUSED`` and no ``PermissionDeniedError``, because no
+        ``ActionPolicy`` was consulted and no ``PermissionDecision`` recorded — ADR-0197
+        §13's partial supersession of ADR-0042 §4, scoped to exactly this case.
+
+        The operation is performed by calling this engine's own implementation of it
+        (ADR-0197 §2), so a routed ``forget`` and a typed-door ``forget`` destroy the
+        same belief through the same code.
+        """
+        card = self.routed_parked.pop(handle)
+        operation = card.operation
+        if not approved:
+            outcome = RouteOutcome.REFUSED
+        else:
+            await self._perform_routed(card)
+            outcome = RouteOutcome.PERFORMED
+        # A routed pass that is not a park **owes an answer** (ADR-0197 §8), and this
+        # one composes nothing — a fake originates no model call — so it carries the
+        # fixed sentence below. Carrying `reply=None` instead would be the one routed
+        # shape §8 refuses outright, so the fake could not even construct its own
+        # outcome; carrying `reply_degraded=True` would claim a composition that failed.
+        return self._checked(
+            TurnOutcome(
+                turn=None,
+                routed=RoutedOperation(operation=operation, outcome=outcome),
+                reply=_ROUTED_REPLY,
+            ),
+            "resume",
+        )
+
+    async def _perform_routed(self, card: OperationConfirmation) -> None:
+        """Call this engine's own implementation of the card's operation (ADR-0197 §2).
+
+        The scalar identity is read off the display subject by ADR-0197 §5's mapping —
+        ``Belief.id``, ``Question.id``, ``SourceGrant.source`` — and it is the identity
+        the façade is called with, never the record.
+        """
+        (subject,) = card.subject
+        match card.operation:
+            case RoutableOperation.FORGET:
+                await self.forget(cast("Belief", subject).id)
+            case RoutableOperation.FORGET_QUESTION:
+                await self.forget_question(cast("Question", subject).id)
+            case RoutableOperation.REVOKE:
+                await self.revoke(cast("SourceGrant", subject).source)
+            case _:  # pragma: no cover — `OperationConfirmation` admits no read-only member
+                msg = f"{card.operation.value} is read-only and is never confirmed"
+                raise AssertionError(msg)
 
     # --- the clauses no type expresses -------------------------------------
 

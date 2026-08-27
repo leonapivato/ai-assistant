@@ -70,6 +70,7 @@ from assistant_engine_contract import (
     DecisionSubject,
     InvocationSubject,
     ReadSubject,
+    RoutedParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -81,12 +82,14 @@ from assistant_engine_contract import (
 
 from ai_assistant.core.types import (
     BoundAccount,
+    ContinuationToken,
     DestinationProtocol,
     DiscloserProvenance,
     EgressBinding,
     EgressDestination,
     EgressSpan,
     GrantScope,
+    RoutableOperation,
 )
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import (
@@ -345,6 +348,29 @@ class TestHubEngineClientContract(AssistantEngineContract):
             backing.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
             yield client
+
+    @pytest.fixture
+    async def routed_park(self, tmp_path: Path) -> AsyncIterator[RoutedParkSubject]:
+        """A client of a hub holding a single answerable **routed** park.
+
+        Arranged hub-side and answered over the wire, which is the whole of what this
+        binding adds: ADR-0197 §8 says no module under ``wire/`` changes for the routed
+        member beyond the version constant, because "a result payload takes the shape of
+        the method's own declared return annotation" — so if that is true, the card, its
+        token and the resumed outcome cross with no second declaration, and if it is not,
+        these cases are where it shows.
+
+        The belief the park is about is held by the hub's engine, and the client reads it
+        back through ``belief`` over the same connection — so the effect is observed the
+        way a spoke would observe it.
+        """
+        backing = FakeAssistantEngine()
+        held = backing.hold("rec-routed", content="the user likes jazz")
+        backing.park_routed("routed-1", operation=RoutableOperation.FORGET, subject=(held,))
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield RoutedParkSubject(
+                engine=client, token=ContinuationToken(handle="routed-1"), belief_id=held.id
+            )
 
     @pytest.fixture
     async def parked_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
