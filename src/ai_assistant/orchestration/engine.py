@@ -2016,10 +2016,14 @@ class Engine:
         #: discards. Bounded by ``max_outstanding_confirmations`` and by nothing
         #: else: no lifetime, no clock, and no setting of its own.
         self._settled: dict[str, _Settled] = {}
-        #: The serial :meth:`_mint_handle` stamps every handle with (#1644). One
-        #: integer, never a table: it is what makes a handle unique over the
-        #: process's whole life rather than over what is live now, and it costs the
-        #: same whether the hub mints two handles or two million.
+        #: The epoch and serial :meth:`_mint_handle` stamps every handle with
+        #: (#1644). Two values, never a table: the serial makes a handle unique over
+        #: this engine's whole life rather than over what is live now, and the epoch
+        #: makes it unique across engines — the same pair, for the same reason, that
+        #: ``InMemoryPlanStore`` and ``FakePlanStore`` mint ids from for ADR-0044
+        #: §1's non-reuse guarantee, where "the sequence alone is process-local, so a
+        #: restart would re-mint a prior id".
+        self._handle_epoch = uuid.uuid4().hex
         self._handle_serial = count(1)
         self._reserved: set[str] = set()
         self._reserved_routes: set[str] = set()
@@ -5221,11 +5225,17 @@ class Engine:
         holding after the record is discarded, which is where the live-table test
         stopped.
 
-        **The scope is the process, which is the scope handles have** (ADR-0084 §7).
-        The serial restarts with the engine, exactly as the parked, routed and settled
-        tables do; a token from a previous process life is unresolvable because those
-        tables are empty, and recovering an answerable confirmation across a restart
-        is ``pending_confirmations``' job (ADR-0052 §1).
+        **The epoch is what makes the process scope a fact rather than an assertion**
+        (ADR-0084 §7, ADR-0198 §4). The serial restarts with the engine, exactly as
+        the parked, routed and settled tables do — so on a serial alone a restarted
+        hub with a repeating factory would mint a *previous* process's handle for a
+        new park, and that process's token would resolve it: the very aliasing this
+        method exists to refuse, moved one lifetime over. A fresh random epoch per
+        engine closes it, which is what ADR-0198 §4's "a token from a previous
+        process life yields ``UnknownContinuationError``" needs in order to be true
+        of every factory rather than only of a random one. Recovering an answerable
+        confirmation across a restart stays ``pending_confirmations``' job, and it
+        re-mints through this method (ADR-0052 §1).
 
         The suffix is not a secret and does not need to be: the factory's value is
         what makes a handle unguessable, and the token stays opaque to every caller
@@ -5239,7 +5249,7 @@ class Engine:
         or not. Called *before* the runner can park, so a raising factory fails with
         no durable state yet committed.
         """
-        handle = f"{self._id_factory()}#{next(self._handle_serial)}"
+        handle = f"{self._id_factory()}#{self._handle_epoch}#{next(self._handle_serial)}"
         self._reserved.add(handle)
         return handle
 

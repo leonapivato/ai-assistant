@@ -1371,6 +1371,51 @@ async def test_the_token_is_opaque_process_scoped_state() -> None:
         await second.engine.resume(token, approved=True, timeout=PATIENT)
 
 
+async def test_a_restarted_engine_does_not_re_mint_a_previous_engine_s_handle() -> None:
+    """ADR-0198 §4: a previous process life's token is refused, whatever the factory.
+
+    The case above uses the default factory, whose values differ between engines all
+    by themselves — so it would pass against an engine that made no attempt at
+    uniqueness at all. This one hands **both** engines the same repeating factory,
+    which is where "process-scoped" stops being free: on a per-engine serial alone the
+    restarted engine mints the same handle for a *different* parked action, and the
+    first engine's token then resolves it. That is the stale-token aliasing #1644
+    records, moved one lifetime over, and it is the exposure the sibling case names as
+    a warm restart.
+
+    A fresh random epoch per engine is what closes it — the pair
+    ``InMemoryPlanStore`` and ``FakePlanStore`` already mint ids from for ADR-0044
+    §1's non-reuse guarantee, in the same words: "the sequence alone is process-local,
+    so a restart would re-mint a prior id".
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    before = Harness(
+        tools=(confirmable(),), loop_id_factory=lambda: next(goals), id_factory=lambda: "same"
+    )
+    parked = await before.engine.converse("send it", timeout=PATIENT)
+    stale = parked.step.confirmation.token  # type: ignore[union-attr]
+
+    after = Harness(
+        tools=(confirmable(),),
+        loop_id_factory=lambda: next(iter(("g-99",))),
+        id_factory=lambda: "same",
+    )
+    fresh = await after.engine.converse("send something else", timeout=PATIENT)
+    assert fresh.step is not None
+    assert fresh.step.confirmation is not None
+    assert fresh.step.confirmation.token != stale
+
+    with pytest.raises(UnknownContinuationError):
+        await after.engine.resume(stale, approved=True, timeout=PATIENT)
+    # The restarted engine's own park is still answerable by its own token, so the
+    # refusal above is about the stale handle and not about a mint that broke.
+    resolved = await after.engine.resume(
+        fresh.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+    assert resolved.step is not None
+    assert resolved.step.disposition is Disposition.EXECUTED
+
+
 # --- durable recovery of a parked confirmation (ADR-0052) ---------------
 
 
