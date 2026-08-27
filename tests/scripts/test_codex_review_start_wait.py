@@ -270,10 +270,16 @@ def test_wait_reports_a_round_that_died_without_recording(tmp_path: Path) -> Non
 
 
 def _release_blocking_artifact(path: Path, seconds: float = 60.0) -> None:
-    """Unblock a reader stuck on the named pipe at ``path``.
+    """Unblock a reader stuck on the named pipe at ``path``, and unname it.
 
     Opened non-blocking, which fails with ``ENXIO`` until a reader is there, so
     this polls instead of hanging the suite when nothing ever reads it.
+
+    The name is removed as soon as the reader is attached, and before the write:
+    both descriptors are already open, so the write still lands, and no later
+    directory listing can reopen the pipe and block on it with no writer left. A
+    pipe unlinked one statement later would leave the poller's next listing racing
+    this process — timing-dependent, which is the one thing the test below is not.
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -282,6 +288,7 @@ def _release_blocking_artifact(path: Path, seconds: float = 60.0) -> None:
         except OSError:
             time.sleep(0.05)
             continue
+        path.unlink()
         with os.fdopen(fd, "w") as handle:
             handle.write("not a review artifact\n")
         return
@@ -333,7 +340,6 @@ def test_wait_reports_a_round_that_finished_while_the_poll_was_looking(tmp_path:
         # make is made below, off what `--wait` reports.
         _reap(repo)
         _release_blocking_artifact(blocker)
-        blocker.unlink()
         stdout, stderr = waiter.communicate(timeout=120)
     finally:
         if waiter.poll() is None:
