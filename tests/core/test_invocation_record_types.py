@@ -1,4 +1,7 @@
-"""``ToolInvocation``, ``RecordedInvocation`` and the cost field (ADR-0192 §§2, 5).
+"""``ToolInvocation``, ``RecordedInvocation``, the cost field and its carrier.
+
+ADR-0192 §§2 and 5 for the row and the field; ADR-0195 §2 for ``ReportedOutput``,
+the envelope a successful call composes to put a figure *into* that field.
 
 The row has **exactly two well-formed shapes** and a validator refuses every other
 combination at construction. That is ADR-0029 §3's standard — the
@@ -23,6 +26,7 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     CostBasis,
     RecordedInvocation,
+    ReportedOutput,
     ToolCost,
     ToolFailure,
     ToolFailureKind,
@@ -232,10 +236,10 @@ def test_an_invisible_tool_identifier_is_refused() -> None:
 def test_a_result_reports_no_figure_by_default() -> None:
     """``None`` states that the tool reported no figure, and the row records ``UNKNOWN``.
 
-    No integration can populate it yet — ``ToolImplementation`` returns
-    ``FrozenJson`` and ADR-0029 §1 declines to contract the callable's shape — so
-    this default is what every registered tool produces today, and a budget over it
-    fails closed. #1558 owns the carrier.
+    Still what every registered tool in this tree produces, and a budget over it
+    fails closed. Since ADR-0195 a tool *may* populate it — by returning a
+    :class:`ReportedOutput` on the success exit — but nothing is obliged to, and
+    the two exits the tool does not compose report nothing at all.
     """
     assert ToolResult(outcome=ToolOutcome.SUCCEEDED).incurred_cost is None
 
@@ -270,3 +274,89 @@ def test_an_unknown_basis_is_the_value_for_not_knowing() -> None:
     assert result.incurred_cost is not None
     assert result.incurred_cost.basis is CostBasis.UNKNOWN
     assert result.incurred_cost.amount is None
+
+
+# --- the carrier a successful call composes (ADR-0195 §2) --------------------
+
+
+def test_the_envelope_carries_an_output_and_the_figure_together() -> None:
+    """The whole of what a tool reports on the exit it composes by returning."""
+    envelope = ReportedOutput(output={"sent": True}, incurred_cost=PRICED)
+
+    assert envelope.output == {"sent": True}
+    assert envelope.incurred_cost == PRICED
+
+
+def test_an_envelope_without_a_figure_is_refused() -> None:
+    """``incurred_cost`` is required, and this is the case that holds it required.
+
+    Every behavioural case in the seam's suite supplies a cost, so an
+    implementation that defaulted this field — to ``UNKNOWN``, say — would pass
+    all of them while minting a second spelling of a bare return. ADR-0195 §2
+    makes the field required to foreclose exactly that, and the Alternatives
+    section's answer to ADR-0032's "two spellings of one thing" objection rests
+    on it.
+    """
+    with pytest.raises(ValidationError, match="incurred_cost"):
+        ReportedOutput(output={"sent": True})  # type: ignore[call-arg]  # the point of the case
+
+
+def test_an_envelope_may_report_a_figure_over_no_output_at_all() -> None:
+    """``output`` defaults, because a priced call need not produce a value."""
+    envelope = ReportedOutput(incurred_cost=PRICED)
+
+    assert envelope.output is None
+
+
+def test_an_unknown_basis_in_an_envelope_is_permitted() -> None:
+    """ADR-0195 §5: it lands identically to reporting nothing, and is not refused.
+
+    An integration computing a figure from a tariff table that sometimes yields
+    ``UNKNOWN`` would otherwise have to branch at its return statement to avoid
+    tripping a validator, and refusing a value that is *true* would convert an
+    honest report into a failed call.
+    """
+    assert ReportedOutput(incurred_cost=UNKNOWN).incurred_cost.basis is CostBasis.UNKNOWN
+
+
+def test_the_envelope_states_no_outcome_and_none_can_be_added() -> None:
+    """It carries a price and never what the seam rules (ADR-0031 §2, ADR-0195 §2).
+
+    ``extra="forbid"`` is what stops an outcome, a failure kind or a disclosure
+    report being smuggled onto a value the tool composes: a callable's own
+    account of what happened to it is not evidence, and the two fields here are
+    the whole of what it may say.
+    """
+    assert set(ReportedOutput.model_fields) == {"output", "incurred_cost"}
+    with pytest.raises(ValidationError, match="outcome"):
+        ReportedOutput(incurred_cost=PRICED, outcome=ToolOutcome.SUCCEEDED)  # type: ignore[call-arg]  # the point of the case
+
+
+def test_the_envelope_is_frozen() -> None:
+    """A figure that could be rewritten after the seam read it is not a report."""
+    envelope = ReportedOutput(incurred_cost=PRICED)
+
+    with pytest.raises(ValidationError):
+        envelope.incurred_cost = UNKNOWN
+
+
+def test_an_output_the_annotation_refuses_raises_in_the_tools_own_frame() -> None:
+    """``output`` is ``FrozenJsonValue``, so the envelope opens no new route.
+
+    A value ``ToolResult.output`` would refuse is refused here too, at the
+    envelope's own construction — which is *inside* the callable, so it escapes
+    as an ordinary exception and the seam classifies it ``INTERNAL``, exactly
+    where the same value lands when it is returned bare (ADR-0029 §3).
+    """
+    with pytest.raises(ValidationError):
+        ReportedOutput(output={1, 2}, incurred_cost=PRICED)  # type: ignore[arg-type]  # the point
+
+
+def test_an_envelope_cannot_nest_inside_another() -> None:
+    """``FrozenJsonValue`` admits no ``BaseModel``, so no unwrapping loop is owed."""
+    nested = ReportedOutput(incurred_cost=PRICED)
+
+    with pytest.raises(ValidationError):
+        # The annotation refuses it statically too, which is the stronger half:
+        # `mypy` rejects this argument, so the runtime refusal is the backstop.
+        ReportedOutput(output=nested, incurred_cost=PRICED)  # type: ignore[arg-type]  # the point

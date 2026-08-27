@@ -65,6 +65,10 @@ class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
     def admitting(self) -> Callable[[SpendGate], InvocableToolRegistry]:
         return lambda gate: InMemoryToolRegistry(ledger=FakeAuditTrail(), gate=gate)
 
+    @pytest.fixture
+    def accounting(self) -> Callable[[FakeAuditTrail], InvocableToolRegistry]:
+        return lambda trail: InMemoryToolRegistry(ledger=trail, gate=trail)
+
 
 def a_registry(
     tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = (),

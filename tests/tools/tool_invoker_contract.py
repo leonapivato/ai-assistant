@@ -32,7 +32,7 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast
 
 import pytest
 import structlog.testing
@@ -55,9 +55,11 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    ReportedOutput,
     Reversibility,
     RiskLevel,
     SpendAdmissionHandle,
+    SpendPeriod,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -777,6 +779,182 @@ class Sleeper:
         self.calls += 1
         await asyncio.sleep(self._seconds)
         return None
+
+
+# --- ADR-0195: what a tool reports its own call cost ------------------------
+#
+# The channel's producer is deliberately **test-only**. ADR-0195 §7 requires it:
+# no integration in the tree reports a figure, `send_email` reports none because
+# SMTP carries no price, and teaching a production integration to report a number
+# nobody measured — in order to make an end-to-end case pass — is the fiction
+# ADR-0016 §4 refused on the declaration side, reached from the other end.
+
+#: The figure a test-only priced integration reports.
+REPORTED = ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.03"), currency="USD")
+
+#: What an interceptor returns to mean "hand back the real value".
+PASS: Final = object()
+
+
+class Priced:
+    """A test-only priced integration: it returns its output **and** its price."""
+
+    def __init__(self, output: FrozenJson = None, cost: ToolCost = REPORTED) -> None:
+        """Return ``output`` at ``cost`` on every call."""
+        self.calls = 0
+        self._output = output
+        self._cost = cost
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> ReportedOutput:
+        """Report what this call cost, on the exit a successful call composes."""
+        self.calls += 1
+        return ReportedOutput(output=self._output, incurred_cost=self._cost)
+
+
+class Envelope:
+    """A tool that hands back one **prepared** envelope, whatever is in it.
+
+    Separate from :class:`Priced` because half of ADR-0195's cases are about a
+    hostile or unvalidated envelope the case itself built — a subclass counting
+    its reads, or a ``model_construct``-built one carrying an output the
+    annotation refuses.
+    """
+
+    def __init__(self, envelope: ReportedOutput) -> None:
+        """Return ``envelope`` on every call."""
+        self.calls = 0
+        self._envelope = envelope
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> ReportedOutput:
+        """Hand back the prepared envelope."""
+        self.calls += 1
+        return self._envelope
+
+
+def unvalidated(output: object, cost: ToolCost = REPORTED) -> ReportedOutput:
+    """An envelope pydantic never validated, so ``output`` reaches the seam.
+
+    Constructed normally the refused value would raise in the tool's own frame
+    (which is the other half of ADR-0195 §2's clause, pinned on the model in
+    ``tests/core``). ``model_construct`` is what lets the same value reach the
+    seam's *own* construction of the ``ToolResult`` — the arm §11 names.
+    """
+    return ReportedOutput.model_construct(output=output, incurred_cost=cost)
+
+
+class SwallowingPriced:
+    """A priced tool that **absorbs** its cancellation and returns an envelope anyway.
+
+    The shape that makes ADR-0195 §4's first interruption check assertable: a
+    seam that checked only after reading would build a result carrying a figure
+    obtained after it had stopped waiting, and one that checked only before would
+    still have entered the accessors. Neither field is read here, and the
+    envelope reports that.
+    """
+
+    def __init__(self, envelope: ReportedOutput) -> None:
+        """Return ``envelope`` after absorbing whatever cancellation arrives."""
+        self.entered = asyncio.Event()
+        self._envelope = envelope
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> ReportedOutput:
+        """Absorb the cancellation and return the envelope regardless."""
+        self.entered.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+        return self._envelope
+
+
+class Accesses:
+    """How many times each of a watched envelope's two fields was read."""
+
+    def __init__(self) -> None:
+        """Nothing read yet."""
+        self.counts: dict[str, int] = {"output": 0, "incurred_cost": 0}
+
+
+def watched(
+    *,
+    output: FrozenJson = None,
+    cost: ToolCost = REPORTED,
+    intercept: Callable[[str, int], object] | None = None,
+) -> tuple[ReportedOutput, Accesses]:
+    """A ``ReportedOutput`` **subclass** that counts, and can sabotage, its reads.
+
+    ``isinstance`` admits a subclass, so both of the envelope's fields are
+    tool-authored reads (ADR-0195 §2) and a seam that read either one twice would
+    be reading a value it had not judged. ``intercept`` is called with the field's
+    name and its 1-based access count *before* the real value is handed back; it
+    may raise, cancel the invoking task, or return a substitute, and returning
+    :data:`PASS` means "the real value".
+
+    The counter is armed only after construction, so pydantic's own reads while
+    building the model are not what a case measures.
+    """
+    seen = Accesses()
+    armed = False
+
+    class Watched(ReportedOutput):
+        def __getattribute__(self, name: str) -> object:
+            if armed and name in seen.counts:
+                seen.counts[name] += 1
+                if intercept is not None:
+                    substitute = intercept(name, seen.counts[name])
+                    if substitute is not PASS:
+                        return substitute
+            return super().__getattribute__(name)
+
+    built = Watched(output=output, incurred_cost=cost)
+    armed = True
+    return built, seen
+
+
+def hostile_after_the_first(name: str, count: int) -> object:
+    """Answer the first read truthfully; raise on the second, differ on the third.
+
+    ADR-0195 §11's own shape, and the reason it is not a matrix of hostile
+    *first* accesses: that matrix is satisfiable by an implementation which reads
+    ``output`` a second time when it builds the ``ToolResult``, which is exactly
+    the path §2's single-read clause exists to close.
+    """
+    if count == 1:
+        return PASS
+    if count == 2:
+        msg = f"{name} may be read only once"
+        raise RuntimeError(msg)
+    return "a different answer entirely"
+
+
+def dumping(behaviour: Callable[[], Mapping[str, object] | None]) -> ToolCost:
+    """A ``ToolCost`` whose ``model_dump`` runs ``behaviour`` before answering.
+
+    Overriding it is **legitimate** — ADR-0032 §6 rules that "the round-trip's
+    result is what crosses" — which is precisely why the seam runs it under a
+    guard rather than trusting it. ``behaviour`` returning ``None`` means "answer
+    normally".
+    """
+
+    class Dumping(ToolCost):
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            substitute = behaviour()
+            if substitute is not None:
+                return dict(substitute)
+            return super().model_dump(*args, **kwargs)
+
+    return Dumping(basis=CostBasis.PER_CALL, amount=Decimal("0.03"), currency="USD")
+
+
+def cancel_this_task() -> None:
+    """Cancel whichever task is invoking, from inside tool-authored code."""
+    task = asyncio.current_task()
+    assert task is not None, "these cases drive `invoke` inside a task"
+    task.cancel()
 
 
 class ToolInvokerContract:
@@ -1787,10 +1965,13 @@ class ToolInvokerContract:
     ) -> None:
         """The declaration's price appears on no row, on this path or any other.
 
-        ``ToolResult.incurred_cost`` is what the *tool* reported, and nothing
-        populates it yet (#1558), so the row records an ``UNKNOWN`` basis. A lane
-        filling it from ``ToolDefinition.cost`` would put a declaration where a
-        measurement belongs and corrupt the spend total ADR-0192 §5 is built on.
+        ``ToolResult.incurred_cost`` is what the *tool* reported, and this tool
+        reported nothing, so the row records an ``UNKNOWN`` basis — beside a
+        declaration that carries a real ``PER_CALL`` figure, which is the whole
+        point of the case. A lane filling the field from ``ToolDefinition.cost``
+        would put a declaration where a measurement belongs and corrupt the spend
+        total ADR-0192 §5 is built on, and ADR-0195's channel changes nothing
+        about that: the figure comes from the tool or the row says ``UNKNOWN``.
         """
         trail = FakeAuditTrail()
         invoker = consuming(trail)
@@ -3510,3 +3691,434 @@ class ToolInvokerContract:
         assert len(gate.released) == already + 1, "the second grant's reservation was retired too"
         assert gate.outstanding == []
         assert len(spy.calls) == 1, "the refused call reached no callable"
+
+    # --- ADR-0195: the cost a successful call reports ----------------------
+
+    @pytest.fixture
+    def accounting(self) -> Callable[[FakeAuditTrail], InvocableToolRegistry]:
+        """Return a factory building an invoker whose ledger **and** gate are ``trail``.
+
+        The two other factories give the subject a fresh counterpart for whichever
+        seam they are not arranging, which is right for every case that reads one
+        of them. ADR-0195's end-to-end case reads **both at once** — a figure
+        written to a completion row by the ledger has to be the figure the gate
+        then totals — and two objects would leave the gate measuring a history the
+        ledger never wrote. One trail is also what the composition root wires.
+        """
+        raise NotImplementedError
+
+    async def test_a_reported_figure_reaches_the_completion_row_unaltered(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §2 and §6: the seam unwraps, and ADR-0192 §5's mapping carries it.
+
+        The envelope itself reaches nothing: what the result holds is the output
+        and the figure, separately, and no ``ReportedOutput`` is on the row.
+        """
+        priced = Priced(output={"sent": True})
+        invoker.register(tool(), priced)
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert result.output == {"sent": True}
+        assert result.incurred_cost == REPORTED
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == REPORTED
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_bare_return_beside_it_still_records_an_unknown_cost(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The control the reporting case is only meaningful against.
+
+        A widening obliges nobody: the tool that says nothing is the tool every
+        registration in this tree is today, and its row records ``UNKNOWN``
+        exactly as it did before the channel existed.
+        """
+        invoker.register(tool("reports"), Priced(output=1))
+        invoker.register(tool("silent"), Spy(output=1))
+
+        priced = await invoked(invoker, trail, call_for(tool("reports"), decision_id="d-priced"))
+        silent = await invoked(invoker, trail, call_for(tool("silent"), decision_id="d-silent"))
+
+        assert priced.output == silent.output == 1
+        assert priced.incurred_cost == REPORTED
+        assert silent.incurred_cost is None
+        recorded = {each.decision_id: each.incurred_cost for each in await completions(trail)}
+        assert recorded == {"d-priced": REPORTED, "d-silent": ToolCost(basis=CostBasis.UNKNOWN)}
+
+    async def test_an_unknown_basis_in_an_envelope_lands_as_a_bare_return_does(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §5, asserted as identity rather than as two similar rows.
+
+        The clause is that no implementation treats the two differently — at the
+        seam, on the row, or in the total — so that no reader can build a
+        distinction on the difference between saying ``UNKNOWN`` and saying
+        nothing.
+        """
+        unknown = ToolCost(basis=CostBasis.UNKNOWN)
+        invoker.register(tool("reports"), Priced(output="x", cost=unknown))
+        invoker.register(tool("silent"), Spy(output="x"))
+
+        reported = await invoked(invoker, trail, call_for(tool("reports"), decision_id="d-priced"))
+        bare = await invoked(invoker, trail, call_for(tool("silent"), decision_id="d-silent"))
+
+        assert reported.outcome is bare.outcome is ToolOutcome.SUCCEEDED
+        assert reported.output == bare.output == "x"
+        recorded = {each.decision_id: each.incurred_cost for each in await completions(trail)}
+        assert recorded == {"d-priced": unknown, "d-silent": unknown}
+
+    async def test_a_cost_that_fails_revalidation_is_discarded_alone(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §4, in ADR-0032 §6's own idiom and for its own reason.
+
+        ``model_construct`` bypasses every validator while satisfying
+        ``isinstance``, so a ``PER_CALL`` basis with no amount would otherwise
+        reach a row and, through it, ADR-0194's arithmetic. What is discarded is
+        the **cost and nothing else**: discarding a real success — an act that
+        already happened, possibly irreversibly — over an accounting field would
+        destroy the record ADR-0192 exists to write, to reach a fail-closed state
+        the ``UNKNOWN`` row already reaches.
+
+        The envelope is ``model_construct``-built too, and it has to be: pydantic
+        revalidates a nested model, so a normally-constructed ``ReportedOutput``
+        refuses this cost in the **tool's** frame. That is where the case would
+        stop without the seam's own round-trip — and it is also why the seam
+        cannot simply hand the figure to ``ToolResult`` and let *that* refuse it:
+        the refusal would arrive as an ``INTERNAL`` result, destroying a real
+        success over an accounting field.
+        """
+        bad = ToolCost.model_construct(basis=CostBasis.PER_CALL)
+        invoker.register(tool(), Envelope(unvalidated({"sent": True}, cost=bad)))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED, "the act happened and the record says so"
+        assert result.output == {"sent": True}
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_dumped_cost_that_differs_crosses_as_the_round_trips_result(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §6's rule inherited rather than a new one being minted here.
+
+        A ``ToolCost`` subclass may legitimately override ``model_dump``, and what
+        crosses is what the round-trip produced — not what the attribute appeared
+        to hold.
+        """
+        substitute = {"basis": CostBasis.PER_CALL, "amount": Decimal("9.99"), "currency": "EUR"}
+        invoker.register(tool(), Priced(cost=dumping(lambda: substitute)))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.incurred_cost == ToolCost(
+            basis=CostBasis.PER_CALL, amount=Decimal("9.99"), currency="EUR"
+        )
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == result.incurred_cost
+
+    async def test_an_output_an_envelope_carries_but_the_annotation_refuses_is_internal(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """Exactly where the same value lands when it is returned bare (ADR-0029 §3).
+
+        The envelope adds **no** route by which content reaches a result that a
+        bare return does not already reach, so both tools produce the same
+        classification — and the reported figure goes with the discarded result,
+        because the two came off one object.
+        """
+        invoker.register(tool("enveloped"), Envelope(unvalidated({1, 2})))
+        invoker.register(tool("bare"), Returner({1, 2}))
+
+        enveloped = await invoked(invoker, trail, call_for(tool("enveloped"), decision_id="d-env"))
+        bare = await invoked(invoker, trail, call_for(tool("bare"), decision_id="d-bare"))
+
+        assert enveloped.outcome is bare.outcome is ToolOutcome.FAILED
+        assert enveloped.failure is not None
+        assert bare.failure is not None
+        assert enveloped.failure.kind is bare.failure.kind is ToolFailureKind.INTERNAL
+        recorded = {each.decision_id: each.incurred_cost for each in await completions(trail)}
+        unknown = ToolCost(basis=CostBasis.UNKNOWN)
+        assert recorded == {"d-env": unknown, "d-bare": unknown}
+
+    async def test_a_returned_mapping_carrying_an_incurred_cost_key_is_output(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """``isinstance`` and no other test (ADR-0195 §2).
+
+        An implementation sniffing for a ``dict`` with an ``incurred_cost`` key
+        would read a tool's *output* as a report, and every JSON API that happens
+        to use that word would start filling a spend ledger.
+        """
+        payload = {"incurred_cost": {"basis": "per_call", "amount": "5.00", "currency": "USD"}}
+        invoker.register(tool(), Spy(output=payload))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.output == payload, "JSON that mentions a cost is still JSON"
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    async def test_this_seams_deadline_discards_the_figure_it_pre_empts(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §4: one carrier has one fate, and neither accessor is entered.
+
+        The callable absorbed its cancellation and returned an envelope anyway. A
+        row citing its figure would attribute to the tool a statement about a call
+        the seam has just said it did not get to finish — and the first
+        interruption check is what stops the accessors being entered at all.
+        """
+        envelope, seen = watched(output={"sent": True})
+        swallowing = SwallowingPriced(envelope)
+        invoker.register(tool(), swallowing)
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=BRIEF)
+
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.TIMED_OUT
+        assert result.incurred_cost is None
+        assert seen.counts == {"output": 0, "incurred_cost": 0}, "no field of it was read"
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    async def test_a_delivered_cancellation_discards_the_figure_it_pre_empts(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The deadline's twin, on the route ADR-0029 §4 keeps on the executor.
+
+        A separate case because an implementation can hold one and drop the other:
+        the deadline is the seam's own state, while this one is read off the task.
+        """
+        envelope, seen = watched(output={"sent": True})
+        swallowing = SwallowingPriced(envelope)
+        invoker.register(tool(), swallowing)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await swallowing.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert seen.counts == {"output": 0, "incurred_cost": 0}, "no field of it was read"
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_each_of_the_envelopes_fields_is_read_exactly_once(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §2's single-read clause, asserted on the access **count**.
+
+        A matrix of hostile *first* accesses alone is satisfiable by an
+        implementation that reads ``output`` a second time when it builds the
+        ``ToolResult`` — so this envelope answers its first read truthfully,
+        raises on the second and would answer differently on the third, and the
+        count is what the case is about.
+        """
+        envelope, seen = watched(output={"sent": True}, intercept=hostile_after_the_first)
+        invoker.register(tool(), Envelope(envelope))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert seen.counts == {"output": 1, "incurred_cost": 1}
+        assert result.output == {"sent": True}, "the completion carries the first captured value"
+        assert result.incurred_cost == REPORTED
+
+    async def test_an_output_accessor_that_raises_is_internal_and_discards_the_figure(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §2: the two reads' defects resolve on their **subject**.
+
+        An unreadable ``output`` leaves the seam with nothing to record as the
+        call's result, so it takes the ``INTERNAL`` path an unrepresentable output
+        already takes — and the figure is discarded with it, unread, because a
+        seam keeping half of a misbehaving carrier would be arbitrating between
+        two accounts a tool gave of its own call.
+        """
+
+        def raise_on_output(name: str, count: int) -> object:
+            if name == "output":
+                msg = "this accessor is broken"
+                raise RuntimeError(msg)
+            return PASS
+
+        envelope, seen = watched(output={"sent": True}, intercept=raise_on_output)
+        invoker.register(tool(), Envelope(envelope))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert seen.counts["incurred_cost"] == 0, "the figure went with the result, unread"
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_cost_accessor_that_raises_yields_unknown_and_nothing_else(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The other subject: a malformed cost costs the **cost** and no more.
+
+        The read runs under its own ``Exception`` guard because it happens after
+        ADR-0192 §1's claim has been appended, so an exception escaping it would
+        leave a claim with no completion — over an accounting field, on a call
+        that already ran.
+        """
+
+        def raise_on_cost(name: str, count: int) -> object:
+            if name == "incurred_cost":
+                msg = "this accessor is broken"
+                raise RuntimeError(msg)
+            return PASS
+
+        envelope, _ = watched(output={"sent": True}, intercept=raise_on_cost)
+        invoker.register(tool(), Envelope(envelope))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert result.output == {"sent": True}
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_model_dump_that_raises_yields_unknown_and_nothing_else(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The same guard, one step further in: the dump is tool-authored too.
+
+        ADR-0032 §6 rules that overriding ``model_dump`` is legitimate, so the
+        seam runs the attribute access, the dump **and** the validation under one
+        guard rather than trusting any of the three.
+        """
+
+        def explode() -> Mapping[str, object] | None:
+            msg = "this dump is broken"
+            raise RuntimeError(msg)
+
+        invoker.register(tool(), Priced(output="ok", cost=dumping(explode)))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.SUCCEEDED
+        assert result.output == "ok"
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    @pytest.mark.parametrize("field", ["output", "incurred_cost"])
+    async def test_an_accessor_that_cancels_the_invoking_task_discards_the_figure(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, field: str
+    ) -> None:
+        """ADR-0195 §4's **second** interruption check, which is what sees this.
+
+        Reading a tool-authored value can itself deliver a cancellation, so a
+        check made only before the reads would build a result carrying a figure
+        obtained after the seam had stopped waiting. The cancellation propagates
+        unchanged — it is not an accounting fact — and the row records ``UNKNOWN``.
+        """
+
+        def cancel_on(name: str, count: int) -> object:
+            if name == field:
+                cancel_this_task()
+            return PASS
+
+        envelope, _ = watched(output={"sent": True}, intercept=cancel_on)
+        invoker.register(tool(), Envelope(envelope))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_model_dump_that_cancels_the_invoking_task_discards_the_figure(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """And it returns a **valid** value, so only the re-read can catch it.
+
+        An implementation that took the round-trip's result because the round-trip
+        succeeded would record a figure obtained after the seam had stopped
+        waiting.
+        """
+
+        def cancel_and_answer() -> Mapping[str, object] | None:
+            cancel_this_task()
+            return None
+
+        invoker.register(tool(), Priced(output="ok", cost=dumping(cancel_and_answer)))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_reported_figure_reaches_the_total_and_a_ceiling_refuses_the_next_call(
+        self, accounting: Callable[[FakeAuditTrail], InvocableToolRegistry]
+    ) -> None:
+        """The end-to-end case ADR-0192 §9 deferred to whichever ADR minted the channel.
+
+        A **test-only** priced integration reports a ``PER_CALL`` figure, through
+        ``invoke``, onto a completion row, into ADR-0194 §2's accounted total, and
+        the ceiling then refuses a later call — with **no allowance configured**,
+        which is the whole point: until this channel existed every row read
+        ``UNKNOWN``, so the period was indeterminate unless the user had stated a
+        per-call worst case of their own. The declaration is ``FREE`` throughout,
+        so nothing the ceiling bites on came from ``ToolDefinition.cost``.
+        """
+        trail = FakeAuditTrail(currency="USD", day_ceiling=Decimal("1.00"))
+        invoker = accounting(trail)
+        priced = tool(cost=ToolCost(basis=CostBasis.FREE))
+        invoker.register(
+            priced,
+            Priced(cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.60"), currency="USD")),
+        )
+
+        for attempt in ("first", "second"):
+            result = await invoked(
+                invoker, trail, call_for(priced, decision_id=f"d-{attempt}"), timeout=PATIENT
+            )
+            assert result.outcome is ToolOutcome.SUCCEEDED
+
+        stated = {each.period: each for each in await trail.spend_totals()}
+        assert stated[SpendPeriod.CALENDAR_DAY].accounted == Decimal("1.20"), (
+            "the total is made of measured figures, not of an allowance"
+        )
+
+        with pytest.raises(SpendCeilingError):
+            await invoked(invoker, trail, call_for(priced, decision_id="d-third"), timeout=PATIENT)

@@ -47,6 +47,10 @@ class TestFakeToolInvokerContract(ToolInvokerContract):
     def admitting(self) -> Callable[[SpendGate], InvocableToolRegistry]:
         return lambda gate: FakeToolInvoker(ledger=FakeAuditTrail(), gate=gate)
 
+    @pytest.fixture
+    def accounting(self) -> Callable[[FakeAuditTrail], InvocableToolRegistry]:
+        return lambda trail: FakeToolInvoker(ledger=trail, gate=trail)
+
 
 async def test_fake_records_the_calls_it_accepted() -> None:
     """Beyond the contract: the fake exists to let an executor's test assert on

@@ -1,6 +1,6 @@
 # 32. The failure transport at the tool seam
 
-- Status: Accepted, §5 amended by ADR-0039
+- Status: Accepted, §5 amended by ADR-0039; §§1 and 6 amended by ADR-0195
 - Date: 2026-07-21
 - Amended: 2026-07-22 by ADR-0039 — §5's "it does not reach `StepExecution.error`
   when the outcome is INDETERMINATE, an asymmetry inherited rather than chosen"
@@ -11,6 +11,25 @@
   §5 is untouched and still binding: the seam's enumeration, the by-value rule,
   and the no-safety-net candour that the producer-side rule (§3) is the only
   defence against a Tier 1 leak.
+- Amended: 2026-08-26 by ADR-0195 — `ClassifiedToolError` carries a third
+  attribute, keyword-only and defaulted: `incurred_cost: ToolCost | None = None`, what
+  the call cost as the tool reports it (ADR-0192 §5). §6's revalidation reaches it
+  and reads it independently of the other two, in that section's own idiom —
+  `ToolCost.model_validate(cost.model_dump())` — and a cost that does not survive is
+  discarded alone: the outcome, the output, the failure and `effect_may_have_committed`
+  all stand and the row records an `UNKNOWN` basis, which is §6's "each defect resolves
+  in its own pessimistic direction" applied to a field whose pessimistic direction
+  ADR-0194 §2 already fixes. The field is defaulted where §2 leaves
+  `effect_may_have_committed` undefaulted, because silence about a price already means
+  "no figure" while silence about a side effect would assert one. Nothing else moves:
+  the carrier's base class, its placement outside `ToolError`, its `core/errors.py` home,
+  its never-escaping-`invoke` rule, §2's outcome rule, §3's `TIMED_OUT` reservation, §4's
+  precedence — which discards a reported cost together with the classification it
+  pre-empts — and §5's by-value message rule are untouched. §1's "What is not
+  contracted here" and §7's first bullet are untouched as statements about ADR-0032;
+  the return type they describe is `tools/`-internal by ADR-0029 §1 and ADR-0195 §9
+  records why no separate note is owed for widening it. Refs #1558, ADR-0195 §3, §4,
+  §9, §10.
 - Decides what ADR-0031 §3 named and declined — issue #192. ADR-0029 §3
   ratified a vocabulary of eight `ToolFailureKind`s; six of them have no
   carrier, so an integration cannot report any of them. This gives them one.
