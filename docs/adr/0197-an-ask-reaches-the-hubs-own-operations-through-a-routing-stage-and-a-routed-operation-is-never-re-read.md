@@ -1722,8 +1722,11 @@ closed set and a two-directional validator is the shape that keeps
 **The four records — on three ADRs — are stated here in their exact form and are
 not made by this change** (ADR-0026 §6, ADR-0030 §6, ADR-0032 §8): writing
 "amended by ADR-0197" onto a ratified ADR while ADR-0197 is only `Proposed` is the
-state claim ADR-0019 forbids. The lane that ratifies this ADR makes them, and no
-other lane does. ADR-0052 takes two of the four, in two different forms, and the
+state claim ADR-0019 forbids. They are made by the **implementing lane** of §12,
+in the change that lands this decision — not by the ratifying commit, which
+ADR-0165 confines to one ADR file and one changed line and which could not carry
+them without forfeiting its own exemption. ADR-0195 §10's two records are the
+precedent and were applied exactly there, by the lane that implemented it. ADR-0052 takes two of the four, in two different forms, and the
 difference is not a slip: a **supersession** pair accumulates on a leading-token
 `Status` line (ADR-0070 §4), where an **amendment** qualifier is excluded from one
 (ADR-0082 §2) and lives in the note alone.
