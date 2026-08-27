@@ -65,8 +65,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import Enum
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, get_type_hints
 
 import pytest
 from pydantic import SecretStr
@@ -2564,7 +2565,11 @@ class AssistantEngineContract(ABC):
                 for parameter in inspect.signature(initialiser).parameters.values()
                 if parameter.name not in {"self", "message"}
             ]
-            sample = {parameter.name: _sample_for(parameter.name) for parameter in parameters}
+            hints = _resolved_hints(initialiser)
+            sample = {
+                parameter.name: _sample_for(parameter.name, hints.get(parameter.name))
+                for parameter in parameters
+            }
             original = kind("the failure", **sample)
             details = {
                 attribute: getattr(original, attribute)
@@ -4672,13 +4677,56 @@ def _protocol_declarations() -> str:
     return inspect.getsource(protocols_module)
 
 
-def _sample_for(parameter: str) -> object:
+def _resolved_hints(initialiser: Callable[..., object]) -> dict[str, object]:
+    """The initialiser's resolved annotations, or none where they cannot be resolved.
+
+    ``core/errors.py`` runs under ``from __future__ import annotations`` and imports
+    some annotation-only names under ``TYPE_CHECKING``, so
+    :func:`typing.get_type_hints` raises ``NameError`` for a whole signature on the
+    strength of one such name. That is not a failure of this test: an unresolvable
+    annotation simply means :func:`_sample_for` falls back to the shape it can infer
+    from the parameter's own name, which is what it did for every subtype before an
+    enum-typed keyword existed.
+
+    Args:
+        initialiser: The ``__init__`` being sampled.
+
+    Returns:
+        The resolved hints, or an empty mapping.
+    """
+    try:
+        return dict(get_type_hints(initialiser))
+    except NameError:
+        return {}
+
+
+def _sample_for(parameter: str, annotation: object = None) -> object:
     """A plausible value for one structured-state parameter, by its declared shape.
 
     Deliberately shallow: what the round-trip test needs is *a* value the
     constructor accepts, not a realistic one. A parameter this does not know is
     given a string, which is what every operator-facing field on the hierarchy is.
+
+    **A closed vocabulary is read off the annotation rather than from a name
+    table**, which is the same rule-over-list discipline the caller's docstring
+    states: ADR-0200 §4's ``TranscriptionFailedError`` carries a
+    :class:`~ai_assistant.core.types.SpeechFailure`, and a string that happens not
+    to be one of its values is refused by the enum before the round trip can say
+    anything about it. Taking the first member covers every enum-typed keyword this
+    hierarchy grows, including the ones nobody has written yet.
+
+    Args:
+        parameter: The keyword's name.
+        annotation: Its resolved annotation, where the caller could resolve one.
+
+    Returns:
+        A value the constructor accepts.
     """
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        # The **last** member and not the first, so the sample differs from a default
+        # like ``SpeechFailure.UNCLASSIFIED``: a constructor that ignored the keyword
+        # entirely would round-trip its own default and pass.
+        return list(annotation)[-1]
     if parameter in {"limit", "size"}:
         return 1
     if parameter.endswith("_ids"):
