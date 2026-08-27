@@ -684,34 +684,27 @@ _mode_wait() {
     local artifact line verdict r_tree marker m_tree m_base live unknown now remaining
     local noted_base=0
     while :; do
-        artifact="$(_artifact_for_tree)"
-        if [[ -n "$artifact" ]]; then
-            line="$(head -n 1 "$artifact")"
-            # The artifact only exists because the round's own verdict guard
-            # accepted its last line, so what is left is stripping the optional
-            # label the guard permits. `LC_ALL=C` for the reason that guard states
-            # at length: `[^[:alnum:]]` is locale-dependent, and in a single-byte
-            # non-ASCII locale an em dash's leading byte reads as a letter.
-            verdict="$(_last_verdict_line "$artifact")"
-            verdict="$(LC_ALL=C sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt][^[:alnum:]]*//; s/\.$//' \
-                <<<"$verdict" | tr '[:lower:]' '[:upper:]')"
-            printf 'artifact=%s\n' "${artifact#"${repo_root}/"}"
-            printf 'persona=%s\n' "$persona"
-            printf 'tree=%s\n' "$tree"
-            printf 'round=%s\n' "$(_provenance_field "$line" round)"
-            printf 'verdict=%s\n' "$verdict"
-            {
-                echo
-                echo "===== ${persona} review of tree ${tree:0:12} is recorded ====="
-                echo "  artifact  ${artifact#"${repo_root}/"}"
-                echo "  verdict   ${verdict}"
-                echo "  round     $(_provenance_field "$line" round)"
-                echo "  churn     $(_provenance_field "$line" churn_ratio)"
-                echo
-            } >&2
-            return 0
-        fi
-
+        # LIVENESS IS READ FIRST, AND THE ARTIFACT SECOND. The order is the whole
+        # of issues #1629 and #1630: a round records its artifact and only then
+        # exits, so "gone" always arrives after "recorded". Reading the artifact
+        # first inverted that — a round that recorded and exited between the two
+        # reads was seen as neither, and every path below answers exit 4, "stop
+        # polling", about a finished green round. Three lanes were told that in one
+        # day (#1624 r1, #1625 r4, #1626 r8), each with the verdict visible in the
+        # log printed as evidence of failure.
+        #
+        # This order makes the window unreachable rather than narrower: the file
+        # listing below is expanded strictly after the liveness observation, so a
+        # round observed gone has necessarily already renamed its artifact into
+        # place (`mv`, atomic, far below) and the listing contains it. Re-reading
+        # the artifact directory a second time before each exit 4 would be the same
+        # guarantee bought with two reads instead of one, and with two scan sites
+        # to keep in step.
+        #
+        # The direction it can still be wrong in is the harmless one: a round that
+        # finished after the liveness read is reported as still running, and the
+        # next poll — one interval later — reports its artifact.
+        #
         # This loop key's own marker, kept for the "it died" diagnosis below: that
         # question is about the round THIS invocation would have started, and its
         # log is the one at this key's path.
@@ -753,6 +746,37 @@ _mode_wait() {
             if [[ -z "$(_round_field tree)" ]]; then
                 unknown=1
             fi
+        fi
+
+        # A record for HEAD's tree is the authoritative answer (ADR-0027 §6 — it is
+        # what `ship` selects by), so it is read after the liveness observation
+        # above and wins over it in both directions.
+        artifact="$(_artifact_for_tree)"
+        if [[ -n "$artifact" ]]; then
+            line="$(head -n 1 "$artifact")"
+            # The artifact only exists because the round's own verdict guard
+            # accepted its last line, so what is left is stripping the optional
+            # label the guard permits. `LC_ALL=C` for the reason that guard states
+            # at length: `[^[:alnum:]]` is locale-dependent, and in a single-byte
+            # non-ASCII locale an em dash's leading byte reads as a letter.
+            verdict="$(_last_verdict_line "$artifact")"
+            verdict="$(LC_ALL=C sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt][^[:alnum:]]*//; s/\.$//' \
+                <<<"$verdict" | tr '[:lower:]' '[:upper:]')"
+            printf 'artifact=%s\n' "${artifact#"${repo_root}/"}"
+            printf 'persona=%s\n' "$persona"
+            printf 'tree=%s\n' "$tree"
+            printf 'round=%s\n' "$(_provenance_field "$line" round)"
+            printf 'verdict=%s\n' "$verdict"
+            {
+                echo
+                echo "===== ${persona} review of tree ${tree:0:12} is recorded ====="
+                echo "  artifact  ${artifact#"${repo_root}/"}"
+                echo "  verdict   ${verdict}"
+                echo "  round     $(_provenance_field "$line" round)"
+                echo "  churn     $(_provenance_field "$line" churn_ratio)"
+                echo
+            } >&2
+            return 0
         fi
 
         # Only where the tree is actually KNOWN: an unpublished marker in this

@@ -269,6 +269,86 @@ def test_wait_reports_a_round_that_died_without_recording(tmp_path: Path) -> Non
     assert "codex produced an empty review" in result.stderr
 
 
+def _release_blocking_artifact(path: Path, seconds: float = 60.0) -> None:
+    """Unblock a reader stuck on the named pipe at ``path``.
+
+    Opened non-blocking, which fails with ``ENXIO`` until a reader is there, so
+    this polls instead of hanging the suite when nothing ever reads it.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            time.sleep(0.05)
+            continue
+        with os.fdopen(fd, "w") as handle:
+            handle.write("not a review artifact\n")
+        return
+    raise AssertionError(f"nothing read {path} within {seconds}s")
+
+
+def test_wait_reports_a_round_that_finished_while_the_poll_was_looking(tmp_path: Path) -> None:
+    """Issues #1629 and #1630: 'the round is gone' must never be read first.
+
+    A round renames its artifact into place and only *then* exits, so the two
+    observations are ordered on disk — and `--wait` has to read them in that same
+    order, liveness before the artifact directory. Reading the directory first
+    inverts it: a round that records and exits between the two reads is seen as
+    neither, and exit 4 — "stop polling, nothing is coming" — is reported about a
+    finished, green, already-paid round. Three lanes were told that in one day, and
+    `worker.md` tells a lane a 4 is never a reason to wait again, so the natural
+    next move is to relaunch the round that just succeeded.
+
+    The interleaving is forced rather than raced for. A named pipe in the artifact
+    directory blocks the `head` that reads each candidate's provenance, so `--wait`
+    is held *inside* a listing expanded before the round recorded anything, and the
+    hold is released only once the round has recorded and exited. Under the
+    inverted order that listing is the one the answer is computed from, and the
+    answer is exit 4; under this one the listing is taken after the liveness
+    observation it must outlive, and the artifact is found.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 4")
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    # Created only now: the round's own round-count scan reads this directory
+    # before it publishes the marker `--start` returns on, so nothing of the round
+    # can block on this pipe.
+    blocker = repo / ".review" / "0-blocking-not-an-artifact.md"
+    os.mkfifo(blocker)
+    waiter = subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script
+        [bash(), str(SCRIPT), "--wait", "adversarial", "main", "--timeout", "120"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # The round is gone, so its artifact is already renamed into place — it is
+        # written before the process exits. Nothing reads `.review/` here: a reader
+        # would block on the pipe alongside `--wait`, and the assertion it would
+        # make is made below, off what `--wait` reports.
+        _reap(repo)
+        _release_blocking_artifact(blocker)
+        blocker.unlink()
+        stdout, stderr = waiter.communicate(timeout=120)
+    finally:
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+        with contextlib.suppress(FileNotFoundError):
+            blocker.unlink()
+
+    assert waiter.returncode == RECORDED, stderr
+    reported = _fields(stdout)
+    assert reported["verdict"] == "APPROVE"
+    assert reported["tree"] == _tree(repo)
+    assert repo / reported["artifact"] == require_artifact(repo, _git(repo, "rev-parse", "HEAD"))
+
+
 def test_start_refuses_a_second_round_of_the_same_persona(tmp_path: Path) -> None:
     """ADR-0015 and #142's rule, refused at the start rather than in a log."""
     repo = tmp_path / "repo"
