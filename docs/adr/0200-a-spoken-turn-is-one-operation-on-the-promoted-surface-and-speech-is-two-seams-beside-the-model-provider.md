@@ -329,6 +329,21 @@ async def converse_spoken(
 > `None` to run in a fresh one, with `UnknownConversationError` where it names
 > none this engine can operate on.
 
+> **Normative.** The budget is **threaded** to each stage, which is ADR-0029 §4's
+> rule and the one `converse`'s own signature already carries in as many words —
+> "the caller's budget, threaded to the seam that owns the deadline". The
+> effective bound on a speech stage is the **lesser** of the caller's remaining
+> budget and the decorator's configured one (§1), so a stage never outlives the
+> call and a generous deployment setting never overrides a tight caller.
+
+> **Normative.** Every expiry has a stated outcome and none is new machinery.
+> Expiry inside `transcribe` is a `SpeechTimeoutError`, which §4 translates to
+> `TranscriptionFailedError` carrying `SpeechFailure.TIMED_OUT`. Expiry inside
+> `synthesize` is a `SpeechTimeoutError`, which §4 degrades. Expiry during the
+> turn behaves exactly as it does on `converse`, whose semantics this ADR does
+> not change and does not restate. A budget already exhausted when a stage is
+> reached is that stage's expiry and is not a separate case.
+
 > **Normative.** Every clause `AssistantEngine`'s docstring binds every method to
 > binds this one: the identifier validation before any I/O, the local refusal of
 > a malformed argument, ADR-0060's cancellation clause, ADR-0065's
@@ -427,9 +442,25 @@ caller may attest at this rung is nobody.
 
 > **Normative.** `SpokenReply` is a frozen `extra="forbid"` model with two
 > members: `audio`, the `SpokenAudio` that was synthesised, and `text`, the
-> `NonBlankEncodableText` that audio says. The two always agree — no
-> implementation synthesises words other than the ones `text` carries — so a
-> caller that cannot play audio still knows exactly what was spoken.
+> `NonBlankEncodableText` **that was passed to** `SpeechSynthesizer.synthesize`
+> to produce it. Orchestration constructs the pair from the one call, so the two
+> agree by construction and no validator is asked to establish it.
+
+> **Normative.** That the audio is an audible rendering of that text is the
+> **synthesizer's** obligation, discharged in its conformance suite, and not an
+> invariant of this type. No component decodes, re-transcribes or otherwise
+> inspects a rendering to check it, and no lane adds an operation that does.
+
+**Why the invariant is constructive rather than semantic.** An earlier draft said
+"the two always agree", which read as a promise about what the audio *sounds
+like* — and nothing structural could establish it: a conforming synthesizer could
+return well-formed audio saying "no" for the text "yes", and the only check would
+be to transcribe the rendering, which is a second inference with its own
+failures, its own cost and its own retention question. Making `text` the *input*
+to synthesis is enforceable at the one place the pair is built, keeps the
+promise a caller actually relies on — that the words on screen are the words the
+hub asked to have spoken — and leaves fidelity where it belongs, as behaviour a
+conformance suite tests rather than a shape a model validator asserts.
 
 > **Normative.** `spoken` is `None` wherever `outcome.reply` is `None`: a park,
 > a recovered resume, and a composition failure each leave nothing to say, and
@@ -482,11 +513,29 @@ caller may attest at this rung is nobody.
 
 > **Normative.** It is raised **`from None`**. The seam's exception is not
 > chained across the promoted boundary: neither its message, nor its class name,
-> nor its traceback reaches a caller, in process or across the wire. What the
-> raised error carries instead is a **project-owned classification** — the
-> nearest class to the caught one in `core/errors.py`'s own `SpeechError`
-> taxonomy, matched by **identity** against a mapping frozen at import — plus
-> this project's own message for that class.
+> nor its traceback reaches a caller, in process or across the wire.
+
+> **Normative.** What it carries instead is one keyword-only constructor
+> argument, `failure`, of type `SpeechFailure` — a closed `StrEnum` in
+> `core/types.py` with exactly one member per class of the `SpeechError`
+> taxonomy §1 fixes, and therefore exactly two at this rung: `UNCLASSIFIED` for a
+> bare `SpeechError`, and `TIMED_OUT` for `SpeechTimeoutError`. A lane that adds
+> a `SpeechError` subclass adds its member here in the same change; the two
+> vocabularies do not drift apart.
+
+> **Normative.** The member is chosen by walking the caught exception's MRO for
+> the nearest class in a mapping of that taxonomy **frozen at import** and
+> matched by **object identity**, falling back to `UNCLASSIFIED`. It is never
+> derived from the exception's `__name__`, its module, or its message, each of
+> which an implementation controls.
+
+> **Normative.** `TranscriptionFailedError`'s signature is therefore
+> `(message, *, failure: SpeechFailure)`, and nothing under `wire/` changes to
+> carry it: `wire/errors.py`'s `details_of` reads an `AssistantError`'s
+> structured detail off its constructor's parameters, excluding `self` and
+> `message`, and `wire/codec.py`'s `project` renders an `Enum` by its value. The
+> far side reconstructs the same class with the same member, which is the
+> substitutability ADR-0084 §4 promotes the surface for.
 
 **This is `models/routing.py`'s `_classify`, applied one boundary further out,
 and it is why the chaining an earlier draft required was wrong.** That helper
@@ -500,10 +549,16 @@ takes arbitrary text, so an implementation that interpolates the clip it could
 not decode has put the recording inside the exception. `raise … from exc` keeps
 that object reachable as `__cause__` and renders it in the traceback, which
 would defeat §8 in the one place §8 cannot see. Suppressing the cause is
-therefore not a loss of diagnostics but the condition of the guarantee: the
-classification is what a caller needs, and an implementation that wants its own
-detail logs it at its own seam, where the audio is already in scope and the log
-tier is the implementation's own.
+therefore not a loss of diagnostics but the condition of the guarantee.
+
+> **Normative.** An earlier draft of this paragraph let an implementation "log
+> its own detail at its own seam, where the audio is already in scope", and that
+> was a hole in §8 rather than a concession: §8 forbids audio in either log tier
+> "by any component on this path", and a transcriber is such a component. A
+> speech implementation logs the same audio-free classification and its own
+> message, and logs neither the recording, a fragment of it, nor a rendering of
+> an exception that might carry one. Nothing is exempted by being inside the
+> implementation.
 
 > **Normative.** `heard` is disclosed to the caller on every call that produced
 > a transcript. A push-to-talk surface that cannot show the user what it heard
@@ -658,12 +713,30 @@ place nobody inspects.
 ### 9. The wire carries audio as it stands, and nothing under `wire/` changes
 
 > **Normative.** `SpokenAudio` is a frozen `extra="forbid"` model in
-> `core/types.py` with exactly two members: `content`, the audio as **standard
-> base64 text**, typed with a `core/types.py` refinement layered on
-> `NonBlankEncodableText` and validated at construction; and `media_type`, a
-> `SpokenAudioFormat` member. It carries a `decoded()` method returning the
-> `bytes`, so the decoding convention is written once and no consumer re-derives
-> it.
+> `core/types.py` with exactly two members: `content`, typed `Base64Audio`; and
+> `media_type`, a `SpokenAudioFormat` member. It carries a `decoded()` method
+> returning the `bytes`, so the decoding convention is written once and no
+> consumer re-derives it.
+
+> **Normative.** `Base64Audio` is a public `core/types.py` annotation, spelled as
+> that file's existing refinements are —
+> `type Base64Audio = Annotated[NonBlankEncodableText, AfterValidator(...)]` —
+> and its validation is exactly this: the value is standard base64 as RFC 4648 §4
+> defines it, **with** padding, over that section's 64-character alphabet plus
+> `=`; it decodes without error; and it is **canonical**, meaning re-encoding
+> what it decodes to reproduces it byte for byte. The value is **never
+> normalised**: what a caller passed is what crosses the wire and what
+> `decoded()` reverses, which is `NonBlankEncodableText`'s own posture and
+> ADR-0096 §2's reason for it.
+
+**The canonicality clause is not decoration.** Base64 admits distinct spellings
+of one byte string — a non-zero final-group remainder, and a URL-safe alphabet
+among them — so without it `SpokenAudio` would have two values for one
+recording, `wire/codec.py`'s canonical encoding would faithfully preserve the
+difference, and ADR-0087 §4's normalises-nothing rule would make them two values
+all the way down. Refusing the non-canonical spelling is what makes one recording
+one value; it is also, incidentally, what makes a decoder that quietly ignores
+stray characters unable to admit a payload a stricter peer refuses.
 
 > **Normative.** No file under `wire/` changes to carry audio. ADR-0087 §2c's
 > scalar table gains no row, `wire/codec.py`'s `project` gains no branch, the
@@ -703,6 +776,26 @@ available: §11 names the condition that would make it worth its supersession.
 > **Normative.** An implementation handed a `media_type` its `formats` property
 > does not name refuses it rather than guessing, and the engine refuses it
 > locally, before any I/O, on the same read of that property.
+
+> **Normative.** **A refused recording never travels inside the refusal**, and
+> this binds every entry point that constructs a `SpokenAudio` from a value it
+> did not author — the wire server's argument adapter and the gateway's body
+> parse among them. `Base64Audio`'s own validator names the class of defect and
+> the position, never the value, on `encodable_text`'s stated ground. That is
+> necessary and not sufficient: a pydantic `ValidationError` carries the rejected
+> **input** whatever the message says, so each such entry point catches the
+> construction failure and raises a project-owned refusal `from None`, carrying
+> no input value and no chained cause.
+
+**This is §8's rule reaching the one path §8's own test would have missed.** A
+recording rejected at validation has never reached a seam, so no
+`TranscriptionFailedError` is raised for it and none of §4's clauses apply — and
+a near-valid clip with one bad character is exactly the input an attacker or an
+unlucky browser produces. Without this clause the recording would leave the
+device, fail to parse, and come back out inside a refusal that a caller renders
+and a log records. It also costs `wire/` and `interfaces/gateway/` a refusal
+path, which is a change to how a refusal is *rendered* and not to what the codec
+*carries*; §9's claim above is about carriage and stands.
 
 ### 10. The browser surface is one POST, and the front end runs no speech engine
 
@@ -837,8 +930,9 @@ worth deciding.
 > what a decision that names the member does not do.
 
 > **Normative.** Everything else about this ADR is additive: two new Protocols,
-> one new member on a provided contract, seven new `core/types.py` names — the
-> six of §3, §4 and §9 plus the base64 refinement §9 names — three new
+> one new member on a provided contract, eight new `core/types.py` names —
+> `SpokenAudio`, `SpokenAudioFormat`, `Base64Audio`, `SpokenChannel`,
+> `SpokenAudience`, `SpokenReply`, `SpokenTurn` and `SpeechFailure` — three new
 > `core/errors.py` names (`SpeechError`, `SpeechTimeoutError`,
 > `TranscriptionFailedError`), one new `Settings` field. No other ratified clause
 > is read differently after it, and no existing member changes — `ModelError` and
@@ -959,7 +1053,12 @@ each wave must contain if it exists.
 | §3 (format pick) | The engine picks `channel.plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
 | §1 (failures) | `SpeechError` and `SpeechTimeoutError` in `core/errors.py`, carrying `retryable` and `routable`; `ModelError` byte-unchanged | A test asserting each seam's declared raises and both class attributes; a test that the deadline decorator raises `SpeechTimeoutError`; a test that `ModelError`'s subclass set is unchanged |
 | §4 (translation) | `SpeechError` from `transcribe` becomes `TranscriptionFailedError`; `SpeechError` from `synthesize` degrades; everything else propagates | Three tests: a classified failure each side, and a non-`SpeechError` exception asserted to propagate from both |
-| §4 (no chaining) | `TranscriptionFailedError` raised `from None`, carrying a project-owned classification matched by identity | A test that `__cause__` is `None` and that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering |
+| §4 (no chaining) | `TranscriptionFailedError(message, *, failure: SpeechFailure)` raised `from None`; `SpeechFailure` matched by identity over a frozen mapping | A test that `__cause__` is `None`; a test that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering; a test that a class named after a known one is still `UNCLASSIFIED` |
+| §4 (failure vocabularies) | One `SpeechFailure` member per `SpeechError` class | A test enumerating both and asserting the bijection, so a later subclass cannot land without its member |
+| §3 (budget) | The caller's budget threaded to each stage; the effective speech bound is the lesser of it and the decorator's | Three expiry tests — in `transcribe`, in the turn, in `synthesize` — asserting `TIMED_OUT`, `converse`'s own behaviour, and degradation respectively |
+| §4 (`SpokenReply`) | Orchestration builds the pair from one `synthesize` call | A test that `text` is byte-identical to the argument passed; no test decodes the audio |
+| §9 (`Base64Audio`) | The named annotation, padded RFC 4648 §4, canonical, never normalised | Rejection tests per defect class — bad alphabet, missing padding, non-canonical final group, URL-safe alphabet — and a byte-identity round trip |
+| §9 (refusal) | Every entry point constructing a `SpokenAudio` from untrusted input refuses `from None` with no input value | Two failure-path tests, in process and through the gateway, with a near-valid clip, asserting the clip appears in neither the refusal, its cause, its rendering, nor either log tier |
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
