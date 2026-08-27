@@ -33,12 +33,12 @@
   clause of ADR-0004 — the data-handling decision — for a Tier 0 value, and it
   decides the transport of a ratified egress boundary. ADR-0172 took both lenses
   for the first of those and ADR-0174 for the second.
-- **One consequence is named up front because it is a new disclosure.** An
-  overlay that issues a certificate for a name it assigns does so through its
-  control plane and a public certificate authority, so the gateway machine's
-  overlay name becomes **public** where it was previously held by the overlay's
-  operator alone. §4 states that delta, accepts it in ADR-0124 §3's own terms, and
-  names the exit.
+- **One consequence is named up front because it is a new disclosure.** On the
+  route available in practice, the certificate comes from a publicly trusted
+  authority through the overlay's control plane, so the gateway machine's overlay
+  name becomes **public** where it was previously held by the overlay's operator
+  alone. §4 states that delta, states what the one other admitted route discloses
+  instead, accepts both in ADR-0124 §3's own terms, and names the exits.
 
 ## Context
 
@@ -154,6 +154,13 @@ spent the mechanism to buy its output.
 > and whatever name it carries: it produces a warning instead of a secure context,
 > which makes it the self-signed route under another name and refuses with it.
 
+> **Normative.** That root is either a **publicly trusted** one or one the **owner
+> administers**, and no third. A root some other party administers — an employer's
+> device-management root, say — is **not** a route this ADR authorises even where
+> the browsing device already trusts it: it lets that party mint a certificate for
+> the gateway's own name and stand between the owner and their assistant, and
+> nothing records that it did.
+
 > **Normative.** No other issuance route is authorised. A **self-signed**
 > certificate is refused; a certificate for a name outside the overlay, from a
 > certificate authority the overlay does not operate or delegate to, is refused;
@@ -202,6 +209,22 @@ name in front of a public authority — and, because the major browsers require
 certificate transparency of publicly trusted certificates, into a public log. The
 requirement and the disclosure are therefore one decision taken twice, and §4
 accepts the second half knowing it is the price of the first.
+
+**The other case is a device that already trusts a root, and *who administers it*
+is what decides whether that helps.** Both lenses found the gap on the same round,
+from opposite sides: an already-trusted private root satisfies the trust
+requirement and is neither public nor logged, so §4's account was true of one
+route and not the other. Splitting the roots is what makes both true. A root the
+**owner** administers is the strictly better outcome this ADR should not forbid —
+the secure context arrives with no public authority in it and nothing disclosed
+beyond the owner's own machines. A root **somebody else** administers is the worse
+outcome that looks identical from the browser: the trust the browser reports is
+that party's judgement rather than the owner's, and that party can mint a
+certificate for the gateway's own name whenever it likes. A public authority can
+also mis-issue, which is exactly why the public ecosystem is logged and audited;
+an employer's root is neither. **That is why the clause names the owner rather
+than the trust store**: "the device already trusts it" is a fact about the device
+and the rule needs a fact about who decides.
 
 **Why the other two stay refused, in ADR-0174 §7's own words rather than
 paraphrased.** A self-signed certificate "trains the owner to click through a
@@ -414,14 +437,18 @@ that it is on the owner's own machine, owned by the owner's own user.
 > clause of this ADR obliges a reload, and no lane may present the gateway as
 > renewing, watching or reloading anything.
 
-> **Normative.** §1's trust requirement means the issuing authority is a publicly
-> trusted one, so issuance makes the gateway machine's overlay name **public** — in
-> the certificate itself and in the transparency logs such an authority publishes
-> to. That consequence is **accepted**, on the same terms ADR-0124 §3
-> accepted the coordination metadata: it is the owner's act, it is bounded and
-> enumerable, and it discloses a name and an instant and nothing else — no request,
-> no response, no byte of the store, and no address that is reachable from the
-> public internet.
+> **Normative.** §1 admits two roots and each discloses to its own recipients.
+> **On the publicly trusted route** — the one available in practice — issuance makes
+> the gateway machine's overlay name **public**, in the certificate itself and in
+> the transparency logs such an authority publishes to. **On the
+> owner-administered route** the disclosure runs to the owner's own authority and
+> to nobody else, and nothing about the machine becomes public.
+
+> **Normative.** Both consequences are **accepted**, on the same terms ADR-0124 §3
+> accepted the coordination metadata: each is the owner's act, each is bounded and
+> enumerable, and each discloses a name and an instant and nothing else — no
+> request, no response, no byte of the store, and no address that is reachable from
+> the public internet.
 
 **The delta is smaller than it first looks, and naming it exactly is what makes it
 acceptable.** ADR-0124 §3 already has the overlay's operator holding "each
@@ -462,12 +489,14 @@ says nothing about them discloses nothing about them, and that costs an operatin
 act they are performing anyway. A control plane the owner hosts removes the vendor
 from the issuance path but **not** the public authority from it, because §1's
 trust requirement is a fact about the browsing device and not about who runs the
-overlay; an owner who self-hosts still ends up in a public log. The exit that
-would remove the log entirely — a chain a phone trusts that is not publicly
-logged — is not available while the major browsers require transparency of
-publicly trusted certificates, and naming it as though it were would be a false
-comfort. **Revisit when** that changes, or when what an overlay's issuance
-discloses stops matching this section.
+overlay; an owner who self-hosts still ends up in a public log. **The exit that
+removes the log entirely is §1's second root**, and it is genuinely narrow: it
+needs a browsing device that already trusts an authority the *owner* administers,
+which is a deployment an owner either has or does not, and which this ADR admits
+without asking anyone to build. What is **not** an exit is installing such a root
+to obtain one — §1 refuses that in terms, and it is the self-signed hazard wearing
+a better hat. **Revisit when** the trust requirement can be met some third way, or
+when what an overlay's issuance discloses stops matching this section.
 
 ### 5. What the gateway discloses when it binds, and what that disclosure is not
 
