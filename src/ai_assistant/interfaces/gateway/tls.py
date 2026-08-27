@@ -108,13 +108,15 @@ class RemoteTls:
         one case where the gateway's refusal is more useful than the browser's,
         because the gateway can say which bound failed and the browser cannot".
 
-        **Asked once, at start, and :meth:`~.server.Gateway.start_remote` records
-        why not again at the bind.** §8's sentence puts this check "at start, before
-        it binds or discloses a bootstrap value" and also states it about "the moment
-        of binding"; those cannot both be literal once a bootstrap value is disclosed
-        in between, and the explicit ordering is the half that governs. It reads
-        nothing off the filesystem either way — the bounds are the ones parsed at
-        start — so §4's "does not re-read them while it runs" is untouched.
+        **Asked twice, and :meth:`~.server.Gateway.start_remote` carries why.** §8's
+        sentence puts this check "at start, before it binds or discloses a bootstrap
+        value" *and* states it about "the moment of binding", and those cannot both
+        be literal once a bootstrap value is disclosed in between. Asking at both
+        moments satisfies both halves: everything the configuration itself gets
+        wrong is refused before the owner is handed anything, and a clock that moved
+        in the interval is caught before the listener binds. It reads nothing off the
+        filesystem either way — the bounds are the ones parsed at start — so §4's
+        "does not re-read them while it runs" is untouched.
 
         Args:
             instant: The reading of the gateway's own clock.

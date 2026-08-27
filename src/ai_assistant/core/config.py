@@ -1870,13 +1870,24 @@ class Settings(BaseSettings):
         > filesystem or importing a subsystem: a value that is blank or has no UTF-8
         > form, and the three combinations above.
 
-        Both conditions are about the *value* rather than about the filesystem, which
-        is what keeps them here: a blank path names nothing on any machine, and a
+        All three conditions are about the *value* rather than about the filesystem,
+        which is what keeps them here: a blank path names nothing on any machine; a
         path with no UTF-8 form is one :func:`os.fsencode` cannot round-trip, so the
         refusal that named it could not itself be built — the reason
         :mod:`ai_assistant.wire.custody` gives for escaping every pathname it
-        reports. Existence, custody, permissions and usability are the gateway's, at
-        start, on the machine that holds the file.
+        reports; and a path carrying a NUL is one no system call will accept, on any
+        machine, ever. Existence, custody, permissions and usability are the
+        gateway's, at start, on the machine that holds the file.
+
+        **The NUL is refused here rather than caught there, and adversarial review is
+        why it is refused at all.** A pathname with an embedded NUL passed both other
+        conditions and then reached ``Path.stat``, which raises ``ValueError`` —
+        *not* ``OSError``, because no system call is ever attempted — so the
+        gateway's own refusal, which is phrased around a file it could not read, was
+        skipped and the operator got a bare traceback in place of a sentence. Adding
+        a second ``except`` there would have been the narrower fix and the wrong one:
+        the condition is decidable from the value alone, which is exactly what §8's
+        split puts in this class.
 
         Args:
             value: The configured path, or ``None`` where the listener is off.
@@ -1886,7 +1897,7 @@ class Settings(BaseSettings):
             The path, stripped of surrounding space, or ``None``.
 
         Raises:
-            ValueError: If the value is blank or has no UTF-8 form.
+            ValueError: If the value is blank, has no UTF-8 form, or carries a NUL.
         """
         if value is None:
             return None
@@ -1910,6 +1921,13 @@ class Settings(BaseSettings):
                 f"could not itself be written (ADR-0202 §8)"
             )
             raise ValueError(msg) from exc
+        if "\x00" in path:
+            msg = (
+                f"{info.field_name} carries a NUL character, which no pathname on any "
+                f"system may contain (ADR-0202 §8). Set it to the path the overlay wrote "
+                f"the certificate and key to"
+            )
+            raise ValueError(msg)
         return path
 
     @model_validator(mode="after")
