@@ -734,10 +734,11 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
             start += held + 1
             held = 0
         elif term in _ASKING and reference is not None and at > 0 and terms[at - 1] in _FRAMING:
-            # "the question **you asked** me": an asking verb is a reference only where a
-            # person is doing the asking, which in a reference is the user or the
-            # assistant. "The memory of asking Alice" is the act itself, and stripping it
-            # would leave the query naming Alice and nothing else.
+            # "the question **you asked** me": an asking verb is a reference only in the
+            # past tense and only where a person is doing the asking, who in a reference
+            # is the user or the assistant. "The memory of me asking Alice" is the act
+            # itself, and stripping it would leave the query naming Alice and nothing
+            # else.
             start += held + 1
             held = 0
         elif term in _DEMONSTRATIVES:
@@ -962,14 +963,19 @@ _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
 #: relationship in "I talked about Alice".
 _REFERENCE: Final[frozenset[str]] = frozenset(("about", "of"))
 
-#: The asking verbs, which are how a *question* gets referred to — "the question **you
-#: asked** me about my commute". Held apart from :data:`_REFERENCE` because they need one
-#: more condition than position: a person has to be doing the asking, and in a reference
-#: that person is the user or the assistant, so the word before must be one of
-#: :data:`_FRAMING`'s. Without that, "the memory of asking Alice" would be stripped down
-#: to ``alice`` and name whatever else the store says about her — the act of asking is
-#: content there, not a way of pointing at a record.
-_ASKING: Final[frozenset[str]] = frozenset(("ask", "asks", "asked", "asking"))
+#: The one asking verb that is how a *question* gets referred to — "the question **you
+#: asked** me about my commute", which is the form #1647 recorded the router producing.
+#: Held apart from :data:`_REFERENCE` by two conditions rather than one:
+#:
+#: - **the form is the past tense alone.** A reference is to an asking that *happened*,
+#:   which is what makes there be a record of it. The gerund is the act itself — "the
+#:   memory of me asking Alice" is a memory of doing it — and stripping it leaves the
+#:   query naming ``alice`` and nothing else, which resolves whatever the store says
+#:   about her. ``ask`` and ``asks`` are absent for the same reason and buy nothing: no
+#:   recorded phrasing uses them, and a query that says one fails closed;
+#: - **somebody has to be doing the asking**, and in a reference that somebody is the
+#:   user or the assistant, so the word before must be one of :data:`_FRAMING`'s.
+_ASKING: Final[frozenset[str]] = frozenset(("asked",))
 
 
 #: Raised where §3's vocabulary has grown a confirm-owed member and :data:`_MATCH_ON`

@@ -1117,19 +1117,29 @@ async def test_a_long_run_of_framing_is_walked_rather_than_recursed_into() -> No
     assert resolution == Resolved(subject=(held,), argument="b-1")
 
 
-async def test_an_asking_verb_with_nobody_asking_is_content_and_not_a_reference() -> None:
-    """ "The memory of asking Alice" is a memory *of an act*, not a way of pointing at one.
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param("the memory of asking Alice", id="nobody-asking"),
+        pytest.param("the memory of me asking Alice", id="a-person-asking"),
+        pytest.param("the memory of me asking Alice about Paris", id="and-a-subject-after-it"),
+    ],
+)
+async def test_an_asking_gerund_is_the_act_and_not_a_reference(query: str) -> None:
+    """A memory "of me asking Alice" is a memory *of an act*, not a way of pointing at one.
 
-    An asking verb is how a question gets referred to — "the question **you asked** me
-    about my commute" — and what makes that a reference is the person doing the asking,
-    who in a reference is the user or the assistant. With nobody in front of it the word
-    is content: strip it here and the query names ``alice`` alone, which resolves
-    whatever else the store happens to say about her and parks a destructive confirmation
-    on it.
+    Two things make an asking verb a reference, and this has neither reliably: the past
+    tense, because a reference is to an asking that happened, which is what makes there
+    be a record of it; and a person in front of it, who in a reference is the user or the
+    assistant. The gerund is the act itself however the sentence is arranged around it,
+    and stripping it leaves the query naming ``alice`` alone — which resolves whatever
+    else the store happens to say about her and parks a destructive confirmation on that.
+
+    The question arm above is the shape that *is* a reference, and it still resolves.
     """
     operations = Operations(beliefs_held=(belief("b-1", "Alice lives in Paris"),))
 
-    resolution = await resolve(operations, RoutableOperation.FORGET, "the memory of asking Alice")
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
 
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
