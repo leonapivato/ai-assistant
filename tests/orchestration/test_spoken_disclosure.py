@@ -18,19 +18,25 @@ from __future__ import annotations
 import json
 from base64 import b64encode
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import PATIENT, Harness, NoStepPlanner
+from test_engine import AT, CAPABILITY, PARAMETERS, PATIENT, Harness, NoStepPlanner, tool
 
+from ai_assistant.core.errors import MemoryStoreError, SpeechError
 from ai_assistant.core.types import (
+    ActionPlan,
     Attestation,
     CalendarFacet,
     ContextFacet,
     CurrentContext,
+    Disposition,
     EmailFacet,
+    EpisodicMemory,
+    Goal,
     MemoryRecord,
     MemorySource,
+    PlanStep,
     Provenance,
     Role,
     SemanticMemory,
@@ -46,12 +52,18 @@ from ai_assistant.orchestration.disclosure import (
     supply_for_unbounded_audience,
 )
 from ai_assistant.testing import (
+    FakeMemoryStore,
     FakeModelProvider,
     FakeRoutingRecorder,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import MemoryWrite
 
 _AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 _MP4: Final = SpokenAudioFormat.MP4
@@ -61,6 +73,17 @@ _ANSWER: Final = "You went hiking on Tuesday."
 #: What a withheld record says. Recognisable, so an assertion can look for the
 #: span itself rather than for "something about somebody else".
 _WITHHELD_CONTENT: Final = "Alice is seeing a cardiologist on Friday"
+
+#: What a *placed* record says, beside it. Every ADR-0203 §6 case seeds both, so
+#: "nothing was withheld" and "everything was withheld" are told apart by the same
+#: assertion rather than by two.
+_SPEAKABLE_CONTENT: Final = "the user hikes on Tuesdays"
+
+#: The transcript ADR-0203 §6's cases are driven with. Chosen so that
+#: ``FakeMemoryStore``'s lexical relevance retrieves both records above — the arms
+#: are about what the subtraction removes, and a case whose store returned nothing
+#: would pass every one of them vacuously.
+_ASKED: Final = "what is on this week"
 
 _RECORDING: Final = SpokenAudio(content=b64encode(b"an utterance").decode("ascii"), media_type=_MP4)
 
@@ -540,3 +563,372 @@ async def test_a_routed_written_pass_is_not_told_a_spoken_channel() -> None:
 
     assert outcome.routed is not None
     assert "SPOKEN ALOUD" not in _messages(composing, Role.SYSTEM)
+
+
+# --- ADR-0203 §6: the withholding binds the supply the whole turn runs over ---
+
+
+class _EchoingPlanner:
+    """A planner whose rationale names every record it was handed.
+
+    The real planner's ``rationale`` is a model completion authored over the supply,
+    which is exactly why ADR-0203 §1 exists: ``Engine._capture`` renders it into the
+    episode's ``content``, and the episode's *own* recorded origin is ``OBSERVED``
+    with ``about_person`` unset, which ADR-0199 §3 places as speakable — so storing
+    an unplaced value launders it into a placed one. Echoing is the strongest form
+    of that. A planner that cited what it saw is what a model does, and it makes
+    "the episode carries no value derived from a withheld record" a claim these
+    cases can fail on rather than one they have to trust.
+
+    It plans a step only where ``needs`` appears in what it was supplied, which is
+    how ADR-0203 §3's admission — that the plan's consequence is not independent of
+    the plan — becomes observable.
+
+    Structurally implements :class:`~ai_assistant.core.protocols.Planner`.
+    """
+
+    def __init__(self, *, needs: str | None = None) -> None:
+        self._needs = needs
+        self.calls: list[tuple[CurrentContext, tuple[MemoryRecord, ...]]] = []
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        """Record what this turn was supplied, and plan over exactly that."""
+        supplied = tuple(memories)
+        self.calls.append((context, supplied))
+        planned = self._needs is not None and any(self._needs in one.content for one in supplied)
+        steps = (
+            (
+                PlanStep(
+                    id="step-1",
+                    intent="send the note",
+                    capability=CAPABILITY,
+                    parameters=PARAMETERS,
+                ),
+            )
+            if planned
+            else ()
+        )
+        return ActionPlan(
+            id=f"{goal.id}-plan",
+            goal_id=goal.id,
+            steps=steps,
+            created_at=AT,
+            rationale=" | ".join(one.content for one in supplied) or "nothing was supplied",
+        )
+
+
+def _prompt(model: FakeModelProvider, call: int = 0) -> str:
+    """The user turn of the ``call``-th completion this provider was asked for."""
+    return next(one.content for one in model.calls[call].messages if one.role is Role.USER)
+
+
+def _episodes(records: Sequence[MemoryRecord]) -> tuple[EpisodicMemory, ...]:
+    """Every captured episode among ``records``."""
+    return tuple(one for one in records if isinstance(one, EpisodicMemory))
+
+
+async def test_a_withheld_class_is_not_read_aloud_one_turn_later() -> None:
+    """§6's first obligation, and #1692 as the QA run heard it.
+
+    Turn one asks a question that retrieves a belief about somebody else and
+    deflects. Its captured episode is then read: with ADR-0203 §1 in force the plan
+    rationale that episode carries was authored over a supply the belief had already
+    been removed from, so the episode carries no span of it and no value derived
+    from one. Turn two, on the same conversation, *is* supplied that episode — and
+    the composing stage is handed nothing naming what turn one withheld, which is
+    the sentence #1691 heard spoken aloud.
+
+    Before this ADR every assertion below the first failed together: the planner saw
+    the belief, wrote it into the rationale, capture stored that under an
+    ``OBSERVED`` provenance §3 places as **speakable**, and the next turn retrieved
+    it as ordinary supply.
+    """
+    planner = _EchoingPlanner()
+    model = FakeModelProvider(_ANSWER)
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        model,
+        planner=planner,
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED, "what is on the record"]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    first = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    # The planner never saw it, so nothing downstream of a model can have derived
+    # from it — ADR-0203 §1's whole argument for binding on the input side.
+    assert planner.calls, "the turn reached the planner"
+    assert all(_WITHHELD_CONTENT not in one.content for one in planner.calls[0][1])
+    assert _SPEAKABLE_CONTENT in {one.content for one in planner.calls[0][1]}, (
+        "the case is only about the withheld half if the speakable half was retrieved"
+    )
+    assert first.outcome is not None
+    assert first.outcome.turn is not None
+    assert _WITHHELD_CONTENT not in (first.outcome.turn.plan.rationale or "")
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
+    assert _WITHHELD_CONTENT not in captured[0].content
+    assert "Alice" not in captured[0].content
+    assert _SPEAKABLE_CONTENT in captured[0].content, (
+        "the episode is thinner rather than absent — capture itself is unchanged"
+    )
+
+    second = await harness.engine.converse_spoken(
+        _RECORDING,
+        plays=(_MP4,),
+        timeout=PATIENT,
+        conversation_id=first.outcome.conversation_id,
+    )
+
+    # The second turn genuinely ran over the first turn's episode; without this a
+    # case that had lost conversational continuity would pass (ADR-0074 §5).
+    assert second.outcome is not None
+    assert second.outcome.turn is not None
+    assert _episodes(second.outcome.turn.memories), "the first turn's episode reached turn two"
+    assert len(model.calls) == 2
+    assert _WITHHELD_CONTENT not in _prompt(model, 1)
+    assert "Alice" not in _prompt(model, 1)
+
+
+async def test_what_the_operation_returns_carries_nothing_that_was_withheld() -> None:
+    """§6's second obligation, and #1693.
+
+    ADR-0200 §7's third clause — "nothing on this surface carries what was withheld"
+    — is satisfied **literally** rather than on the narrow reading #1693 offers as
+    the alternative: there is only one turn, and it did not see the withheld record.
+    The plan is checked against the same supply, because a ``TurnResult`` whose
+    ``memories`` were narrowed but whose ``plan`` was authored over everything would
+    pass a membership assertion and still hand the caller a model-written summary of
+    the withheld set.
+    """
+    planner = _EchoingPlanner()
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=planner,
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    turn = spoken.outcome.turn
+    assert turn is not None
+    assert all(one.about_person is None for one in turn.memories)
+    assert all(_WITHHELD_CONTENT not in one.content for one in turn.memories)
+    assert turn.context.calendar is None
+    assert turn.context.email is None
+    # "and its plan was produced over that same supply": the tuple the planner was
+    # handed *is* the one the turn carries, so nothing planned over a wider supply
+    # and swapped the narrower one in afterwards.
+    assert planner.calls[0][1] == turn.memories
+    assert _WITHHELD_CONTENT not in (turn.plan.rationale or "")
+
+
+async def test_a_wholly_speakable_store_reaches_the_planner_whole_and_is_answered() -> None:
+    """§6's negative arm, "without which the two above are satisfiable by withholding everything".
+
+    This is milestone 19's exit criterion asserted rather than argued — the owner
+    asks aloud about their own life and hears an answer drawn from accumulated
+    memory — and it is what bounds §3's step clause: on a supply the subtraction
+    does not touch, the plan and the step are what the same transcript produces on
+    either channel.
+    """
+    planner = _EchoingPlanner(needs="hikes")
+    model = FakeModelProvider(_ANSWER)
+    harness = _wired(
+        model,
+        planner=planner,
+        tools=(tool(),),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    speakable = (
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", "errands happen on a Monday", source=MemorySource.INFERRED),
+        _belief("rec-3", "the user said they cycle on Sundays", source=MemorySource.USER_ASSERTED),
+    )
+    await _seed(harness, *speakable)
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    supplied = {one.id for one in planner.calls[0][1]}
+    assert {one.id for one in speakable} <= supplied, "every placed record reached the planner"
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert {one.id for one in speakable} <= {one.id for one in spoken.outcome.turn.memories}
+    assert spoken.outcome.step is not None, "the plan drove the step it chose"
+    assert spoken.outcome.step.disposition is Disposition.EXECUTED
+    assert spoken.outcome.reply == _ANSWER
+    assert "NOT AVAILABLE ON THIS CHANNEL" not in _prompt(model)
+
+
+async def test_the_step_follows_the_plan_the_subtracted_supply_produced() -> None:
+    """§6's fourth obligation: §3's step consequence observed once rather than inferred.
+
+    ``Engine._run_turn`` drives ``turn.plan.steps[0]``, so a plan authored over a
+    narrower supply can drive a different step or leave the plan with no steps at
+    all — the no-action branch. The arm exists so that a later lane cannot quietly
+    restore the wider supply to keep the step stable: the *same* store and the
+    *same* words drive a step on ``converse`` and drive none on ``converse_spoken``,
+    and the subtraction is the whole of the difference.
+    """
+    withheld = _belief("rec-1", _WITHHELD_CONTENT, about_person="Alice")
+
+    spoken_planner = _EchoingPlanner(needs=_WITHHELD_CONTENT)
+    spoken_harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=spoken_planner,
+        tools=(tool(),),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(spoken_harness, withheld)
+
+    spoken = await spoken_harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert spoken.outcome.turn.plan.steps == (), "no step could be planned from what was left"
+    assert spoken.outcome.step is None, "and the runner saw that plan, not a wider one"
+
+    written_planner = _EchoingPlanner(needs=_WITHHELD_CONTENT)
+    written_harness = _wired(FakeModelProvider(_ANSWER), planner=written_planner, tools=(tool(),))
+    await _seed(written_harness, withheld)
+
+    written = await written_harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert written.turn is not None
+    assert written.turn.plan.steps != ()
+    assert written.step is not None
+    assert written.step.disposition is Disposition.EXECUTED
+
+
+async def test_a_withholding_turn_that_cannot_compose_reports_reply_degraded() -> None:
+    """§6's fifth obligation, first arm: ``reply_degraded`` on the ``withheld=True`` route.
+
+    ADR-0203 §3 unpins the three degradation flags' **values** and keeps their
+    **rules**, and this is the rule: a composition failure yields
+    ``TurnOutcome.reply_degraded`` exactly as it does on ``converse`` (ADR-0170 §8).
+    A blank completion is the forcing input, because ``NonBlankEncodableText``
+    cannot hold one and the stage classifies it rather than raising.
+    """
+    harness = _wired(
+        FakeModelProvider("   "),
+        planner=_EchoingPlanner(),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(harness, _belief("rec-1", _WITHHELD_CONTENT, about_person="Alice"))
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.reply is None
+    assert spoken.outcome.reply_degraded is True
+    assert spoken.spoken is None, "there is no answer to render"
+
+
+async def test_a_withholding_turn_whose_capture_fails_reports_capture_degraded() -> None:
+    """§6's fifth obligation, second arm: ``capture_degraded`` on the ``withheld=True`` route.
+
+    The answer is still the answer and the user is told it went unrecorded, exactly
+    as on ``converse``. Seeding happens before the store is armed, so what fails is
+    the *capture* write and not the seed.
+    """
+
+    class _FailingCapture(FakeMemoryStore):
+        """A store whose writes fail once armed."""
+
+        armed = False
+
+        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+            if self.armed:
+                msg = "the embedder is down"
+                raise MemoryStoreError(msg)
+            return await super().write_atomic(writes)
+
+    memory = _FailingCapture(now=lambda: AT)
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(),
+        memory=memory,
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(harness, _belief("rec-1", _WITHHELD_CONTENT, about_person="Alice"))
+    memory.armed = True
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None, "the turn still produced its answer"
+    assert spoken.outcome.reply == _ANSWER
+    assert spoken.outcome.capture_degraded is True
+
+
+async def test_a_withholding_turn_whose_synthesis_fails_reports_spoken_degraded() -> None:
+    """§6's fifth and sixth obligations: ``spoken_degraded`` **on the withholding route**.
+
+    §6 pins this one there specifically, "because that is the route the existing
+    spoken-path degradation tests do not reach: they run over supplies nothing is
+    subtracted from, so an implementation that skipped synthesis on a deflection, or
+    reported ``spoken_degraded`` ``False`` beside a ``None`` rendering there, would
+    pass every one of them". ADR-0200 §4's exactly-when clause is unmoved, and the
+    value handed to the seam is the deflection.
+    """
+    deflection = "There is something about that I would rather not say out loud."
+    synthesizer = FakeSpeechSynthesizer()
+    synthesizer.fail_next_synthesize(SpeechError("the voice model wedged"))
+    harness = _wired(
+        FakeModelProvider(deflection),
+        planner=_EchoingPlanner(),
+        synthesizer=synthesizer,
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(harness, _belief("rec-1", _WITHHELD_CONTENT, about_person="Alice"))
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.spoken is None
+    assert spoken.spoken_degraded is True
+    assert spoken.outcome is not None
+    assert spoken.outcome.reply == deflection
+    assert synthesizer.spoken_texts == (deflection,), "synthesis was attempted, on the deflection"
+
+
+async def test_the_bounded_channel_still_plans_over_its_whole_supply() -> None:
+    """§6's seventh obligation: a subtraction that leaked everywhere would pass every case above.
+
+    ADR-0203 §1's last clause binds an **operation** and not a session, a transport,
+    a device or a caller: ``converse``'s audience is bounded, so ADR-0199 §5's
+    second clause governs it unchanged and its turn plans over everything it
+    retrieved — the plan rationale included.
+    """
+    planner = _EchoingPlanner()
+    harness = _wired(FakeModelProvider(_ANSWER), planner=planner)
+    seeded = (
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+    await _seed(harness, *seeded)
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    supplied = {one.id for one in planner.calls[0][1]}
+    assert {one.id for one in seeded} <= supplied
+    assert outcome.turn is not None
+    assert {one.id for one in seeded} <= {one.id for one in outcome.turn.memories}
+    assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
