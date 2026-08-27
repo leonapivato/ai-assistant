@@ -243,18 +243,21 @@ the browser:** milestone 19 is a web-client feature — mic capture and playback
 over the gateway — rather than a native spoke, which arrives at 21 where the
 rolling buffer needs it; this refines stance 7 below into *riding*
 `track:web-client`'s surface rather than merely queuing behind that track.
-**The #665 read-back disclosure ADR is the track's first lane:** it is conduct
-and not protocol, and #665's own terms require it ratified before the first
-spoke that speaks, so it waits on nothing else here.
+**The disclosure decision #665 asks for is the track's first lane:** #665 is
+the issue holding that spoken read-back is a disclosure surface owed its own
+ADR. That ADR is conduct rather than protocol, and #665's own terms require it
+ratified before the first spoke that speaks, so authoring and ratifying it is
+the lane this track opens with and it waits on nothing else here.
 
 - **19 — talk to it.** Push-to-talk in the browser: mic capture over the
   gateway, hub-side STT (a model in `models/` behind ADR-0013's router;
   inference in worker processes, never the hub process), the composed reply from
   `track:conversation`, spoken back via TTS. Attribution: an explicit press on
   an authenticated web session is the principal — no speaker ID at this rung.
-  Disclosure per the #665 ADR. It depends on `track:conversation` 17–18
-  (composed and streamed answers), `track:web-client` 13–14 (the gateway and the
-  chat surface), and that ADR.
+  Disclosure under the ADR #665 asks for, which is why that ADR is the first
+  lane above. It depends on `track:conversation` 17–18 (composed and streamed
+  answers), `track:web-client` 13–14 (the gateway and the chat surface), and on
+  that ADR being ratified first.
   *Exit: the owner holds push-to-talk in a browser on another device, asks aloud
   about their own life, and hears an answer drawing on accumulated memory; a
   content class ruled unspeakable is deflected ("details on your phone"), not
