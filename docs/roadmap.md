@@ -197,13 +197,23 @@ ruling recorded on #1312.
   context; what `track:web-client` milestone 14 needs from the hub, built here.
   *Exit: a streamed answer over the wire, resumed mid-conversation, from the
   CLI.*
+- **26 — hub-owned intent routing.** `ask` → typed operation: a routing stage
+  ahead of planning resolves one utterance onto a closed subset of the engine's
+  own operations, one-directional — a typed operation is never re-read — with its
+  own confirm rule for the operations that write, distinct from the tool seam
+  (ADR-0154, ADR-0148). Conceptually moved here from `track:web-client`'s
+  deferred list (#1230). The ADR lands first (golden rule 5), then the
+  implementation lanes, then QA.
+  *Exit: from an enrolled device, the owner says "forget that I …" in an `ask`,
+  is shown what will be forgotten, confirms, and the belief is gone; "what have
+  you read lately?" answers from the read trail with no confirmation; and a
+  routed operation's result never reaches the model.*
 
 **Deferred — stated, not scheduled:**
 
-- **Hub-owned intent routing.** `ask` → typed operation, one-directional — a
-  typed operation is never re-read — with its own confirm rule, distinct from the
-  tool seam. Conceptually moved here from `track:web-client`'s deferred list
-  (#1230).
+- **Multi-step plan driving.** At most a plan's first step is driven (ADR-0170
+  §5, #242), so an ask needing two acts gets one. It waits on evidence that the
+  one-act limit is a limit anyone hits.
 - The **engagement surface** the Gap register names as on-no-track debt. This
   track is its natural eventual home, but it stays undesigned until ruled.
 
