@@ -149,8 +149,10 @@ for that algorithm to find.
 
 > **Normative.** A route that is **taken** ends the pipeline there. No goal is
 > minted, no context is assembled, no memories are retrieved, no plan is made or
-> persisted, no step is driven, no capacity slot is taken and no `ToolRegistry`,
-> `ActionPolicy` or `ToolInvoker` is reached. The composing stage still runs, on
+> persisted, no step is driven and no `ToolRegistry`, `ActionPolicy` or
+> `ToolInvoker` is reached. A routed pass that **parks** takes a slot at the
+> engine's outstanding-confirmation ceiling, which §7 states; a routed pass that
+> does not park takes none. The composing stage still runs, on
 > §6's inputs.
 
 > **Normative.** The routing stage is entered on a `converse` or
@@ -392,8 +394,23 @@ second, and both failures are visible.
 > §8's reason applied here: an existing ceiling that already bounds this listing
 > everywhere else is the ceiling.
 
+> **Normative.** The lookup's candidates are **typed records**, and the operation's
+> argument is a **scalar identity read off one of them** by a fixed per-operation
+> mapping — not the record itself, which no confirm-owed member's signature
+> accepts. The mapping is total over §3's confirm-owed members and is exactly:
+> `forget` takes `Belief.id`; `forget_question` takes `Question.id`; `revoke` takes
+> `SourceGrant.source`. A member added under §3's widening rule states its own
+> mapping in the ADR that adds it, and condition (iii) is not satisfied without one.
+
+> **Normative.** The two are carried separately and neither substitutes for the
+> other. The **display subject** is the typed record, and it is what §7's card
+> renders and what an `AMBIGUOUS` listing carries, because a person judges the
+> belief and not its id. The **scalar argument** is what §2's façade call is made
+> with, and it is what the park retains and §9's row records as `subject`.
+
 > **Normative.** Where the lookup resolves to **exactly one** candidate, that
-> candidate is the operation's argument. Where it resolves to **none**, the route
+> candidate is the display subject and the identity read off it by the mapping
+> above is the argument. Where it resolves to **none**, the route
 > ends in `RouteOutcome.NOT_FOUND`, nothing is performed and nothing is confirmed.
 > Where it resolves to **more than one**, the route ends in
 > `RouteOutcome.AMBIGUOUS`, nothing is performed, nothing is confirmed, and the
@@ -483,6 +500,24 @@ change what the listing beside the reply says.
 > `ContinuationToken` the confirmation carries, and through no other method. A
 > `resume` whose `approved` is `False` performs nothing and returns
 > `RouteOutcome.REFUSED`.
+
+> **Normative.** A routed park holds a slot at the engine's existing
+> **outstanding-confirmation ceiling** — `max_outstanding_confirmations`, the bound
+> that exists because "a client that requests confirmable actions and abandons every
+> token would grow the table without bound". A routed park is exactly that shape and
+> takes no exemption from it: the slot is reserved before the park is registered, is
+> released when the park resolves or is evicted, and a route that cannot reserve one
+> meets the same backpressure the engine already applies at that ceiling, in the same
+> form. The ceiling gets no second setting and no routed-only variant.
+
+> **Normative.** A routed park is **claimed once, atomically**, under the same lock
+> the engine's existing park resolution runs under, and the claim is what evicts it:
+> the entry is removed before the row of §9 is written, before the operation is
+> called, and before anything is composed. A second `resume` presenting the same
+> token — concurrent or later, and whatever its `approved` value — resolves nothing
+> and raises `UnknownContinuationError`, so one park yields one answer, one row pair
+> and at most one operation, which is what §1's one-operation clause costs at this
+> seam.
 
 > **Normative.** `AssistantEngine.pending_confirmations` does **not** list a routed
 > park, and a routed park is **not recovered across a restart**. A token presented
@@ -665,11 +700,16 @@ and a renderer.
 > revise the first when the second arrives — which is ADR-0192's own shape, where an
 > authorisation and the act that spends it are two rows rather than one rewritten.
 
+> **Normative.** `RouteApproval.OWED` states that **the router decided to seek the
+> user's confirmation** for this operation on this subject. It does **not** state
+> that a card was rendered, delivered, or seen: the row is written before the park
+> is registered, so a cancellation between the two leaves an `OWED` row for a
+> confirmation nobody was shown, and that is the safe direction §9's ordering
+> deliberately chooses. No surface renders an `OWED` row as "you were asked".
+
 > **Normative.** A **park that is never answered** therefore leaves exactly its
-> first row, carrying `RouteApproval.OWED`, and that row is a true and complete
-> statement of what happened: a routed operation was put to the user and no answer
-> came. No later write completes it, and no reader treats the absence of a second
-> row as a refusal.
+> first row. No later write completes it, and no reader treats the absence of a
+> second row as a refusal, as a lapse, or as evidence about what the user saw.
 
 > **Normative.** A row that cannot be written **stops the act it precedes**. The
 > pass ends in `RouteOutcome.UNRECORDED`, the operation is not called, no park is
@@ -704,10 +744,11 @@ and a renderer.
 >   `True`, and `REFUSED` where they answered `False`. A confirm-owed operation's
 >   row is never `NOT_OWED` and a read-only operation's row is always `NOT_OWED`,
 >   stated as a two-directional validator.
-> - `subject: Identifier | NonBlankEncodableText | None` — the identity §5's lookup
->   resolved, or `None` where the operation takes none. It is the *identity* the
->   operation was called with — a record id, a question id, a source name — and
->   never the record's contents.
+> - `subject: Identifier | NonBlankEncodableText | None` — the **scalar argument**
+>   §5's mapping read off the resolved candidate, or `None` where the operation
+>   takes none. It is the identity the façade was called with — a `Belief.id`, a
+>   `Question.id`, a `SourceGrant.source` — and never the display subject and never
+>   the record's contents.
 > - `conversation_id: Identifier | None` — the conversation the ask ran under,
 >   `None` where the pass has none for ADR-0074 §3's own reasons.
 
@@ -728,8 +769,14 @@ and a renderer.
 > ```
 >
 > `record` appends one row and returns nothing, taking the identity the caller
-> minted rather than producing one; a row already present under the same `id` is
-> not appended twice and is not an error, so a retried write is idempotent. `recent` answers **newest-recorded first** and refuses a `limit`
+> minted rather than producing one. A row already present under the same `id`
+> **whose every field is equal to the one supplied** is not appended twice and is
+> not an error, so a retried write is idempotent; a row present under the same `id`
+> differing in **any** field raises `RoutingTrailError` and appends nothing, and the
+> act that row precedes does not proceed. Idempotence is over the whole frozen
+> record and never over the id alone: a repeating id factory would otherwise let a
+> routed `revoke` be performed while the trail kept only an earlier `forget`'s row,
+> which is the one failure this store exists to make impossible. `recent` answers **newest-recorded first** and refuses a `limit`
 > outside `[1, 2**63)` locally and before any I/O, as ADR-0186 §3 requires of every
 > bounded listing. `export` answers the whole trail in the same order and is bounded
 > only by ADR-0085 §8c's payload limit. `clear` destroys every row, for ADR-0007's
@@ -977,9 +1024,27 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > composer was called does not satisfy this clause.
 
 > **Normative.** The same lane ships §5's three resolution cases — none, one, more
-> than one — asserting that the many-candidate case performs **nothing**, and §7's
-> park-and-resume pair asserting that a refused resume performs nothing and that a
-> routed park does not appear in `pending_confirmations`.
+> than one — asserting that the many-candidate case performs **nothing**; §5's
+> mapping asserted per confirm-owed member, that the façade was called with the
+> scalar identity and never handed the record; and §7's park-and-resume pair
+> asserting that a refused resume performs nothing and that a routed park does not
+> appear in `pending_confirmations`.
+
+> **Normative.** The same lane ships §7's one-shot claim as **concurrency** tests
+> rather than sequential ones: two `resume` calls on one token raced with
+> `approved` `True` on both, and raced with `True` and `False`, asserting in each
+> case that the operation was called at most once, that exactly one `GIVEN`-or-
+> `REFUSED` row exists for that `route_id`, and that the loser raised
+> `UnknownContinuationError`. A test that resumes twice in sequence does not
+> satisfy this clause. It also ships the ceiling case: routed parks accumulated to
+> `max_outstanding_confirmations` and one more, asserting the same backpressure a
+> step-driving turn meets there and that no park was registered for the refused one.
+
+> **Normative.** The lane landing §9 ships `record`'s conflict case: the same `id`
+> presented with a differing field raises `RoutingTrailError`, appends nothing, and
+> the act it precedes does not proceed — asserted with the operation's store
+> observed untouched. The identical-record retry is asserted beside it, so
+> idempotence is pinned as over the whole record rather than over the id.
 
 > **Normative.** The lane landing §9 ships its ordering tests, and they are the
 > ones that fail on the plausible wrong implementation: a `RoutingTrail` double
@@ -1133,8 +1198,11 @@ forbids. The lane that ratifies this ADR makes them, and no other lane does.
 - **The routing trail does not answer the deletion question it makes visible.** A
   `forget` through the typed door still records nothing, and the two doors now
   differ. §11 files it as `track:memory` ground.
-- **A routed park does not survive a restart.** The user repeats one sentence. The
-  alternative was a second durable park store, and §7 states the trade rather than
+- **A routed park does not survive a restart, and it spends the same scarce slot a
+  confirmable action already spends.** The user repeats one sentence after a
+  restart, and a client that asks the assistant to forget things and never answers
+  meets the ceiling that already exists rather than a new one. The alternative to
+  the first was a second durable park store, and §7 states the trade rather than
   hiding it.
 - **A hub whose routing trail cannot be written routes nothing at all**, reads
   included (§9), and says so with its own outcome — `UNRECORDED`, which states that
