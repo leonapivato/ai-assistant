@@ -522,6 +522,20 @@ change what the listing beside the reply says.
 > ceiling itself: repeated trail failures would otherwise reserve up to the ceiling
 > and block every later confirmation with no park to evict.
 
+> **Normative.** A routed park has a **bounded lifetime**. It is evicted once that
+> lifetime has elapsed since it was registered, releasing its ceiling slot, and its
+> token thereafter resolves nothing and raises `UnknownContinuationError` like any
+> other unresolvable token (ADR-0084 §7). The lifetime is read through
+> `core.config.Settings` and has **no spelling for "unlimited"** (ADR-0185 §6's
+> shape). Eviction is performed on demand — when a slot is sought and when
+> `pending_confirmations` runs its existing reconciliation — and this decision adds
+> no scheduler and no background job.
+
+> **Normative.** An evicted park writes **no** row. §9's `OWED` row already stands
+> and its meaning is unchanged: a route was decided and no answer came. The absence
+> of a second row is what an unanswered park looks like, whether the user walked
+> away or the park expired, and no reader distinguishes the two from the trail.
+
 > **Normative.** A routed park is **claimed once, atomically**, under the same lock
 > the engine's existing park resolution runs under, and the claim is what evicts it:
 > the entry is removed before the row of §9 is written, before the operation is
@@ -568,7 +582,20 @@ pending `CONFIRM` out of the audit trail. A routed park has neither, so recovery
 would mean a second durable park store built for this one shape. What a lost
 routed park costs is one repeated sentence: **nothing has happened yet** — the
 operation has not run, no side effect is pending, and the resolution is a lookup
-the next ask redoes in the same way. An egress park is the opposite case and is
+the next ask redoes in the same way.
+
+**The lifetime is what makes that sentence true rather than aspirational, and it is
+there because the park is deliberately invisible.** A tool park has two ways back —
+`pending_confirmations` enumerates it, and its durable binding survives a restart —
+so a token lost in flight is recoverable by asking. A routed park has neither by
+design, so without a lifetime a client that disconnected between the park and its
+token would hold a slot nothing could ever free: at a ceiling of one, the very next
+"forget that I …" would meet backpressure rather than a fresh card, and repeating
+the sentence would be exactly what does not work. Bounding the lifetime is the
+cheapest way to keep the invisibility from becoming a leak, and it is why the
+enumeration is refused rather than merely omitted — an enumeration would have to
+render the card again, and §7's card is engine-assembled from a resolution this
+process still holds. An egress park is the opposite case and is
 why ADR-0052 exists: there the user's approval is expensive to reconstruct and the
 act may be irreversible. Trading a repeated sentence for a store is the right way
 round, and the day a routed confirmation becomes expensive to reconstruct is the
@@ -788,7 +815,12 @@ and a renderer.
 > ```
 >
 > `record` appends one row and returns nothing, taking the identity the caller
-> minted rather than producing one. A row already present under the same `id`
+> minted rather than producing one. Its checks and its append are **one critical
+> section**: the row-`id` equality test, the `route_id` test, the append and the
+> §9 pruning happen under one transaction or one lock, so two concurrent `record`
+> calls carrying a colliding `route_id` cannot both observe no conflict and both
+> append. Exactly one succeeds and the other raises `RoutingTrailError`, and the
+> loser's act does not proceed. A row already present under the same `id`
 > **whose every field is equal to the one supplied** is not appended twice and is
 > not an error, so a retried write is idempotent; a row present under the same `id`
 > differing in **any** field raises `RoutingTrailError` and appends nothing, and the
@@ -1073,13 +1105,27 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > `UnknownContinuationError`. A test that resumes twice in sequence does not
 > satisfy this clause. It also ships the ceiling case: routed parks accumulated to
 > `max_outstanding_confirmations` and one more, asserting the same backpressure a
-> step-driving turn meets there and that no park was registered for the refused one.
+> step-driving turn meets there and that no park was registered for the refused one;
+> a reservation taken and then failed before registration — the trail write raising,
+> and the pass cancelled at that await — asserting that a later routed park is
+> admitted, which is the only assertion that fails on an implementation releasing
+> the slot only on resolution; and a park held past its lifetime, asserting that its
+> slot is released, that its token then raises `UnknownContinuationError`, and that
+> a fresh routed park is admitted at a ceiling of one.
 
-> **Normative.** The lane landing §9 ships `record`'s conflict case: the same `id`
+> **Normative.** The lane landing §9 ships `record`'s conflict cases: the same `id`
 > presented with a differing field raises `RoutingTrailError`, appends nothing, and
 > the act it precedes does not proceed — asserted with the operation's store
-> observed untouched. The identical-record retry is asserted beside it, so
-> idempotence is pinned as over the whole record rather than over the id.
+> observed untouched; the same for a `route_id` already held under a different
+> route. The identical-record retry is asserted beside them, so idempotence is
+> pinned as over the whole record rather than over the id.
+
+> **Normative.** The same lane ships `record`'s atomicity as a **concurrency** test
+> in the shared conformance suite, so every implementation pays it: two `record`
+> calls raced with a colliding `route_id` and distinct row ids, asserting exactly
+> one appended row and one `RoutingTrailError`. A sequential test of the same pair
+> does not satisfy this clause, because the check-then-append implementation it is
+> written against passes sequentially.
 
 > **Normative.** The lane landing §9 ships its ordering tests, and they are the
 > ones that fail on the plausible wrong implementation: a `RoutingTrail` double
@@ -1233,12 +1279,13 @@ forbids. The lane that ratifies this ADR makes them, and no other lane does.
 - **The routing trail does not answer the deletion question it makes visible.** A
   `forget` through the typed door still records nothing, and the two doors now
   differ. §11 files it as `track:memory` ground.
-- **A routed park does not survive a restart, and it spends the same scarce slot a
-  confirmable action already spends.** The user repeats one sentence after a
-  restart, and a client that asks the assistant to forget things and never answers
-  meets the ceiling that already exists rather than a new one. The alternative to
-  the first was a second durable park store, and §7 states the trade rather than
-  hiding it.
+- **A routed park expires, spends a scarce slot until it does, and does not survive
+  a restart.** The user repeats one sentence after a restart or an expiry; a client
+  that asks the assistant to forget things and never answers meets the ceiling that
+  already exists rather than a new one; and a token lost in flight costs a wait
+  rather than a permanently held slot. Two settings' worth of lifecycle for a park
+  nobody can enumerate is the price of not building a second durable park store,
+  and §7 states the trade rather than hiding it.
 - **A hub whose routing trail cannot be written routes nothing at all**, reads
   included (§9), and says so with its own outcome — `UNRECORDED`, which states that
   nothing happened, as against `FAILED`, which states that something was called and
