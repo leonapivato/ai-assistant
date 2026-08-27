@@ -22,7 +22,9 @@
   each reaches the remote browser listener's TLS key material, and **ADR-0174
   §7's plain-HTTP clause** — the clause this decision exists to replace — together
   with **one sentence of ADR-0174 §8**, its empty default for the remote host-name
-  list, which §6 turns into a refusal to start. §10 applies ADR-0070 §1's test
+  list, which §6 turns into a refusal to start, and **one limb of ADR-0174 §6's
+  delegation clause**, its claim that §8 is the single statement of when that list
+  is refused. §10 applies ADR-0070 §1's test
   clause by clause to every other ADR a reader might expect this to falsify and
   finds no further record owed.
 - **The records on those two ADRs' own header lines are the implementing lane's
@@ -575,7 +577,10 @@ requires on every connection.
 > **Normative.** The gateway still **resolves nothing**. It binds the overlay
 > address `gateway_remote_address` names, it compares `Host` literally against a
 > set the owner configured, and it asks no resolver what any name means. This ADR
-> adds no name-admission rule, no resolution step and no clause to ADR-0174 §6.
+> adds no name-admission rule and no resolution step to ADR-0174 §6, and changes
+> nothing about which `Host` values that section admits. The one sentence of §6 it
+> reaches is that section's delegation of the field's **refusal** conditions to §8,
+> superseded on the record §10 writes.
 
 > **Normative.** The gateway refuses at start, and reports why, unless **every**
 > element of `gateway_remote_host_names` is a name the configured certificate
@@ -637,15 +642,29 @@ element costs an owner nothing they can use, since an uncovered name is
 unreachable either way, and it turns a page that will not load into a line at
 start-up naming the element.
 
-**This adds a condition to `gateway_remote_host_names` and falsifies no sentence
-of ADR-0174 §8, which is why §10 records it as a stacked addition rather than a
-second supersession.** §6 of that ADR delegates the field entirely — "§8 is the
-single statement of what it holds, what its default is and when it is refused …
-This section states only what the gateway does with it, and adds no condition on
-it" — so a new condition belongs beside §8's, and §8's own sentences stay true: the
-field still holds the additional authorities §6 admits, and a non-empty list while
-`gateway_remote_address` is unset is still refused at load. What §8 could not have
-spoken to is a certificate, because under ADR-0174 there was none.
+**This adds a condition to `gateway_remote_host_names`, and the clause it
+falsifies is in ADR-0174 §6 rather than §8 — which is why §10 records a
+supersession there rather than a stacked addition.** §6 of that ADR delegates the
+field in terms: "`gateway_remote_host_names` is §8's field and §8 is the single
+statement of what it holds, what its default is and **when it is refused**. This
+section states only what the gateway does with it, and adds no condition on it."
+Its second sentence stays true — ADR-0174 §6 gains no condition of its own — but
+its first does not, because a refusal condition for that field now lives here,
+outside §8. A reader holding only ADR-0174 §6 therefore reads that delegation more
+widely than it now holds, and takes §8's conditions for the complete set. That is
+ADR-0070 §1's second limb, and §10 scopes the record to that limb alone: what the
+field holds is unchanged, and its default is still §8's to state — changed only by
+the sentence of §8 recorded in the paragraph below.
+
+**An earlier draft called this a stacked addition, and adversarial review was
+right to block it.** The argument then was that every sentence of ADR-0174 §8 stays
+true of a list this ADR additionally requires the certificate to cover. That is so,
+and it answers the wrong clause. A stacked addition is what a clause carrying **no**
+completeness claim earns — ADR-0182 §9's ground for ADR-0168 §8's settings table,
+used again in §10 below for §8's own field list — and ADR-0174 §6 carries one in
+terms. What §8 could not have spoken to is a certificate, because under ADR-0174
+there was none; but §8's silence is not what owes the record. §6's claim of
+completeness over §8 is.
 
 **That refusal supersedes one sentence of ADR-0174 §8 and the record is owed, so
 it is named here rather than absorbed** (§10). §8 says of
@@ -891,6 +910,21 @@ a reader holding only §8 acts differently. §6 argues it and bounds it; nothing
 in §8's clause for that field moves, and the two other fields' clauses are
 untouched.
 
+**ADR-0174 §6's delegation clause — superseded, as to its *when it is refused*
+limb and nothing else.** The clause is "`gateway_remote_host_names` is §8's field
+and §8 is the single statement of what it holds, what its default is and when it
+is refused." §6 above states a refusal condition for that field — every configured
+element covered by the certificate — and states it here rather than in §8, so a
+reader holding only ADR-0174 §6 reads that delegation more widely than it now
+holds and takes §8's conditions for the complete set. That is ADR-0070 §1's second
+limb. **The scope is that limb**: what the field holds is unchanged; its default is
+still §8's to state, moved only by the sentence of §8 recorded above; and §6's own
+second sentence — "This section states only what the gateway does with it, and adds
+no condition on it" — stays true, because ADR-0174 §6 itself gains nothing. §6 of
+this ADR carries the argument, and records that an earlier draft classified this as
+a stacked addition on the ground that §8's sentences stay true, which is so and
+answers the wrong clause.
+
 **The record owed on ADR-0174, written here for the implementing lane to copy.**
 Its `Status` line reads `Accepted` today, so under ADR-0070 §4 the supersession
 leads and `Accepted` is dropped; ADR-0082 §2 then puts the amendment record in the
@@ -898,7 +932,7 @@ appended dated note rather than as a `Status` qualifier, and ADR-0070 §1 requir
 that note in every case. The line becomes:
 
 ```text
-- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, and §8's empty default for the remote host-name list as it reaches a configured remote browser listener)
+- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage)
 ```
 
 **A stacked addition, recorded here and nowhere else** (ADR-0082 §1): the public
@@ -913,14 +947,7 @@ than reading it into §3's.
 on ADR-0168 §6's cookie half. §6's clause lists what the cookie carries and stays
 true of one carrying more.
 
-**A third, likewise**: §6's requirement that every element of
-`gateway_remote_host_names` be a name the certificate presents. ADR-0174 §6
-delegates that field's conditions to its §8 in terms, and every sentence of §8
-stays true of a list this ADR additionally requires the certificate to cover — §8
-could not have spoken to a certificate, because under ADR-0174 there was none. §6
-of this ADR carries the argument.
-
-**A fourth, likewise**: §5's ordering of ADR-0174 §3's identity check ahead of the
+**A third, likewise**: §5's ordering of ADR-0174 §3's identity check ahead of the
 TLS handshake. Every clause of §3 stays true — the identity is still obtained
 before anything is served, still before ADR-0168 §7's checks and before any session
 is read, and still from the agent on the gateway's own machine. What is added is an
@@ -956,11 +983,14 @@ ordering against an event §3 had no occasion to mention.
   rather than bound; they act identically. Writing the record the reading asks for
   would declare an amendment no clause of §2 fails the test for, which ADR-0082 §1
   rules is wrong "however the declaration reads".
-- **ADR-0174 §2's other clauses, §3, §4, §5, §6, §9 and §10** — each stays true. §2's
+- **ADR-0174 §2's other clauses, §3, §4, §5, §9 and §10** — each stays true. §2's
   bind and off-unless-configured clauses are applied unchanged and its proxy
   prohibition is reinforced (§1); §3's identity check is ordered, not modified (§5);
-  §4's admission is untouched; §5's carry-over is untouched; §6 gains no rule (§6);
-  §9's one-mint rule is untouched; §10's direction rule is reinforced (§9).
+  §4's admission is untouched; §5's carry-over is untouched; §9's one-mint rule is
+  untouched; §10's direction rule is reinforced (§9). **ADR-0174 §6 is deliberately
+  not in this list**: its `Host`-admission and resolves-nothing clauses gain no rule
+  and are untouched (§6), but its delegation clause is superseded on the record
+  above.
 - **ADR-0174 §8, apart from the one sentence recorded above** — its three fields are
   joined by two, and a settings table that "carries no clause saying it is complete"
   is not an exclusive enumeration, which is the ground ADR-0182 §9 established for
