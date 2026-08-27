@@ -220,10 +220,13 @@ same fact and this decision adds no store query, on the seam or off it.
 > **Normative.** A resolution that does **not** complete installs no settled
 > record. The record exists only where the answer was recorded, the runner
 > returned and the park was evicted — all three inside §1's one critical section —
-> so a resolution that raised leaves its park registered, leaves its token naming
-> a park rather than a settled record, and is re-entered by a later `resume`
-> exactly as it is re-entered today. Nothing in §§1–5 reaches that path, and this
-> decision makes no claim about it.
+> and a resolution that raised evicts nothing of its own. What becomes of that
+> park afterwards is exactly what becomes of it today and is **not** decided here:
+> a direct retry re-enters resolution, and a recovery enumeration running in
+> between may evict the binding under ADR-0052 §2's reconciliation, after which
+> its token raises `UnknownContinuationError` like any other handle that names no
+> park. Nothing in §§1–5 reaches either path, and this decision claims nothing
+> about which of them a given retry meets.
 
 > **Normative.** A restatement is not an exchange, so it is not captured under the
 > conversation that parked. Capturing it would file a second episode for one
@@ -234,11 +237,15 @@ same fact and this decision adds no store query, on the seam or off it.
 so is part of this decision.** A ruling can be recorded and the transition that
 should have applied it can then fail — the hazard ADR-0044 §3 names and that
 `AuditTrail.resolution_of` was added to answer, tracked as **#257** and still
-open. Such a resume leaves its park registered and no settled record, so a retry
-re-enters resolution and meets the trail's single-resolution index rather than a
-restatement. That is the behaviour on `main` today, before and after this
-decision, and driving such a binding to the disposition already decided is #257's
-work. Absorbing it here would make one decision of two, and the second is neither
+open. Such a resume installs no settled record, so a retry never meets a
+restatement; what it does meet depends on whether a recovery enumeration reached
+the binding first. A direct retry re-enters resolution and meets the trail's
+single-resolution index; a retry after `pending_confirmations` has reconciled the
+binding away meets `UnknownContinuationError`, because reconciliation evicts a
+`_parked` entry the trail no longer holds pending and this decision leaves that
+rule exactly as ADR-0052 §2 wrote it. Both are the behaviour on `main` today,
+before and after this decision, and driving such a binding to the disposition
+already decided is #257's work. Absorbing it here would make one decision of two, and the second is neither
 about a replayed token nor answerable without reopening what a partly applied
 resolution means.
 
@@ -439,6 +446,24 @@ third reason above is a cost to weigh rather than a prohibition.
 > or capture. Without it an implementation that cached the `StepOutcome` at
 > settlement passes every other case in this section and answers with an
 > `ExecutionState` the store has stopped holding.
+
+> **Normative.** The race this decision exists to close is pinned, not left to the
+> sequential cases. A shared-contract case issues **two concurrent** `resume`
+> calls for one token and asserts that both return the one settled outcome, that
+> neither raises, and that the trail holds exactly one resolution for the binding.
+> An implementation that installs the settled record after releasing §1's lock —
+> or evicts before installing — fails it deterministically, because the second
+> call reaches the table between the two and finds nothing. A consumer whose
+> transport forbids two calls in flight on one connection (ADR-0084 §3) declines
+> the case through the suite's existing capability skip rather than weakening it.
+
+> **Normative.** §1's same-critical-section clause is additionally pinned inside
+> `orchestration`'s own tests, where the seam is reachable: a resolution held
+> between recording the answer and installing the settled record, a second
+> `resume` admitted while it is held, and the assertion that the second restates
+> rather than raises and that exactly one execution attempt was made. The shared
+> suite can observe only the outcome; this is what pins the ordering that produces
+> it.
 
 > **Normative.** `FakeAssistantEngine` conforms in the same change. A fake that
 > raised where the real engine restates would let every consumer's tests pass
