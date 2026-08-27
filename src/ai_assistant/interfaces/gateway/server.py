@@ -36,6 +36,20 @@ remote browser listener" — the loopback listener is bound whether or not this 
 is, on the same address, under every clause of ADR-0168 §2 that survives. A
 gateway with no ``gateway_remote_address`` behaves byte for byte as it did.
 
+**That second listener serves HTTPS, and it is the listener rather than a setting
+that decides so** (ADR-0202). It terminates TLS in this process, on a certificate
+the overlay obtained for this machine's own overlay name and a key that never left
+it; there is no setting that makes it serve plain HTTP, no fallback to plain HTTP
+on any condition, and no redirect — "serving a redirect would require the
+plain-HTTP listener it refuses" (§2). A gateway whose certificate or key is absent,
+unreadable, unusable, mismatched, or outside its validity period does not start and
+reports why, which takes the loopback listener down with it: §2 weighs that
+explicitly and prefers it to "silent degradation moved to a different place".
+:mod:`.tls` holds every one of those refusals, and it runs at construction because
+§8 orders them "before it binds or discloses a bootstrap value". The loopback
+listener is untouched by all of it and still speaks plain HTTP, "potentially
+trustworthy for free" (§9).
+
 **What the second listener adds is a fact the first one never had.** Before serving
 anything on it — a static asset and the bootstrap exchange included — the gateway
 asks the overlay agent on its **own** machine who holds the connecting address, and
@@ -74,15 +88,21 @@ nobody has thought of yet".
 **Two of the twenty-eight are narrower than the rest, and the narrowing is about
 the page's own origin rather than about who is asking** (ADR-0177 §3). A credential
 reaches this system through ``connect_account`` and ``reprovision_account`` and
-through no other operation on any surface, and a page served from
-``http://100.x.y.z:8422`` is not a potentially trustworthy origin (ADR-0174 §7) — so
-those two are admitted on the loopback listener and refused on the remote browser
-one, on a condition of their own. And a gateway that reaches its *hub* over
-ADR-0124's remote listener serves none of the five to any browser on either
-listener, because ADR-0151 §13's own question — the credential's hop from an
-enrolled device to the hub — is untouched by ADR-0177 §3 and stays refused.
-:meth:`Gateway._connections_refused` is where both live, and neither is decided
-from anything a browser asserts.
+through no other operation on any surface, and those two are admitted on the
+loopback listener and refused on the remote browser one, on a condition of their
+own. **ADR-0202 does not reach that condition**, and the distinction is worth
+holding: §3's refusal was *argued* from the remote page not being a potentially
+trustworthy origin (ADR-0174 §7), and ADR-0202 changes that fact — the remote page
+is served over HTTPS and is such an origin. What it does not change is a single
+clause of ADR-0177 §3, which ADR-0202 §9 leaves where it found it and §10 records
+no supersession against. So the refusal stands as written, and lifting it is
+ADR-0177's own decision to reopen rather than a consequence of this one.
+
+**And a gateway that reaches its *hub* over ADR-0124's remote listener** serves
+none of the five to any browser on either listener, because ADR-0151 §13's own
+question — the credential's hop from an enrolled device to the hub — is untouched
+by ADR-0177 §3 and stays refused. :meth:`Gateway._connections_refused` is where
+both live, and neither is decided from anything a browser asserts.
 
 **Two of those shapes answer on a stream** (ADR-0175 §1): the body of the response
 to the request the browser made, written in pieces, with no socket, no upgrade and
@@ -198,6 +218,7 @@ from ai_assistant.interfaces.gateway.sessions import (
     SessionTable,
     mint_value,
 )
+from ai_assistant.interfaces.gateway.tls import remote_tls
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError, TransportError
 from ai_assistant.wire.overlay import (
     CLIENT_AGENT_SOCKET,
@@ -219,6 +240,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
         RoutedListing,
         RoutedOperation,
     )
+    from ai_assistant.interfaces.gateway.tls import RemoteTls
     from ai_assistant.wire.overlay import OverlayAgent
 
 _log = structlog.get_logger(__name__)
@@ -231,6 +253,18 @@ _log = structlog.get_logger(__name__)
 #: address, and the remote address is a second field rather than a widening of the
 #: first — which is what makes ADR-0168 §2's reader right about the door they built.
 _LOOPBACK: Final = "127.0.0.1"
+
+#: The scheme each listener speaks, which is a property of the listener rather than
+#: a setting. The loopback listener speaks plain HTTP and is "untouched" by ADR-0202
+#: — "it speaks plain HTTP, it is bound whether or not the remote listener is, and no
+#: clause of this ADR adds a certificate, a key or a scheme requirement to it" (§2).
+#: The remote browser listener "serves HTTPS and nothing else. No setting makes it
+#: serve plain HTTP, and the gateway may not fall back to plain HTTP on any condition
+#: — an absent file, an unreadable file, an expired certificate, or a failed
+#: handshake." So there are two constants and no third state, and neither is
+#: configurable.
+_LOOPBACK_SCHEME: Final = "http"
+_REMOTE_SCHEME: Final = "https"
 
 #: Spelled once for :func:`_offset_text`, so it carries no bare literal a reader has
 #: to recognise. ``interfaces.cli`` holds the same pair for the same helper.
@@ -519,6 +553,28 @@ def _authority(host: str, port: int) -> str:
         The authority.
     """
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _cookie(half: str, *, remote: bool) -> str:
+    """The `Set-Cookie` value for one minted session (ADR-0168 §6, ADR-0202 §7).
+
+    One function rather than an interpolation at the call site, so the attribute set
+    is one thing to read against the two ADRs that decide it — and so a second mint
+    path could never grow a different set.
+
+    Args:
+        half: The cookie half the session table minted.
+        remote: Whether the exchange arrived on the remote browser listener, which is
+            the only thing that decides `Secure`.
+
+    Returns:
+        The header value, with every attribute ADR-0168 §6 requires and, on the
+        remote listener alone, the one ADR-0202 §7 adds.
+    """
+    attributes = "HttpOnly; SameSite=Strict; Path=/"
+    if remote:
+        attributes = f"{attributes}; Secure"
+    return f"{_COOKIE_NAME}={half}; {attributes}"
 
 
 def _refuse_an_address_this_machine_does_not_hold(address: str) -> None:
@@ -872,11 +928,20 @@ class Gateway:
         it unskippable: every composition of a gateway runs it, not just the one this
         module ships.
 
+        **ADR-0202 §8's refusals are here for the same reason, and its ordering
+        requires it.** §8 has the gateway refuse "at start, before it binds or
+        discloses a bootstrap value" everything about the certificate and key that
+        only the machine can answer, and :func:`.run_gateway` mints and discloses
+        between this constructor and the bind — so the pair is read here, once, and
+        the listener is built from what this read produced (:mod:`.tls`).
+
         Args:
             settings: The loaded configuration, read for ADR-0168 §8's ten figures,
-                ADR-0175 §8's eleventh, ADR-0174 §8's three fields, and nothing else.
+                ADR-0175 §8's eleventh, ADR-0174 §8's three fields, ADR-0202 §8's two
+                paths, and nothing else.
             engine: The hub, as the promoted ``AssistantEngine`` (ADR-0168 §1).
-            now: The clock, injected.
+            now: The clock, injected. ADR-0202 §8's validity check is about "the
+                moment of binding", so it is a reading of this one.
             defer: How a session's death and a record interval's close are
                 scheduled, injected for the same reason.
             bundle: The front end's assets, already read.
@@ -889,14 +954,16 @@ class Gateway:
 
         Raises:
             ConfigurationError: If the remote browser listener is configured on with
-                no agent to satisfy ADR-0174 §3, or if a listed device's identity is
-                over the byte bound the wire seam holds every overlay identity to.
-                Both are stay-down deployment faults (ADR-0083 §5): a gateway that
-                bound the door anyway would refuse every connection on it, or refuse
-                the owner's own named device at every exchange with nothing saying
-                why.
+                no agent to satisfy ADR-0174 §3, if a listed device's identity is
+                over the byte bound the wire seam holds every overlay identity to, or
+                if its TLS material fails any condition ADR-0202 §§2, 3, 6 and 8 put
+                at start. Each is a stay-down deployment fault (ADR-0083 §5): a
+                gateway that bound the door anyway would refuse every connection on
+                it, refuse the owner's own named device at every exchange with
+                nothing saying why, or serve a certificate no browser accepts.
         """
         _check_the_remote_listener_can_serve(settings, agent=agent)
+        tls = remote_tls(settings, now=now)
         self._settings = settings
         self._engine = engine
         self._now = now
@@ -931,6 +998,12 @@ class Gateway:
         self._origin = f"http://{self._authority}"
         self._agent = agent
         self._remote_address = settings.gateway_remote_address
+        #: The certificate, the key and the two facts ADR-0202 §5 discloses about
+        #: them, read once at start and never re-read: "no clause of this ADR obliges
+        #: a reload, and no lane may present the gateway as renewing, watching or
+        #: reloading anything" (§4). ``None`` exactly where no remote listener is
+        #: configured, in which case nothing was read and no path was touched.
+        self._remote_tls: RemoteTls | None = tls
         #: Whether this gateway's own connection to its hub is ADR-0084 §1's loopback
         #: socket, which is the only transport ADR-0151 §13 lets the five connection
         #: operations cross and which ADR-0177 §3's first clause leaves "whole and
@@ -1017,11 +1090,26 @@ class Gateway:
         exit test milestone 14 names is a phone, and the address to type into it is
         not the loopback one this gateway has always printed.
 
+        **The two listeners disclose two different schemes** (ADR-0202 §2). The
+        remote authorities are ``https://`` because that listener "serves HTTPS and
+        nothing else"; the loopback one is untouched and still ``http://``. An origin
+        is scheme, host and port, so this is also what makes an owner upgrading a
+        deployment exchange a fresh bootstrap value rather than silently carrying an
+        old session across the change — the migration ADR-0202's Consequences names.
+
+        **A remote authority the certificate does not cover is not filtered out
+        here**, because there is none: ADR-0202 §6 refuses to start unless every
+        element of ``gateway_remote_host_names`` is a name the certificate presents.
+        The bound address stays on this list under ADR-0174 §6 unchanged, and §6 of
+        ADR-0202 records that reaching the gateway by it "stops working in practice"
+        as a consequence rather than a rule — the browser refuses the name mismatch
+        before a request exists, and the gateway is told nothing about it.
+
         Returns:
             The origins, in the order a disclosure should list them.
         """
         remote = sorted(self._remote_authorities)
-        return (self._origin, *(f"http://{one}" for one in remote))
+        return (self._origin, *(f"{_REMOTE_SCHEME}://{one}" for one in remote))
 
     def mint_bootstrap(
         self, disclose: Callable[[Disclosure], None], *, act: MintAct | None
@@ -1138,6 +1226,21 @@ class Gateway:
         everything, which is exactly the pair of failures ADR-0168 §9 refuses to
         present identically.
 
+        **This listener serves HTTPS and the socket is bound without a TLS context
+        all the same** (ADR-0202 §2, §5). The handshake is performed per connection
+        in :meth:`_handshake`, one step *after* ADR-0174 §3's identity check, because
+        §5 of ADR-0202 orders it there: "ADR-0174 §3's overlay-identity check runs on
+        the connection **before** the TLS handshake, so a connection whose overlay
+        identity cannot be obtained is closed without the certificate being
+        presented." Handing the context to ``start_server`` would put the handshake
+        before the accept callback runs and make that ordering unreachable. Nothing
+        is served in plain HTTP by the gap: :meth:`_handle` reaches
+        :meth:`_serve_connection` on this listener only through both checks.
+
+        **What binds is what the constructor already read** (§4). The pair is not
+        re-read here and is not re-read while the process runs, so a renewal takes
+        effect at the next start and nothing watches a file.
+
         Returns:
             The bound server, or ``None`` where the listener is off.
 
@@ -1153,16 +1256,41 @@ class Gateway:
                 address in use is exactly such a case.
         """
         address = self._remote_address
-        if address is None:
+        tls = self._remote_tls
+        if address is None or tls is None:
             return None
         await self._confirm_the_address_is_on_the_overlay(address)
         _refuse_an_address_this_machine_does_not_hold(address)
         server = await asyncio.start_server(
             partial(self._handle, remote=True), host=address, port=self._settings.gateway_port
         )
+        # ADR-0202 §5's disclosure: "When the remote browser listener binds, the
+        # gateway discloses on its own standard output, beside the address it bound:
+        # that the listener speaks HTTPS, the name the certificate carries, and the
+        # instant the certificate's validity ends." Three Tier 2 facts and nothing of
+        # the key — "a name of the gateway's own machine, an instant, and a scheme" —
+        # so ADR-0004 §5's rule that logs carry Tier 2 only is satisfied rather than
+        # stretched. It is **not** a record under ADR-0168 §6, whose enumeration
+        # governs requests, exactly as §5 of that ADR's bootstrap disclosure is not.
+        #
+        # **The expiry is the whole of the renewal story's mechanism** (§4, §5).
+        # Renewal is the owner's act and the gateway watches nothing, and what makes
+        # that workable "rather than a trap is that every start tells the owner how
+        # long they have".
+        #
+        # **``origins`` rather than ``authorities``, and the rename is load-bearing.**
+        # ``core.logging`` masks every key containing ``auth``, so the address this
+        # disclosure has to stand beside was reaching the owner as ``'[REDACTED]'``.
+        # That module's own instruction for an over-matched key is to rename it —
+        # "that is a local fix, where an exemption is a global one" — and ``origins``
+        # is the word the loopback listener's own line and every disclosure already
+        # use for the same value.
         _log.info(
             "gateway.remote_listening",
-            authorities=sorted(self._remote_authorities),
+            scheme=_REMOTE_SCHEME,
+            origins=[f"{_REMOTE_SCHEME}://{one}" for one in sorted(self._remote_authorities)],
+            certificate_names=list(tls.names),
+            certificate_expires=tls.not_after.isoformat(),
             listed_devices=len(self._listed_devices),
         )
         return server
@@ -1306,6 +1434,8 @@ class Gateway:
         try:
             if remote and not await self._identify(writer, connection):
                 return
+            if remote and not await self._handshake(writer):
+                return
             await self._serve_connection(reader, writer, connection)
         finally:
             self._connections.discard(connection)
@@ -1370,6 +1500,77 @@ class Gateway:
                     "the gateway takes a browsing device's identity from its own overlay "
                     "agent and never from the peer, so a peer it cannot name is refused "
                     "(ADR-0174 §3)"
+                ),
+            )
+            return False
+        return True
+
+    async def _handshake(self, writer: asyncio.StreamWriter) -> bool:
+        """Terminate TLS on one remote connection, in this process (ADR-0202 §1, §2).
+
+        > ADR-0174 §3's overlay-identity check runs on the connection **before** the
+        > TLS handshake, so a connection whose overlay identity cannot be obtained is
+        > closed without the certificate being presented. (ADR-0202 §5)
+
+        That ordering is why this is a step of the connection rather than an argument
+        to ``asyncio.start_server``: a context handed to the bind is applied before
+        the accept callback runs, and §3's check could then only ever be after it.
+        §5 states what the ordering buys and what it does not — "the certificate is
+        public (§4), so declining to present it to an unidentified peer protects
+        nothing of consequence. What it does is keep ADR-0174 §3's 'before serving
+        anything' at its strongest reading rather than leaving a lane to decide
+        whether a handshake counts as serving."
+
+        **A failed handshake is recorded nowhere** (ADR-0202 §5). "A connection that
+        yields no request is not a request refused, and no lane may add a record
+        class, a condition or a counter for it under that section" — so this is
+        outside ADR-0168 §6's enumeration exactly as §8's ceilings and §3's identity
+        refusal are, and nothing is counted. The warning below carries no fact about
+        a request, because none has been read.
+
+        **Nothing is written back, and there is nothing that could be.** A peer whose
+        handshake failed is not speaking HTTP, so a status line would be bytes it
+        cannot parse; and a peer that spoke plain HTTP to this door gets the refusal
+        §2 requires — no fallback and no redirect, because "serving a redirect would
+        require the plain-HTTP listener it refuses".
+
+        **The handshake is bounded by ``gateway_read_timeout``**, which is ADR-0168
+        §8's figure applied to the one thing that can now stall before a request
+        exists. §8 states the deadline over "how long a connection may stall", and a
+        peer that connects and then sends nothing is exactly that — the case the
+        figure already bounds one step later, where the request would be read. Left
+        to the standard library's own minute this door would hold a connection
+        against ADR-0168 §8's two ceilings for twice as long as the same silence
+        costs on the loopback listener.
+
+        Args:
+            writer: The accepted connection, upgraded in place.
+
+        Returns:
+            Whether TLS was established.
+        """
+        tls = self._remote_tls
+        if tls is None:  # pragma: no cover — a remote listener binds only with one
+            return False
+        try:
+            await writer.start_tls(
+                tls.context,
+                ssl_handshake_timeout=self._settings.gateway_read_timeout.total_seconds(),
+            )
+        except OSError as exc:
+            # `ssl.SSLError` and `TimeoutError` are both `OSError`, and so is the
+            # abort a peer that went away produces. None of them says anything about
+            # this gateway's own configuration — the certificate was checked at start
+            # — so all three are one condition here: a peer that did not complete a
+            # handshake, which is a fact about that peer.
+            _log.warning(
+                "gateway.remote_handshake_failed",
+                reason=str(exc),
+                detail=(
+                    "a connection on the remote browser listener did not complete a TLS "
+                    "handshake, so it is closed unread. This listener serves HTTPS and "
+                    "nothing else, with no fallback and no redirect (ADR-0202 §2) — a "
+                    "browser sent to it with http:// arrives here"
                 ),
             )
             return False
@@ -1630,6 +1831,14 @@ class Gateway:
         equals :attr:`_authority`, so the comparison is byte for byte the one
         ADR-0168 §7 made.
 
+        **The scheme comes from the listener rather than from the request**
+        (ADR-0202 §2), because an origin is scheme, host and port and the two
+        listeners speak two schemes. Reading it from the request is not an option
+        that exists: nothing a browser sends says which scheme it used, and a peer
+        that could choose would be choosing what it is judged against. So a page on
+        the remote listener is `https://` and one on the loopback listener is
+        `http://`, each decided by the socket that accepted the connection.
+
         Args:
             request: The request as parsed.
             connection: The connection it arrived on, which decides which set of
@@ -1639,11 +1848,12 @@ class Gateway:
             The condition it fails, or ``None`` where it passes both.
         """
         admitted = self._remote_authorities if connection.remote else frozenset({self._authority})
+        scheme = _REMOTE_SCHEME if connection.remote else _LOOPBACK_SCHEME
         host = request.header("host")
         if host is None or host not in admitted:
             return RefusalCondition.HOST_NOT_BOUND
         origin = request.header("origin")
-        if origin is not None and origin != f"http://{host}":
+        if origin is not None and origin != f"{scheme}://{host}":
             return RefusalCondition.ORIGIN_NOT_OWN
         return None
 
@@ -1712,7 +1922,15 @@ class Gateway:
             # this name is detectable as the anomaly it is, and no persistent
             # expiry — none of which the guarantee rests on, because "a session's
             # lifetime is decided by the gateway alone" (ADR-0168 §6).
-            set_cookie=f"{_COOKIE_NAME}={values.cookie_half}; HttpOnly; SameSite=Strict; Path=/",
+            #
+            # **`Secure` on the remote listener and only there** (ADR-0202 §7), which
+            # is a stacked addition to §6 rather than a change to it: every other
+            # attribute is unchanged and the loopback listener is untouched. It
+            # defends a narrow residual — "a downgrade a future lane might introduce,
+            # or an attacker who can make the browser attempt `http://` at the same
+            # authority" — and it is a clause rather than a lane's choice because
+            # once the listener is HTTPS-only its absence would look deliberate.
+            set_cookie=_cookie(values.cookie_half, remote=connection.remote),
             close=True,
         )
 

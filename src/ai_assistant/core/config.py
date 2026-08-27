@@ -1817,6 +1817,168 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The remote browser listener's TLS material (ADR-0202 §8) ---------
+    # **Two fields, both paths, and no third.** §8: "``gateway_remote_address``
+    # remains the switch (ADR-0174 §8); a field by which this listener could serve
+    # plain HTTP is what §2 refuses; and a renewal interval is not this system's to
+    # hold, because §4 makes renewal an owner act." No port figure is added either —
+    # ADR-0174 §8's "no second port figure" clause is applied unchanged.
+    #
+    # **Paths rather than a fixed location**, because "the overlay agent decides
+    # where it writes, and it differs by vendor, by platform and by how the owner
+    # invoked it. A fixed path would be this system asserting a fact about a program
+    # it does not own" — the shape ``client_overlay_agent_socket`` already has one
+    # field over.
+    #
+    # **What is *not* checked here is everything that needs the machine.** §8 splits
+    # the check across two places, as ADR-0174 §8's does: this class refuses what it
+    # can decide "without touching the filesystem or importing a subsystem" — a blank
+    # value, one with no UTF-8 form, and the three combinations below — and the
+    # gateway refuses at start what only the machine can answer, because the custody
+    # predicate lives in ``wire/custody.py`` and golden rule 2 forbids ``core``
+    # importing a subsystem.
+    gateway_remote_tls_certificate: str | None = Field(
+        default=None,
+        description=(
+            "The path to the certificate the remote browser listener serves, obtained "
+            "by the overlay for this machine's own overlay name (ADR-0202 §1, §8). "
+            "Set together with gateway_remote_tls_key and with "
+            "gateway_remote_address; unset with both of them. Read once, when the "
+            "gateway starts, and never re-read: a renewed certificate takes effect at "
+            "the next start."
+        ),
+    )
+    gateway_remote_tls_key: str | None = Field(
+        default=None,
+        description=(
+            "The path to the private key of gateway_remote_tls_certificate, generated "
+            "on this machine and never leaving it (ADR-0202 §1, §3, §8). Set together "
+            "with the certificate and with gateway_remote_address; unset with both of "
+            "them. The gateway reads it, and refuses to start on a file owned by "
+            "another user or granting any permission to group or other."
+        ),
+    )
+
+    @field_validator("gateway_remote_tls_certificate", "gateway_remote_tls_key")
+    @classmethod
+    def _the_tls_paths_are_paths_a_gateway_could_open(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        """Refuse a value that names no file at all (ADR-0202 §8).
+
+        > ``Settings`` refuses at load what it can decide without touching the
+        > filesystem or importing a subsystem: a value that is blank or has no UTF-8
+        > form, and the three combinations above.
+
+        Both conditions are about the *value* rather than about the filesystem, which
+        is what keeps them here: a blank path names nothing on any machine, and a
+        path with no UTF-8 form is one :func:`os.fsencode` cannot round-trip, so the
+        refusal that named it could not itself be built — the reason
+        :mod:`ai_assistant.wire.custody` gives for escaping every pathname it
+        reports. Existence, custody, permissions and usability are the gateway's, at
+        start, on the machine that holds the file.
+
+        Args:
+            value: The configured path, or ``None`` where the listener is off.
+            info: The field being validated, for the name in the refusal.
+
+        Returns:
+            The path, stripped of surrounding space, or ``None``.
+
+        Raises:
+            ValueError: If the value is blank or has no UTF-8 form.
+        """
+        if value is None:
+            return None
+        path = value.strip()
+        if not path:
+            msg = (
+                f"{info.field_name} is blank, which names no file on any machine "
+                f"(ADR-0202 §8). Set it to the path the overlay wrote the certificate "
+                f"and key to, or unset it together with gateway_remote_address"
+            )
+            raise ValueError(msg)
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            # A lone surrogate is a `str` Python holds and UTF-8 cannot express. The
+            # gateway would have to name it in a refusal, and building that message
+            # would fail exactly where the fault is — the condition
+            # `wire.custody.displayable` exists to keep out of a refusal's own text.
+            msg = (
+                f"{info.field_name} has no UTF-8 form, so a refusal naming the path "
+                f"could not itself be written (ADR-0202 §8)"
+            )
+            raise ValueError(msg) from exc
+        return path
+
+    @model_validator(mode="after")
+    def _the_listener_is_configured_with_a_certificate_or_not_at_all(self) -> Settings:
+        """Refuse the three configurations §8 names, each in its own words.
+
+        > Three configurations are **refused at settings load**: either field set
+        > while ``gateway_remote_address`` is unset; either field unset while
+        > ``gateway_remote_address`` is set; and one set while the other is unset.
+        > Each is a configuration no reading makes true, and none is ignored silently
+        > — the rule ADR-0174 §8 applies to its two lists, for the reason it gives.
+
+        **The pair is judged first, and the order is what makes each message the
+        useful one.** A half-configured pair is a member of whichever of the other
+        two conditions the address happens to select, and telling an owner who wrote
+        one path that "the listener is off" would name the setting they got right.
+        So the split pair is reported as a split pair, and the two remaining
+        conditions then see a pair that is wholly set or wholly unset.
+
+        **Neither path is checked against the filesystem here**, which is §8's split:
+        a path that exists, is the owner's, and carries a certificate the key belongs
+        to is a fact about the machine, and the gateway refuses at start on all of
+        it.
+
+        Returns:
+            ``self``, once the pair and the switch agree.
+
+        Raises:
+            ValueError: If the pair is split, stranded, or missing under a
+                configured listener.
+        """
+        certificate = self.gateway_remote_tls_certificate
+        key = self.gateway_remote_tls_key
+        if (certificate is None) != (key is None):
+            set_field, unset_field = (
+                ("gateway_remote_tls_certificate", "gateway_remote_tls_key")
+                if key is None
+                else ("gateway_remote_tls_key", "gateway_remote_tls_certificate")
+            )
+            msg = (
+                f"{set_field} is set while {unset_field} is unset. The remote browser "
+                f"listener terminates TLS itself and needs both halves of one pair "
+                f"(ADR-0202 §8) — a certificate with no key serves nothing and a key "
+                f"with no certificate proves nothing. Set both, or unset both together "
+                f"with gateway_remote_address"
+            )
+            raise ValueError(msg)
+        if self.gateway_remote_address is None and certificate is not None:
+            msg = (
+                f"gateway_remote_tls_certificate={certificate!r} and "
+                f"gateway_remote_tls_key are set while gateway_remote_address is unset, "
+                f"so the listener they would serve is off and nothing would ever read "
+                f"them (ADR-0202 §8). Set gateway_remote_address to the overlay address "
+                f"the gateway should serve browsers on, or unset both paths"
+            )
+            raise ValueError(msg)
+        if self.gateway_remote_address is not None and certificate is None:
+            msg = (
+                f"gateway_remote_address={self.gateway_remote_address!r} is set, so the "
+                f"remote browser listener serves HTTPS and nothing else — there is no "
+                f"setting that makes it serve plain HTTP and no fallback to it "
+                f"(ADR-0202 §2). Set gateway_remote_tls_certificate and "
+                f"gateway_remote_tls_key to the pair your overlay obtained for this "
+                f"machine's own overlay name, or unset gateway_remote_address to serve "
+                f"browsers over the loopback listener alone"
+            )
+            raise ValueError(msg)
+        return self
+
     @field_validator("gateway_remote_address")
     @classmethod
     def _the_browser_listener_binds_only_an_overlay_address(cls, value: str | None) -> str | None:
