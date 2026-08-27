@@ -57,7 +57,7 @@ page served over `http://` from an address that is not loopback is not a
 #1668 records what that does and does not block, and the boundary is worth
 keeping in view because it is what makes this a scheme decision and not a
 milestone decision. Everything hub-side — the speech Protocols, their triads and
-the wire carriage the milestone-19 contract ADR decides — is browser-agnostic and
+the wire carriage ADR-0200 decides — is browser-agnostic and
 was never blocked. Push-to-talk in a browser on the gateway's **own** machine was
 never blocked either: a loopback origin is potentially trustworthy for free, which
 is ADR-0174 §7's own observation that "loopback got the classification for free and
@@ -776,11 +776,12 @@ configured by different words are two deployments one recipe cannot describe, an
 
 **Deferred or refused by name, each with which of the two it is:**
 
-- **The milestone-19 speech surface.** Untouched. The contract ADR for browser
-  speech takes ADR-0174 §7's stop rather than working around it and makes a
-  ratified scheme decision a precondition of its remote case (#1668); this ADR
-  discharges that precondition and decides no part of that surface. It is cited by
-  subject rather than by number because it is not on `main` as this is written.
+- **The milestone-19 speech surface.** Untouched. **ADR-0200** — the contract ADR
+  for browser speech, which merged while this one was in review — takes ADR-0174
+  §7's stop rather than working around it and makes a ratified scheme decision a
+  precondition of its remote case (#1668); this ADR discharges that precondition
+  and decides no part of that surface. §10 applies ADR-0070 §1's test to it and
+  finds no record owed.
 - **What the assistant may say aloud, and how a withheld class is handled.**
   ADR-0199 decides it, and milestone 19's exit test has that as its second half
   — "a content class ruled unspeakable is deflected … not read aloud". This ADR
@@ -997,6 +998,16 @@ ordering against an event §3 had no occasion to mention.
   ADR-0168 §8's table where it found no record owed for the fields ADR-0174 §8 and
   ADR-0175 §8 had themselves added. §8's refusals, its shared-port clause and its
   device-list clauses are applied unchanged.
+- **ADR-0200 §10** — satisfied, not superseded, and the shape is ADR-0174 §7's
+  second clause above. Its normative clause holds the remote-browser case of its
+  own §13 wave until a scheme decision "is ratified and merged", and forbids any
+  lane reading ADR-0200 as supplying one, as authorising a certificate or as
+  permitting the requirement to be degraded. Every sentence stays true: the hold
+  still binds until this ADR merges, ADR-0200 still supplies nothing, and a reader
+  holding only §10 acts identically — they look for the ratified decision, which is
+  this one. Its §11 deferral bullet records that the trigger "has fired", which
+  this ADR answers rather than contradicts. Nothing here reaches §§1–9, which §10
+  itself calls "likewise unaffected: not one of those sections is browser-facing".
 - **ADR-0004 §1, §2, §4 and §5** — the tiers are applied, not changed; residency is
   untouched (§4); §4's encryption-at-rest decision is untouched, and its `0600`
   posture is applied rather than modified; §5's rule that logs carry Tier 2 only is
