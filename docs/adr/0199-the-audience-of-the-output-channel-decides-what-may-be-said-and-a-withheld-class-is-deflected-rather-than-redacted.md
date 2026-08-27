@@ -262,11 +262,16 @@ same word.
 > `CalendarFacet` or an `EmailFacet`, each of which carries no span of any entry or
 > message by its own ratified construction.
 
-> **Normative.** No `notification_class` is placed as speakable on a channel of
-> unbounded audience by this ADR. An ADR admitting a delivery channel of unbounded
-> audience places the classes that exist when it is written, keyed on
-> `NotificationCandidate.producer` and `notification_class`, and a class it does not
-> place stays withheld.
+> **Normative.** No notification is placed as speakable on a channel of unbounded
+> audience by this ADR. An ADR admitting a delivery channel of unbounded audience
+> places what it places on the whole of §2's recorded origin for a notification —
+> `NotificationCandidate.producer`, `notification_class` **and** `sensitivity` — and
+> what it does not place stays withheld.
+
+> **Normative.** A candidate matching a placement in `producer` and
+> `notification_class` while carrying a `sensitivity` that placement does not name
+> is withheld. No implementation reads a placement as reaching a tier it did not
+> name, and no placement names `DataTier.SECRET`.
 
 > **Normative.** An ADR admitting a new source, a new facet, a new notification
 > producer, or any other producer of content that can reach an output channel
@@ -332,6 +337,18 @@ question really lives is in the beliefs a message reader would propose, and thos
 are unplaced by the second and fourth clauses until the ADR admitting that reader
 places them. Recording that the example moved is better than honouring it in the
 place it was aimed at.
+
+**`sensitivity` is in the placement key because dropping it would widen a
+placement by construction.** The field is "the producer's chosen sensitivity, never
+defaulted", chosen per candidate rather than per class, so one producer's one class
+can emit an `OPERATIONAL` candidate and a `PERSONAL` one — "your build finished" and
+"your build failed on the branch you pushed from the clinic" are the same producer
+and the same class. A two-field placement would admit both on the strength of the
+narrower one, which is the unintentionally broader class this ADR exists to refuse.
+The key therefore ranges over exactly two tiers rather than three: ADR-0130 §2
+refuses `DataTier.SECRET` at validation, so §3's Tier 0 floor is already enforced on
+this path by the type, and the last clause states the consequence rather than
+relying on the type to keep holding it.
 
 **Health sits at the bottom, and this is where that is said.** Design note 2 of
 #1318 records that health data is "the most sensitive tier we would ingest", that
