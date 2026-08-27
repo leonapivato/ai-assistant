@@ -525,11 +525,27 @@ change what the listing beside the reply says.
 > **Normative.** A routed park has a **bounded lifetime**. It is evicted once that
 > lifetime has elapsed since it was registered, releasing its ceiling slot, and its
 > token thereafter resolves nothing and raises `UnknownContinuationError` like any
-> other unresolvable token (ADR-0084 §7). The lifetime is read through
-> `core.config.Settings` and has **no spelling for "unlimited"** (ADR-0185 §6's
-> shape). Eviction is performed on demand — when a slot is sought and when
-> `pending_confirmations` runs its existing reconciliation — and this decision adds
-> no scheduler and no background job.
+> other unresolvable token (ADR-0084 §7). Elapse is measured against the **injected
+> clock** (ADR-0009), never a wall clock read at the seam, so a test advances it
+> rather than waits.
+
+> **Normative.** `core.config.Settings` gains `routed_confirmation_ttl`, a
+> `_DurationSetting` — deliberately **not** `_NullableDuration` — defaulting to
+> `timedelta(minutes=15)` and validated at load as strictly positive. `None` is not
+> a value it accepts: it takes no part in the disable sentinel `confirmation_ttl`
+> opts into, which is exactly the wrong default to inherit here, and a zero or
+> negative duration is refused at load rather than producing a card unusable the
+> instant it is rendered. It is the whole of this decision's lifetime configuration,
+> and no second setting scales, extends or disables it.
+
+> **Normative.** Expiry is checked **inside the claim**, under the same lock and
+> before the token resolves anything. A `resume` presenting a token whose park has
+> elapsed raises `UnknownContinuationError`, evicts the entry and releases its slot,
+> whether or not any capacity has been sought and whether or not
+> `pending_confirmations` has run since. Eviction elsewhere — when a slot is sought,
+> and in `pending_confirmations`' existing reconciliation — is opportunistic
+> housekeeping that reclaims slots earlier; it is never what makes an expired park
+> unusable. This decision adds no scheduler and no background job.
 
 > **Normative.** An evicted park writes **no** row. §9's `OWED` row already stands
 > and its meaning is unchanged: a route was decided and no answer came. The absence
@@ -772,12 +788,11 @@ and a renderer.
 > - `route_id: Identifier` — the identity of the **route**, minted once when the
 >   route is taken and carried by every row of that route. It is **unique across
 >   every retained row that is not of the same route**: `record` refuses a row whose
->   `route_id` is already held under a different route — a differing `operation`,
->   `subject` or `conversation_id`, or an `approval` the route already holds — with
->   `RoutingTrailError`, appending nothing, and the act that row precedes does not
->   proceed. Without that rule a repeating id factory would file two destructive
->   decisions as one route while the row-level `id` check passed, since the two rows'
->   own ids differ. On a read-only route it
+>   `route_id` is already held by a row differing in `operation`, `subject` or
+>   `conversation_id` — with `RoutingTrailError`, appending nothing, and the act that
+>   row precedes does not proceed. Without that rule a repeating id factory would
+>   file two destructive decisions as one route while the row-level `id` check
+>   passed, since the two rows' own ids differ. On a read-only route it
 >   names one row; on a confirm-owed route it is what joins the `OWED` row to the
 >   `GIVEN` or `REFUSED` row that answers it, and it is carried on the parked entry
 >   the continuation token names so the `resume` can write it.
@@ -803,6 +818,17 @@ and a renderer.
 > ADR-0185 §2's ground — a trail row is a statement about a decision, not a copy of
 > what the decision was about — and it is what makes the row safe to keep after the
 > belief it names is destroyed.
+
+> **Normative.** A `route_id`'s rows form a **state machine, and `record` enforces
+> it** inside the same critical section, refusing with `RoutingTrailError` and
+> appending nothing on any other sequence. A read-only route is exactly one
+> `NOT_OWED` row and admits no second row of any kind. A confirm-owed route is an
+> `OWED` row and then **at most one** of `GIVEN` or `REFUSED`: a `GIVEN` or
+> `REFUSED` arriving under a `route_id` holding no `OWED` row is refused, a second
+> answer of either member under an already-answered route is refused, and a second
+> `OWED` row is refused. Without this the trail could hold a `GIVEN` and a `REFUSED`
+> for one route — two incompatible claims about what one person decided — or a
+> `GIVEN` for a confirmation nobody was ever offered.
 
 > **Normative.** `core/protocols.py` gains `RoutingTrail`, the durable store, with
 > exactly four members on ADR-0185 §12's shape and no others:
@@ -843,9 +869,19 @@ and a renderer.
 > Protocol, shared conformance suite, and canonical fake in `ai_assistant.testing`
 > — in one change (`CONTRIBUTING.md` → "Adding a Protocol", ADR-0137 §3).
 
-> **Normative.** The trail is bounded, on ADR-0185 §6's shape: a maximum row count
-> read through `core.config.Settings`, pruned earliest-recorded-first, **with no
-> spelling for "unlimited"**.
+> **Normative.** `core.config.Settings` gains `routing_trail_max_rows`, an
+> `_IntegerSetting` defaulting to `200_000`, `gt=0` and `lt=2**63`, validated at
+> load — the shape and the number `source_read_trail_max_rows` already carries,
+> because a routing row is smaller than a read row and the two trails are read by
+> the same kind of operator. The trail is bounded by it, pruned
+> earliest-recorded-first inside `record`'s critical section, **with no spelling for
+> "unlimited"** (ADR-0185 §6).
+
+> **Normative.** Pruning is by recording order alone and takes no account of a
+> route's state: an unanswered park's `OWED` row is pruned at the bound like any
+> other. The park is in memory and the trail is the record rather than the state, so
+> a pruned row costs history and never costs a resolution — and a bound with an
+> exception is a bound an adversary chooses the shape of.
 
 > **Normative.** `AssistantEngine` gains **no method** for this trail in this
 > decision, and the trail is therefore unreachable from the CLI and from a browser.
@@ -1113,12 +1149,28 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > slot is released, that its token then raises `UnknownContinuationError`, and that
 > a fresh routed park is admitted at a ceiling of one.
 
+> **Normative.** The lifetime's expiry is pinned by advancing the **injected clock**
+> and then calling `resume` **directly** — seeking no capacity and enumerating no
+> confirmations first — asserting `UnknownContinuationError` and that the operation
+> was not called. A test that reclaims the slot before resuming does not satisfy this
+> clause, because it passes against an implementation whose expiry is only ever
+> noticed by housekeeping. The boundary is asserted on both sides of the lifetime,
+> and `routed_confirmation_ttl` is asserted refused at load for `None`, for zero and
+> for a negative duration.
+
 > **Normative.** The lane landing §9 ships `record`'s conflict cases: the same `id`
 > presented with a differing field raises `RoutingTrailError`, appends nothing, and
 > the act it precedes does not proceed — asserted with the operation's store
 > observed untouched; the same for a `route_id` already held under a different
 > route. The identical-record retry is asserted beside them, so idempotence is
 > pinned as over the whole record rather than over the id.
+
+> **Normative.** The same lane ships the route state machine as conformance cases,
+> each asserting `RoutingTrailError` and an unchanged trail: `GIVEN` as a route's
+> first row; `REFUSED` as a route's first row; `GIVEN` after `REFUSED` and `REFUSED`
+> after `GIVEN`; a second `OWED`; and a second row of any kind on a `NOT_OWED`
+> route. The two valid sequences — `OWED`→`GIVEN` and `OWED`→`REFUSED` — are
+> asserted beside them.
 
 > **Normative.** The same lane ships `record`'s atomicity as a **concurrency** test
 > in the shared conformance suite, so every implementation pays it: two `record`
