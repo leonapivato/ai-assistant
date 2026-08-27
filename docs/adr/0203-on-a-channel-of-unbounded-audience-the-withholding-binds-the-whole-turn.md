@@ -594,12 +594,22 @@ material actually seen, which is the direction that cannot weaken it.
 > wider supply to keep the step stable.
 
 > **Normative.** The lane pins **the degradation rules unmoved**, which is what
-> §3's unpinning of their values must not be read as relaxing: on such a turn a
-> forced composition failure yields `TurnOutcome.reply_degraded` exactly as it does
-> on `converse`, and a forced capture failure yields `TurnOutcome.capture_degraded`
-> exactly as it does. Both are deterministic over the canonical fakes, and the arm
-> exists so that "the value follows its inputs" cannot become "the flag is this
-> operation's to decide".
+> §3's unpinning of their values must not be read as relaxing. On a turn that
+> **withheld** — the `withheld=True` route, not a turn over a wholly speakable
+> store — a forced composition failure yields `TurnOutcome.reply_degraded` exactly
+> as it does on `converse`; a forced capture failure yields
+> `TurnOutcome.capture_degraded` exactly as it does; and a forced synthesis failure
+> yields `spoken is None` with `SpokenTurn.spoken_degraded` `True`, which is
+> ADR-0200 §4's exactly-when clause unmoved. All three are deterministic over the
+> canonical fakes.
+
+> **Normative.** The third of those is pinned **on the withholding route
+> specifically**, because that is the route the existing spoken-path degradation
+> tests do not reach: they run over supplies nothing is subtracted from, so an
+> implementation that skipped synthesis on a deflection, or reported
+> `spoken_degraded` `False` beside a `None` rendering there, would pass every one
+> of them. The arm exists so that "the value follows its inputs" cannot become
+> "the flag is this operation's to decide".
 
 > **Normative.** The lane pins **the bounded channel unchanged**: the same
 > utterance through `converse`, over the same store, reaches the planner with the
@@ -635,7 +645,7 @@ The implementation is one lane in `orchestration`, briefed after this ADR merges
    ("**The** `TurnResult` **the turn produced is unchanged**"). Each is re-pointed
    at this ADR rather than deleted: the sentences are still true of a bounded
    channel, and what changes is where the subtraction sits on an unbounded one.
-3. **The six tests of §6.**
+3. **The seven tests of §6.**
 4. **The record on ADR-0200**, which is the item below.
 5. **Closing #1692 and #1693**, which this decision answers and that lane fixes.
 
