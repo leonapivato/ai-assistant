@@ -401,9 +401,11 @@ fall out of the rule rather than needing a special case written for it later.
 > and from nowhere else (ADR-0170 §2). No lane satisfies this ADR by having the
 > stage fetch, re-assemble or re-retrieve anything.
 
-> **Normative.** Where content was withheld, the composing stage is told **that**
-> a withholding occurred, and composes an answer that states it and names a
-> channel of bounded audience on which the answer can be had.
+> **Normative.** Where content was withheld, the composing stage is told **that** a
+> withholding occurred, and composes an answer that states it. Where a channel of
+> bounded audience can be named on which the answer can be had, the answer names
+> one; where none can be named, it names none and says nothing further about what
+> was withheld.
 
 > **Normative.** A deflection carries no span of the withheld content and no value
 > derived from it — not a paraphrase, a summary, a count over it, a category, a
@@ -411,18 +413,27 @@ fall out of the rule rather than needing a special case written for it later.
 > from what was speakable on that channel, plus the fact of the withholding and the
 > channel it names.
 
-> **Normative.** Where nothing remains to say and no channel of bounded audience is
-> available to name, the outcome on that channel is silence. No implementation
-> substitutes a partial answer, an apology carrying the subject, or a reply that
-> makes the existence of the withheld content inferable beyond the bare fact that
-> something was withheld.
+> **Normative.** Where the turn was addressed to the assistant and nothing
+> speakable remains, the answer states that it cannot be given on this channel and
+> carries nothing else. No implementation substitutes a partial answer, an apology
+> carrying the subject, or a reply that makes the withheld content inferable beyond
+> the bare fact that something was withheld.
+
+> **Normative.** Where nothing was addressed to the assistant — a delivery, or any
+> other emission on a channel nobody asked on — and §3 withholds the whole of what
+> would be emitted, the outcome on that channel is **silence**. Nothing is emitted
+> announcing that something was withheld.
 
 > **Normative.** A delivery whose content §3 withholds from a channel of unbounded
 > audience is **not emitted on that channel**, and no deflection is spoken in its
-> place unless that deflection is itself composed under the clauses above. The
-> notification is neither discarded nor retired on that account: it stays in the
-> hub's durable outbox (ADR-0131 §3) and reaches the user on a channel that can
-> carry it. Delivery on a channel of bounded audience is unaffected.
+> place. Delivery on a channel of bounded audience is unaffected.
+
+> **Normative.** Such a notification is neither discarded nor retired on that
+> account: it stays in the hub's durable outbox (ADR-0131 §3) and is delivered on a
+> channel that can carry it **if and when a device asks on one**. This ADR promises
+> no delivery in the absence of such a channel and creates no channel; ADR-0131 §1
+> keeps delivery an answer to a request a device made, and ADR-0130's own retention
+> and expiry govern the entry unchanged, so a notification may expire unread.
 
 > **Normative.** A reply composed for a channel of bounded audience is never
 > emitted on a channel of unbounded audience. A component that fans one value out
@@ -448,20 +459,31 @@ this is what it is; ADR-0044, ADR-0052 and ADR-0059 are the durable machinery
 behind it, and none of them is engaged by this ADR, because a deflection parks
 nothing and resolves nothing.
 
+**Naming a channel is conditional, because the case where there is none is
+ordinary rather than exotic.** A room speaker with no browser open and no other
+enrolled device is the state a household kitchen is in most of the day, and a rule
+that required naming a bounded channel there would have no satisfying output at
+all. So the naming is conditional and the *stating* is not: the answer still says
+that something was withheld, which is what keeps the remaining content from
+reading as the whole of it.
+
+**An addressed turn always answers; an unaddressed emission stays silent.** The two
+clauses look like one rule with an exception and are two rules with different
+subjects. When the owner asks a question aloud, silence is indistinguishable from a
+system that failed, and #1318's milestone 19 exit test turns on a deflection being
+*heard*. When nothing was addressed to the assistant — milestone 20's unprompted
+utterance into a room — an emission whose entire content is "there is something I
+will not say" is pure signal about the existence of withheld content, delivered to
+a room that did not ask, with no answer to compensate it. The outbox is the right
+place for that notification, and saying nothing is the channel declining rather
+than the delivery path failing.
+
 **"Details on your phone" is the shape and the third clause is what keeps it from
 becoming a leak.** "You have a message from the clinic" is a deflection that
 discloses the thing it declines to read. So is "there are two things I can't say
 about Alice". The rule is that a deflection is composed from what was speakable
 plus the bare fact — which is what makes "details on your phone" the model
 sentence rather than a slogan.
-
-**Silence is a permitted outcome, and stating so is what makes milestone 20's shape
-survive.** An unprompted utterance whose entire content is withheld has nothing to
-degrade to: naming the surface aloud is itself an utterance into the room, and one
-that says something was worth saying. A notification that cannot be spoken waits in
-the outbox ADR-0131 §3 built for it, and is delivered where it can be. Saying
-nothing is not a failure of the delivery path; it is the delivery path declining a
-channel.
 
 **The delivery clause is what makes the rule implementable on the path that has no
 composing stage.** A notification is not composed by ADR-0170's stage: ADR-0131 §1
@@ -473,7 +495,11 @@ to §2 and §5, or drop the notification silently. The clause takes the fourth: 
 channel declines, and the outbox ADR-0131 §3 built for a notification nobody was
 listening for holds it. Retiring it instead would be the delivery path losing a
 notification to a disclosure rule, which is the one outcome ADR-0131 §3's durability
-exists to prevent.
+exists to prevent. What the clause deliberately does **not** promise is that the
+notification arrives: the hub cannot open a channel — ADR-0131 §1 rules that
+delivery answers "a request that device sent" — so an owner with nothing but a
+speaker gets a pending entry, and ADR-0130's retention may expire it first. Stating
+that is better than a guarantee this ADR has no instrument to keep.
 
 **The fan-out clause is where the reply path and the delivery path meet, and it is
 directed at the lane that adds speech.** ADR-0175 §4 rules that a delivery is
