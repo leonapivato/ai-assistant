@@ -1082,6 +1082,23 @@ async def test_a_reference_does_not_strip_another_operations_record_kind() -> No
     assert resolution == Resolved(subject=(held,), argument="q-1")
 
 
+async def test_a_name_does_not_name_what_that_name_possesses() -> None:
+    """The possessive is a relation and not an ending, so it is not an inflection.
+
+    ``alex`` and ``alex's`` look like ``cat`` and ``cats`` and are not the same kind of
+    pair: the second names something *of* the first. A query saying "I like Alex" that
+    reached the belief "I like Alex's dog" would park a destructive confirmation on a
+    record about a dog. A query that says ``alex's`` still finds a record that says it —
+    :func:`~ai_assistant.orchestration.routing._terms` keeps the apostrophe inside the
+    word — which is the half this keeps.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I like Alex's dog"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I like Alex")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 

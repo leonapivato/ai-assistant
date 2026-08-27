@@ -814,6 +814,13 @@ def _same_word(term: str, word: str) -> bool:
     - **a bare** ``d`` **needs a stem ending in** ``e`` (``move`` → ``moved``), which is
       the only shape it is an inflection of.
 
+    **The possessive is not one of the endings**, though it looks like the same kind of
+    thing: ``alex`` and ``alex's`` are not the same word but the second and a relation to
+    it, so "I like Alex" would name the belief "I like Alex's dog". A query saying
+    ``wife's`` still finds a record saying ``wife's`` — :func:`_terms` keeps the
+    apostrophe inside the word — and one saying ``wife`` no longer reaches whatever the
+    wife has.
+
     Deliberately not a stemmer: a stemmer is a dependency, a vocabulary and a set of
     surprises, and the tolerance this needs is the difference between the person a user
     speaks in and the person a stored belief is written in. What it does not reach —
@@ -844,7 +851,7 @@ def _same_word(term: str, word: str) -> bool:
 #: and a source identifier is not English.
 _STEM: Final = 3
 
-_INFLECTIONS: Final = ("s", "es", "d", "ed", "ing", "'s")
+_INFLECTIONS: Final = ("s", "es", "d", "ed", "ing")
 
 #: One word of a record or a query: a run of letters or digits, with apostrophes kept
 #: **inside** it so a contraction stays one word (``can't``, ``user's``). Underscores are
