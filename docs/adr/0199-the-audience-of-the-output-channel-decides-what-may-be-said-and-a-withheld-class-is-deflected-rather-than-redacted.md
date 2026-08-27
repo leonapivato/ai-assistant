@@ -191,7 +191,9 @@ a ratified sentence, so it is refused in terms rather than left to be noticed.
 > content for what it appears to be about. For a belief the recorded origin is
 > `Provenance.source`, together with `Attestation.reported_by` where the band is
 > `ATTESTED` (ADR-0092 §1), and `MemoryBase.about_person`. For a context facet it
-> is the facet's own kind and its `source`.
+> is the facet's own kind and its `source`. For a notification it is
+> `NotificationCandidate.producer`, `NotificationCandidate.notification_class` and
+> `NotificationCandidate.sensitivity`.
 
 > **Normative.** No implementation, lane or later ADR may decide a class by
 > reading `MemoryBase.content`, a facet's rendered text, a composed reply, or any
@@ -218,6 +220,19 @@ value ADR-0097 §1 keys a grant on — chosen there precisely "because the join 
 the belief already exists". A spoken-disclosure rule keyed on the same value
 inherits that join for free, and a lane that adds a source has one place to state
 its posture rather than a second classification to maintain beside the first.
+
+**A notification is classifiable on the same terms, and the fields are already
+there.** `NotificationCandidate.producer` is documented as "the producer's declared
+name — a stable Tier 2 name, on ADR-0093 §7's rule for a reader's identity", which
+is the same rule `Attestation.reported_by` is chosen under;
+`notification_class` is "declared by the producer and not a configurable value";
+and `sensitivity` is a `DataTier` "never defaulted", with `DataTier.SECRET`
+"refused at validation (ADR-0130 §2)". So the delivery path is not a hole this rule
+cannot reach — it is a second supply site with its own three recorded values, and
+ADR-0130 §2's refusal of `SECRET` at construction is §3's Tier 0 floor already
+enforced there by the type. The candidate also "references and does not contain"
+the records it is about, so classifying it does not reach through to the beliefs it
+names.
 
 **A class with no recorded origin is a real case and not a hypothetical.** A
 component that composes a value out of several inputs and records nothing about
@@ -247,11 +262,17 @@ same word.
 > `CalendarFacet` or an `EmailFacet`, each of which carries no span of any entry or
 > message by its own ratified construction.
 
-> **Normative.** An ADR admitting a new source, a new facet, or any other producer
-> of content that can reach an output channel states the posture of what it
-> produces on a channel of unbounded audience, in its own text. It may not settle
-> that question by silence, and until it does, what that producer produces is
-> withheld from such a channel.
+> **Normative.** No `notification_class` is placed as speakable on a channel of
+> unbounded audience by this ADR. An ADR admitting a delivery channel of unbounded
+> audience places the classes that exist when it is written, keyed on
+> `NotificationCandidate.producer` and `notification_class`, and a class it does not
+> place stays withheld.
+
+> **Normative.** An ADR admitting a new source, a new facet, a new notification
+> producer, or any other producer of content that can reach an output channel
+> states the posture of what it produces on a channel of unbounded audience, in its
+> own text. It may not settle that question by silence, and until it does, what
+> that producer produces is withheld from such a channel.
 
 > **Normative.** Content whose class is placed as speakable is not thereby
 > authorised for any channel this ADR says nothing about, and a placement is a
@@ -373,6 +394,13 @@ fall out of the rule rather than needing a special case written for it later.
 > reply bound for that channel is composed. No implementation composes a reply and
 > then removes, masks, blanks or rewrites part of it to satisfy this ADR.
 
+> **Normative.** The withholding subtracts from what the turn produced and adds
+> nothing. The `TurnResult` the turn produced is unchanged; the composing stage
+> gains no `ContextProvider`, no `MemoryStore`, no second context assembly and no
+> second retrieval; and its context and its memories still reach it from the turn
+> and from nowhere else (ADR-0170 §2). No lane satisfies this ADR by having the
+> stage fetch, re-assemble or re-retrieve anything.
+
 > **Normative.** Where content was withheld, the composing stage is told **that**
 > a withholding occurred, and composes an answer that states it and names a
 > channel of bounded audience on which the answer can be had.
@@ -388,6 +416,13 @@ fall out of the rule rather than needing a special case written for it later.
 > substitutes a partial answer, an apology carrying the subject, or a reply that
 > makes the existence of the withheld content inferable beyond the bare fact that
 > something was withheld.
+
+> **Normative.** A delivery whose content §3 withholds from a channel of unbounded
+> audience is **not emitted on that channel**, and no deflection is spoken in its
+> place unless that deflection is itself composed under the clauses above. The
+> notification is neither discarded nor retired on that account: it stays in the
+> hub's durable outbox (ADR-0131 §3) and reaches the user on a channel that can
+> carry it. Delivery on a channel of bounded audience is unaffected.
 
 > **Normative.** A reply composed for a channel of bounded audience is never
 > emitted on a channel of unbounded audience. A component that fans one value out
@@ -427,6 +462,18 @@ that says something was worth saying. A notification that cannot be spoken waits
 the outbox ADR-0131 §3 built for it, and is delivered where it can be. Saying
 nothing is not a failure of the delivery path; it is the delivery path declining a
 channel.
+
+**The delivery clause is what makes the rule implementable on the path that has no
+composing stage.** A notification is not composed by ADR-0170's stage: ADR-0131 §1
+rules that a delivery is "the result payload of a request that device sent" and
+ADR-0130 decides the artifact long before any device asks. So "withhold at supply"
+has no supply site there, and without the clause above a spoken delivery channel
+would face three bad options — speak an unplaced class, inspect and redact contrary
+to §2 and §5, or drop the notification silently. The clause takes the fourth: the
+channel declines, and the outbox ADR-0131 §3 built for a notification nobody was
+listening for holds it. Retiring it instead would be the delivery path losing a
+notification to a disclosure rule, which is the one outcome ADR-0131 §3's durability
+exists to prevent.
 
 **The fan-out clause is where the reply path and the delivery path meet, and it is
 directed at the lane that adds speech.** ADR-0175 §4 rules that a delivery is
@@ -611,10 +658,31 @@ The five clauses a reader would check:
 - **ADR-0170 §1's "no reply is gated … on the ground that it is a reply".** That
   clause is about ADR-0021 §5's floor, ADR-0148's machinery and ADR-0017 §3, and it
   is used here as given: this ADR engages none of the three, adds no permission
-  check to the reply path, and gates nothing. What it constrains is which of the
-  turn's own inputs the composing stage is supplied for a given channel — a
-  question ADR-0170 §2 fixes the *set* of and says nothing about the filtering of. A
-  reader holding only ADR-0170 builds the stage exactly as before.
+  check to the reply path, and gates nothing.
+- **ADR-0170 §2's "Its context and its memories are the ones the turn already
+  assembled".** This is the clause a reader would reach for, and the test is applied
+  to it rather than asserted past. Read with the prose ADR-0089 §3 makes available
+  for exactly that purpose, the clause fixes the **provenance** of the stage's
+  inputs and not their cardinality: its own heading is "The stage consumes **no
+  `ContextProvider` and no `MemoryStore`**", its closing sentence is "It performs no
+  second context assembly and no second retrieval", and its rationale is about the
+  composition root and about not reaching through `Engine`'s collaborators for a
+  provider. **The decisive test is that an implementation satisfying §5 still
+  satisfies every clause of ADR-0170 §2**: the stage holds no provider and no store,
+  assembles nothing a second time, retrieves nothing a second time, and receives
+  what it receives from the turn and from nowhere else. §5's second clause states
+  that in terms so the compatibility is a rule rather than a reading. What changes
+  is that a subset is supplied where a superset was available — an addition of an
+  obligation, contradicting no sentence ADR-0170 wrote, which is ADR-0082 §1's
+  stacked addition rather than ADR-0070 §1's supersession. Declaring it a
+  supersession would be the mis-declaration ADR-0082 §1 warns of, and would edit a
+  `Status` line on a decision this ADR leaves entirely intact.
+- **ADR-0130 §2 and ADR-0131 §1 and §3.** §2's recorded-origin list for a
+  notification reads three fields ADR-0130 put on the candidate, for a purpose it did
+  not name and does not exclude; §5's delivery clause declines a channel and leaves
+  the outbox's durability doing exactly the job ADR-0131 §3 built it for. Neither
+  ADR gains or loses a sentence, and a reader holding only them builds the same
+  producer, the same artifact and the same outbox.
 - **ADR-0175 §4's "filters nothing … withholds nothing".** Untouched, and §5's
   reasoning says why: the obligation is stated over a component that fans out to
   channels of differing audience, which the gateway of ADR-0175 is not — every
@@ -729,6 +797,17 @@ clearest user story. Rejected in terms (§4): the evidence is a sensed signal ov
 medium anyone in range can inject into, being wrong costs exactly the disclosure the
 rule exists to prevent, and admitting it is voice-as-credential arrived at by a
 different road. #665 names this constraint as inherited rather than new.
+
+**Scope the whole decision to replies, and leave notification deliveries to
+milestone 20.** Tempting because a delivery is not composed by ADR-0170's stage, so
+§5's "withhold at supply" has no supply site on that path and the rule needs a
+second disposition to be implementable. Rejected because the delivery path is where
+#1318 says "the disclosure rules bite hardest" — an unprompted utterance into a room
+nobody addressed — and a decision that governs the answer to a question and not the
+interruption nobody asked for has ruled the easy half. The second disposition turns
+out to be cheap: `NotificationCandidate` already carries `producer`,
+`notification_class` and `sensitivity`, so the classification exists, and declining
+the channel costs nothing because ADR-0131 §3's outbox is durable.
 
 **Defer the whole decision to the ADR that builds the spoken channel.** One lane
 instead of two, with the mechanism and its disclosure rule decided together by
