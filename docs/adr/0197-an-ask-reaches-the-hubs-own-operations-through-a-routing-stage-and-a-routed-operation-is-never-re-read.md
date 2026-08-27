@@ -751,11 +751,22 @@ whole product is that it noticed.
 > `PERFORMED` on a read-only operation;
 > every element of `listing`, and of a confirmation's `subject`, is of the arm
 > `operation` names; a present `confirmation`'s **own** `operation` equals the outer
-> `operation`; and the **tag decides the permitted outcomes**, so that
-> `AWAITING_CONFIRMATION` and `REFUSED` are reachable **only** on a confirm-owed
-> `operation` and `PERFORMED` beside a `listing` **only** on a read-only one. §3's
-> tag is a property of the operation and is therefore derivable from `operation`
-> alone, which is what lets a validator state this without a second field. The last is the one an inner-model validator cannot reach: a
+> `operation`; and the **tag decides the permitted outcomes**, stated as a closed
+> set per tag rather than as a list of exclusions. A **read-only** operation admits
+> exactly three: `PERFORMED`, `UNRECORDED` and `FAILED`. A **confirm-owed**
+> operation admits all eight. §3's tag is a property of the operation and is
+> therefore derivable from `operation` alone, which is what lets a validator state
+> this without a second field.
+
+**The read-only set is three because §5 gives a read-only route nothing to be
+ambiguous about.** Such an operation takes no query and resolves no argument, so
+there is no lookup, and `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED` and `NOT_FOUND` are all
+statements about a lookup that never ran; `AWAITING_CONFIRMATION` and `REFUSED` are
+statements about a confirmation §7 never offers it. Writing the rule as a closed set
+per tag rather than as the three exclusions the pipeline happens to notice is what
+keeps §8's own claim true — that `RoutedOperation` is unable to describe a pass that
+did not happen — and it is the form that stays complete when a ninth member is added
+to `RouteOutcome` rather than silently admitting it on both tags. The last is the one an inner-model validator cannot reach: a
 > card is valid on its own terms while describing a different operation from the
 > route that produced it, and a user reading "revoke this grant?" would be
 > approving a `forget`. One discriminator per value is §8's rule, and two values
@@ -1387,7 +1398,10 @@ consumer group and not a second decision.
 > asserted with a `confirmation` whose `operation` differs from the outer one and
 > which is otherwise wholly valid, and the fifth with a **read-only** `operation`
 > carrying `AWAITING_CONFIRMATION` beside a wholly valid one-element confirmation,
-> and with the same operation carrying `REFUSED`; `OperationConfirmation`'s own validator against
+> with the same operation carrying `REFUSED`, and with the same operation carrying
+> each of `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED` and `NOT_FOUND` — the last three over an
+> otherwise valid listing, since it is those that a validator written as "not a
+> confirmation outcome" admits; `OperationConfirmation`'s own validator against
 > a **zero**-element subject, a **two**-element subject, and an element of the
 > wrong arm; the
 > `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape across
