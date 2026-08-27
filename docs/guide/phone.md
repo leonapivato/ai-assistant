@@ -364,7 +364,15 @@ You get three things back, and they are three different statements.
 - **The answer**, in the panel below, exactly as a typed question's answer
   appears. It is the same rendering: a spoken turn is an ordinary turn that
   arrived by a different door.
-- **The answer spoken aloud**, played as it arrives.
+- **The answer spoken aloud**, played as it arrives. Holding the button again
+  stops it: a press is an interrupt, so an answer you have already read is one
+  you can talk over rather than wait out. The page says where the sound stopped,
+  because the words on screen are the same either way.
+
+**On an iPhone, the ring/silent switch silences it.** If the answer is on screen
+and you hear nothing, check that switch before anything else — the phone mutes
+this page's audio while it is on silent, with the volume up and nothing on the
+page able to tell.
 
 Two things it says instead, and neither is something going wrong.
 
