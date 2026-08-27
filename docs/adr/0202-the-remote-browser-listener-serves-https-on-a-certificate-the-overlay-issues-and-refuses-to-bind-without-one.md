@@ -372,11 +372,27 @@ before it bites rather than after.
 > its own sake: it is public by construction (§4). It is named in the class only so
 > that the pair is provisioned, renewed and refused together.
 
-> **Normative.** The gateway refuses at start a key file whose **owner is not the
-> user the gateway runs as**, or whose mode grants any permission to group or
-> other, and refuses a certificate or key path failing the custody conditions
+> **Normative.** The gateway refuses at start a **key** file whose **owner is not
+> the user the gateway runs as**, or whose mode grants any permission to group or
+> other. It refuses a **certificate** file on the same ownership condition and on a
+> **writability** one — no group or other write — while permitting it to be
+> world-readable, because the certificate is public by construction (§4) and only
+> its integrity is at stake. It refuses either path failing the custody conditions
 > `wire/custody.py` already owns for a path trusted rather than authenticated. It
 > reports which condition failed and on which path.
+
+> **Normative.** The certificate's predicate is **not** weaker than the key's by
+> oversight, and adversarial review is why it is stated at all. `wire/custody.py`
+> supplies **ancestor** conditions only — `first_ancestor_fault` and
+> `others_can_create_in` — and no leaf ownership or mode check, so a certificate
+> owned by the gateway's user but group-writable in a safe directory would pass
+> everything else this ADR asks. Another local user could then replace it, before
+> start, with a certificate carrying the configured name and **this key's own public
+> key** — which needs no access to the private key, since issuing a certificate over
+> somebody else's public key is what an authority does — signed by an authority no
+> browser trusts. Every check §8 enumerates would pass and every browser would
+> refuse the chain: exactly the silent dead end §2 and §6 exist to remove, arrived at
+> from the filesystem instead of from the configuration.
 
 > **Normative.** That predicate is **ownership and mode**, and it is deliberately
 > not a claim that no other user can read the key. ADR-0084 §1 rules that a
@@ -1045,13 +1061,15 @@ ordering against an event §3 had no occasion to mention.
 
 ## Consequences
 
-**One implementation lane, and its first act is the two records.** The lane is
-`interfaces/gateway/` — binding the listener with a TLS context, the start-up
-refusals of §§2, 3, 6 and 8, and §5's disclosure — plus the `Settings` fields and
-their load-time refusals, plus the `app/` wiring that hands the gateway what it
-needs. Before any of that it writes the two records §10 spells out, on ADR-0004's
-`Status` line and dated note and on ADR-0174's, copying the scope text verbatim.
-Nothing implements against this ADR until it merges (ADR-0015 §5, golden rule 5).
+**One implementation lane, and the two records are not part of it.** They are
+made in this change, on ADR-0004's `Status` line and dated note and on ADR-0174's,
+as the atomic pair ADR-0082 §7 describes — so the implementing lane writes neither,
+and a lane appending a second copy of either would be duplicating a record that has
+already landed. That lane is `interfaces/gateway/` — binding the listener with a TLS
+context, the start-up refusals of §§2, 3, 6 and 8, and §5's disclosure — plus the
+`Settings` fields and their load-time refusals, plus the `app/` wiring that hands
+the gateway what it needs. Nothing implements against this ADR until it merges
+(ADR-0015 §5, golden rule 5).
 
 **The owner gains one operating act per gateway host, and one recurring one.**
 `docs/guide/phone.md` is where both belong: its step 3 gains the two settings, its
