@@ -2,6 +2,40 @@
 
 - Status: Accepted
 - Date: 2026-08-26
+- Amended: 2026-08-27 (§1 and Context — the recursion-limit dependence is
+  attributed to the wrong mechanism, in two places). §1's rationale for the
+  `BeforeValidator` position says pydantic-core's validation of the recursive
+  `FrozenJson` alias is "a walk that costs Python stack per level, and therefore
+  one that can refuse first, with its own `recursion_loop` diagnostic, whenever
+  the recursion limit is low enough to bring its threshold under the ceiling", and
+  Context's fourth bullet says the same thing the other way: "The guard tracks the
+  interpreter's recursion limit: at `sys.setrecursionlimit(200)` the deepest
+  accepted value drops from 256 containers to 194."
+
+  **Measured** by #1620 (pydantic 2.13.4 / pydantic-core 2.46.4, at this ADR's own
+  parent), and confirmed here on the unguarded alias:
+  `TypeAdapter(Mapping[str, FrozenJson])` — the recursive alias alone, on an
+  ordinary `dict` — accepts 256 containers and no more at
+  `sys.setrecursionlimit()` of 1000, 200 and 120 alike. The alias walk is Rust and
+  costs no Python frame per level, so its threshold is flat at every recursion
+  limit. The mechanism that tracks the limit is **this repository's own
+  `_deep_freeze`**, which accepts 997 containers at a limit of 1000 and 197 at 200
+  — and 197 is where the "194" figure comes from, the holder path adding a few
+  frames.
+
+  **Nothing decided changes.** Context's ground stands as stated — acceptance does
+  vary with a process-global — and only the attribution of *which* mechanism
+  varies with it is wrong. §1's ordering requirement is unaffected: the front
+  measurement is what makes the refusal limit-independent, because it refuses
+  before `_deep_freeze` recurses, and §5(d)'s pin still discriminates against both
+  non-conforming placements. §1's sentence about the *liar* case (a value that
+  presents as shallow and validates deep) is not touched here and is not what this
+  note corrects: an overridden mapping is walked through Python, so that walk does
+  cost a frame per level. A reader holding only this ADR would carry away a false
+  belief about pydantic-core, which is a stale phrase in its own text and so an
+  amendment under ADR-0082 §1 — recorded as this dated note alone, with no
+  `Status` edit and no sentence below rewritten, since no other ADR is the cause.
+  Refs #1620, PR #1617.
 
 ## Context
 
