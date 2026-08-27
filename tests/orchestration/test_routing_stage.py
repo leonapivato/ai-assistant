@@ -1037,6 +1037,51 @@ async def test_a_reference_names_a_kind_the_routed_operation_resolves_over() -> 
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        pytest.param("her dog likes cats", "my dog likes cats", id="a-third-person-possessive"),
+        pytest.param("this dog bites", "that dog bites", id="a-demonstrative-before-a-subject"),
+    ],
+)
+async def test_an_opening_word_that_says_which_one_is_not_stripped(
+    query: str, content: str
+) -> None:
+    """The opening run holds what a copied span drags along, not what identifies a subject.
+
+    ``her`` says whose dog it is and ``this`` says which dog, and with one record held
+    there is no ambiguity for the difference to show as: the route would resolve to the
+    belief about somebody else's dog and park a destructive confirmation on it. So the
+    first and second persons are strippable and the third is not, and a demonstrative is
+    strippable only where what follows it is more framing — "that I drive a green estate
+    car" is the connective the router copied, and "that dog" is a subject.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", content),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+async def test_a_reference_does_not_strip_another_operations_record_kind() -> None:
+    """ "The question about grants" is a question whose subject is grants.
+
+    The opening is a reference — this route resolves over questions — but ``grants`` is
+    the subject it names, and a strippable vocabulary pooled across the operations would
+    take it for ``revoke``'s kind of record. The query would then name nothing at all:
+    ``NOT_FOUND`` without the store being read, which is #1647's own defect rebuilt one
+    layer up. So the vocabulary is this route's entry and never the union.
+    """
+    held = question("q-1", "Which grants should I revoke?")
+    operations = Operations(questions_held=(held, question("q-2", "Did the user move?")))
+
+    resolution = await resolve(
+        operations, RoutableOperation.FORGET_QUESTION, "the question about grants"
+    )
+
+    assert resolution == Resolved(subject=(held,), argument="q-1")
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 

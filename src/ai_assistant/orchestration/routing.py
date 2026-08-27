@@ -686,20 +686,28 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
 
     **Only a leading run is dropped, and never a word from the body of the query.** That
     is the whole rule, and it is what keeps the lookup from quietly widening past what
-    the user said: every word after the opening still has to be in the record, so a
-    query that negates, quantifies, joins, places or dates its subject goes on saying so.
+    the user said: every word after the opening still has to be in the record, so a query
+    that negates, quantifies, joins, places, dates or names somebody goes on saying so.
     "That I dislike him" keeps ``him`` and does not name the belief "I dislike her".
 
-    Two things are strippable there. Always :data:`_FRAMING` — the articles and pronouns
-    a copied span opens with, "**that I** drive a green estate car", and "**my** calendar"
-    for a grant whose source is ``calendar``. And, only where the query opens on an
-    article and a record kind **this operation resolves over**, :data:`_REFERENCE` as
-    well: "the question you asked me about my commute" is six words of reference and then
-    the one word that says which.
+    What the opening may hold, and nothing else:
 
-    A set rather than a sequence, because the match is on which words the query names
-    and never on the order it named them in: the router copies a span out of a sentence,
-    and the sentence's word order is the sentence's, not the record's.
+    - **an article**, unconditionally — ``a``, ``an``, ``the`` name nobody;
+    - **a demonstrative**, only where what follows it is more framing or nothing at all.
+      "That I drive a green estate car" opens on the connective the router copies out of
+      the sentence; "that dog bites" opens on a word that says *which dog*, and a rule
+      that dropped it would name the belief "this dog bites";
+    - **a first- or second-person pronoun or possessive**, unconditionally — the speaker
+      and the assistant, which is what a copied span drags along and what differs between
+      a user speaking and a belief stored about them. The third person is absent for the
+      reason the demonstrative is conditional: ``her`` says whose dog it is;
+    - **a reference to a record**, where the query opens on an article and a kind this
+      operation resolves over (:func:`_opens_on_a_record`): "the question you asked me
+      about my commute" is six words of reference and then the one word that says which.
+
+    A set rather than a sequence, because the match is on which words the query names and
+    never on the order it named them in: the router copies a span out of a sentence, and
+    the sentence's word order is the sentence's, not the record's.
 
     Args:
         query: The user's own words for which record they meant.
@@ -711,11 +719,31 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
         framing.
     """
     terms = _terms(query)
-    strippable = _FRAMING | _REFERENCE if _opens_on_a_record(terms, operation) else _FRAMING
+    reference = _REFERENCE | _KINDS_OF[operation] if _opens_on_a_record(terms, operation) else None
     start = 0
-    while start < len(terms) and terms[start] in strippable:
+    while start < len(terms) and _is_framing(terms, start, reference):
         start += 1
     return frozenset(terms[start:])
+
+
+def _is_framing(terms: tuple[str, ...], at: int, reference: frozenset[str] | None) -> bool:
+    """Whether ``terms[at]`` is part of the opening rather than the subject.
+
+    ``reference`` is the vocabulary a record reference may use — this operation's own,
+    never every operation's — or ``None`` where the query does not open on one. Built per
+    call rather than shared, because a union over the operations would strip one route's
+    record kind out of another route's subject: "the question about grants" is a question
+    *about grants*, and a ``grants`` taken from ``revoke``'s vocabulary would leave the
+    query naming nothing at all.
+    """
+    term = terms[at]
+    if reference is not None and term in reference:
+        return True
+    if term in _DEMONSTRATIVES:
+        # A demonstrative opens either a connective ("that I …") or a subject ("that
+        # dog"), and what follows is what says which.
+        return at + 1 == len(terms) or _is_framing(terms, at + 1, reference)
+    return term in _FRAMING
 
 
 def _opens_on_a_record(terms: tuple[str, ...], operation: RoutableOperation) -> bool:
@@ -734,11 +762,7 @@ def _opens_on_a_record(terms: tuple[str, ...], operation: RoutableOperation) -> 
       ``forget_question`` and is a belief's own content when the route is ``forget``, and
       the operation is the only thing in the pass that knows which.
     """
-    return (
-        len(terms) > 1
-        and terms[0] in _ARTICLES
-        and terms[1] in _KINDS_OF.get(operation, frozenset())
-    )
+    return len(terms) > 1 and terms[0] in _ARTICLES and terms[1] in _KINDS_OF[operation]
 
 
 def _names(wanted: frozenset[str], value: str) -> bool:
@@ -828,17 +852,25 @@ _INFLECTIONS: Final = ("s", "es", "d", "ed", "ing", "'s")
 #: words and a query naming ``calendar`` reaches it.
 _WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
-#: The articles and demonstratives: half of :data:`_FRAMING`, and the half that can open
-#: a reference to a record (:func:`_opens_on_a_record`).
-_ARTICLES: Final[frozenset[str]] = frozenset(("a", "an", "the", "this", "that", "these", "those"))
+#: The demonstratives, which open either a connective the router copied ("**that** I
+#: drive a green estate car") or a subject ("**that** dog bites"). Which one they opened
+#: is read off what follows them (:func:`_is_framing`), never off the word alone.
+_DEMONSTRATIVES: Final[frozenset[str]] = frozenset(("this", "that", "these", "those"))
+
+#: What can stand in front of a record kind and make it a reference to a record
+#: (:func:`_opens_on_a_record`): an article, or a demonstrative.
+_ARTICLES: Final[frozenset[str]] = frozenset(("a", "an", "the")) | _DEMONSTRATIVES
 
 #: The words a query **opens** with as framing rather than as subject, stripped from the
 #: query side of the comparison and from that side only (#1647).
 #:
-#: Two classes, and each is here because one of #1647's own arms needs it: the articles
-#: and demonstratives, for the connective the router copies out of the sentence ("**that
-#: I** drive a green estate car"), and the pronouns and possessives, for "stop reading
-#: **my** calendar" against a grant whose source is ``calendar``.
+#: Two classes, and each is here because one of #1647's own arms needs it: the articles,
+#: which name nobody, and the **first- and second-person** pronouns and possessives, for
+#: "stop reading **my** calendar" against a grant whose source is ``calendar``. Those two
+#: persons are the speaker and the assistant — what a copied span drags along, and what
+#: differs between a user speaking and a belief stored about them. The third person is
+#: **not** here: ``her`` in "her dog likes cats" says whose dog it is, and a query that
+#: lost it would name the belief "my dog likes cats".
 #:
 #: **They are stripped from the opening and nowhere else** (:func:`_wanted`), which is
 #: what stops this set from quietly widening the lookup past what the user said. A word
@@ -856,12 +888,13 @@ _ARTICLES: Final[frozenset[str]] = frozenset(("a", "an", "the", "this", "that", 
 #: The record side keeps all of its words, which is what makes the asymmetry safe: a
 #: record whose own words are ``the`` and ``my`` is still matched by a query naming them,
 #: because the match is tested against everything the record says.
-_FRAMING: Final[frozenset[str]] = _ARTICLES | frozenset(
+_FRAMING: Final[frozenset[str]] = frozenset(
     word
     for group in (
-        # pronouns and possessives
-        "i me my mine myself we us our ours you your yours he him his she her hers",
-        "it its they them their theirs",
+        # articles
+        "a an the",
+        # the first and second persons, and their possessives
+        "i me my mine myself we us our ours you your yours",
     )
     for word in group.split()
 )
@@ -869,12 +902,14 @@ _FRAMING: Final[frozenset[str]] = _ARTICLES | frozenset(
 #: The record kinds a **reference** may name, per confirm-owed operation — the kinds that
 #: operation's lookup resolves over, and no others (:func:`_opens_on_a_record`).
 #:
-#: Per operation rather than one list, because the same noun is a reference for one route
-#: and a belief's own content for another: "the question of taxes" names a deferred
-#: question when the route is ``forget_question`` and is something the user believes when
-#: the route is ``forget``. The operation is the only thing in the pass that knows which,
-#: and a route that resolved over beliefs while stripping the word ``question`` would
-#: hand "the question of taxes" to the belief "I hate taxes".
+#: Per operation rather than one list, twice over. A reference's *opening* has to name a
+#: kind this route resolves over: "the question of taxes" names a deferred question when
+#: the route is ``forget_question`` and is something the user believes when the route is
+#: ``forget``, and a route over beliefs that stripped ``question`` would hand that query
+#: to the belief "I hate taxes". And the reference's *vocabulary* is this entry alone
+#: (:func:`_is_framing`), never the union: "the question about grants" is a question
+#: whose subject is grants, and a ``grants`` borrowed from ``revoke``'s kinds would strip
+#: the query down to nothing and read no store at all.
 _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
     RoutableOperation.FORGET: frozenset(
         (
@@ -898,17 +933,16 @@ _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
     ),
 }
 
-#: The words that frame a **reference** to a record rather than say what it holds,
-#: stripped from the start of a query and only where it opens on an article and a record
-#: kind of :data:`_KINDS_OF` (:func:`_wanted`).
+#: The words that frame a reference to a record without naming its kind, stripped from
+#: the start of a query beside :data:`_KINDS_OF`'s entry for the route and only where the
+#: query opens on a reference (:func:`_wanted`).
 #:
-#: A person refers to what the assistant keeps by its kind — "the question you asked me
-#: about my commute" — and those words are about the record's existence rather than about
-#: what ``Question.content`` says. Every one of them is an ordinary word elsewhere, which
-#: is why the opening admits them rather than their mere presence.
-_REFERENCE: Final[frozenset[str]] = frozenset(
-    {"about", "of", "ask", "asks", "asked", "asking"} | frozenset().union(*_KINDS_OF.values())
-)
+#: A person refers to what the assistant keeps by its kind — "the question **you asked
+#: me about** my commute" — and those words are about the record's existence rather than
+#: about what ``Question.content`` says. Every one of them is an ordinary word elsewhere,
+#: which is why the opening admits them rather than their mere presence: ``about``
+#: asserts a relationship in "I talked about Alice".
+_REFERENCE: Final[frozenset[str]] = frozenset(("about", "of", "ask", "asks", "asked", "asking"))
 
 
 #: Raised where §3's vocabulary has grown a confirm-owed member and :data:`_MATCH_ON`
