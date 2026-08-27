@@ -1027,6 +1027,14 @@ def test_every_integer_setting_is_discovered() -> None:
         # so the record of what a *model* chose to do to the user's own memory is
         # pruned away by the very next routed read.
         "routing_trail_max_rows",
+        # ADR-0200 §6's bound on a spoken recording and a spoken rendering, in bytes
+        # of decoded audio. Acknowledged here for the reason every byte ceiling above
+        # is, and the ``bool`` argument bites hardest of any of them:
+        # ``hub_max_spoken_audio_bytes=True`` is a one-byte audio bound, which refuses
+        # every recording a browser can produce while the hub reports health — an
+        # ``OversizedValueError`` on every press, from a deployment that looks
+        # configured.
+        "hub_max_spoken_audio_bytes",
     }
 
 

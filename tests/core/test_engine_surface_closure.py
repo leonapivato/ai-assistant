@@ -182,8 +182,30 @@ _NAMESPACE: Final = {
 #: and gives ``AssistantEngine`` **no method** for it, so nothing on this surface
 #: returns one and the walk is right not to reach it. They are ``core`` surface the
 #: read-surface ADR §11 defers will promote when it gives them a door.
+#:
+#: The three after those are ADR-0200's — ``SpokenTurn``, which ``converse_spoken``
+#: returns, and the ``SpokenAudio`` and ``SpokenAudioFormat`` it carries. The walk
+#: reaches ``SpokenTurn`` through that method's return annotation and its argument
+#: annotations alike, and terminates almost immediately: ``TurnOutcome`` is already
+#: here, ``NonBlankEncodableText`` is a scalar, and ``SpokenAudio`` carries exactly
+#: two members — ``SpokenAudioFormat``, a closed ``StrEnum``, and ``Base64Audio``,
+#: which is an ``Annotated`` refinement of a scalar rather than a promoted model and
+#: so is a leaf ADR-0087 §2c already spells.
+#:
+#: ``SpeechFailure`` is **not** here and its absence is the shape of ADR-0200 §4
+#: rather than an omission: it is carried by
+#: :class:`~ai_assistant.core.errors.TranscriptionFailedError`, an *exception*, and
+#: reaches a client through ADR-0085 §10a's error payload rather than through any
+#: method's return type. The walk is over the field graph of what the surface
+#: returns, so it is right not to reach it; what holds it to the surface is
+#: ``wire/errors.py``'s reconstruction, which
+#: ``test_every_error_s_structured_state_round_trips_through_its_constructor``
+#: exercises over every subtype.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "SpokenTurn",
+        "SpokenAudio",
+        "SpokenAudioFormat",
         "RoutedOperation",
         "RoutableOperation",
         "RouteOutcome",
@@ -478,13 +500,24 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     and §11 say so in terms, adding no gateway route, argument or call — so
     ADR-0177 §1's thirty is unmoved again.
 
+    ADR-0200 §3's ``converse_spoken`` takes it to forty, and it is the second
+    addition that is a *further entry on an existing call* rather than a new
+    capability — ``converse`` and ``converse_streaming`` are untouched, "same names,
+    same signatures, same clauses, same results", and a caller that wants no speech
+    calls one of them and observes nothing this decision adds. It is also the **first
+    addition since ADR-0177 §1 that moves that ADR's browser count**: §12(a)
+    partially supersedes §1's enumeration for exactly this member, taking thirty to
+    thirty-one, where every addition above left it unmoved. ``resume`` gains no
+    spoken twin, and neither speech Protocol is on this surface at all — ADR-0200 §2
+    keeps the whole composition behind this one method.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 39
+    assert len(_method_names()) == 40
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -658,6 +691,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     the deciding ADR and §12 puts it on the implementing lane, rather than leaving
     either to be discovered here.
 
+    **ADR-0200 §3 is under the first limb**, and moves both numbers: the method set
+    to forty and the version to 18. It is the first-limb reading 12, 14, 15 and
+    ADR-0194 §5 all took — ``wire.surface``'s ``METHODS`` is derived from the
+    Protocol, so a version 18 client sending ``converse_spoken`` to a version 17 hub
+    is refused at the handshake rather than at the call. The **second** limb is
+    deliberately not met and ADR-0200 §9 is why: audio crosses as
+    :data:`~ai_assistant.core.types.Base64Audio`, which is text, so ADR-0087 §2c's
+    scalar table gains no row, ``project`` gains no branch, and no existing frame's
+    encoding moves. One limb is all ADR-0124 §9 needs, and naming which one is what
+    this pin exists to make a lane do.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -666,7 +710,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (39, 17), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 18), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
