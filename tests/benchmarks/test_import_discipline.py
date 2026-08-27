@@ -28,7 +28,9 @@ FORBIDDEN_EXTERNAL = frozenset(
     {
         "pydantic_ai",
         "anthropic",
+        "av",
         "openai",
+        "sherpa_onnx",
         "tiktoken",
         "fastembed",
         "huggingface_hub",

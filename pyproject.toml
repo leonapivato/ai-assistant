@@ -1413,6 +1413,14 @@ forbidden_modules = [
     # may be imported, this one states what may open a *connection*, and the second
     # rule must not weaken on the day the first list changes for a reason of its own.
     "anthropic",
+    # The media library ADR-0200 §9's containers are read and written with. Its
+    # bundled ffmpeg is built with network protocols — `av.open("http://…")`
+    # resolves and connects, verified rather than assumed — so it opens a
+    # connection in exactly the sense this contract is about, whatever it is
+    # normally used for. `models/speech_container.py` hands it an in-memory buffer
+    # and never a name, which is a property of that module rather than of the
+    # library, and is why the capability is fenced here as well.
+    "av",
     "fastembed",
     "huggingface_hub",
     "openai",

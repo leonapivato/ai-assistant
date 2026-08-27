@@ -19,6 +19,15 @@ refusal names the class of defect and the container, never a byte of the value �
 which matters most on this path, because a recording that fails to parse is
 exactly the input whose refusal a caller renders and a log records.
 
+**The library is handed a buffer and never a name.** The bundled ffmpeg is built
+with network protocols — ``av.open("http://…")`` resolves and connects, which was
+verified rather than assumed — so the *library* can open a connection even though
+this seam has no reason to. Both entry points below pass an in-memory buffer, so
+no value reaching this module can name a protocol handler, and the capability is
+fenced besides: ``pyproject.toml`` classifies ``av`` as transport-bearing and
+forbids it to every package outside ``models/``, ``ai_assistant.tools`` included
+(ADR-0017 §4, ADR-0154).
+
 **A decode is bounded before it is materialised.** A container is a compressed
 representation, so a small body can describe a very long recording; ADR-0200 §6's
 byte bound is enforced by the caller on the encoded form and says nothing about
