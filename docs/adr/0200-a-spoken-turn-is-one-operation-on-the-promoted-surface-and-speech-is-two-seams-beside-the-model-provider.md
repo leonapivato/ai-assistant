@@ -225,11 +225,20 @@ clause above is what forbids the disagreement rather than a second answer.
 > deferred routing wrapper an implementation someone writes rather than a
 > contract someone reopens.
 
-> **Normative.** This ADR adds exactly **two** subclasses and no more:
-> `SpeechTimeoutError`, `retryable` and `routable` both `True`, raised by the
-> deadline decorator; and nothing else, because nothing else has been observed.
-> A lane adds a subclass on evidence of a failure mode it has actually seen, the
-> way ADR-0011 §1's taxonomy was built, and not on speculation.
+> **Normative.** This ADR adds exactly **one** proper subclass of `SpeechError`
+> and no more — `SpeechTimeoutError`, `retryable` and `routable` both `True`,
+> raised by the deadline decorator — so the taxonomy is **two classes**: the base
+> and that one. Nothing else, because nothing else has been observed. A lane adds
+> a subclass on evidence of a failure mode it has actually seen, the way ADR-0011
+> §1's taxonomy was built, and not on speculation.
+
+> **Normative.** The count is over this taxonomy and over nothing else.
+> `TranscriptionFailedError` (§4) is a third new name in `core/errors.py` and is
+> **not** in it: §4 makes it an `AssistantError` subclass rather than a
+> `SpeechError` one, deliberately, because it carries no `retryable` and no
+> `routable` claim. So `SpeechError`'s proper-subclass set is exactly
+> `{SpeechTimeoutError}`, and §4's `SpeechFailure` has one member per class of
+> this taxonomy — two — which is the bijection §4 states and §13 tests.
 
 > **Normative.** Two argument refusals sit outside that vocabulary and are
 > `ValueError`, raised locally before any I/O: a `SpokenAudio` whose `media_type`
@@ -943,8 +952,16 @@ path, which is a change to how a refusal is *rendered* and not to what the codec
 
 > **Normative.** The gateway reads those three members from the body by name and
 > reads no fourth. A `timeout` a body carries is therefore **never read**: it
-> does not reach `converse_spoken`, it does not displace the gateway's own
-> budget, and it changes no response.
+> does not reach `converse_spoken` and it does not displace the gateway's own
+> budget. On a request the gateway admits it changes no response.
+
+> **Normative.** "A request the gateway admits" is the whole of that
+> qualification and it is not a loophole. A body is bounded whole by
+> `gateway_max_request_bytes` before any member of it is read, so a body big
+> enough to breach that bound is refused on its **size** — exactly as it would be
+> were the surplus bytes in `utterance`, in a member no clause names, or in
+> whitespace. That refusal is about the bytes and says nothing about the member
+> carrying them; no `timeout` is read on that path either.
 
 **Never read rather than refused, and the difference is deliberate.** No other
 assistant route inspects a member it does not use — `Gateway._ask` selects
@@ -1204,7 +1221,7 @@ each wave must contain if it exists.
 | §9 | `SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()` | A round-trip test; a test that `wire/codec.py` is unmodified; a rejection test per malformed encoding |
 | §3 (plays) | `plays` required with no default, a non-empty tuple | A test refusing the call with no `plays` and with an empty one; a test that a `frozenset` does not project |
 | §3 (format pick) | The engine picks `plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
-| §1 (failures) | `SpeechError` and `SpeechTimeoutError` in `core/errors.py`, carrying `retryable` and `routable`; `ModelError` byte-unchanged | A test asserting each seam's declared raises and both class attributes; a test that the deadline decorator raises `SpeechTimeoutError`; a test that `ModelError`'s subclass set is unchanged |
+| §1 (failures) | `SpeechError` and `SpeechTimeoutError` in `core/errors.py`, carrying `retryable` and `routable`; `ModelError` byte-unchanged | A test asserting each seam's declared raises and both class attributes; a test that the deadline decorator raises `SpeechTimeoutError`; a test that `SpeechError`'s proper-subclass set is exactly `{SpeechTimeoutError}` and that `ModelError`'s subclass set is unchanged |
 | §4 (translation) | `SpeechError` from `transcribe` becomes `TranscriptionFailedError`; `SpeechError` from `synthesize` degrades; everything else propagates | Three tests: a classified failure each side, and a non-`SpeechError` exception asserted to propagate from both |
 | §4 (no chaining) | `TranscriptionFailedError(message, *, failure: SpeechFailure = SpeechFailure.UNCLASSIFIED)` raised `from None`; `SpeechFailure` matched by identity over a frozen mapping | A test that `__cause__` is `None`; a test that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering; a test that a class named after a known one is still `UNCLASSIFIED` |
 | §4 (failure vocabularies) | One `SpeechFailure` member per `SpeechError` class | A test enumerating both and asserting the bijection, so a later subclass cannot land without its member |
@@ -1222,7 +1239,7 @@ each wave must contain if it exists.
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
-| §10 (deadline) | `/ask/spoken` reads `utterance`, `plays` and `conversation_id` from the body and nothing else; the gateway passes `_TURN_BUDGET` as `timeout` | A test posting a body that also carries `timeout`, asserting the engine is called with the gateway's own budget and that the body's value reaches neither the call nor the response |
+| §10 (deadline) | `/ask/spoken` reads `utterance`, `plays` and `conversation_id` from the body and nothing else; the gateway passes `_TURN_BUDGET` as `timeout` | A test posting a body that also carries `timeout`, asserting the engine is called with the gateway's own budget and that the body's value reaches neither the call nor the response; a second posting a `timeout` large enough to breach `gateway_max_request_bytes`, asserting the ordinary size refusal and no call |
 | §10 (secure context) | Nothing capturing a microphone on a non-loopback origin ships before ADR-0174 §11's decision | The lane's own precondition, checked at briefing rather than by a test |
 | §12 | Nothing — ADR-0177's record is made in this ADR's own change, not by an implementing lane | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0177 reaches ADR-0200 from its header |
 
