@@ -1462,6 +1462,7 @@ class Engine:
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
+        epoch_factory: Callable[[], str] = _uuid,
         now: Clock = _utcnow,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -1835,6 +1836,16 @@ class Engine:
                 nothing (its collaborators are all in-memory).
             id_factory: Supplies opaque continuation-token handles; injectable so
                 a test can assert a stable handle.
+            epoch_factory: Supplies this engine's handle epoch, read **once** at
+                construction (#1644). Separate from ``id_factory`` rather than reusing
+                it, because the epoch's whole job is to differ between two engines
+                that share one factory — which is exactly what a repeating
+                ``id_factory`` produces and exactly the case the epoch exists for, so
+                drawing both from one source would make them agree at the moment they
+                must not. Injectable because ``CONTRIBUTING`` → "Determinism" puts
+                randomness behind a seam, and because a test proving restart isolation
+                should do it with two epochs it chose rather than with two real UUIDs
+                and the hope they differ.
             now: The clock :meth:`purge_expired` measures ``trace_retention`` back
                 from, and the only reading this façade takes — every other instant
                 on this surface is stamped by the stage that owns the write.
@@ -2022,8 +2033,9 @@ class Engine:
         #: makes it unique across engines — the same pair, for the same reason, that
         #: ``InMemoryPlanStore`` and ``FakePlanStore`` mint ids from for ADR-0044
         #: §1's non-reuse guarantee, where "the sequence alone is process-local, so a
-        #: restart would re-mint a prior id".
-        self._handle_epoch = uuid.uuid4().hex
+        #: restart would re-mint a prior id". Read once, here, so every handle this
+        #: engine mints carries the same one.
+        self._handle_epoch = epoch_factory()
         self._handle_serial = count(1)
         self._reserved: set[str] = set()
         self._reserved_routes: set[str] = set()
@@ -5230,12 +5242,18 @@ class Engine:
         the parked, routed and settled tables do — so on a serial alone a restarted
         hub with a repeating factory would mint a *previous* process's handle for a
         new park, and that process's token would resolve it: the very aliasing this
-        method exists to refuse, moved one lifetime over. A fresh random epoch per
-        engine closes it, which is what ADR-0198 §4's "a token from a previous
-        process life yields ``UnknownContinuationError``" needs in order to be true
-        of every factory rather than only of a random one. Recovering an answerable
-        confirmation across a restart stays ``pending_confirmations``' job, and it
-        re-mints through this method (ADR-0052 §1).
+        method exists to refuse, moved one lifetime over. A fresh epoch per engine closes
+        it, which is what ADR-0198 §4's "a token from a previous process life yields
+        ``UnknownContinuationError``" needs in order to be true of every factory
+        rather than only of a random one.
+
+        The epoch comes from its **own** injected factory, defaulting to a UUID.
+        Randomness lives behind a seam (``CONTRIBUTING`` → "Determinism"), and it is a
+        second seam rather than a reuse of ``id_factory`` because drawing the epoch
+        from that factory would make two engines sharing one agree on it — the very
+        case the epoch exists to separate. Recovering an answerable confirmation
+        across a restart stays ``pending_confirmations``' job, and it re-mints through
+        this method (ADR-0052 §1).
 
         The suffix is not a secret and does not need to be: the factory's value is
         what makes a handle unguessable, and the token stays opaque to every caller
