@@ -110,6 +110,11 @@ from ai_assistant.testing.recipient_grants import (
     recipient_grant,
     recipient_revocation_of,
 )
+from ai_assistant.testing.routing import (
+    FakeRoutingRecorder,
+    FakeRoutingTrail,
+    routed_operation_record,
+)
 from ai_assistant.testing.secrets import (
     DEFAULT_INSTALLATION,
     OTHER_INSTALLATION,
@@ -211,6 +216,8 @@ __all__ = [
     "FakeRecipientGrantResolution",
     "FakeRecipientGrantStore",
     "FakeRecipientGrants",
+    "FakeRoutingRecorder",
+    "FakeRoutingTrail",
     "FakeSecretStore",
     "FakeSecrets",
     "FakeSourceGrantStore",
@@ -246,6 +253,7 @@ __all__ = [
     "recipient_grant",
     "recipient_revocation_of",
     "revocation_of",
+    "routed_operation_record",
     "source_grant",
     "source_read_record",
     "succeeds",
