@@ -196,38 +196,52 @@ _WITHHELD_LINE: Final = (
     "Something that bears on this was NOT AVAILABLE ON THIS CHANNEL and has not been shown to you."
 )
 
-#: What is added to :data:`_SYSTEM_PROMPT` where the answer is bound for a channel
-#: of **unbounded** audience — ADR-0200 §3's spoken turn, and today nothing else.
+#: What is added to a system prompt where the answer is bound for a channel of
+#: **unbounded** audience — ADR-0200 §3's spoken turn, and today nothing else.
 #:
-#: **It adds no decision procedure and takes none away.** ADR-0199 §2 forbids
+#: **It carries no decision procedure and takes none away.** ADR-0199 §2 forbids
 #: deciding a class by inspecting content, so nothing here asks the model to judge
 #: what may be said: the judgement was made at supply, in
-#: ``orchestration.disclosure``, on recorded origin, and the withheld material never
-#: reached this prompt. What this text does is shape the *deflection* ADR-0199 §5
-#: specifies for the case where something was held back.
+#: ``orchestration.disclosure``, on recorded origin, and what was withheld never
+#: reached this prompt. What this text does is say what the channel is.
 #:
-#: **The model cannot leak what it was not given, which is the whole point of
-#: withholding at supply** (ADR-0199 §5). It is told **that** a withholding
-#: occurred and nothing about what it was, so a paraphrase, a summary, a count, a
-#: category or a subject label is not something it is trusted not to write — it is
-#: something it has no material to write from.
+#: **Appended to both system prompts and not only to the turn's** (ADR-0200 §7).
+#: The composing stage is told the audience of the channel the answer is bound for
+#: on *every* composition of this operation, a routed pass included: a routed reply
+#: is spoken aloud exactly as an ordinary one is. That is not the third *value*
+#: ADR-0197 §6 forbids — §6's enumeration is about the routed result's data ("no
+#: query, no resolved argument, no candidate, no record, no listing and no count")
+#: and its third clause forbids "rendering a routed result into text and supplying
+#: that text to a model". A statement about the channel is neither.
 _SPOKEN_CHANNEL_PROMPT: Final = """\
 THIS ANSWER WILL BE SPOKEN ALOUD. It is bound for a loudspeaker, so it reaches \
 whoever is within range of the device without their doing anything. Write for the \
 ear: plain sentences, no markdown, no bullets, no headings, no code, and no URLs \
-read out character by character.
+read out character by character."""
 
-Where the material below records that something was NOT AVAILABLE ON THIS CHANNEL, \
-say so plainly, in one short clause, and offer to give it on a screen instead — \
-"there is something about that I would rather not say out loud; ask me again where \
-you can read it" is the shape. You have not been shown what was held back and you \
-must not guess at it: do not describe it, summarise it, categorise it, count it, \
-name a subject for it, or say who or what it concerns. Say only that something was \
-held back and where it can be had.
+#: What is added on top of that where ADR-0199 §3 held something back — the
+#: deflection shape §5 specifies, and nothing else.
+#:
+#: **The model cannot leak what it was not given, which is the whole point of
+#: withholding at supply** (ADR-0199 §5). It is told **that** a withholding occurred
+#: and nothing about what it was, so a paraphrase, a summary, a count, a category or
+#: a subject label is not something it is trusted not to write — it is something it
+#: has no material to write from.
+#:
+#: Appended **only** on a pass where something was withheld, so an ordinary answer
+#: is never invited to invent a deflection it has no grounds for.
+_WITHHOLDING_PROMPT: Final = """\
+Something that bears on this was held back because it may not be said on this \
+channel. Say so plainly, in one short clause, and offer to give it on a screen \
+instead — "there is something about that I would rather not say out loud; ask me \
+again where you can read it" is the shape. You have not been shown what was held \
+back and you must not guess at it: do not describe it, summarise it, categorise it, \
+count it, name a subject for it, or say who or what it concerns. Say only that \
+something was held back and where it can be had.
 
-Where that is recorded and nothing else below answers the question, say that you \
-cannot give this answer on this channel and stop. Do not offer a partial answer, \
-and do not apologise in words that reveal the subject."""
+Where nothing else below answers the question, say that you cannot give this answer \
+on this channel and stop. Do not offer a partial answer, and do not apologise in \
+words that reveal the subject."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,7 +482,10 @@ class ComposingStage:
         """
         conversation = (
             Message(
-                role=Role.SYSTEM, content=_system_prompt(unbounded_audience=unbounded_audience)
+                role=Role.SYSTEM,
+                content=_system_prompt(
+                    _SYSTEM_PROMPT, unbounded_audience=unbounded_audience, withheld=withheld
+                ),
             ),
             Message(
                 role=Role.USER, content=_render_request(turn, step, undriven, withheld=withheld)
@@ -503,7 +520,11 @@ class ComposingStage:
         return ComposedReply(text=text, degraded=False)
 
     async def compose_routed(
-        self, *, operation: RoutableOperation, outcome: RouteOutcome
+        self,
+        *,
+        operation: RoutableOperation,
+        outcome: RouteOutcome,
+        unbounded_audience: bool = False,
     ) -> ComposedReply:
         """Compose the answer for a routed pass, from two enum values (ADR-0197 §6).
 
@@ -542,13 +563,27 @@ class ComposingStage:
                 owes no answer, is not composed for, and originates no model call
                 (ADR-0197 §10) — the engine decides that before this stage is reached,
                 exactly as it decides a parked step's.
+            unbounded_audience: Whether the channel this answer is bound for has an
+                **unbounded** audience (ADR-0200 §3, §7). A routed reply on a spoken
+                turn is spoken aloud exactly as an ordinary one is, so the audience
+                reaches this composition too — and it is **not** the third value
+                ADR-0197 §6 forbids: that section's enumeration is about the routed
+                result's data ("no query, no resolved argument, no candidate, no
+                record, no listing and no count") and its third clause forbids
+                "rendering a routed result into text and supplying that text to a
+                model". A statement about the channel is neither, and nothing here
+                composes a deflection: ADR-0199 §3 withholds nothing from two closed
+                vocabularies this system owns, so there is nothing on this path for a
+                withholding to have happened to.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError`` or
             came back unusable as an answer.
         """
         try:
-            answer = await self._model.complete(_routed_prompt(operation, outcome))
+            answer = await self._model.complete(
+                _routed_prompt(operation, outcome, unbounded_audience=unbounded_audience)
+            )
         except ModelError:
             _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
             return ComposedReply(text=None, degraded=True)
@@ -771,7 +806,9 @@ _OUTCOME_PHRASE: Final[dict[RouteOutcome, str]] = {
 }
 
 
-def _routed_prompt(operation: RoutableOperation, outcome: RouteOutcome) -> tuple[Message, ...]:
+def _routed_prompt(
+    operation: RoutableOperation, outcome: RouteOutcome, *, unbounded_audience: bool = False
+) -> tuple[Message, ...]:
     """Assemble the conversation for a routed pass, from two enum values (ADR-0197 §6).
 
     Every span is this repository's own: the system turn is a constant, and the user
@@ -785,12 +822,20 @@ def _routed_prompt(operation: RoutableOperation, outcome: RouteOutcome) -> tuple
     Args:
         operation: The routed operation.
         outcome: What became of it.
+        unbounded_audience: Whether the answer is bound for a channel of unbounded
+            audience (ADR-0200 §3). It changes the *instruction* and not the
+            material, which is why it does not touch §6's enumeration.
 
     Returns:
         The system turn and the user turn, in that order.
     """
     return (
-        Message(role=Role.SYSTEM, content=_ROUTED_SYSTEM_PROMPT),
+        Message(
+            role=Role.SYSTEM,
+            content=_system_prompt(
+                _ROUTED_SYSTEM_PROMPT, unbounded_audience=unbounded_audience, withheld=False
+            ),
+        ),
         Message(
             role=Role.USER,
             content=(
@@ -801,27 +846,33 @@ def _routed_prompt(operation: RoutableOperation, outcome: RouteOutcome) -> tuple
     )
 
 
-def _system_prompt(*, unbounded_audience: bool) -> str:
-    """The instruction for this pass, given the audience of the channel it is for.
+def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> str:
+    """The instruction for this pass, given the channel it is for and what it lost.
 
-    One prompt with a clause appended rather than two prompts, because everything
-    :data:`_SYSTEM_PROMPT` says about truthfulness, attribution and the
-    conversation window is true whichever channel the answer is bound for — and two
-    copies would be two places for those rules to drift apart. What
-    :data:`_SPOKEN_CHANNEL_PROMPT` adds is what an unbounded audience changes:
-    writing for the ear, and ADR-0199 §5's deflection shape.
+    One prompt with clauses appended rather than a family of prompts, because
+    everything ``base`` says is true whichever channel the answer is bound for — and
+    a second copy would be a second place for those rules to drift apart. What is
+    appended is what the channel changes: writing for the ear (ADR-0200 §3), and
+    ADR-0199 §5's deflection shape where something was actually withheld.
 
     Args:
+        base: This pass's own instruction — :data:`_SYSTEM_PROMPT` for a turn,
+            :data:`_ROUTED_SYSTEM_PROMPT` for a routed pass.
         unbounded_audience: Whether the channel's audience is unbounded (ADR-0199
             §1). It reaches this stage from the operation being executed and never
             from an argument a caller supplied (ADR-0200 §3, §7).
+        withheld: Whether ADR-0199 §3 held anything back from this pass's material.
+            Only ever ``True`` beside ``unbounded_audience``.
 
     Returns:
         The system message's content.
     """
-    if not unbounded_audience:
-        return _SYSTEM_PROMPT
-    return f"{_SYSTEM_PROMPT}\n\n{_SPOKEN_CHANNEL_PROMPT}"
+    clauses = [base]
+    if unbounded_audience:
+        clauses.append(_SPOKEN_CHANNEL_PROMPT)
+    if withheld:
+        clauses.append(_WITHHOLDING_PROMPT)
+    return "\n\n".join(clauses)
 
 
 def _render_request(

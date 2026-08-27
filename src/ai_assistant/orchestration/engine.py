@@ -3231,7 +3231,7 @@ class Engine:
             timeout=timedelta(seconds=max(remaining(), 0.0)),
             conversation_id=conversation_id,
             compose=self._composed_spoken,
-            compose_routed=self._composed_routed_whole,
+            compose_routed=self._composed_routed_spoken,
         )
         # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
         # that an outcome over ADR-0085 §8c on its own raises exactly as it does on
@@ -6513,6 +6513,41 @@ class Engine:
         del conversation
         return await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome
+        )
+
+    async def _composed_routed_spoken(
+        self, routed: RoutedOperation, conversation: str
+    ) -> ComposedReply | None:
+        """Compose a routed answer for a channel of unbounded audience (ADR-0200 §7).
+
+        :meth:`_composed_routed_whole` with the audience told, and with nothing else
+        different. A routed reply on a spoken turn is **spoken aloud** exactly as an
+        ordinary one is, so ADR-0200 §7's clause — the composing stage is told the
+        audience of the channel the answer is bound for — reaches this composition
+        too; a path that skipped it would have the hub composing for a screen while
+        the answer went to a loudspeaker, which is the one thing §2 says the gateway
+        must not be allowed to cause and no less wrong for being caused here.
+
+        **Nothing is withheld on this path and nothing is deflected.** ADR-0197 §6
+        gives this stage two closed vocabularies this system owns, so ADR-0199 §3
+        has no content to place and §5 has no withholding to shape. Telling the
+        stage the audience is not the third *value* §6 forbids: that section's
+        enumeration is about the routed result's data — "no query, no resolved
+        argument, no candidate, no record, no listing and no count" — and its third
+        clause forbids "rendering a routed result into text and supplying that text
+        to a model". A statement about the channel is neither.
+
+        Args:
+            routed: What the routing stage did.
+            conversation: Accepted and dropped, as :meth:`_composed_routed_whole`
+                drops it.
+
+        Returns:
+            What the stage composed.
+        """
+        del conversation
+        return await self._composing.compose_routed(
+            operation=routed.operation, outcome=routed.outcome, unbounded_audience=True
         )
 
     async def _compose_routed_streaming(
