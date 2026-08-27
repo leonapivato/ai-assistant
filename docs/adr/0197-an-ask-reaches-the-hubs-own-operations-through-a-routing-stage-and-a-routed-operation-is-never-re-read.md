@@ -569,6 +569,14 @@ change what the listing beside the reply says.
 > housekeeping that reclaims slots earlier; it is never what makes an expired park
 > unusable. This decision adds no scheduler and no background job.
 
+> **Normative.** A `resume` whose row cannot be written ends in
+> `RouteOutcome.UNRECORDED` with the park **already claimed** — §9 orders the write
+> before the effect and the claim before the write — so the token is spent, the
+> slot released, and nothing performed. The remedy is this section's own sentence:
+> nothing has happened yet, and the operation is asked for again rather than
+> resumed again. A surface that told the user to retry the token would be telling
+> them to present one that now raises `UnknownContinuationError`.
+
 > **Normative.** An evicted park writes **no** row. §9's `OWED` row already stands
 > and its meaning is unchanged: a route was decided and no answer came. The absence
 > of a second row is what an unanswered park looks like, whether the user walked
@@ -667,8 +675,8 @@ whole product is that it noticed.
 
 > **Normative.** `FAILED` means the operation was **called and raised**, and the
 > engine asserts nothing about whether it took effect. `UNRECORDED` means §9's row
-> could not be written, so the operation was **never called** and nothing was
-> destroyed. The two are separate members because they are opposite statements
+> was not written — the store refused it, or no `route_id` could be minted for it
+> (§9) — so the operation was **never called** and nothing was destroyed. The two are separate members because they are opposite statements
 > about the same question — did anything happen — and a surface that rendered them
 > alike would tell a user their belief might be gone when this decision guarantees
 > it is not.
@@ -820,13 +828,16 @@ and a renderer.
 >   store mints nothing: a store that minted the id could not be handed a frozen
 >   record, and a retry could not name the row it was retrying.
 > - `route_id: Identifier` — the identity of the **route**, minted once when the
->   route is taken and carried by every row of that route. It is **unique across
->   every retained row that is not of the same route**: `record` refuses a row whose
->   `route_id` is already held by a row differing in `operation`, `subject` or
->   `conversation_id` — with `RoutingTrailError`, appending nothing, and the act that
->   row precedes does not proceed. Without that rule a repeating id factory would
->   file two destructive decisions as one route while the row-level `id` check
->   passed, since the two rows' own ids differ. On a read-only route it
+>   route is taken and carried by every row of that route. Its uniqueness is checked
+>   at **both** ends, because neither end can do it alone: at the mint (below) it is
+>   unique across every **live park**, and at the store `record` refuses a row whose
+>   `route_id` is already held by a **retained** row differing in `operation`,
+>   `subject` or `conversation_id` — with `RoutingTrailError`, appending nothing,
+>   and the act that row precedes does not proceed. Without the store's half a
+>   repeating id factory would file two destructive decisions as one route while the
+>   row-level `id` check passed, since the two rows' own ids differ; without the
+>   mint's half the bound would defeat the store's, since a pruned row is a row
+>   `record` cannot see. On a read-only route it
 >   names one row; on a confirm-owed route it is what joins the `OWED` row to the
 >   `GIVEN` or `REFUSED` row that answers it, and it is carried on the parked entry
 >   the continuation token names so the `resume` can write it.
@@ -876,6 +887,40 @@ and a renderer.
 > orphan `GIVEN` costs an operator one join that finds no `OWED`, where the refusal
 > costs the user the operation they had just approved and leaves the park claimed,
 > its slot released and nothing done.
+
+> **Normative.** A `route_id` is minted when the route is taken — by **every**
+> route, read-only ones included — and **every** mint is checked against the **live
+> park table**, the engine's own in-memory registry of §7, never against the trail's
+> retained rows. A read-only route is checked too because its `NOT_OWED` row under a
+> live park's id would collide with that park's own answer just as a second park's
+> `OWED` row would. A mint colliding with the `route_id` of a park that is still
+> registered is retried from the factory, and a
+> small retry budget exhausting ends the pass in `RouteOutcome.UNRECORDED`: nothing
+> is parked, no row is written, no token is minted and the operation is never
+> called. That is the insert-if-absent-and-retry shape ADR-0074 §1 already gives a
+> conversation id, and it is here for ADR-0074 §1's own reason — the factory is
+> *injected*, so a repeating test double, a seeded factory or a future non-random
+> scheme makes a collision reachable in a way probability does not answer.
+
+**Liveness is checked where liveness lives, which is the same lesson as the clause
+above read from the other side.** The store's `route_id` rule is a consistency
+check over the rows it **retains**, and at a small `routing_trail_max_rows` those
+rows are not a census of live routes — so it cannot be the guard against a
+repeating factory, and left as the only guard it fails in the direction that costs
+the user the operation. Concretely: a live `forget` park's `OWED` row is pruned, a
+second park mints the same id and is admitted because no row remains to conflict
+with, and the first park's approval then collides with the *second* park's retained
+row and is refused — after §7 has already claimed the token, so the user's yes is
+spent on nothing. The park table is the state and knows exactly which ids are live,
+so the mint is where a collision is caught: before anything is parked, before a
+token exists, and before a card is shown that could not be honoured.
+
+**What survives a prune is history, not a resolution.** Two routes can still end up
+under one `route_id` in the trail, where a factory repeats across a prune and no
+park was live at the mint. That costs an operator a join that finds more than it
+expected and costs no user an operation, which is the trade §9 makes throughout: a
+bounded trail forgets, and what it must never do is forget something a live park
+depends on.
 
 **The dropped check is the mistake, not the bound.** It is tempting to exempt a
 live park's `OWED` row from pruning instead, and that is the wrong half to move:
@@ -953,6 +998,39 @@ is the **record**, and a record that can refuse the thing it records is not one.
 > two ADR-0186 §10 partitions: a routed operation is never a `PermissionDecision`
 > and never a `SourceReadRecord`, and no lane widens `recent_decisions`,
 > `export_decisions`, `recent_reads` or `export_reads` to return one.
+
+> **Normative.** The routing trail is a **Tier 1 local store**. ADR-0155 §1's
+> residency clause governs it, so no component places any part of it in a service
+> another party operates; its file lives under `Settings.data_dir` and is created
+> owner-only (ADR-0004 §4, ADR-0084 §9). The hub owns it exclusively, as it owns
+> every other database in the data directory (ADR-0083 §1, §10), and no interface
+> adapter opens it. `ai-assistant-purge` destroys it as part of destroying the data
+> directory, with no per-store step and no new clause: ADR-0126 §1's act "carries
+> no inclusion list and no exclusion list … and it opens no store to empty it", and
+> no lane adds one for this store.
+
+> **Normative.** The primary production implementation lives in **`permissions/`**,
+> beside `SqliteAuditTrail` and `SqliteSourceReadTrail`. It is not built in
+> `orchestration/`, which consumes contracts and holds no store today, and the
+> stage of §2 reaches this one by injection like every other.
+
+**The classification is stated rather than inferred, and it follows either way.**
+ADR-0155 §1's second clause decides membership by *where this system persists a
+value* rather than by what it contains, so a store whose file is under `data_dir`
+is inside the residency clause whether or not this ADR says so — ADR-0185 §9's own
+reason for saying it anyway is that a new store which omitted to would be a store
+nobody had classified. The rows make it worth being findable: they carry
+conversation ids and the subjects of model-selected operations against the owner's
+own memory.
+
+**And `permissions/` is where every decision trail this system keeps already
+lives.** ADR-0004 §7 charters the subsystem for the audit trail, ADR-0185 §4 placed
+the read trail there on ADR-0097 §3's argument, and ADR-0192's `RecordedInvocation`
+rides `AuditTrail` in the same package. Being a **fourth row kind** is a statement
+about what a row *is* — that it is neither of ADR-0186 §10's two — and never about
+which package the store is built in; the two questions are answered separately
+because ADR-0186 §10's partition would otherwise read as a placement rule it never
+was.
 
 **Recording it is the delegated call, and this is why it went that way.** Every
 other place a model's choice reaches an effect in this system leaves a durable
@@ -1257,6 +1335,17 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > asserted to append. A suite that only pins the refusals passes against a `record`
 > that requires an `OWED` row.
 
+> **Normative.** The same lane ships the mint's half of §9's `route_id` rule under
+> a **deliberately repeating** id factory, which is the case the store's half
+> cannot catch: at `routing_trail_max_rows=1` and a ceiling admitting two parks,
+> park a confirm-owed route under `r`; record a routed read so the `OWED` row is
+> pruned; park a second, different confirm-owed route while the factory still
+> yields `r`. Assert that the second park does **not** register under `r` — the
+> mint retried, or the pass ended `UNRECORDED` with nothing parked and no token —
+> and then that resuming the **first**, still-live token performs its operation and
+> appends its `GIVEN` row. A suite that pins only the store's conflict case passes
+> against an implementation with no mint-time check at all.
+
 > **Normative.** The same lane ships the bounded-trail park→prune→resume path
 > end-to-end at `routing_trail_max_rows=1`: a confirm-owed route parks and records
 > `OWED`; a routed read-only operation records its `NOT_OWED` row and prunes the
@@ -1290,6 +1379,12 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > `NOT_OWED` row; and an `AMBIGUOUS` and a `NOT_FOUND` route each leaving **none**.
 > It also ships a row asserted to carry no query, no utterance and no record
 > contents, and `RouteApproval`'s two-directional validator against the tag.
+
+> **Normative.** The lane landing §9 ships its residency clause as a test rather
+> than as prose: the store's file is created **under `Settings.data_dir`** and
+> **owner-only**, asserted on the mode the platform reports, and no path outside
+> that directory is opened. It is the one clause of §9 that a working store can
+> violate while every other test passes.
 
 > **Normative.** The same lane ships the discrimination `UNRECORDED` exists for: an
 > `UNRECORDED` pass and a `FAILED` pass over the same routed `forget`, asserting
