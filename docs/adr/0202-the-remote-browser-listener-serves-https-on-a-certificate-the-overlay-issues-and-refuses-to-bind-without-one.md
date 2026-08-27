@@ -357,10 +357,11 @@ before it bites rather than after.
 
 > **Normative.** The private key is Tier 0 under ADR-0004 §1. ADR-0004 §3's
 > keyring clause is superseded **only** for this class — the **remote browser
-> listener's TLS key material**, which is exactly the private key the overlay
-> issued for the gateway machine's overlay name together with the certificate that
-> accompanies it — and for nothing else. The class is closed. No lane may cite this
-> ADR to place any other Tier 0 value outside the OS keyring, and admitting a
+> listener's TLS key material**: the private key the gateway reads at the path §8
+> names, together with the certificate that accompanies it, read at bind and for
+> the sole purpose of building that listener's TLS context — and for nothing else.
+> The class is **closed by role and by path, not by provenance**. No lane may cite
+> this ADR to place any other Tier 0 value outside the OS keyring, and admitting a
 > further kind takes its own ratified decision, however closely it resembles this
 > one.
 
@@ -384,6 +385,20 @@ before it bites rather than after.
 > not close the class ADR-0084 §1 names. **No lane may present the check as
 > establishing that the key is unreadable by other users**, in a disclosure under §5
 > or anywhere else; a lane that needs that guarantee owes its own decision.
+
+**The class is closed by role rather than by origin, and architecture review is
+why.** An earlier draft defined it as "exactly the private key the overlay issued",
+which reads well and is the wrong axis. §1's issuance requirement binds the owner's
+provisioning act and a lane's design and is **not a start-time check** — the
+gateway cannot determine a certificate's issuer, and §1 says so in terms — so a
+pair the owner provisioned some other way passes every check §8 enumerates and is
+bound "whatever its origin". A provenance-defined exemption would therefore be
+strictly narrower than the set the gateway can actually read, leaving a key it
+binds under §2 with **no** exemption from ADR-0004 §3 and §7 at all. Closing the
+class by role and path instead makes the exemption exactly coextensive with what
+the gateway may read, which is what a closed class has to be to close anything. It
+is no wider in substance: one listener, one purpose, the two paths §8 names, and
+§9's refusal of any other reader.
 
 **Why the keyring is not available here, checked against ADR-0125 rather than
 assumed.** ADR-0125 §2 closes `SecretScope` at exactly three members — `PROVIDER`,
