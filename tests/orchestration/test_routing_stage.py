@@ -890,6 +890,66 @@ async def test_a_short_source_identifier_is_not_inflected_into_another_one() -> 
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+@pytest.mark.parametrize(
+    ("content", "resolved"),
+    [
+        pytest.param("I can't drive", True, id="the-record-the-user-meant"),
+        pytest.param("I can drive", False, id="the-record-that-says-the-opposite"),
+    ],
+)
+async def test_a_contracted_negation_is_a_word_and_not_two_fragments(
+    content: str, resolved: bool
+) -> None:
+    """ "can't" is how English negates, and splitting it loses the negation entirely.
+
+    An apostrophe treated as a separator turns ``can't`` into ``can`` and ``t`` — a modal
+    and a one-letter fragment, both of which look exactly like framing — so a query the
+    user negated would reduce to the same terms as the belief asserting the opposite,
+    and with one record held there is no ambiguity for that to show up as. The
+    confirmation card would name a belief that says the opposite of what the user said.
+    """
+    held = belief("b-1", content)
+    operations = Operations(beliefs_held=(held,))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I can't drive")
+
+    expected = (
+        Resolved(subject=(held,), argument="b-1")
+        if resolved
+        else Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+    )
+    assert resolution == expected
+
+
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        pytest.param("that I talked about Alice", "I talked with Alice", id="about-asserts"),
+        pytest.param("that I hate the question of taxes", "I hate taxes", id="question-asserts"),
+    ],
+)
+async def test_a_reference_word_away_from_the_start_still_constrains(
+    query: str, content: str
+) -> None:
+    """``about``, ``of`` and the record-kind words are framing by **position**, not always.
+
+    Each of them names a record when a query opens with it — "the question you asked me
+    about my commute" — and asserts something ordinary anywhere else: "I talked about
+    Alice" is not "I talked with Alice", and a belief about the question of taxes is not
+    the belief about taxes. A bag-wide filter cannot tell those apart and would resolve
+    each of these to the record that says something else; stripping a leading run can,
+    with no parsing and no second model call.
+
+    The other half of this pair is the question arm above, which is the same words in the
+    position that does make them a reference.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", content),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 
