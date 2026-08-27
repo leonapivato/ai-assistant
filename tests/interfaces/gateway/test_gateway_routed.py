@@ -431,6 +431,8 @@ async def test_an_operation_that_carried_no_listing_crosses_a_null_one() -> None
         (timedelta(hours=2), "2026-08-27 11:00:00", "+02:00"),
         (timedelta(hours=-5, minutes=-30), "2026-08-27 03:30:00", "-05:30"),
         (timedelta(hours=5, minutes=30, seconds=21), "2026-08-27 14:30:21", "+05:30:21"),
+        (timedelta(microseconds=500_000), "2026-08-27 09:00:00.500000", "+00:00:00.500000"),
+        (timedelta(microseconds=-500_000), "2026-08-27 08:59:59.500000", "-00:00:00.500000"),
     ],
 )
 async def test_a_period_bound_crosses_rendered_from_its_own_offset(
@@ -446,6 +448,14 @@ async def test_a_period_bound_crosses_rendered_from_its_own_offset(
     ones that separate them: positive, negative-with-minutes, and an offset carrying
     **seconds**, which a renderer truncating to ``+HH:MM`` states a bound the ledger
     did not use.
+
+    **The sub-second pair is the round-3 blocker**, and it is the one where truncation
+    was silent *and* wrong in sign: ``timedelta(microseconds=-500_000)`` read through
+    ``total_seconds()`` came out ``+00:00``. ``SpendTotal`` admits an offset "at
+    whatever resolution it has" and its cross-field rule exists so "a renderer
+    performs exactly those two additions", so the rendering is meant to be total over
+    what the type accepts. No zone database produces one; what closes it is that a
+    silent truncation states a boundary the ledger did not use.
 
     **The arithmetic is asserted at this edge deliberately.** §5 bars the bound from
     being read through the client's zone database, so doing it in the gateway is what

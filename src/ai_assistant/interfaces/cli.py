@@ -9165,6 +9165,11 @@ def _render_invocation(recorded: RecordedInvocation) -> None:
 #: table rather than a ``.replace("_", " ").title()``, so a member added later is a
 #: ``KeyError`` at the one place that has to choose a word rather than a machine
 #: spelling silently reaching a user.
+#: Spelled once and used by the two spend-boundary helpers below, so neither carries
+#: a bare literal a reader has to recognise.
+_SECONDS_A_DAY: Final = 86_400
+_MICROS_A_SECOND: Final = 1_000_000
+
 _PERIOD_NAMES: Final[Mapping[SpendPeriod, str]] = {
     SpendPeriod.CALENDAR_DAY: "Today",
     SpendPeriod.CALENDAR_MONTH: "This month",
@@ -9180,13 +9185,30 @@ def _offset_label(offset: timedelta) -> str:
     renderer rounding to the minute would print an offset the clock contract says
     was never in force. A whole-minute offset — every modern one — keeps the short
     form, because a trailing ``:00`` on every line teaches a reader nothing.
+
+    **A sub-second offset keeps its fraction, and so does a sub-second bound.**
+    :class:`~ai_assistant.core.types.SpendTotal`'s own validator admits an offset "at
+    whatever resolution it has", and its cross-field rule exists so that "a renderer
+    performs exactly those two additions" — which is a claim that the rendering is
+    total over what the type accepts. Reading the offset through
+    ``total_seconds()`` truncated one: ``timedelta(microseconds=-500_000)`` came out
+    ``+00:00``, sign and all. No zone database carries such an offset, so this is a
+    value nothing produces today; what makes it worth closing is that the
+    truncation is silent and its direction is wrong — it states a boundary the
+    ledger did not use rather than declining to state one.
     """
-    total = int(offset.total_seconds())
-    sign = "-" if total < 0 else "+"
-    hours, rest = divmod(abs(total), 3600)
+    micros = (
+        offset.days * _SECONDS_A_DAY + offset.seconds
+    ) * _MICROS_A_SECOND + offset.microseconds
+    sign = "-" if micros < 0 else "+"
+    seconds, fraction = divmod(abs(micros), _MICROS_A_SECOND)
+    hours, rest = divmod(seconds, 3600)
     minutes, seconds = divmod(rest, 60)
     stem = f"{sign}{hours:02d}:{minutes:02d}"
-    return stem if not seconds else f"{stem}:{seconds:02d}"
+    if not seconds and not fraction:
+        return stem
+    stem = f"{stem}:{seconds:02d}"
+    return stem if not fraction else f"{stem}.{fraction:06d}"
 
 
 def _bound(instant: datetime, offset: timedelta) -> str:
@@ -9201,8 +9223,16 @@ def _bound(instant: datetime, offset: timedelta) -> str:
     **Both offsets are carried and both are used**, because a period containing a
     transition has different offsets at its two ends — the case ADR-0194 §1's
     boundary rule exists for, and the one a single offset would misrender.
+
+    **A fraction of a second survives, from either side of the addition.** The
+    instant is a ``UtcInstant`` and may carry microseconds, and so may the offset, so
+    a fixed ``%H:%M:%S`` states a boundary a microsecond off the one the ledger used.
+    A whole-second boundary — every one a zone database produces — keeps the short
+    form, for :func:`_offset_label`'s reason.
     """
-    return (instant.replace(tzinfo=None) + offset).strftime("%Y-%m-%d %H:%M:%S")
+    shifted = instant.replace(tzinfo=None) + offset
+    stamp = shifted.strftime("%Y-%m-%d %H:%M:%S")
+    return stamp if not shifted.microsecond else f"{stamp}.{shifted.microsecond:06d}"
 
 
 def _render_spend(totals: tuple[SpendTotal, ...]) -> None:

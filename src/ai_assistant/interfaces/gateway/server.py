@@ -232,6 +232,11 @@ _log = structlog.get_logger(__name__)
 #: first — which is what makes ADR-0168 §2's reader right about the door they built.
 _LOOPBACK: Final = "127.0.0.1"
 
+#: Spelled once for :func:`_offset_text`, so it carries no bare literal a reader has
+#: to recognise. ``interfaces.cli`` holds the same pair for the same helper.
+_SECONDS_A_DAY: Final = 86_400
+_MICROS_A_SECOND: Final = 1_000_000
+
 #: The paths the browser-facing surface uses. ADR-0168 §12 leaves the surface to
 #: this lane — "the request shapes, the paths, the document, and whether a push
 #: carrier such as a WebSocket is among them… no ADR is owed for it and the
@@ -4232,8 +4237,15 @@ def _bound_text(instant: datetime, offset: timedelta) -> str:
     what a reader sees is the boundary the ledger used. **No zone database is
     consulted here or on the page** — §5 bars the client's ``tzdata`` and this is the
     only arithmetic that would have wanted one.
+
+    **A fraction of a second survives, from either side of the addition**, exactly as
+    it does on the CLI: the instant is a ``UtcInstant`` and may carry microseconds,
+    and so may the offset, so a fixed ``%H:%M:%S`` states a boundary a microsecond
+    off the one the ledger used.
     """
-    return (instant.replace(tzinfo=None) + offset).strftime("%Y-%m-%d %H:%M:%S")
+    shifted = instant.replace(tzinfo=None) + offset
+    stamp = shifted.strftime("%Y-%m-%d %H:%M:%S")
+    return stamp if not shifted.microsecond else f"{stamp}.{shifted.microsecond:06d}"
 
 
 def _offset_text(offset: timedelta) -> str:
@@ -4242,13 +4254,26 @@ def _offset_text(offset: timedelta) -> str:
     ``interfaces.cli._offset_label``'s rule, because it is the same fact reaching a
     second surface: a zone whose offset carries seconds is rare and real, and
     truncating one would state a bound the ledger did not use.
+
+    **A sub-second offset keeps its fraction**, for that helper's own reason:
+    :class:`~ai_assistant.core.types.SpendTotal` admits an offset "at whatever
+    resolution it has", and reading it through ``total_seconds()`` truncated
+    ``timedelta(microseconds=-500_000)`` to ``+00:00``, sign and all. Nothing
+    produces such an offset today; what makes it worth closing is that the
+    truncation is silent and states a bound the ledger did not use.
     """
-    total = int(offset.total_seconds())
-    sign = "-" if total < 0 else "+"
-    hours, rest = divmod(abs(total), 3600)
+    micros = (
+        offset.days * _SECONDS_A_DAY + offset.seconds
+    ) * _MICROS_A_SECOND + offset.microseconds
+    sign = "-" if micros < 0 else "+"
+    seconds, fraction = divmod(abs(micros), _MICROS_A_SECOND)
+    hours, rest = divmod(seconds, 3600)
     minutes, seconds = divmod(rest, 60)
     stem = f"{sign}{hours:02d}:{minutes:02d}"
-    return stem if not seconds else f"{stem}:{seconds:02d}"
+    if not seconds and not fraction:
+        return stem
+    stem = f"{stem}:{seconds:02d}"
+    return stem if not fraction else f"{stem}.{fraction:06d}"
 
 
 #: A view for **every** arm of ADR-0197 §8's :data:`RoutedListing`, which is what
