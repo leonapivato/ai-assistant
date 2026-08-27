@@ -125,6 +125,10 @@ from ai_assistant.testing.secrets import (
     SecretMethod,
     disclosure_of,
 )
+from ai_assistant.testing.speech import (
+    FakeSpeechSynthesizer,
+    FakeSpeechTranscriber,
+)
 from ai_assistant.testing.streaming import (
     DEFAULT_STREAM_DELTAS,
     DEFAULT_STREAM_REPLY,
@@ -224,6 +228,8 @@ __all__ = [
     "FakeSourceGrants",
     "FakeSourceReadRecorder",
     "FakeSourceReadTrail",
+    "FakeSpeechSynthesizer",
+    "FakeSpeechTranscriber",
     "FakeSpendGate",
     "FakeSpendLedger",
     "FakeStreamingCompleter",
