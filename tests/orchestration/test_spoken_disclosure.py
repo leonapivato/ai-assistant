@@ -9,12 +9,13 @@ withholding, and nothing filtering the composed answer afterwards.
 
 from __future__ import annotations
 
+import json
 from base64 import b64encode
 from datetime import UTC, datetime
 from typing import Final
 
 import pytest
-from test_engine import PATIENT, Harness
+from test_engine import PATIENT, Harness, NoStepPlanner
 
 from ai_assistant.core.types import (
     ActionPlan,
@@ -33,6 +34,7 @@ from ai_assistant.core.types import (
     TimeOfDay,
     TurnResult,
 )
+from ai_assistant.orchestration import RoutingStage
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.disclosure import (
     placed_facet_kinds,
@@ -41,6 +43,7 @@ from ai_assistant.orchestration.disclosure import (
 )
 from ai_assistant.testing import (
     FakeModelProvider,
+    FakeRoutingRecorder,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
@@ -470,3 +473,63 @@ async def test_nothing_rewrites_the_composed_answer_and_the_rendering_is_that_va
     assert isinstance(harness.synthesizer, FakeSpeechSynthesizer)
     assert harness.synthesizer.spoken_texts == (deflection,)
     assert spoken.spoken is not None
+
+
+# --- §7: a routed spoken pass is told the audience too -----------------------
+
+
+async def test_a_routed_spoken_pass_composes_for_the_unbounded_channel() -> None:
+    """ADR-0200 §7: the audience reaches the stage on **every** composition of this call.
+
+    A routed pass is composed from two enum values rather than from a turn
+    (ADR-0197 §6), and it is still spoken aloud — so a path that skipped the
+    audience would have the hub composing for a screen while the answer went to a
+    loudspeaker, which is exactly what ADR-0200 §2 refuses to let the *gateway*
+    cause and is no less wrong caused here.
+
+    **And the audience is not the third value ADR-0197 §6 forbids.** That section's
+    enumeration is about the routed result's data — "no query, no resolved argument,
+    no candidate, no record, no listing and no count" — and its third clause forbids
+    "rendering a routed result into text and supplying that text to a model". A
+    statement about the channel is neither, and this case checks that nothing else
+    moved: the routed prompt is still two phrases selected by enum member.
+    """
+    composing = FakeModelProvider("I have forgotten it.")
+    harness = Harness(
+        composing=ComposingStage(model=composing, streaming=FakeStreamingCompleter()),
+        planner=NoStepPlanner(),
+        routing=RoutingStage(
+            model=FakeModelProvider(json.dumps({"operation": "forget", "query": "hiking"})),
+            recorder=FakeRoutingRecorder(),
+        ),
+        transcriber=FakeSpeechTranscriber(transcripts=["forget what I said about hiking"]),
+    )
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.routed is not None
+    assert "SPOKEN ALOUD" in _messages(composing, Role.SYSTEM)
+    # The material is untouched: two phrases from two closed vocabularies, and no
+    # query, candidate, record, listing or count anywhere near it (ADR-0197 §6).
+    user_turn = _messages(composing, Role.USER)
+    assert "hiking" not in user_turn
+    assert user_turn.startswith("The user asked the assistant to ")
+
+
+async def test_a_routed_written_pass_is_not_told_a_spoken_channel() -> None:
+    """The other side, so the clause is a property of the *operation* and not a default."""
+    composing = FakeModelProvider("I have forgotten it.")
+    harness = Harness(
+        composing=ComposingStage(model=composing, streaming=FakeStreamingCompleter()),
+        planner=NoStepPlanner(),
+        routing=RoutingStage(
+            model=FakeModelProvider(json.dumps({"operation": "forget", "query": "hiking"})),
+            recorder=FakeRoutingRecorder(),
+        ),
+    )
+
+    outcome = await harness.engine.converse("forget what I said about hiking", timeout=PATIENT)
+
+    assert outcome.routed is not None
+    assert "SPOKEN ALOUD" not in _messages(composing, Role.SYSTEM)
