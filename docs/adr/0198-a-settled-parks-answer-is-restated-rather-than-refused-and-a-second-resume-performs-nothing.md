@@ -461,9 +461,10 @@ third reason above is a cost to weigh rather than a prohibition.
 > neither raises, and that the trail holds exactly one resolution for the binding.
 > An implementation that installs the settled record after releasing §1's lock —
 > or evicts before installing — fails it deterministically, because the second
-> call reaches the table between the two and finds nothing. A consumer whose
-> transport forbids two calls in flight on one connection (ADR-0084 §3) declines
-> the case through the suite's existing capability skip rather than weakening it.
+> call reaches the table between the two and finds nothing. No consumer is
+> exempted: `AssistantEngineContract` offers no capability skip, and the wire
+> client opens **one connection per call**, so two concurrent `resume` calls
+> engage ADR-0084 §3's serial-connection rule not at all.
 
 > **Normative.** §1's same-critical-section clause is additionally pinned inside
 > `orchestration`'s own tests, where the seam is reachable: a resolution held
