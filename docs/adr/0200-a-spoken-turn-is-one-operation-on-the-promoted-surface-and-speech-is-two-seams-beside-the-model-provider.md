@@ -503,6 +503,24 @@ therefore does not exist; `spoken` is a `SpokenAudio`.
 > `OversizedValueError` exactly as it does on `converse`. Dropping a rendering
 > cannot rescue it, and no implementation tries.
 
+> **Normative.** The degradation is **measured again on the result it
+> produces**, and it has exactly one step. Where the `SpokenTurn` carrying
+> `spoken` `None` still breaches ADR-0085 §8c, that is §8c's oversized result
+> and raises `OversizedValueError` — the same error, on the same clause, as the
+> case above. Nothing further is dropped to make it fit: `heard` is owed to the
+> caller by this section's disclosure clause and `outcome` is the answer, so
+> there is no third thing to give up, and an implementation that shortened
+> either would be truncating a result rather than degrading a rendering.
+
+**A result can be over the limit with no rendering in it at all, which is why
+the second measurement is a clause and not an implementation detail.** The
+wrapper is not free: `heard` carries the transcript, `spoken_degraded` and the
+member names carry their own bytes, and none of them is in the `TurnOutcome` §8c
+would have measured on `converse`. So a `TurnOutcome` lawful alone can be over
+§8c once wrapped — before any rendering is added and after one is taken away —
+and the two clauses above make that shape raise rather than leaving it, like the
+gap the fourth case closed, with no legal value.
+
 **Why §6's bound does not already cover this.** §6 bounds the recording and the
 rendering, each on its own; ADR-0085 §8c bounds the *serialised whole*. A
 `TurnOutcome` that `converse` may lawfully return just under §8c, plus a
@@ -570,12 +588,39 @@ stated.
 > which an implementation controls.
 
 > **Normative.** `TranscriptionFailedError`'s signature is therefore
-> `(message, *, failure: SpeechFailure)`, and nothing under `wire/` changes to
-> carry it: `wire/errors.py`'s `details_of` reads an `AssistantError`'s
-> structured detail off its constructor's parameters, excluding `self` and
-> `message`, and `wire/codec.py`'s `project` renders an `Enum` by its value. The
-> far side reconstructs the same class with the same member, which is the
-> substitutability ADR-0084 §4 promotes the surface for.
+> `(message, *, failure: SpeechFailure = SpeechFailure.UNCLASSIFIED)`, and
+> nothing under `wire/` changes to carry it: `wire/errors.py`'s `details_of`
+> reads an `AssistantError`'s structured detail off its constructor's
+> parameters, excluding `self` and `message`, and `wire/codec.py`'s `project`
+> renders an `Enum` by its value. The far side reconstructs the same class with
+> the same member, which is the substitutability ADR-0084 §4 promotes the
+> surface for.
+
+> **Normative.** **The default has exactly one caller — ADR-0085 §10a's reduced
+> payload — and no implementation may rely on it for anything else.** Every
+> raise on this path passes `failure` explicitly: the orchestration boundary
+> computes it from the caught exception's MRO under the clause above and never
+> omits it.
+
+> **Normative.** It is there because §10a's reduction sets `details` to `null`
+> when an error payload will not fit the frame, and `raise_from_payload` then
+> calls the declared type with the message alone. A *required* keyword there
+> would make that call raise `ProtocolError` instead of the declared failure —
+> one operation with a typed contract in process and an undeclared one across
+> the wire, which is the "two observable failure contracts for one call"
+> ADR-0084 §4–§5 promote this surface to prevent and which §10a's client clause
+> was written against. This is `UnresolvedEvidenceError`'s shape, a default plus
+> the loss *marked*, taken for that clause's own reason.
+
+> **Normative.** The loss is legible rather than silent, and no caller reads
+> `UNCLASSIFIED` on its own. On a reduced delivery the reconstructed error
+> carries `details_elided` `True`, which `wire/errors.py` already sets from the
+> frame's own `reduced` member: `UNCLASSIFIED` beside `details_elided` `True`
+> means the classification did not survive the frame, and beside `details_elided`
+> `False` means the seam raised a bare `SpeechError`. The `SpeechFailure`
+> vocabulary is unchanged by this — it still has exactly one member per
+> `SpeechError` class, and the default names an existing member rather than
+> adding a transport one.
 
 **This is `models/routing.py`'s `_classify`, applied one boundary further out,
 and it is why the chaining an earlier draft required was wrong.** That helper
@@ -1161,7 +1206,7 @@ each wave must contain if it exists.
 | §3 (format pick) | The engine picks `plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
 | §1 (failures) | `SpeechError` and `SpeechTimeoutError` in `core/errors.py`, carrying `retryable` and `routable`; `ModelError` byte-unchanged | A test asserting each seam's declared raises and both class attributes; a test that the deadline decorator raises `SpeechTimeoutError`; a test that `ModelError`'s subclass set is unchanged |
 | §4 (translation) | `SpeechError` from `transcribe` becomes `TranscriptionFailedError`; `SpeechError` from `synthesize` degrades; everything else propagates | Three tests: a classified failure each side, and a non-`SpeechError` exception asserted to propagate from both |
-| §4 (no chaining) | `TranscriptionFailedError(message, *, failure: SpeechFailure)` raised `from None`; `SpeechFailure` matched by identity over a frozen mapping | A test that `__cause__` is `None`; a test that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering; a test that a class named after a known one is still `UNCLASSIFIED` |
+| §4 (no chaining) | `TranscriptionFailedError(message, *, failure: SpeechFailure = SpeechFailure.UNCLASSIFIED)` raised `from None`; `SpeechFailure` matched by identity over a frozen mapping | A test that `__cause__` is `None`; a test that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering; a test that a class named after a known one is still `UNCLASSIFIED` |
 | §4 (failure vocabularies) | One `SpeechFailure` member per `SpeechError` class | A test enumerating both and asserting the bijection, so a later subclass cannot land without its member |
 | §3 (budget) | The caller's budget threaded to each stage; the effective speech bound is the lesser of it and the decorator's | Three expiry tests — in `transcribe`, in the turn, in `synthesize` — asserting `TIMED_OUT`, `converse`'s own behaviour, and degradation respectively |
 | §4 (`spoken`) | `spoken` is the rendering of `outcome.reply` and nothing else | A test that the value handed to `synthesize` is byte-identical to `outcome.reply`; no test decodes the audio |
@@ -1172,6 +1217,8 @@ each wave must contain if it exists.
 | §9 (refusal) | Every entry point constructing a `SpokenAudio` from untrusted input refuses `from None` with no input value | Two failure-path tests, in process and through the gateway, with a near-valid clip, asserting the clip appears in neither the refusal, its cause, its rendering, nor either log tier |
 | §8 (authorship) | Nothing on this path writes an exception message it did not author, the defect path included | A test propagating `RuntimeError` carrying a recognisable fragment, asserting it reaches no log tier, store or surfaced error |
 | §4 (ceiling) | The fourth degradation case, measured on the whole projected `SpokenTurn` | A near-ceiling test: an outcome lawful for `converse` plus a one-byte rendering degrades rather than raising, and the same outcome alone still raises `OversizedValueError` |
+| §4 (ceiling, second measure) | The degraded result re-measured; a `SpokenTurn` still over §8c with `spoken` `None` raises `OversizedValueError` and nothing further is dropped | A test whose `TurnOutcome` fits ADR-0085 §8c alone but whose `SpokenTurn` does not even with no rendering, asserting `OversizedValueError` rather than a degradation, and that `heard` is not shortened to make it fit |
+| §4 (reduced delivery) | `failure` defaults to `UNCLASSIFIED` for ADR-0085 §10a's reduction alone; every raise passes it explicitly | A reduced round-trip at §8d's frame floor asserting `TranscriptionFailedError` is raised with `details_elided` `True` rather than `ProtocolError`; a test that the orchestration path passes `failure` on every raise |
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
