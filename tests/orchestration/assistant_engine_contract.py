@@ -2043,25 +2043,30 @@ class AssistantEngineContract(ABC):
         carries its ``step``, still carries no ``routed``, and is ruled exactly as ADR-0052
         §3 and ADR-0042 §4 ruled it.
 
-        **What this case asserts is the scope, and deliberately not the ruling.** ADR-0197
-        §12 writes it as "still raises ``PermissionDeniedError``", and that is in dispute
-        rather than merely stale: ADR-0042 §4 makes a denial a *ruling* — "the adapter
-        conveys consent; the policy rules on it; the engine records and executes" — and
+        **ADR-0197 §12 writes this case as "still raises ``PermissionDeniedError``", and
+        ADR-0197's own amendment of 2026-08-27 corrects it.** §7's "and to raise
+        ``PermissionDeniedError`` exactly as it does today" is a description of the tree
+        rather than a decision, and the tree returns a ruling: ADR-0042 §4 makes a denial a
+        ``DENY`` *ruling* — "the adapter conveys consent; the policy rules on it; the
+        engine records and executes" — and
         :meth:`test_a_refusal_is_a_result_and_not_an_exception` has pinned the consequence
-        against every implementation since ADR-0084, while ADR-0197 §7 describes the same
-        refusal as raising. Settling that is an amendment to a ratified decision, and
-        issue **#1636** carries it.
+        against every implementation since ADR-0084. §13's record on ADR-0042 is what
+        leaves that guarantee whole here: it supersedes §4 **only** "as it reaches a resume
+        answering a routed park".
 
-        So this case asserts only the two facts no reading disputes and that §12 is
-        actually asking to see: the outcome still carries a ``step``, and it carries no
-        ``routed`` member. Whatever the refusal *produces* is the older case's to pin, and
-        it is unchanged either way — which is the whole of what "the supersession is
-        narrow" means here. Without this case the suite would pin the new behaviour and
-        not its scope, and an implementation that stopped carrying a step on **every**
-        refusal would pass.
+        So this case pins the three facts the corrected reading leaves: the outcome still
+        carries a ``step``, it carries **no** ``routed`` member, and **nothing is raised** —
+        the last asserted by the call standing unwrapped, since a
+        :class:`~ai_assistant.core.errors.PermissionDeniedError` here would fail the case
+        outright. What the refusal *produces* stays the older case's to pin, which is what
+        keeps this one about the **scope**: without it the suite would pin the new
+        behaviour and not its narrowness, and an implementation that stopped carrying a
+        step on **every** refusal would pass.
         """
         pending = await parked_engine.pending_confirmations()
 
+        # Unwrapped deliberately: this call raising is the failure the case exists to
+        # catch, so no `pytest.raises` may stand between it and the assertions below.
         resumed = await parked_engine.resume(pending[0].token, approved=False, timeout=_PATIENT)
 
         assert resumed.step is not None

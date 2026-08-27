@@ -2,6 +2,50 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Amended: 2026-08-27 (§7 — the ordinary parked step's refusal is described as
+  raising, and the tree returns a ruling). §7's clause bounding the routed resume
+  to three differences ends "and the whole of a `resume` answering an ordinary
+  parked step, which continues to carry its step and to **raise
+  `PermissionDeniedError` exactly as it does today**". The final four words are
+  what defeat it: the sentence is a description of the tree rather than a
+  decision, and the tree does not do it.
+
+  **What the tree does.** ADR-0042 §4 rules that "the adapter conveys consent; the
+  policy rules on it; the engine records and executes", and that `approved=False →
+  DENY` is a **ruling** — so `StepRunner.resume` returns a `DENIED` disposition,
+  `Engine.resume`'s own docstring says so, and
+  `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception` has
+  pinned it against every implementation since ADR-0084, in terms: "never a raised
+  `PermissionDeniedError` — an implementation that raised would hand a client a
+  failure path the in-process engine does not have". The `PermissionDeniedError`
+  this ADR read off `core/protocols.py`'s `resume` docstring is a declaration in
+  that docstring alone (#1636); it describes no implementation this repository has
+  ever had.
+
+  **Nothing decided changes, which is what makes this an amendment rather than a
+  supersession** (ADR-0082 §1's second limb). §7's three named differences all
+  concern the **routed** park — `step` `None` beside a non-`None` `routed`, a
+  refusal returned as `RouteOutcome.REFUSED` rather than raised, and a `turn`
+  `None` for §8's reason rather than ADR-0052 §3's — and none of them rests on the
+  sentence above. §13's record on ADR-0042 is likewise unaffected: it supersedes
+  §4's `DENY` guarantee **only** "as it reaches a resume answering a routed park",
+  which is precisely what leaves that guarantee whole for a parked step. A reader
+  holding only this ADR would build a `resume` that raises on an ordinary refusal
+  and contradict ADR-0042 §4 and a ratified conformance clause, which is a stale
+  phrase in this ADR's own text.
+
+  **§12's third conformance case follows the corrected reading.** It exists to pin
+  the supersession as **narrow** rather than to restate ADR-0042 §4, so what it
+  requires of an ordinary parked step resumed `False` is that the outcome still
+  carries a `step`, that it carries **no** `routed` member, and that no
+  `PermissionDeniedError` is raised. The property §12 is asking to see — that an
+  implementation which stopped carrying a step on *every* refusal would fail — is
+  unchanged, and the case beside it in the same suite continues to pin what the
+  refusal produces.
+
+  Recorded as this dated note alone, with no `Status` edit and no sentence below
+  rewritten, since no other ADR is the cause (ADR-0196's own shape, on #1620's
+  precedent). Refs #1623, PR #1634, #1636, ADR-0042 §4, ADR-0082 §1.
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
   *`ask` → typed operation, one-directional — a typed operation is never re-read —
