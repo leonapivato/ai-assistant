@@ -147,6 +147,13 @@ spent the mechanism to buy its output.
 > **overlay issues for a name the overlay assigns to the machine that runs the
 > gateway**, and its private key is generated on that machine and never leaves it.
 
+> **Normative.** That certificate must **chain to a root the browsing device
+> already trusts**, with nothing installed on that device for this purpose and
+> nothing for the owner to overrule. An issuance route that yields a chain the
+> browser does not already trust does **not** satisfy this ADR, whoever operates it
+> and whatever name it carries: it produces a warning instead of a secure context,
+> which makes it the self-signed route under another name and refuses with it.
+
 > **Normative.** No other issuance route is authorised. A **self-signed**
 > certificate is refused; a certificate for a name outside the overlay, from a
 > certificate authority the overlay does not operate or delegate to, is refused;
@@ -163,9 +170,11 @@ spent the mechanism to buy its output.
 > bound whatever its origin.
 
 > **Normative.** Nothing in this ADR is conditioned on Tailscale. ADR-0124 §2's
-> acceptance is of an overlay rather than of a vendor, and an overlay that
-> satisfies ADR-0124 §2 and issues a certificate for a name it assigns satisfies
-> this ADR; moving to one reopens no clause of it.
+> acceptance is of an overlay rather than of a vendor, and an overlay satisfies
+> this ADR when it satisfies ADR-0124 §2 and issues, for a name it assigns, a
+> certificate meeting the trust requirement above. Moving to such an overlay
+> reopens no clause of this ADR; moving to one whose issuance does not meet that
+> requirement is not a move this ADR permits.
 
 **The vendor's instance, named once so the clause is checkable against something
 real.** Tailscale's `tailscale cert` obtains a certificate for the machine's
@@ -174,6 +183,25 @@ authority, using the control plane to prove the name, and writes the certificate
 and the private key as files on the machine that asked. That is the worked case of
 the clause above, and it is named the way ADR-0124 §2 named Tailscale: as the
 first implementation of a property, not as the property.
+
+**The trust requirement is what makes the vendor-neutral clause mean anything, and
+architecture review was right that without it the clause was empty.** An earlier
+draft let any ADR-0124-compliant overlay that "issues a certificate for a name it
+assigns" satisfy this ADR — which an overlay running its own private authority
+does, while the browser shows a warning and withholds the microphone exactly as
+before. That is the self-signed outcome reached by a longer route, and it would
+have made this decision buy nothing. Stating the requirement as a property of the
+**chain the browsing device already trusts** keeps the neutrality that matters —
+no vendor, no named authority, no issuance API in the clause — while ruling out
+the routes that do not deliver the classification this ADR exists to obtain.
+
+**In practice that means a publicly trusted authority, and §4's disclosure follows
+from it rather than sitting beside it.** The only chains a phone trusts out of the
+box are the public ones, so requiring an already-trusted chain is what puts the
+name in front of a public authority — and, because the major browsers require
+certificate transparency of publicly trusted certificates, into a public log. The
+requirement and the disclosure are therefore one decision taken twice, and §4
+accepts the second half knowing it is the price of the first.
 
 **Why the other two stay refused, in ADR-0174 §7's own words rather than
 paraphrased.** A self-signed certificate "trains the owner to click through a
@@ -386,10 +414,10 @@ that it is on the owner's own machine, owned by the owner's own user.
 > clause of this ADR obliges a reload, and no lane may present the gateway as
 > renewing, watching or reloading anything.
 
-> **Normative.** Where the overlay issues through a control plane and a public
-> certificate authority, that issuance makes the gateway machine's overlay name
-> **public** — in the certificate itself and in the public logs such an authority
-> publishes to. That consequence is **accepted**, on the same terms ADR-0124 §3
+> **Normative.** §1's trust requirement means the issuing authority is a publicly
+> trusted one, so issuance makes the gateway machine's overlay name **public** — in
+> the certificate itself and in the transparency logs such an authority publishes
+> to. That consequence is **accepted**, on the same terms ADR-0124 §3
 > accepted the coordination metadata: it is the owner's act, it is bounded and
 > enumerable, and it discloses a name and an instant and nothing else — no request,
 > no response, no byte of the store, and no address that is reachable from the
@@ -428,11 +456,18 @@ does. This is precisely why the first clause of this section forbids the gateway
 invoke it — the convenience of a gateway that provisions its own certificate would
 have cost ADR-0004 §2's residency question, and it is not for sale at that price.
 
-**The exit is named rather than taken, in ADR-0124 §3's own shape.** An overlay
-that issues from a control plane the owner hosts, or that issues from an authority
-that publishes no public log, satisfies §1's clause with a smaller disclosure and
-reopens nothing here. **Revisit when** an overlay in use offers that, or when what
-its issuance discloses stops matching this section.
+**The exits are named rather than taken, and the smaller one is the only one
+available today.** The **name** is the owner's to choose — an overlay name that
+says nothing about them discloses nothing about them, and that costs an operating
+act they are performing anyway. A control plane the owner hosts removes the vendor
+from the issuance path but **not** the public authority from it, because §1's
+trust requirement is a fact about the browsing device and not about who runs the
+overlay; an owner who self-hosts still ends up in a public log. The exit that
+would remove the log entirely — a chain a phone trusts that is not publicly
+logged — is not available while the major browsers require transparency of
+publicly trusted certificates, and naming it as though it were would be a false
+comfort. **Revisit when** that changes, or when what an overlay's issuance
+discloses stops matching this section.
 
 ### 5. What the gateway discloses when it binds, and what that disclosure is not
 
@@ -918,6 +953,12 @@ ADR-0174 §6 already told them to make.
   so teaching the owner to overrule it spends what it buys. A trusted local root
   installed on the phone is the same objection one step further along, and it adds
   an operating act on every browsing device rather than one on the gateway host.
+- **An overlay's own private certificate authority.** The shape architecture review
+  found in an earlier draft's vendor-neutral clause, and the reason §1 now carries a
+  trust requirement: an overlay may well issue for a name it assigns, and if the
+  browsing device does not already trust the chain the owner gets the same warning
+  and the same withheld microphone. *Rejected* in §1 — it is the self-signed route
+  arrived at by a longer path, and it would have made this ADR buy nothing at all.
 - **Terminating TLS in the overlay's own "serve" feature.** It would need no
   certificate handling in this repository at all. *Rejected* in §1, on ADR-0174 §2's
   mechanical ground rather than a policy one: a terminating proxy destroys the peer
