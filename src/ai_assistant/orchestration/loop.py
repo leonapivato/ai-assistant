@@ -64,12 +64,27 @@ if TYPE_CHECKING:
         Planner,
     )
     from ai_assistant.core.types import (
+        CurrentContext,
         FeedbackEvent,
         MemoryRecord,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
+
+#: A filter over the supply one turn runs on, applied **between retrieval and
+#: planning** (ADR-0203 §2).
+#:
+#: It is handed what the turn assembled and what it retrieved, and returns what the
+#: rest of the turn may run over. It is a *filter*: it may remove members, and it may
+#: not add one, reorder what survives, assemble a second context, issue a retrieval,
+#: reach a ``ContextProvider`` or a ``MemoryStore``, or make a store query of any
+#: kind. :class:`~ai_assistant.orchestration.disclosure.UnboundedAudienceSupply` is
+#: today's only one; this loop knows nothing of disclosure and applies whatever it is
+#: given, which is what keeps ADR-0199's posture in one module.
+type SupplyFilter = Callable[
+    [CurrentContext, tuple[MemoryRecord, ...]], tuple[CurrentContext, tuple[MemoryRecord, ...]]
+]
 
 #: A user's own utterance is asserted, not inferred, so the goal it becomes
 #: carries full confidence (``Provenance`` requires 1.0 for ``USER_ASSERTED``).
@@ -408,6 +423,7 @@ class LearningLoop:
         *,
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
+        narrow: SupplyFilter | None = None,
     ) -> TurnResult:
         """Run one turn: intent, context, memory retrieval, planning.
 
@@ -441,6 +457,19 @@ class LearningLoop:
         the raw turn it might have been distilled from even where the episode is
         the more relevant record.
 
+        **A caller may narrow the supply between retrieval and planning, and
+        nothing further is read to replace what it removed** (ADR-0203 §§1-2). The
+        ``narrow`` filter is applied to the assembled context and to all three
+        groups of ``memories`` once they are in hand, and the plan, the
+        ``TurnResult`` and therefore every stage downstream of this method run over
+        exactly what it returned. Nothing is refetched, widened, re-run or
+        backfilled afterwards: a turn may reach the planner with fewer records than
+        the same utterance would on a caller that narrows nothing, and that is the
+        decision working. ``memory_degraded`` is deliberately **upstream** of it —
+        it reports whether the history read and the retrieval succeeded, which is a
+        fact about this method's I/O and not about what a caller then chose to be
+        supplied (ADR-0203 §3).
+
         Args:
             utterance: What the user said. It becomes the goal's statement
                 unrewritten — trimmed of surrounding whitespace, and otherwise
@@ -453,9 +482,15 @@ class LearningLoop:
                 separately: from the user's side both are "this answer is less
                 informed than it should have been", and a second flag would ask an
                 adapter to explain a distinction it cannot act on.
+            narrow: A :data:`SupplyFilter` applied between retrieval and planning,
+                or ``None`` to plan over everything the turn assembled and
+                retrieved. ``None`` on ``converse`` and ``converse_streaming``,
+                whose channel audience is bounded; ``converse_spoken`` supplies
+                ADR-0199 §3's subtraction here (ADR-0203 §1).
 
         Returns:
-            The turn's goal, context, assembled memories and plan.
+            The turn's goal, context, assembled memories and plan — each of them
+            over the supply ``narrow`` returned, where one was given.
 
         Raises:
             PlanningError: If ``utterance`` is blank, the injected clock's
@@ -475,6 +510,12 @@ class LearningLoop:
         retrieved, degraded = await self._retrieve(goal.statement)
         preceding = recent + retrieved
         memories = preceding + await self._supplement(goal.statement, preceding=preceding)
+        # ADR-0203 §1: between retrieval and planning, and applied to the context as
+        # well as to the records — a facet no ADR has placed is withheld from the
+        # planner exactly as an unplaced record is. Everything after this line, this
+        # method's own return value included, runs over what it returned.
+        if narrow is not None:
+            context, memories = narrow(context, memories)
         plan = await self._planner.plan(goal, context=context, memories=memories)
         return TurnResult(
             goal=goal,

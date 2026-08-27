@@ -1,10 +1,16 @@
-"""ADR-0199's ruling, applied at supply on the spoken channel (ADR-0200 §7).
+"""ADR-0199's ruling, applied at supply on the spoken channel (ADR-0200 §7, ADR-0203).
 
-Two halves. The first is ``orchestration.disclosure`` on its own — the placement
+Three parts. The first is ``orchestration.disclosure`` on its own — the placement
 rules of ADR-0199 §§2-3, decided from recorded origin and never from content. The
 second is the engine driving them: a withheld class never reaching the composing
 stage's inputs, the stage being told the audience and the bare fact of a
 withholding, and nothing filtering the composed answer afterwards.
+
+The third is **ADR-0203 §6's seven obligations**, which are about the withholding
+binding the supply the *whole turn* runs over rather than the composing stage's
+alone: #1692's two-turn chain, #1693's return value, the negative arm, the step
+consequence §3 admits, the three degradation rules held unmoved on the withholding
+route, and the bounded channel left as it was.
 """
 
 from __future__ import annotations
@@ -18,13 +24,12 @@ import pytest
 from test_engine import PATIENT, Harness, NoStepPlanner
 
 from ai_assistant.core.types import (
-    ActionPlan,
     Attestation,
     CalendarFacet,
     ContextFacet,
     CurrentContext,
     EmailFacet,
-    Goal,
+    MemoryRecord,
     MemorySource,
     Provenance,
     Role,
@@ -32,7 +37,6 @@ from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
     TimeOfDay,
-    TurnResult,
 )
 from ai_assistant.orchestration import RoutingStage
 from ai_assistant.orchestration.composing import ComposingStage
@@ -88,27 +92,24 @@ def _belief(
     )
 
 
-def _turn(*records: SemanticMemory, context: CurrentContext | None = None) -> TurnResult:
-    """A turn carrying ``records`` and nothing else of interest."""
-    goal = Goal(
-        id="g-1",
-        statement="what is on this week",
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-        created_at=_AT,
-    )
-    return TurnResult(
-        goal=goal,
-        context=context
-        or CurrentContext(
-            now=_AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
-        ),
-        memories=records,
-        plan=ActionPlan(id="p-1", goal_id=goal.id, steps=(), created_at=_AT),
-    )
+#: The situational context a case that does not care about facets is given.
+_CONTEXT: Final = CurrentContext(
+    now=_AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
+)
 
 
-def _supply(turn: TurnResult, *, sources: frozenset[str] = frozenset()) -> tuple[TurnResult, bool]:
-    return supply_for_unbounded_audience(turn, speakable_attested_sources=sources)
+def _supply(
+    *records: MemoryRecord,
+    context: CurrentContext = _CONTEXT,
+    sources: frozenset[str] = frozenset(),
+) -> tuple[CurrentContext, tuple[MemoryRecord, ...], bool]:
+    """ADR-0203 §1's subtraction, over one context and one group of records.
+
+    The narrowing predicate is applied to what the turn assembled and retrieved
+    rather than to a ``TurnResult``, because since ADR-0203 §1 there is no turn yet
+    when it runs: it sits between retrieval and planning.
+    """
+    return supply_for_unbounded_audience(context, records, speakable_attested_sources=sources)
 
 
 # --- §3: which classes are placed as speakable -------------------------------
@@ -126,10 +127,10 @@ def test_the_owners_own_beliefs_are_speakable(source: MemorySource) -> None:
     """
     record = _belief("rec-1", "the user hikes on Tuesdays", source=source)
 
-    supply, withheld = _supply(_turn(record))
+    _, memories, withheld = _supply(record)
 
     assert withheld is False
-    assert supply.memories == (record,)
+    assert memories == (record,)
 
 
 def test_a_belief_about_somebody_else_is_withheld() -> None:
@@ -141,10 +142,10 @@ def test_a_belief_about_somebody_else_is_withheld() -> None:
     """
     record = _belief("rec-1", _WITHHELD_CONTENT, about_person="Alice")
 
-    supply, withheld = _supply(_turn(record))
+    _, memories, withheld = _supply(record)
 
     assert withheld is True
-    assert supply.memories == ()
+    assert memories == ()
 
 
 def test_an_attested_belief_from_the_configured_calendar_is_speakable() -> None:
@@ -153,10 +154,10 @@ def test_an_attested_belief_from_the_configured_calendar_is_speakable() -> None:
         "rec-1", "standup at 09:00", source=MemorySource.EXTERNAL, reported_by=_CALENDAR
     )
 
-    supply, withheld = _supply(_turn(record), sources=frozenset({_CALENDAR}))
+    _, memories, withheld = _supply(record, sources=frozenset({_CALENDAR}))
 
     assert withheld is False
-    assert supply.memories == (record,)
+    assert memories == (record,)
 
 
 def test_an_attested_belief_from_any_other_source_is_withheld() -> None:
@@ -170,10 +171,10 @@ def test_an_attested_belief_from_any_other_source_is_withheld() -> None:
         "rec-1", "your test results are in", source=MemorySource.EXTERNAL, reported_by="health"
     )
 
-    supply, withheld = _supply(_turn(record), sources=frozenset({_CALENDAR}))
+    _, memories, withheld = _supply(record, sources=frozenset({_CALENDAR}))
 
     assert withheld is True
-    assert supply.memories == ()
+    assert memories == ()
 
 
 def test_an_attested_belief_with_no_attestation_is_withheld() -> None:
@@ -197,10 +198,10 @@ def test_an_attested_belief_with_no_attestation_is_withheld() -> None:
         }
     )
 
-    supply, withheld = _supply(_turn(unattested), sources=frozenset({_CALENDAR}))
+    _, memories, withheld = _supply(unattested, sources=frozenset({_CALENDAR}))
 
     assert withheld is True
-    assert supply.memories == ()
+    assert memories == ()
 
 
 def test_no_configured_calendar_withholds_every_attested_belief() -> None:
@@ -209,10 +210,10 @@ def test_no_configured_calendar_withholds_every_attested_belief() -> None:
         "rec-1", "standup at 09:00", source=MemorySource.EXTERNAL, reported_by=_CALENDAR
     )
 
-    supply, withheld = _supply(_turn(record))
+    _, memories, withheld = _supply(record)
 
     assert withheld is True
-    assert supply.memories == ()
+    assert memories == ()
 
 
 def test_a_calendar_belief_about_somebody_else_is_still_withheld() -> None:
@@ -225,10 +226,10 @@ def test_a_calendar_belief_about_somebody_else_is_still_withheld() -> None:
         about_person="Alice",
     )
 
-    supply, withheld = _supply(_turn(record), sources=frozenset({_CALENDAR}))
+    _, memories, withheld = _supply(record, sources=frozenset({_CALENDAR}))
 
     assert withheld is True
-    assert supply.memories == ()
+    assert memories == ()
 
 
 def test_the_placed_sources_are_the_three_the_adr_names() -> None:
@@ -255,10 +256,10 @@ def test_both_placed_facets_reach_the_stage() -> None:
         email=EmailFacet(source="email", read_at=_AT, arrived_in_window=2, covers_from=_AT),
     )
 
-    supply, withheld = _supply(_turn(context=context))
+    narrowed, _, withheld = _supply(context=context)
 
     assert withheld is False
-    assert supply.context is context
+    assert narrowed is context
 
 
 def test_a_facet_kind_no_adr_has_placed_is_withheld_by_construction() -> None:
@@ -281,10 +282,10 @@ def test_a_facet_kind_no_adr_has_placed_is_withheld_by_construction() -> None:
         calendar=HealthFacet(source="health", read_at=_AT, entries_in_progress=1, covers_until=_AT),
     )
 
-    supply, withheld = _supply(_turn(context=context))
+    narrowed, _, withheld = _supply(context=context)
 
     assert withheld is True
-    assert supply.context.calendar is None
+    assert narrowed.calendar is None
 
 
 def test_the_placed_kinds_cover_every_facet_the_context_can_hold() -> None:
@@ -315,37 +316,43 @@ def _facet_kinds(annotation: object) -> set[type[ContextFacet]]:
     return {kind for arm in get_args(annotation) for kind in _facet_kinds(arm)}
 
 
-# --- §5: the withholding subtracts, and changes nothing else -----------------
+# --- §2: the subtraction removes members and does nothing else ---------------
 
 
-def test_a_turn_with_nothing_withheld_is_handed_over_unchanged() -> None:
-    """§5: "The withholding subtracts from what the turn produced and adds nothing".
+def test_a_supply_with_nothing_withheld_is_handed_over_unchanged() -> None:
+    """ADR-0199 §5: "The withholding subtracts from what the turn produced and adds nothing".
 
-    Identity rather than equality, because a rebuilt-but-equal value would still be
-    a second object the stage composes from and would hide a rebuild that dropped a
-    member ``TurnResult`` grows later.
+    Identity rather than equality on the context, because a rebuilt-but-equal value
+    would still be a second object the turn runs over and would hide a rebuild that
+    dropped a member :class:`~ai_assistant.core.types.CurrentContext` grows later.
     """
-    turn = _turn(_belief("rec-1", "the user hikes"))
+    record = _belief("rec-1", "the user hikes")
 
-    supply, withheld = _supply(turn)
+    narrowed, memories, withheld = _supply(record)
 
-    assert supply is turn
+    assert narrowed is _CONTEXT
+    assert memories == (record,)
     assert withheld is False
 
 
-def test_the_turn_the_reduction_was_made_from_is_not_modified() -> None:
-    """§5: "The ``TurnResult`` the turn produced is unchanged"."""
-    kept = _belief("rec-1", "the user hikes")
+def test_what_survives_keeps_the_order_it_arrived_in() -> None:
+    """ADR-0203 §2: "The subtraction removes members and reorders nothing".
+
+    ADR-0074 §5's three groups — the conversation's recent turns, then the
+    relevance-retrieved beliefs, then ADR-0158's episodic supplement — reach the
+    planner in that order still, which is how this corpus expresses precedence into
+    a prompt. A filter that partitioned rather than filtered would pass every
+    membership assertion above and silently reorder the prompt.
+    """
+    first = _belief("rec-1", "the user hikes")
     dropped = _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice")
-    turn = _turn(kept, dropped)
+    third = _belief("rec-3", "the user cycles")
+    supplied = (first, dropped, third)
 
-    supply, _ = _supply(turn)
+    _, memories, _ = _supply(*supplied)
 
-    assert turn.memories == (kept, dropped)
-    assert supply.memories == (kept,)
-    assert supply.goal is turn.goal
-    assert supply.plan is turn.plan
-    assert supply.memory_degraded == turn.memory_degraded
+    assert memories == (first, third)
+    assert supplied == (first, dropped, third), "the sequence it was handed is not modified"
 
 
 # --- §7: the engine driving it -----------------------------------------------

@@ -85,6 +85,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
@@ -140,7 +141,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
-from ai_assistant.orchestration.disclosure import supply_for_unbounded_audience
+from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
@@ -239,7 +240,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
-    from ai_assistant.orchestration.loop import LearningLoop
+    from ai_assistant.orchestration.loop import LearningLoop, SupplyFilter
     from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recovery import RecoveryScan
@@ -3244,12 +3245,22 @@ class Engine:
             # ``NonBlankEncodableText | None``, so a blank transcript has nowhere
             # else to go.
             return SpokenTurn()
+        # ADR-0203 §1: this operation declares its channel audience unbounded
+        # (ADR-0200 §3), so the withholding binds the supply the **whole turn** runs
+        # over. One applier is minted per call — as the capacity handle is — and it is
+        # threaded twice: into the turn, where it subtracts between retrieval and
+        # planning, and into the composer, which reads the bare fact off it afterwards
+        # (ADR-0199 §5's third clause).
+        supply = UnboundedAudienceSupply(
+            speakable_attested_sources=self._speakable_attested_sources
+        )
         outcome = await self._run_turn(
             heard,
             timeout=timedelta(seconds=max(remaining(), 0.0)),
             conversation_id=conversation_id,
-            compose=self._composed_spoken,
+            compose=partial(self._composed_spoken, supply=supply),
             compose_routed=self._composed_routed_spoken,
+            narrow=supply,
         )
         # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
         # that an outcome over ADR-0085 §8c on its own raises exactly as it does on
@@ -3410,39 +3421,57 @@ class Engine:
         return spoken
 
     async def _composed_spoken(
-        self, turn: TurnResult | None, step: StepOutcome | None, conversation: str
+        self,
+        turn: TurnResult | None,
+        step: StepOutcome | None,
+        conversation: str,
+        *,
+        supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
         """Compose this pass's answer for a channel of unbounded audience (ADR-0200 §7).
 
         :meth:`_composed_whole` with two differences and no others, both of them
         ADR-0199's rather than this method's.
 
-        **The withholding is at supply.** ``orchestration.disclosure`` reduces what
-        the stage is given to what ADR-0199 §3 places as speakable on a channel of
-        unbounded audience, deciding each class from recorded origin and never by
-        inspecting a word of content. No stage composes a reply and then removes,
-        masks, blanks or rewrites part of it, and nothing here filters, redacts or
-        post-processes ``outcome.reply`` on any ground (ADR-0199 §5, ADR-0200 §7).
+        **The withholding is at supply, and the supply is the whole turn's**
+        (ADR-0203 §1). ``orchestration.disclosure`` reduced what this turn ran over to
+        what ADR-0199 §3 places as speakable on a channel of unbounded audience —
+        between retrieval and planning, deciding each class from recorded origin and
+        never by inspecting a word of content — so ``turn`` **is** the narrowed supply
+        and there is nothing left for this method to subtract. No stage composes a
+        reply and then removes, masks, blanks or rewrites part of it, and nothing here
+        filters, redacts or post-processes ``outcome.reply`` on any ground (ADR-0199
+        §5, ADR-0200 §7).
 
-        **The** :class:`~ai_assistant.core.types.TurnResult` **the turn produced is
-        unchanged**, which ADR-0199 §5 requires and which is why the reduction
-        produces a *supply* rather than editing the turn: the outcome carries the
-        turn's own result back, exactly as ``converse`` would for the same
-        transcript, and ADR-0200 §4 forbids a second difference.
+        **The** :class:`~ai_assistant.core.types.TurnResult` **this stage is given is
+        the one the turn produced**, and the outcome carries that same one back. Until
+        ADR-0203 this method narrowed a copy for the stage and handed the wider turn
+        back, which ADR-0199 §5's second clause required; §1 of ADR-0203 replaces that
+        clause for an operation of this class, and the copy does not move — it ceases
+        to exist. ADR-0200 §4's "no second difference" is replaced for the same case
+        by ADR-0203 §3, which admits the turn, the plan, the step the plan drives and
+        the values computed from those, and bounds the difference to exactly them.
 
         **The audience reaches the stage from the operation being executed** and
         from nothing else — not from an argument, a session, a transport or a device
         (ADR-0200 §3, §7). It is the only input ADR-0200 adds to that stage; the
         withholding *fact* is ADR-0199 §5's, which obliges the stage to be told
         **that** a withholding occurred so it can compose an answer that states it.
-        The stage gains no ``ContextProvider``, no ``MemoryStore``, no second context
-        assembly and no second retrieval, and its context and memories still reach it
-        from the turn (ADR-0170 §2).
+        That fact is read off ``supply`` — the one applier this call minted, which
+        recorded it several stages earlier — and it is the **bare fact**: this stage is
+        never told what was withheld and never sees a span of it. The stage gains no
+        ``ContextProvider``, no ``MemoryStore``, no second context assembly and no
+        second retrieval, and its context and memories still reach it from the turn
+        (ADR-0170 §2, ADR-0203 §2).
 
         Args:
-            turn: What the turn produced, or ``None`` on a pass that owes no answer.
+            turn: What the turn produced, over the subtracted supply. ``None`` on a
+                pass that owes no answer.
             step: What became of the driven step.
             conversation: Accepted and dropped, as :meth:`_composed_whole` drops it.
+            supply: The applier this call minted, read for the bare fact of whether
+                anything was held back. Bound by :meth:`converse_spoken` rather than
+                passed by :meth:`_run_turn`, which knows nothing of disclosure.
 
         Returns:
             What the stage composed, or ``None`` where no answer was owed.
@@ -3450,20 +3479,15 @@ class Engine:
         del conversation
         if turn is None or (step is not None and step.confirmation is not None):
             return None
-        supply, withheld = supply_for_unbounded_audience(
-            turn, speakable_attested_sources=self._speakable_attested_sources
-        )
         undriven = (
-            ()
-            if step is None
-            else tuple(one for one in supply.plan.steps if one.id != step.step_id)
+            () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
         return await self._composing.compose(
-            turn=supply,
+            turn=turn,
             step=step,
             undriven=undriven,
             unbounded_audience=True,
-            withheld=withheld,
+            withheld=supply.withheld,
         )
 
     async def resume(
@@ -5900,7 +5924,7 @@ class Engine:
         del conversation
         return await self._compose(turn, step)
 
-    async def _run_turn(
+    async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers and the supply filter; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
@@ -5910,6 +5934,7 @@ class Engine:
             [TurnResult | None, StepOutcome | None, str], Awaitable[ComposedReply | None]
         ],
         compose_routed: _RoutedComposer,
+        narrow: SupplyFilter | None = None,
     ) -> TurnOutcome:
         """Route the ask, or resolve the conversation, plan the turn and drive its step.
 
@@ -5934,6 +5959,16 @@ class Engine:
         work". A routed pass is a turn — it is captured (§10) and its row names the
         conversation (§9) — so an unknown ``conversation_id`` is refused before anything is
         routed, exactly as it is refused before anything is planned.
+
+        **``narrow`` is how an operation whose channel audience is unbounded subtracts
+        what ADR-0199 §3 withholds** (ADR-0203 §1). It is handed to the turn stage, which
+        applies it between retrieval and planning, so everything below this line — the
+        plan, the persisted plan, the step this pass drives, the origin the authoriser
+        evaluates, the answer composed and the episode captured — is over the subtracted
+        supply, and there is no wider turn anywhere in this method. ``None`` for an
+        operation whose channel audience is bounded, which plans over everything it
+        retrieved exactly as before. A **routed** pass reaches no retrieval and no
+        planner, so there is nothing there for it to subtract from.
         """
         # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
         # does and a continuation marks the conversation active before a reclaim
@@ -5946,7 +5981,10 @@ class Engine:
             )
         history = await self._conversations.history(conversation.id)
         turn = await self._loop.respond(
-            utterance, history=history.records, history_degraded=history.degraded
+            utterance,
+            history=history.records,
+            history_degraded=history.degraded,
+            narrow=narrow,
         )
         self._check_plan_is_for_goal(turn)
         if not turn.plan.steps:
