@@ -85,6 +85,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from itertools import count
 from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
 import structlog
@@ -2015,12 +2016,11 @@ class Engine:
         #: discards. Bounded by ``max_outstanding_confirmations`` and by nothing
         #: else: no lifetime, no clock, and no setting of its own.
         self._settled: dict[str, _Settled] = {}
-        #: Every continuation handle this process has minted, live or not (#1644).
-        #: Names only, never outcomes: it is what makes :meth:`_mint_handle`'s
-        #: uniqueness a fact about *ever* rather than about *now*, which no bounded
-        #: table can be — a bound is precisely what hands a handle back to the mint.
-        #: One short string per confirmable action, for the life of the process.
-        self._minted: set[str] = set()
+        #: The serial :meth:`_mint_handle` stamps every handle with (#1644). One
+        #: integer, never a table: it is what makes a handle unique over the
+        #: process's whole life rather than over what is live now, and it costs the
+        #: same whether the hub mints two handles or two million.
+        self._handle_serial = count(1)
         self._reserved: set[str] = set()
         self._reserved_routes: set[str] = set()
         self._recovery_lock = asyncio.Lock()
@@ -5165,8 +5165,7 @@ class Engine:
         (ADR-0198 §4). This ceiling bounds *unanswered* parks; a settled record is the
         opposite of one, and counting it would let a client that answered every
         confirmation meet backpressure for having done so. The retained set is bounded
-        separately, by the same number, in :meth:`_retain`, and the handles this
-        process has spent are not a table this ceiling ranges over at all.
+        separately, by the same number, in :meth:`_retain`.
 
         Called *before* the runner can park and before the turn is persisted, so a
         refusal leaves neither durable execution state nor a durable goal/plan.
@@ -5190,50 +5189,57 @@ class Engine:
         """Reserve and return a handle no continuation of this process has ever used.
 
         The injected factory supplies the opacity; the engine supplies the
-        *uniqueness*. A factory that repeats a handle is disambiguated with a suffix
-        rather than trusted or refused, so two parked steps never share a handle and
-        neither is stranded (#287).
+        *uniqueness*, and it supplies it by **stamping a serial on every handle**
+        rather than by checking the candidate against anything. One integer of state,
+        no scan, no collision, and no way for two continuations of this process to
+        share a name whatever the factory does.
 
-        **Uniqueness is over the process's whole life, not over what is live now**,
-        and the difference is the defect #1644 records. Testing a candidate against
-        the live tables alone makes a handle mintable again the moment nothing names
-        it — after a resolution, after a reconciliation, or after a settled record is
-        discarded under ADR-0198 §4's bound. A repeating factory would then hand a new
-        park a handle an earlier caller still holds a token for, and presenting that
-        stale token would resolve the **new** park: an old confirmation authorising an
-        action nobody offered it for. Absence is a fact about *now* and reuse is a
-        fact about *ever*, which is why what is kept is the history — the same
-        correction, for the same reason, that ``FakeAssistantEngine`` keeps for the
-        ids an answer may retire.
+        **Uniqueness has to be over the process's whole life, not over what is live
+        now**, which is the defect #1644 records. Testing a candidate against the live
+        tables made a handle mintable again the moment nothing named it — after a
+        resolution, after a reconciliation, or after a settled record was discarded
+        under ADR-0198 §4's bound. A repeating factory would then hand a new park a
+        handle an earlier caller still holds a token for, and presenting that stale
+        token would resolve the **new** park: an old confirmation authorising an
+        action nobody offered it for.
 
-        This subsumes ADR-0198 §4's clause strictly rather than dropping it: "a handle
-        naming a settled record is not minted for a new park … while the record is
-        retained" holds because such a handle was minted, and it goes on holding after
-        the record is discarded, which is where the live-table test stopped.
+        **A serial rather than a set of spent handles, and the reason is this
+        method's caller.** :meth:`_admit_and_reserve` mints *before* the runner knows
+        whether the step will park at all, so a handle is minted for every turn that
+        drives a step — including every turn that parks nothing and hands no token to
+        anybody. Remembering them would grow one string per turn for the life of the
+        hub, unbounded and reachable by a client that holds no confirmation at all,
+        which the confirmation ceiling cannot bound because it counts parks. It would
+        also be a second in-memory table beside ADR-0198 §4's, and an *un*bounded one
+        beside a decision whose whole answer was "a count is the whole of the bound".
+        The serial buys the same guarantee for one integer, so no such table exists
+        and §4's account of what the engine holds stays exactly true.
 
-        **What it costs, stated rather than hidden.** One short string per confirmable
-        action for the life of the process — the ceiling bounds how many can be
-        *outstanding*, not how many may be answered over weeks. It buys a guarantee
-        that cannot be had from a bounded table, because a bound is exactly what makes
-        a handle mintable again; the alternatives, and why this one, are on #1644.
-        Nothing about ADR-0198 §4's own bound moves: the retained **answers** are still
-        bounded by ``max_outstanding_confirmations`` and still discarded oldest-first,
-        and this set holds no outcome, no turn and no binding — only the name.
+        This subsumes ADR-0198 §4's mint clause strictly rather than dropping it: "a
+        handle naming a settled record is not minted for a new park … while the record
+        is retained" holds because no handle is ever minted twice, and it goes on
+        holding after the record is discarded, which is where the live-table test
+        stopped.
 
-        **Reservation is atomic against concurrency.** This method runs to
-        completion with no ``await`` between checking uniqueness and recording the
-        reservation, so two concurrent turns cannot both mint the same handle even
-        with a repeating factory: the first fully reserves before the second reads.
-        The reservation is released by :meth:`_converse` once the turn is known to
-        park (moved into the parked table) or not. Called *before* the runner can
-        park, so a raising factory fails with no durable state yet committed.
+        **The scope is the process, which is the scope handles have** (ADR-0084 §7).
+        The serial restarts with the engine, exactly as the parked, routed and settled
+        tables do; a token from a previous process life is unresolvable because those
+        tables are empty, and recovering an answerable confirmation across a restart
+        is ``pending_confirmations``' job (ADR-0052 §1).
+
+        The suffix is not a secret and does not need to be: the factory's value is
+        what makes a handle unguessable, and the token stays opaque to every caller
+        (ADR-0042 §4) — an adapter may not interpret it, and nothing in the engine
+        reads the serial back.
+
+        **Reservation is atomic against concurrency.** This method runs to completion
+        with no ``await`` between minting and recording the reservation, so two
+        concurrent turns cannot both take one handle. The reservation is released by
+        :meth:`_converse` once the turn is known to park (moved into the parked table)
+        or not. Called *before* the runner can park, so a raising factory fails with
+        no durable state yet committed.
         """
-        handle = self._id_factory()
-        suffix = 0
-        while handle in self._minted:
-            suffix += 1
-            handle = f"{self._id_factory()}#{suffix}"
-        self._minted.add(handle)
+        handle = f"{self._id_factory()}#{next(self._handle_serial)}"
         self._reserved.add(handle)
         return handle
 
