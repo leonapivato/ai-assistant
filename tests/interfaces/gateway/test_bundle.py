@@ -29,9 +29,11 @@ from ai_assistant.core.types import (
     NotificationCondition,
     NotificationReach,
     RoutableOperation,
+    SpokenAudioFormat,
 )
 from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import (
+    _POLICY,
     _REFUSAL_STATUS,
     _relay_fault,
     packaged_bundle,
@@ -979,6 +981,225 @@ def test_the_page_offers_both_turn_entries_and_falls_back_to_neither() -> None:
     # what an automatic fallback from a failed stream would have to be.
     assert script.count("askWhole(") == 2
     assert script.count("askStreaming(") == 2
+
+
+#: The three browser speech APIs ADR-0200 §10 forbids by name, and the one that is a
+#: substring of another is written once: checking for ``SpeechRecognition`` catches
+#: ``webkitSpeechRecognition`` too, which is the vendor-prefixed spelling a lane
+#: reaching for it would most likely use.
+_BROWSER_SPEECH: Final = ("SpeechRecognition", "speechSynthesis")
+
+
+@pytest.mark.parametrize("api", _BROWSER_SPEECH)
+def test_the_front_end_runs_no_browser_speech_engine(api: str) -> None:
+    """§13's ``§10`` row: "a test asserting the bundle references no
+    ``SpeechRecognition`` or ``speechSynthesis``".
+
+    §10's clause is that "The front end records with ``MediaRecorder`` and plays with
+    the browser's ordinary audio playback. It does not call ``SpeechRecognition``,
+    ``webkitSpeechRecognition`` or ``speechSynthesis``, and no lane may wire one."
+
+    Three reasons and the third survives the other two being argued away: some
+    implementations of those APIs transmit to the browser vendor, which is an egress no
+    boundary in ADR-0174 §1 authorises; recognition at the edge would decide what a
+    submission means, which ADR-0094 §6 forbids; and synthesis at the edge "would speak
+    text the hub's disclosure ruling never saw — the front end reading ``outcome.reply``
+    aloud is exactly the failure milestone 19's exit test is written to catch, performed
+    by the browser instead of by us".
+
+    Read off all three shipped files, because a page can reach an API from markup as
+    readily as from a script.
+    """
+    for name in ("app.js", "index.html", "app.css"):
+        source = (
+            _code(name)
+            if name == "app.js"
+            else _markup(name)
+            if name.endswith("html")
+            else _style(name)
+        )
+        assert api not in source, name
+
+
+def test_the_page_records_with_mediarecorder_and_uploads_one_whole_recording() -> None:
+    """§10: the front end "records with ``MediaRecorder``", and "the recording is
+    uploaded complete, in one request… No WebSocket, no protocol upgrade, no
+    ``EventSource`` and no chunked upload".
+
+    The negative half is what the enumeration buys: a page that opened a socket for the
+    upload would satisfy every other check in this file.
+    """
+    script = _code("app.js")
+
+    assert "new MediaRecorder(" in script
+    assert '"/ask/spoken"' in script
+    assert "WebSocket" not in script
+    assert "EventSource" not in script
+
+
+def test_the_page_sends_the_three_members_the_route_reads_and_no_deadline() -> None:
+    """ADR-0200 §10: the body carries "the **browser-owned** arguments of §3's signature
+    and no others — ``utterance``, ``plays`` and ``conversation_id``", and the gateway
+    supplies the deadline of its own.
+
+    A page that sent one would not be refused — §10 makes a body's ``timeout`` *never
+    read* rather than rejected — so nothing at run time would report it, and the front
+    end asserting a deadline it has no standing to choose would go unnoticed
+    (ADR-0177 §1's fifth clause).
+    """
+    sending = _functions(_code("app.js"))["sendRecording"]
+
+    assert "asked.utterance" in sending
+    assert "asked.plays" in sending
+    assert "asked.conversation_id" in sending
+    assert "timeout" not in sending
+
+
+def test_the_formats_the_page_names_are_the_vocabulary_the_surface_carries() -> None:
+    """ADR-0200 §9's ``SpokenAudioFormat`` is a closed vocabulary, and a page naming a
+    member it does not carry would be refused at the door with nothing to say about why.
+
+    Read against the enum rather than against a list in this file, so a member added on
+    a measurement (§9 permits that, and only that) fails here until the page names it.
+    """
+    declared = _declaration(_code("app.js"), "TALK_FORMATS")
+
+    for member in SpokenAudioFormat:
+        assert f'"{member.value}"' in declared, member
+    assert declared.count('"audio/') == len(SpokenAudioFormat)
+
+
+def test_the_rendering_is_played_without_a_url_the_policy_would_refuse() -> None:
+    """ADR-0168 §6 serves every response under a policy permitting media "from its own
+    origin alone", and `media-src 'self'` matches neither a ``blob:`` nor a ``data:``
+    URL — the only two ways to hand a media element bytes the page is holding.
+
+    So the rendering is decoded directly (ADR-0200 §10's "the browser's ordinary audio
+    playback", through the Web Audio decoder), and the two URL schemes are absent from
+    the script. A lane reaching for one of them would be widening a ratified security
+    clause to make one control work, which is the change this pins against.
+    """
+    script = _code("app.js")
+
+    assert "decodeAudioData(" in script
+    assert "createObjectURL(" not in script
+    assert "blob:" not in script
+    assert "data:audio" not in script
+    assert "media-src 'self'" in _POLICY
+
+
+def test_the_control_ships_hidden_and_is_offered_only_where_a_microphone_can_be() -> None:
+    """ADR-0200 §10 and ADR-0202: a browser withholds a microphone from a page whose
+    origin it does not consider trustworthy, and gives no legible account of why.
+
+    So the control ships ``hidden`` — whether the browser will hand this page a
+    microphone is a fact only a script can ask for — and where the answer is no it is
+    revealed **disabled beside the sentence saying why**, which is the legible state an
+    owner can act on. Absent and unexplained is not.
+    """
+    assert "hidden" in _tag(_markup("index.html"), "talk-button")
+    offering = _functions(_code("app.js"))["offerTalk"]
+
+    assert "navigator.mediaDevices" in offering
+    assert "button.disabled = !usable" in offering
+    assert 'saying(usable ? "" : NO_MICROPHONE)' in offering
+
+
+def test_the_press_is_held_by_pointer_and_by_keyboard_and_never_by_a_click() -> None:
+    """A control that is *held* needs the press and the release apart, and a ``click``
+    is the two collapsed into one event.
+
+    The pointer pair covers mouse, pen and touch together — a second ``touchstart``
+    listener would double-fire wherever a browser sends both — and ``setPointerCapture``
+    is what makes a release land here after the finger has drifted off the button.
+    ``preventDefault`` on the keyboard pair is what stops a native button turning Space
+    and Enter into an activation on top of it (#1429's accessibility floor: the control
+    is reachable and operable from the keyboard).
+    """
+    script = _code("app.js")
+
+    for event in ("pointerdown", "pointerup", "pointercancel", "keydown", "keyup"):
+        assert f'talkButton.addEventListener("{event}"' in script, event
+    assert "setPointerCapture(" in script
+    assert 'talkButton.addEventListener("click"' not in script
+    assert 'talkButton.addEventListener("touchstart"' not in script
+
+
+def test_the_held_control_keeps_the_gesture_the_browser_would_otherwise_take() -> None:
+    """A phone claims a press for a scroll or a double-tap zoom, which fires
+    ``pointercancel`` a moment in and ends a recording the owner is still speaking into;
+    a long press selects the label and raises the selection handles over the control
+    being held. Both are declarations rather than script, so they are pinned here."""
+    rule = _rule(_style("app.css"), "#talk-button")
+
+    assert "touch-action: none;" in rule
+    assert "user-select: none;" in rule
+
+
+def test_the_transcript_is_shown_outside_the_panel_the_next_turn_clears() -> None:
+    """ADR-0200 §4: "``heard`` is disclosed to the caller on every call that produced a
+    transcript. A push-to-talk surface that cannot show the user what it heard cannot be
+    corrected by them, and a transcript the hub acted on but never showed is the one part
+    of this path a user has no other way to inspect."
+
+    Outside ``#answer-body`` because ``renderOutcome`` clears that node on every turn —
+    including the typed one an owner asks *because* they read what was heard and it was
+    wrong.
+    """
+    document = _markup("index.html")
+    heard = _functions(_code("app.js"))["heardWas"]
+
+    assert 'id="heard"' in document
+    assert 'id="answer-body"' not in _tag(document, "heard")
+    assert 'el("heard").textContent' in heard
+
+
+def test_a_recording_with_no_words_and_an_unspoken_answer_are_neither_of_them_faults() -> None:
+    """ADR-0200 §4's two shapes a reader should be able to name from the four members.
+
+    A recording that carried no words "is not an error and no exception is raised for
+    it", so it is said in the page's own hint rather than in the fault surface, where it
+    would teach an owner that a quiet room is something going wrong. An answer that could
+    not be spoken is a **degradation**: the answer is on screen and complete, and what is
+    missing is the audio — ADR-0170 §6's rule that a degraded turn is a statement and
+    never silence, one stage further on.
+    """
+    rendering = _functions(_code("app.js"))["renderSpokenTurn"]
+
+    assert "saying(HEARD_NOTHING)" in rendering
+    assert "turn.spoken_degraded" in rendering
+    assert 'line(el("answer-body"), NOT_SPOKEN, "notice")' in rendering
+    assert "fault(" not in rendering
+
+
+def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
+    """``getUserMedia``'s refusals are read off the error's ``name``, the one member the
+    specification fixes — never off its ``message``, which is the browser's own prose.
+
+    A page that relayed one would be saying something it cannot stand behind about a
+    device the owner has to act on, and it is the same rule ADR-0200 §8 states one layer
+    in: nothing on this path writes an exception message it did not author.
+    """
+    refusing = _functions(_code("app.js"))["microphoneRefused"]
+
+    assert "error.name" in refusing
+    assert ".message" not in refusing
+    for named in ("MICROPHONE_DENIED", "NO_MICROPHONE_DEVICE", "MICROPHONE_UNAVAILABLE"):
+        assert named in refusing, named
+
+
+def test_the_spoken_turn_is_rendered_by_the_same_renderer_as_a_typed_one() -> None:
+    """ADR-0200 §4: the outcome "is an ordinary ``TurnOutcome``… This call composes a
+    turn; it does not create a second kind of one."
+
+    So a member added to ``renderOutcome`` reaches all three entries. A page with a
+    second renderer would be the front end's half of the failure #1337 records at the
+    gateway — an answer composed, returned, and dropped one layer short of the person who
+    asked for it, on one entry and not the others.
+    """
+    rendering = _functions(_code("app.js"))["renderSpokenTurn"]
+
+    assert "renderOutcome(turn.outcome, chosenAt)" in rendering
 
 
 def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_ever() -> None:
@@ -2390,6 +2611,10 @@ _FETCH_SITES: Final = {
     "askStreaming": "ask",
     "readDeliveries": "readDeliveries",
     "relay": "listConversations",
+    # The spoken entry (ADR-0200 §10). Its own guard rather than one shared with `ask`,
+    # because it is not reached from there: a press is its own act and the page never
+    # falls back between the three entries (§10, ADR-0168 §9).
+    "sendRecording": "sendRecording",
 }
 
 #: The one ``fetch`` site that deliberately does **not** report a rejection as the

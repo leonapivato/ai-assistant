@@ -201,6 +201,34 @@ button[disabled] {
   cursor: progress;
 }
 
+/*
+ * Push to talk (ADR-0200 §10). The one control on this page that is *held* rather than
+ * clicked, and the two declarations are what make holding it work on a phone.
+ *
+ * `touch-action: none` stops the browser claiming the gesture for a scroll or a
+ * double-tap zoom, which is what otherwise fires `pointercancel` a moment into the
+ * press and ends the recording the owner is still speaking into. `user-select: none`
+ * stops a long press selecting the label and raising the selection handles over the
+ * control being held. Neither is reachable from a keyboard press, which is why the
+ * keyboard half is handled in the script rather than here.
+ *
+ * `cursor: not-allowed` rather than the `progress` above, and only while it is
+ * disabled *and* the page has said why: a browser that will not hand this page a
+ * microphone will not do so later either, so a cursor promising that something is
+ * under way would be the page saying it is working on it. The rule is written for this
+ * control alone — every other disabled button on the page is disabled for the length
+ * of one request, where `progress` is exactly right.
+ */
+#talk-button {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#talk-button[disabled] {
+  cursor: not-allowed;
+}
+
 .hint {
   font-size: 0.85rem;
   color: var(--muted);

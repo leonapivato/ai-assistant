@@ -633,6 +633,25 @@ const FAULTS = {
   "malformed-request":
     "The gateway could not read that request. The page and the gateway ship in one " +
     "distribution, so this means the two halves disagree.",
+  // ADR-0200 §9. Its own condition rather than `malformed-request`, because the two
+  // say different things: that one means the page and the gateway disagree about the
+  // *shape*, and this one means the recording itself is not something the surface can
+  // carry. **The gateway's `detail` says which**, and it is the gateway's own sentence
+  // rather than the validator's — a pydantic error carries the value it rejected
+  // whatever its message says, and §9 forbids a refused recording travelling inside
+  // its own refusal.
+  "recording-unusable": "That recording is not one the assistant can take.",
+  // ADR-0200 §4. A transcription failure **fails** the call where a synthesis failure
+  // degrades it — "the line is whether an answer exists yet" — so this is a fault and
+  // "answer shown, not spoken" is not.
+  //
+  // **The classification reaches the owner as words, in the `detail`.** §4 puts a
+  // `SpeechFailure` on the error precisely because the seam's own exception does not
+  // cross, and the gateway writes this project's own sentence for the member it
+  // carries; `describe` appends it to this one. So a deadline and an unclassified
+  // failure read differently here without this page holding a second copy of either
+  // sentence — which is the drift a per-member table in the front end would be.
+  "transcription-failed": "That recording was not turned into words, so nothing was asked.",
   rejected: "The hub refused that as badly formed, so nothing was written.",
   // The connection surface's own conditions (ADR-0177 §3, ADR-0151 §7). They are here
   // as well as in `CONNECTION_CONDITIONS` because the two answer different questions
@@ -3465,6 +3484,397 @@ async function askStreaming(half, asked, chosenAt, waiting) {
     return;
   }
   renderOutcome(terminal.outcome, chosenAt);
+}
+
+// --- push to talk (ADR-0200 §10) ---------------------------------------------
+//
+// **This page runs no speech engine.** It records with `MediaRecorder` and plays what
+// the hub sent back, and it calls neither `SpeechRecognition` nor `speechSynthesis` —
+// §10 forbids both by name, and `test_bundle.py` asserts the shipped script mentions
+// neither. Recognition here would make the edge decide what a submission means
+// (ADR-0094 §6, §7); synthesis here would speak text the hub's disclosure ruling never
+// saw (ADR-0199), which is the failure milestone 19's exit test is written to catch.
+//
+// **One request, answered whole.** The press ends before the request begins, so there
+// is nothing to stream: the recording goes up complete and the rendering comes back on
+// that request's response. No socket, no upgrade, no `EventSource`, no chunked upload
+// (ADR-0175 §1).
+//
+// **And it is a third entry, never a fallback from either other one** (ADR-0168 §9,
+// ADR-0200 §10). A spoken turn that fails is a spoken turn that failed; the typed form
+// is above it and the owner uses it or does not.
+
+// The container-and-codec members `SpokenAudioFormat` carries, in this page's own
+// preference order. Two facts are read off it and they are different questions: what
+// this browser can *encode* decides what is recorded, and what it can *decode* is what
+// `plays` tells the hub. A browser can be able to do one and not the other.
+//
+// Spelled as the enum's own values, parameters included, because that is what crosses:
+// `audio/webm` alone names a container two codecs can fill, and `MediaRecorder` wants
+// the codec named.
+const TALK_FORMATS = ["audio/webm;codecs=opus", "audio/mp4"];
+
+const LISTENING = "Listening — let go when you have finished.";
+const SENDING = "Sending what you said…";
+
+// **Disabled and explained, rather than absent** (ADR-0200 §10, ADR-0202). A browser
+// withholds a microphone from a page whose origin it does not consider trustworthy,
+// and it gives no legible account of why — so a control that simply was not there
+// would leave an owner with nothing to act on. The two origins that work are named,
+// because naming them is the whole remedy.
+const NO_MICROPHONE =
+  "This browser will not hand this page a microphone. That is a property of the " +
+  "origin rather than of the assistant: a microphone is offered on the gateway's own " +
+  "machine at its http://127.0.0.1 address, and on another device at the https:// " +
+  "address docs/guide/phone.md sets up. Typing works everywhere.";
+
+// The two ways `getUserMedia` says no that an owner can do something about, and a
+// third for everything else. Read off the error's `name`, which is the one member the
+// specification fixes — its `message` is the browser's own prose and differs between
+// them.
+const MICROPHONE_DENIED =
+  "This browser did not give the page the microphone. Nothing was recorded and " +
+  "nothing was sent. The permission is the browser's, not the assistant's: allow the " +
+  "microphone for this site and hold the button again.";
+const NO_MICROPHONE_DEVICE =
+  "This device has no microphone the browser will offer. Nothing was recorded and " +
+  "nothing was sent.";
+const MICROPHONE_UNAVAILABLE =
+  "The microphone could not be opened, so nothing was recorded and nothing was sent. " +
+  "Something else may be holding it.";
+
+// A press that produced no bytes at all — a tap rather than a hold, or a recorder that
+// was stopped before it had written anything. Said rather than sent: an empty
+// recording is not a question, and posting one would spend a turn to be told so.
+const NOTHING_RECORDED =
+  "That press was too short to record anything, so nothing was sent. Hold the button " +
+  "down while you speak, and let go when you have finished.";
+
+// ADR-0200 §4's no-words shape, which is **not** an error: "nothing was asked, so
+// nothing was answered, no turn ran, no episode was captured and no conversation was
+// created". So it is said in the page's own hint rather than in the fault surface,
+// where it would teach an owner that a quiet room is something going wrong.
+const HEARD_NOTHING =
+  "I heard nothing in that recording, so nothing was asked and nothing was answered.";
+
+// ADR-0200 §4's fourth degradation: an answer existed and speaking it did not
+// complete. **A statement rather than a fault**, for ADR-0170 §6's reason applied one
+// stage further on — the answer is on screen and is the whole of what was said, so
+// what is missing is the audio and nothing else.
+const NOT_SPOKEN =
+  "That answer is shown here and was not spoken: composing it worked and rendering it " +
+  "as speech did not. Nothing of the answer is missing — what is above is all of it.";
+
+// The rendering arrived and this browser could not play it. Distinct from the line
+// above, and the difference is where the failure was: the hub rendered speech and sent
+// it, and it is this browser that could not turn it back into sound.
+const COULD_NOT_PLAY =
+  "That answer was spoken and this browser could not play the audio. The answer above " +
+  "is the same words, complete.";
+
+// The press being served, or `null` between presses.
+//
+// **A record rather than a flag**, because a release can land before the browser has
+// answered the permission prompt: the release marks *that* press abandoned, and the
+// code that resumes after the prompt checks that it is still the press it started as
+// rather than that some press is in flight.
+let press = null;
+
+// What this browser can encode, or `null` where it can encode none of them. Asked of
+// `MediaRecorder` rather than assumed from the user agent, which is the only honest
+// way to know: `isTypeSupported` is the browser's own answer about its own encoder.
+function recordableFormat() {
+  if (typeof window.MediaRecorder !== "function") {
+    return null;
+  }
+  if (typeof MediaRecorder.isTypeSupported !== "function") {
+    return null;
+  }
+  return TALK_FORMATS.find((one) => MediaRecorder.isTypeSupported(one)) ?? null;
+}
+
+// What this browser can decode, which is what `plays` says (ADR-0200 §3): "what the
+// caller can *render*, not who can *hear*". In preference order, because the hub
+// renders in "the **first** member of `plays` that the synthesizer's `formats` property
+// also names" — so the order here is a real choice and not a formality.
+//
+// **The recorded format is the floor.** `canPlayType` answers about the media element's
+// decoders and can be empty on a browser that plainly has the codec, since it just
+// encoded with it; sending an empty `plays` is refused by the promoted surface, and
+// sending nothing at all would silence a turn this browser could have heard.
+function playableFormats(recorded) {
+  const probe = document.createElement("audio");
+  const playable = TALK_FORMATS.filter((one) => probe.canPlayType(one) !== "");
+  return playable.length > 0 ? playable : [recorded];
+}
+
+// What the page says about the microphone, in one place so the sentence and the
+// control cannot get out of step.
+function saying(text) {
+  el("talk-state").textContent = text;
+  el("talk-state").hidden = text === "";
+}
+
+// What the hub heard, disclosed on every call that produced a transcript (ADR-0200 §4).
+// Inserted as text like every other value the hub returns (ADR-0168 §6): a transcript
+// is model output.
+function heardWas(text) {
+  el("heard").textContent = text === null ? "" : `Heard: ${text}`;
+  el("heard").hidden = text === null;
+}
+
+// Whether this browser will let the page record at all, decided on load and said on
+// screen either way. Three things have to be true and each is a different question:
+// the page must be able to *ask* for a microphone, it must have a recorder, and that
+// recorder must be able to produce a format this surface carries.
+function offerTalk() {
+  const button = el("talk-button");
+  const usable =
+    navigator.mediaDevices !== undefined &&
+    typeof navigator.mediaDevices.getUserMedia === "function" &&
+    recordableFormat() !== null;
+  button.hidden = false;
+  button.disabled = !usable;
+  saying(usable ? "" : NO_MICROPHONE);
+}
+
+// Which of `getUserMedia`'s refusals this was, from the one member the specification
+// fixes. The browser's own `message` is never rendered: it is prose this project did
+// not author, and a page that relayed it would be saying something it cannot stand
+// behind about a device the owner has to act on.
+function microphoneRefused(error) {
+  const named = error && typeof error.name === "string" ? error.name : "";
+  if (named === "NotAllowedError" || named === "SecurityError") {
+    return MICROPHONE_DENIED;
+  }
+  if (named === "NotFoundError" || named === "OverconstrainedError") {
+    return NO_MICROPHONE_DEVICE;
+  }
+  return MICROPHONE_UNAVAILABLE;
+}
+
+// Give the microphone back the moment the recording ends. A track left live is a
+// browser still showing the recording indicator over a page that has stopped
+// listening, which is a claim about this page that would not be true.
+function releaseMicrophone(stream) {
+  if (stream === null) {
+    return;
+  }
+  stream.getTracks().forEach((track) => track.stop());
+}
+
+async function startTalking() {
+  const button = el("talk-button");
+  if (press !== null || button.disabled) {
+    return;
+  }
+  const format = recordableFormat();
+  if (format === null) {
+    return;
+  }
+  fault(null, "console");
+  heardWas(null);
+  const mine = { format, released: false, recorder: null, stream: null, chunks: [] };
+  press = mine;
+  saying(LISTENING);
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (refusal) {
+    press = null;
+    saying("");
+    fault(microphoneRefused(refusal), "console");
+    return;
+  }
+  // **The release that landed while the prompt was up.** The owner let go, and what
+  // they let go of was this press: the microphone is handed straight back and nothing
+  // is recorded or sent. Checking the identity rather than a flag is what keeps a
+  // *later* press from being abandoned by an earlier one's release.
+  if (press !== mine || mine.released) {
+    releaseMicrophone(stream);
+    if (press === mine) {
+      press = null;
+      saying("");
+    }
+    return;
+  }
+  mine.stream = stream;
+  const recorder = new MediaRecorder(stream, { mimeType: format });
+  mine.recorder = recorder;
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) {
+      mine.chunks.push(event.data);
+    }
+  });
+  // The upload is hung off `stop` rather than off the release, because the recorder
+  // writes its last block as it stops: sending from the release would send a recording
+  // missing its own ending.
+  recorder.addEventListener("stop", () => {
+    void sendRecording(mine);
+  });
+  recorder.start();
+}
+
+function stopTalking() {
+  const mine = press;
+  if (mine === null) {
+    return;
+  }
+  mine.released = true;
+  if (mine.recorder !== null && mine.recorder.state === "recording") {
+    mine.recorder.stop();
+  }
+}
+
+async function sendRecording(mine) {
+  releaseMicrophone(mine.stream);
+  const button = el("talk-button");
+  const half = headerHalf();
+  if (half === null) {
+    press = null;
+    saying("");
+    showBootstrap();
+    return;
+  }
+  const asked = {};
+  try {
+    const recording = new Blob(mine.chunks, { type: mine.format });
+    if (recording.size === 0) {
+      saying(NOTHING_RECORDED);
+      return;
+    }
+    saying(SENDING);
+    button.disabled = true;
+    // Read before the request goes out, so what is compared on the way back is the
+    // selection this turn was sent under and not the one it is landing into — `ask`'s
+    // own rule, and the reason is the same on either entry.
+    const chosenAt = chose;
+    asked.utterance = { content: await base64Of(recording), media_type: mine.format };
+    asked.plays = playableFormats(mine.format);
+    if (conversationId !== null) {
+      asked.conversation_id = conversationId;
+    }
+    const response = await fetch("/ask/spoken", {
+      method: "POST",
+      headers: admitted(half, true),
+      body: JSON.stringify(asked),
+    });
+    const body = await readBody(response);
+    if (!response.ok) {
+      show("answer", false);
+      conversationLost(body, asked.conversation_id);
+      refused("console", body, response.status);
+      return;
+    }
+    renderSpokenTurn(body.turn, chosenAt);
+  } catch (_) {
+    // `fetch` rejects when the connection itself failed — the gateway is gone, which is
+    // a different fault from the hub being gone and is said as one. `ask`'s own catch
+    // draws the same line for the same reason.
+    show("answer", false);
+    fault(GATEWAY_GONE, "console");
+  } finally {
+    press = null;
+    button.disabled = false;
+    if (el("talk-state").textContent === SENDING) {
+      saying("");
+    }
+  }
+}
+
+// The four members of a `SpokenTurn`, each rendered as ADR-0200 §4 describes it.
+//
+// **The turn inside is rendered by `renderOutcome` and by nothing else.** §4 makes it
+// "an ordinary `TurnOutcome`… This call composes a turn; it does not create a second
+// kind of one" — so a spoken answer and a typed one are the same rendering, and a
+// member added to one reaches both.
+function renderSpokenTurn(turn, chosenAt) {
+  // §4: "`heard` is `None` **exactly when** `outcome` is `None`, and that pair is the
+  // recording that carried no words". Not an error, and said where the page says
+  // things about the microphone rather than in the fault surface.
+  if (turn.outcome === null) {
+    heardWas(null);
+    saying(HEARD_NOTHING);
+    return;
+  }
+  heardWas(turn.heard);
+  renderOutcome(turn.outcome, chosenAt);
+  if (turn.spoken !== null) {
+    void playSpoken(turn.spoken);
+    return;
+  }
+  // Carried rather than inferred from the `null` above it: §4 gives `spoken` two `null`
+  // shapes and only one of them is an answer that could not be spoken.
+  if (turn.spoken_degraded) {
+    line(el("answer-body"), NOT_SPOKEN, "notice");
+  }
+}
+
+// Play the rendering the hub sent, and nothing else — the browser's ordinary audio
+// decoding of bytes this system produced (ADR-0200 §10). No `speechSynthesis`: the
+// words that reach a loudspeaker are the ones ADR-0199's disclosure ruling composed
+// for that channel, rendered by the hub's own synthesizer.
+//
+// **Through the Web Audio decoder rather than an `<audio>` element**, and the reason is
+// a ratified clause rather than a preference: ADR-0168 §6 serves every response under a
+// policy permitting media "from its own origin alone", and `media-src 'self'` does not
+// match a `blob:` or a `data:` URL — the only two ways to get bytes the page is holding
+// into a media element. So element playback of a hub-supplied rendering is refused by
+// the browser, and the alternative was widening a ratified security clause to make one
+// control work. `decodeAudioData` takes the octets directly, engages no fetch and no
+// URL, and is subject to no directive at all.
+//
+// `resume` before the source starts because an `AudioContext` built outside a gesture
+// can start suspended; the press that led here is a gesture, so this is the ordinary
+// case going through rather than a workaround for a blocked one.
+async function playSpoken(spoken) {
+  let context = null;
+  try {
+    context = new AudioContext();
+    await context.resume();
+    const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
+    const source = context.createBufferSource();
+    source.buffer = decoded;
+    source.connect(context.destination);
+    const closing = context;
+    source.addEventListener("ended", () => {
+      void closing.close();
+    });
+    source.start();
+  } catch (_) {
+    if (context !== null) {
+      void context.close();
+    }
+    line(el("answer-body"), COULD_NOT_PLAY, "notice");
+  }
+}
+
+// The recording as `SpokenAudio.content` wants it: standard RFC 4648 §4 base64, padded
+// and canonical, which is exactly what `btoa` produces. Never normalised afterwards —
+// what this sends is what the hub validates and what `decoded()` reverses (ADR-0200
+// §9).
+//
+// Chunked because `String.fromCharCode.apply` takes its bytes as arguments, and a
+// second of audio is more arguments than a stack frame holds.
+const BASE64_STRIDE = 0x8000;
+
+async function base64Of(recording) {
+  const bytes = new Uint8Array(await recording.arrayBuffer());
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += BASE64_STRIDE) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(at, at + BASE64_STRIDE));
+  }
+  return btoa(binary);
+}
+
+// The reverse, for the rendering. `atob` is the pair of `btoa` and neither normalises.
+function bytesOf(content) {
+  const binary = atob(content);
+  const bytes = new Uint8Array(binary.length);
+  for (let at = 0; at < binary.length; at += 1) {
+    bytes[at] = binary.charCodeAt(at);
+  }
+  return bytes;
 }
 
 // --- notifications, in the open page and by no other means (ADR-0175 §9) -----
@@ -6722,6 +7132,11 @@ function showConsole() {
   // below them appears when it has been read, so a panel on screen is always a
   // panel showing an answer rather than an empty promise.
   show("control", true);
+  // Whether this browser will let the page record at all, asked once a session exists
+  // and said on screen either way (ADR-0200 §10). Here rather than at load, because the
+  // control lives in the console panel and there is nothing to offer while the
+  // bootstrap panel is up.
+  offerTalk();
   el("utterance").focus();
   watchDeliveries();
   // A park outlives the page that raised it, so a browser opening onto one has to be
@@ -6734,6 +7149,43 @@ el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
 // The way out of a wait, built once and hidden until there is a wait to leave (#1500).
 offerStopWaiting();
+// Push to talk, on the three ways a control is held down (ADR-0200 §10).
+//
+// **Pointer events cover mouse, pen and touch in one pair**, which is why there is no
+// `touchstart` handler beside them: a second set would double-fire on every browser
+// that sends both. `setPointerCapture` is what makes the release land here even when
+// the finger or the cursor has left the button by the time it lifts — without it a
+// press that drifts is a recording that never stops.
+//
+// **The keyboard is its own pair rather than a `click`**, because a click is the whole
+// press-and-release collapsed into one event and this control needs the two apart. The
+// default has to go with it: a native button treats Space and Enter as a click, so
+// leaving it would fire an activation on top of the pair. `repeat` is the key
+// auto-repeating while held, which is not a second press.
+const talkButton = el("talk-button");
+talkButton.addEventListener("pointerdown", (event) => {
+  talkButton.setPointerCapture(event.pointerId);
+  void startTalking();
+});
+talkButton.addEventListener("pointerup", stopTalking);
+talkButton.addEventListener("pointercancel", stopTalking);
+talkButton.addEventListener("keydown", (event) => {
+  if (event.key !== " " && event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  if (event.repeat) {
+    return;
+  }
+  void startTalking();
+});
+talkButton.addEventListener("keyup", (event) => {
+  if (event.key !== " " && event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  stopTalking();
+});
 el("new-conversation").addEventListener("click", startFresh);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
