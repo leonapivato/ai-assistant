@@ -1266,14 +1266,19 @@ async def test_a_discarded_handle_is_never_re_minted_for_a_new_park() -> None:
     the next park takes it, and the token the *first* caller still holds now names the
     *third* park: an old confirmation authorising an action nobody offered it for.
 
-    The factory here repeats deliberately. That is not a contrivance but the condition
-    the mint already declares itself proof against — "a factory that repeats a handle
-    is disambiguated with a suffix rather than trusted or refused" (#287) — and the
-    defect was that the disambiguation only saw what was live. Production injects
+    The factory here repeats deliberately — it returns one constant. That is not a
+    contrivance but the condition the mint already declares itself proof against:
+    "the injected factory supplies the opacity; the engine supplies the *uniqueness*"
+    (#287, on never stranding a park). The defect was that the uniqueness was over
+    what is live rather than over the process's life. Production injects
     ``uuid.uuid4``, so the exposure is a deployment with a counter or a warm restart;
     what is under test is the promise, not the odds.
 
-    Filed as #1644 and taken on this lane's review round 3.
+    The engine now stamps a serial on every handle, so this case also witnesses that
+    the guarantee costs no table: nothing here is remembered, and a turn that parks
+    nothing consumes an integer rather than a string that outlives it.
+
+    Filed as #1644 and taken on this lane's review rounds 3 and 4.
     """
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(
