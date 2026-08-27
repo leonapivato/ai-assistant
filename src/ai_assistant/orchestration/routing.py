@@ -534,16 +534,24 @@ async def resolve(
     among candidates by rank, recency, score, best match, or a second model call.
     Ambiguity ends the route."
 
-    **What the query is matched against.** Every **distinctive** term of the query —
-    its words, less the framing ones a copied span drags along — must appear inside some
-    word of the record's own text (:func:`_names`). Term-wise rather than whole-span,
-    because the router is asked for the user's own words and copies the sentence's
-    connective with them, so ``that I drive a green estate car`` was never a contiguous
-    substring of the belief ``I drive a green estate car`` and a routed forget of a
-    belief that plainly existed ended in ``NOT_FOUND`` (#1647). The rule stays a lookup:
-    it is total, order-independent, and free of rank, score, best match and any second
-    model call, and where it names more than one record the route ends in ``AMBIGUOUS``
-    over a listing the user reads rather than choosing among them.
+    **What the query is matched against.** Every **distinctive** term of the query — its
+    words, less a leading run naming a record and less the function words a copied span
+    drags along (:func:`_wanted`) — must be one of the record's own words, give or take
+    an inflection (:func:`_names`). Term-wise rather than whole-span, because the router
+    is asked for the user's own words and copies the sentence's connective with them, so
+    ``that I drive a green estate car`` was never a contiguous substring of the belief
+    ``I drive a green estate car`` and a routed forget of a belief that plainly existed
+    ended in ``NOT_FOUND`` (#1647).
+
+    The rule stays a lookup: total, order-independent, and free of rank, score, best
+    match and any second model call, so the same query and store give the same candidates
+    every run. It is a **wider** lookup than a substring match and not a looser one —
+    every word the user said still has to be in the record, which is what keeps a negated
+    query off the belief asserting the opposite — and where it names more than one record
+    the route ends in ``AMBIGUOUS`` over a listing the user reads rather than choosing
+    among them. Where it names one, §7's card renders that record before anything of the
+    user's is destroyed, which is the guard a widened match leans on and the reason it
+    may lean on it.
 
     **The bound and its disclosure ride the outcome rather than a count.** A lookup
     resolving to more than one candidate but no more than
@@ -653,25 +661,50 @@ class _Paged[T](Protocol):
 
 
 def _terms(value: str) -> tuple[str, ...]:
-    """``value`` as case-folded words: runs of letters and digits, and nothing else.
+    """``value`` as case-folded words: runs of letters and digits, apostrophes kept.
 
     Punctuation, underscores and whitespace are separators, so ``did the user move?``
-    and ``google_calendar`` are read as the words a person would say them as. This
-    normalises the *comparison* and never the stored value: what the card renders is
-    the record, and what the façade is called with is the identity read off it,
+    and ``google_calendar`` are read as the words a person would say them as. An
+    apostrophe is **not** a separator, and that is load-bearing rather than tidy:
+    splitting ``can't`` into ``can`` and ``t`` leaves two fragments that look like
+    framing, and a query the user negated would name the belief asserting the opposite.
+    A contraction is one word here, so ``can't`` is a word ``I can drive`` does not have.
+    The curly apostrophe is folded onto the straight one so a keyboard cannot decide
+    whether two words are the same word.
+
+    This normalises the *comparison* and never the stored value: what the card renders
+    is the record, and what the façade is called with is the identity read off it,
     neither of which passes through here.
     """
-    return tuple(_WORD.findall(value.casefold()))
+    return tuple(_WORD.findall(value.casefold().replace("\u2019", "'")))
 
 
 def _wanted(query: str) -> frozenset[str]:
-    """The query's **distinctive** terms — its words, less :data:`_FRAMING`'s.
+    """The query's **distinctive** terms: what is left once its framing is dropped.
+
+    Two steps, and the difference between them is the whole of how a word can be
+    framing *sometimes*:
+
+    1. **A leading run of reference words is stripped** — every word from the start of
+       the query that is in :data:`_FRAMING` or :data:`_REFERENCE`, stopping at the
+       first that is neither. This is the shape a person names a record in: "the
+       question you asked me about my commute" is six words of reference and then the
+       one word that says which. Because it is a *prefix* rule, the same words go on
+       constraining the match everywhere else in the query — "that I talked about
+       Alice" keeps its ``about``, and so does not name the belief "I talked with
+       Alice".
+    2. **What remains is filtered by** :data:`_FRAMING` **alone**, which is what lets a
+       stored belief be written in the third person while the user speaks in the first.
 
     A set rather than a sequence, because the match is on which words the query names
-    and never on the order it named them in: the router copies a span out of a
-    sentence, and the sentence's word order is the sentence's, not the record's.
+    and never on the order it named them in: the router copies a span out of a sentence,
+    and the sentence's word order is the sentence's, not the record's.
     """
-    return frozenset(_terms(query)) - _FRAMING
+    terms = _terms(query)
+    start = 0
+    while start < len(terms) and (terms[start] in _FRAMING or terms[start] in _REFERENCE):
+        start += 1
+    return frozenset(terms[start:]) - _FRAMING
 
 
 def _names(wanted: frozenset[str], value: str) -> bool:
@@ -753,44 +786,47 @@ def _same_word(term: str, word: str) -> bool:
 #: and a source identifier is not English.
 _STEM: Final = 3
 
-_INFLECTIONS: Final = ("s", "es", "d", "ed", "ing")
+_INFLECTIONS: Final = ("s", "es", "d", "ed", "ing", "'s")
 
-#: One word of a record or a query: a run of letters or digits. Underscores are
+#: One word of a record or a query: a run of letters or digits, with apostrophes kept
+#: **inside** it so a contraction stays one word (``can't``, ``user's``). Underscores are
 #: separators rather than word characters, so a source named ``google_calendar`` is two
 #: words and a query naming ``calendar`` reaches it.
-_WORD: Final = re.compile(r"[^\W_]+")
+_WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
-#: The words a **query** carries as framing rather than as subject, dropped from the
-#: query side of the comparison and from that side only (#1647).
+#: The words a query carries as framing wherever they appear, dropped from the query
+#: side of the comparison and from that side only (#1647).
 #:
-#: **The test for membership is one question**: can the word be dropped without changing
-#: *which* proposition the query is about? Only two classes pass it — the closed-class
-#: function words that hold a sentence together (articles, demonstratives, pronouns and
-#: possessives, the framing prepositions, the copulas, auxiliaries and modals, and the
-#: fragments an apostrophe leaves, so ``user's`` reads as ``user`` and ``s``), and the
-#: words that name a **record** rather than say what it holds, because a person refers
-#: to what the assistant keeps by its kind ("the question you asked me about my
-#: commute") and those words are about the record's existence rather than about what
-#: ``Question.content`` says.
+#: **The test for membership is one question**: can the word be dropped, *anywhere in a
+#: sentence*, without changing which proposition the query is about? Only the
+#: closed-class function words pass it — articles and demonstratives, pronouns and
+#: possessives, the copulas, auxiliaries and modals, and the contractions of a pronoun
+#: with one of those. They are what a copied span drags along and what differs between a
+#: user speaking in the first person and a belief stored in the third.
 #:
 #: **What is deliberately absent matters as much as what is here**, because a term
 #: dropped from the query stops constraining the match, and a query that no longer
 #: constrains can name the record that says the opposite:
 #:
-#: - **negations and quantifiers** — ``no``, ``none``, ``all``, ``any``, ``every`` —
-#:   without which "I have no pets" names the belief "I have pets";
+#: - **negations, contracted ones included** — ``no``, ``none``, ``not``, and every
+#:   ``n't`` form, which is why :func:`_terms` keeps a contraction whole: without
+#:   ``can't``, "I can't drive" names the belief "I can drive";
+#: - **quantifiers** — ``all``, ``any``, ``every``, ``some`` — without which a habit
+#:   becomes any instance of it;
 #: - **conjunctions** — ``and``, ``or``, ``but``, ``if``, ``when``, ``where`` — without
 #:   which "tea or coffee" names the belief that says "tea and coffee";
-#: - **every preposition but the two that introduce a reference** — ``for``, ``with``,
-#:   ``to``, ``from``, ``in``, ``on``, ``at``, ``by``, ``into``, ``over``, ``under`` —
-#:   which say what a thing's relationship to another is, or where it is or went, so
-#:   without them "I work for Acme" names the belief "I work with Acme";
+#: - **every preposition** — ``for``, ``with``, ``to``, ``from``, ``in``, ``on``,
+#:   ``at``, ``by``, ``into``, ``over`` — which say what a thing's relationship to
+#:   another is, or where it is or went, so without them "I work for Acme" names the
+#:   belief "I work with Acme". ``about`` and ``of`` are in :data:`_REFERENCE` rather
+#:   than here for exactly this reason: they frame a *reference* at the start of a query
+#:   and assert a relationship anywhere else;
 #: - **the mental-state and reporting verbs** — ``know``, ``remember``, ``think``,
 #:   ``say``, ``tell``, ``told`` — which are what a belief asserts, not how it is
 #:   referred to.
 #:
 #: The record side keeps all of its words, which is what makes the asymmetry safe: a
-#: record whose own words are ``the`` and ``about`` is still matched by a query naming
+#: record whose own words are ``the`` and ``is`` is still matched by a query naming
 #: them, because the match is tested against everything the record says.
 _FRAMING: Final[frozenset[str]] = frozenset(
     word
@@ -800,21 +836,38 @@ _FRAMING: Final[frozenset[str]] = frozenset(
         # pronouns and possessives
         "i me my mine myself we us our ours you your yours he him his she her hers",
         "it its they them their theirs",
-        # the two prepositions that introduce a *reference* to a record rather than say
-        # anything about it — "the question you asked me **about** my commute". The rest
-        # are absent for the reason below: `for` and `with` are the difference between
-        # working for Acme and working with them, and a query that lost them would name
-        # the belief asserting the other one.
-        "about of",
         # copulas, auxiliaries and modals
         "am is are was were be been being do does did done have has had",
         "will would shall should can could may might must",
-        # the words that name a record rather than say what it holds
+        # a pronoun contracted with one of those — and **no** `n't` form, ever
+        "i'm it's he's she's that's there's here's what's who's let's",
+        "you're we're they're i've you've we've they've",
+        "i'd you'd he'd she'd we'd they'd i'll you'll he'll she'll we'll they'll",
+    )
+    for word in group.split()
+)
+
+#: The words that name a **record** rather than say what it holds, stripped from the
+#: **start** of a query only (:func:`_wanted`).
+#:
+#: A person refers to what the assistant keeps by its kind — "the question you asked me
+#: about my commute" — and those words are about the record's existence rather than
+#: about what ``Question.content`` says. But every one of them is an ordinary word
+#: elsewhere: ``about`` asserts a relationship in "I talked about Alice", ``question``
+#: is a subject in "I hate the question of taxes", and a bag-wide filter would drop them
+#: there too and name the belief that says something else. Position is what tells the
+#: two apart, and it is available without parsing anything: a reference to a record is
+#: how a sentence *opens*.
+_REFERENCE: Final[frozenset[str]] = frozenset(
+    word
+    for group in (
+        # the two prepositions that introduce a reference
+        "about of",
+        # the kinds of record this engine holds
         "belief beliefs fact facts question questions memory memories note notes",
         "record records source sources grant grants thing things",
+        # and the assistant's own asking, which is how a question gets referred to
         "ask asks asked asking",
-        # the fragments an apostrophe leaves
-        "s t d ll re ve m",
     )
     for word in group.split()
 )
