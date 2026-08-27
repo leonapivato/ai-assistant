@@ -1,6 +1,6 @@
 # 42. The interface adapter contract
 
-- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`)
+- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`) and ADR-0197 (§4's guarantee that `approved=False` becomes a `DENY` ruling, only as it reaches a resume answering a routed park)
 - Date: 2026-07-22
 - Partially superseded: 2026-07-31 by ADR-0084 — **§1's refusal of an
   engine-facing Protocol, and the rule that an interface adapter builds its own
@@ -46,6 +46,30 @@
   which is the form ADR-0075 established and `main` carries several times over.
   Appended note per ADR-0070 §1: no text below it is rewritten, and the
   superseded sentences are left standing exactly as written.
+
+- **Partially superseded: 2026-08-27 by
+  [ADR-0197](0197-an-ask-reaches-the-hubs-own-operations-through-a-routing-stage-and-a-routed-operation-is-never-re-read.md),
+  in the scope the `Status` line names.** §4 rules how a confirmation's answer becomes a
+  ruling: `ActionPolicy.resolve` "is what turns `approved` into an `ALLOW` or `DENY`
+  ruling, and only `approved=False → DENY` is guaranteed". ADR-0197 §7 answers a **routed**
+  park with no `ActionPolicy.resolve` call and no `PermissionDecision` at all, so an
+  `approved` of `False` becomes no ruling whatever and raises no `PermissionDeniedError`:
+  the guarantee's *subject* is absent rather than its value different, which is a
+  replacement in a named case rather than a sentence read too widely.
+
+  **Partial and narrow in the same way as ADR-0052 §3's.** A `resume` answering a parked
+  **step** is ruled exactly as §4 ruled it — the policy rules, the engine records, and the
+  denial is a `DENIED` disposition rather than an exception. What ADR-0197 §7 adds is a
+  second kind of park whose refusal is *returned* on its own member, as
+  `RouteOutcome.REFUSED`, because there is no ruling for a refusal to be.
+
+  **§4's account of what an adapter may not do is untouched, and it binds the routed card
+  as hard as it binds a tool's.** "The adapter conveys consent; the policy rules; the
+  engine records and executes" survives whole: ADR-0197 §7's card carries no model-written
+  text, its content is engine-assembled, and no adapter authors the outcome. §6's refusal
+  to let an adapter read the trail to reconstruct a confirmation is likewise restated
+  there rather than narrowed. ADR-0197 §7 is the operative text; this note records the
+  supersession and does not restate its terms. Refs #1623, ADR-0197 §7, §13.
 
 ## Context
 

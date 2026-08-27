@@ -1,6 +1,6 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand)
+- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`)
 - Date: 2026-08-21
 - **Partially superseded: 2026-08-21 by
   [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
@@ -25,6 +25,33 @@
   authority structure are load-bearing in ADR-0173 rather than merely surviving
   it. ADR-0173 §§6 and 7 are the operative text; this note records the
   supersession and does not restate its terms.
+- **Partially superseded: 2026-08-27 by
+  [ADR-0197](0197-an-ask-reaches-the-hubs-own-operations-through-a-routing-stage-and-a-routed-operation-is-never-re-read.md),
+  in the scope the `Status` line names.** §4 rules `reply` `None` on "exactly three
+  shapes", names the second as "a pass whose `turn` is `None`", and rules
+  `reply_degraded` "never `True` … where `turn` is `None`". ADR-0197 §1 adds an
+  operation-routing stage that **ends the pipeline** where it routes, so a routed pass
+  produces no `TurnResult` at all — and §8 admits routed passes in which `turn` is
+  `None` and an answer is nevertheless **owed**, carrying a `reply`, or carrying `reply`
+  `None` beside `reply_degraded` `True` where composing it failed. A reader holding only
+  this ADR would build a validator that refuses the routed outcome, so it is a change to
+  what was decided rather than a reconciliation of it.
+
+  **It is partial and deliberately narrow.** What ceases to bind is exactly §4's second
+  `None` shape as an exhaustive account of a `None` `turn`, and its two clauses stated in
+  the `turn is None` direction, and only where `TurnOutcome.routed` is non-`None`. The
+  park shape, the recovered-resume shape, the composition-failure shape, the
+  `reply_degraded` flag's meaning and ADR-0173 §6's widening are untouched; an outcome
+  carrying **no** `routed` is ruled exactly as §4 ruled it, and a **recovered** park is
+  such an outcome — it refuses a `reply` after this decision as it did before. §4's own
+  *reason* is what scopes it: "a recovered park persisted no context and no memories, so
+  there was nothing to compose from", which is true of a recovered park and false of a
+  routed pass, where the operation and its outcome are exactly what there is to compose
+  from. §§1, 5, 6 and 8 are untouched and load-bearing in ADR-0197 rather than merely
+  surviving it: §1's refusal to route a reply through a tool is the argument §1 there
+  extends to a hub operation, and §6's rendering rule binds the routed account as it
+  binds the step account. ADR-0197 §8 is the operative text; this note records the
+  supersession and does not restate its terms. Refs #1623, ADR-0197 §8, §13.
 - **This ADR opens `track:conversation` (#1312) and is milestone 17's ruling.** The
   milestone's exit test is the owner asking "what do you know about me?" from an
   enrolled device and receiving a conversational answer drawn from accumulated

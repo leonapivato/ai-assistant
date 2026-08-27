@@ -1,6 +1,6 @@
 # 52. Durable resume of a parked confirmation through the façade
 
-- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface)
+- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface) and ADR-0197 (§3's clause that the step "is what a resume is for, and it is always present", only as it reaches a resume whose `TurnOutcome` carries `routed`)
 - Date: 2026-07-24
 - Partially superseded: 2026-07-31 by ADR-0084 — **two sentences placing
   `TurnOutcome` outside contract surface are false; every decision this ADR made
@@ -83,6 +83,38 @@
   - **§§1–3's durable-resume decisions**, the recovery-by-binding route through
     `confirmation_id=None` (ADR-0044 §3), and every Consequence about what survives
     a restart. ADR-0084 changes none of it.
+- **Amended and partially superseded: 2026-08-27 by
+  [ADR-0197](0197-an-ask-reaches-the-hubs-own-operations-through-a-routing-stage-and-a-routed-operation-is-never-re-read.md)
+  — §1's "the confirmations a user may still answer" is true of every confirmation §1's
+  algorithm ranges over and does not reach ADR-0197 §7's routed park, which holds no
+  execution, no step and no recorded `CONFIRM` for §1's four steps to recover; nothing §1
+  decided changes. §3's "the step … is always present" is superseded only where
+  `TurnOutcome.routed` is present: ADR-0197 §7's routed resume carries `step` `None`, and
+  every resume continuing a parked step is ruled as §3 ruled it. Refs #1623, ADR-0197 §7,
+  §13.**
+
+  Two records on one ADR, in two different forms, and the difference is not a slip: a
+  **supersession** pair accumulates on a leading-token `Status` line (ADR-0070 §4), where
+  an **amendment** qualifier is excluded from one (ADR-0082 §2) and lives in this note
+  alone. So the `Status` line above carries §3's pair and says nothing about §1.
+
+  **§1 is an amendment because a reader implementing its four steps writes identical code
+  before and after.** The algorithm walks `plans.active_executions()` and recovers each
+  step's pending `CONFIRM` from the audit trail; a routed park has none of the three, so
+  it is not a confirmation §1 fails to recover but one §1 never ranged over. What went
+  stale is the *description* of the product — ADR-0082 §1's second limb, a sentence that
+  now reads more widely than it holds — and ADR-0197 §7 states the cost rather than hiding
+  it: a routed park is not recovered across a restart, and what that costs is one repeated
+  sentence, because nothing has happened yet.
+
+  **§3 is a supersession because a reader acting on it does not act identically.** That
+  section ruled a resumed step's outcome "is what a resume is *for*, and it is always
+  present", and that sentence stands on the promoted surface today. ADR-0197 §7 creates a
+  resume with no step at all, so what §3 decided is **replaced** in the case §7 creates —
+  ADR-0070 §1's line between the two — and partial supersession is the sanctioned form
+  (ADR-0070 §3). ADR-0084 already partially superseded §3's *placement* claim, and this
+  pair is added beside that one rather than in place of it (ADR-0070 §4). ADR-0197 §7 is
+  the operative text; this note records both and restates neither's terms.
 - **This is not a contract change.** `Engine` is the concrete `orchestration`
   façade ADR-0042 §1 deliberately did *not* make a Protocol; it has one
   implementation and one class of consumer. So this ADR is Accepted on merge and
