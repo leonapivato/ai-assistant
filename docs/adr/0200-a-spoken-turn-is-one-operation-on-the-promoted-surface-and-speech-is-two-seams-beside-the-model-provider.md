@@ -484,10 +484,33 @@ therefore does not exist; `spoken` is a `SpokenAudio`.
 > `False`.
 
 > **Normative.** `spoken_degraded` is `True` **exactly when** an answer existed
-> and speaking it did not complete — synthesis raised, or the rendering would
-> have breached §6's bound. It implies `spoken is None` and `outcome is not
-> None`. It is never `True` beside a non-`None` `spoken`, because this call
-> streams nothing and so has no partial rendering to carry.
+> and speaking it did not complete, which is four cases and no others: synthesis
+> raised; the format intersection of §3 was empty; the rendering would have
+> breached §6's bound; **or the complete `SpokenTurn` carrying that rendering
+> would breach ADR-0085 §8c's payload limit**. It implies `spoken is None` and
+> `outcome is not None`. It is never `True` beside a non-`None` `spoken`, because
+> this call streams nothing and so has no partial rendering to carry.
+
+> **Normative.** The fourth case is measured on the **whole projected result**,
+> not on the rendering alone, and it degrades rather than refusing: the rendering
+> is dropped and the outcome travels without it. An answer the caller can read is
+> worth more than a rendering that would make the whole result unsendable, which
+> is ADR-0170 §8's argument reaching a fourth stage.
+
+> **Normative.** Where the `TurnOutcome` **alone** breaches that limit, nothing
+> here applies: that is ADR-0085 §8c's oversized result and raises
+> `OversizedValueError` exactly as it does on `converse`. Dropping a rendering
+> cannot rescue it, and no implementation tries.
+
+**Why §6's bound does not already cover this.** §6 bounds the recording and the
+rendering, each on its own; ADR-0085 §8c bounds the *serialised whole*. A
+`TurnOutcome` that `converse` may lawfully return just under §8c, plus a
+one-byte rendering, is over it — so a rendering well inside §6 can still be the
+byte that breaks the frame. Without the fourth case that outcome had no legal
+value at all: returning it would breach §8c and dropping it would contradict this
+section's own "exactly when". Adversarial review found the gap; the fix is one
+more case rather than a new mechanism, because the remedy is the one already
+stated.
 
 > **Normative.** A transcription failure **fails the call**; a synthesis failure
 > **degrades it**. The line is whether an answer exists yet: a failure before
@@ -567,14 +590,29 @@ that object reachable as `__cause__` and renders it in the traceback, which
 would defeat §8 in the one place §8 cannot see. Suppressing the cause is
 therefore not a loss of diagnostics but the condition of the guarantee.
 
-> **Normative.** An earlier draft of this paragraph let an implementation "log
-> its own detail at its own seam, where the audio is already in scope", and that
-> was a hole in §8 rather than a concession: §8 forbids audio in either log tier
-> "by any component on this path", and a transcriber is such a component. A
-> speech implementation logs the same audio-free classification and its own
-> message, and logs neither the recording, a fragment of it, nor a rendering of
-> an exception that might carry one. Nothing is exempted by being inside the
-> implementation.
+> **Normative.** **No component on this path writes an exception message it did
+> not author** — not to either log tier, not to a store, trace or trail, and not
+> into a surfaced error. What may be written for a seam failure is §4's
+> `SpeechFailure` classification and this project's own message for it. This
+> binds a speech implementation logging at its own seam, the composing path, and
+> whatever handler renders an exception that escapes them.
+
+> **Normative.** That reaches the **defect** path too, and deliberately. §4
+> propagates a non-`SpeechError` unchanged so a broken stage is noticed, and a
+> defect's message is as untrusted as any other — `RuntimeError(audio.content)`
+> is constructible by the same implementation that could construct
+> `SpeechError(audio.content)`. Propagation is unchanged; what is forbidden is
+> any component on this path *writing* that message down. A handler that cannot
+> render an exception without its message renders the class and nothing else.
+
+**An earlier draft of this paragraph opened the hole this closes.** It let an
+implementation "log its own detail at its own seam, where the audio is already in
+scope", which reads as a concession and is a contradiction: §8 forbids audio in
+either tier "by any component on this path", and a transcriber is such a
+component. Adversarial review then found the same leak one step further out, on
+the path §4 keeps open on purpose. Both are the same rule — an exception message
+crossing this path is untrusted text — and stating it once over authorship covers
+the seam, the composer, the defect and whatever renders one.
 
 > **Normative.** `heard` is disclosed to the caller on every call that produced
 > a transcript. A push-to-talk surface that cannot show the user what it heard
@@ -1106,6 +1144,8 @@ each wave must contain if it exists.
 | §7 (one answer) | `outcome.reply` is the deflection where a class was withheld | A test that the deflected turn's `reply` carries no span of the withheld content and that `spoken` renders that same value |
 | §9 (`Base64Audio`) | The named annotation, padded RFC 4648 §4, canonical, never normalised | Rejection tests per defect class — bad alphabet, missing padding, non-canonical final group, URL-safe alphabet — and a byte-identity round trip |
 | §9 (refusal) | Every entry point constructing a `SpokenAudio` from untrusted input refuses `from None` with no input value | Two failure-path tests, in process and through the gateway, with a near-valid clip, asserting the clip appears in neither the refusal, its cause, its rendering, nor either log tier |
+| §8 (authorship) | Nothing on this path writes an exception message it did not author, the defect path included | A test propagating `RuntimeError` carrying a recognisable fragment, asserting it reaches no log tier, store or surfaced error |
+| §4 (ceiling) | The fourth degradation case, measured on the whole projected `SpokenTurn` | A near-ceiling test: an outcome lawful for `converse` plus a one-byte rendering degrades rather than raising, and the same outcome alone still raises `OversizedValueError` |
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
