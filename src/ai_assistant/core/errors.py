@@ -1282,6 +1282,34 @@ class ReadTrailError(AssistantError):
     """
 
 
+class RoutingTrailError(AssistantError):
+    """The routing trail could not be written or read (ADR-0197 §9).
+
+    Raised by a :class:`~ai_assistant.core.protocols.RoutingRecorder` or a
+    :class:`~ai_assistant.core.protocols.RoutingTrail` when the store refuses a row
+    — a row id already held under a differing record, a ``route_id`` already held by
+    a retained row of a different route, a sequence the route state machine does not
+    admit, or a record that does not satisfy its own model — and when the backend
+    cannot be read or written at all.
+
+    **One class rather than several**, as :class:`ReadTrailError` is one class rather
+    than two, and ADR-0197 §9 fixes it in as many words. The recourse is identical
+    however the write failed: the act the row precedes **does not proceed**, the pass
+    ends in :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED`, and the
+    operation is never called. A caller that could tell a broken store from a
+    colliding ``route_id`` would do nothing different with the answer.
+
+    **What this error means to its catcher is that nothing happened** (ADR-0197 §9).
+    The row is written *before* the act it precedes, so a refusal here is a refusal
+    to act: no belief is destroyed, no grant is withdrawn, no park is registered and
+    no token is minted. That is the whole difference between
+    :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED` and
+    :attr:`~ai_assistant.core.types.RouteOutcome.FAILED`, which states that the
+    operation was called and raised — and a surface that rendered the two alike would
+    tell a user their belief might be gone when this decision guarantees it is not.
+    """
+
+
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 

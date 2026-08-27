@@ -1021,6 +1021,12 @@ def test_every_integer_setting_is_discovered() -> None:
         # (b) outright), which is exactly why a flag arriving as one must not be
         # mistaken for a deliberate setting.
         "recipient_grant_max_outstanding",
+        # ADR-0197 §9's row cap on the routing trail, carrying
+        # ``source_read_trail_max_rows``' shape and its ``bool`` argument for the same
+        # reason: ``routing_trail_max_rows=True`` is a trail holding exactly one row,
+        # so the record of what a *model* chose to do to the user's own memory is
+        # pruned away by the very next routed read.
+        "routing_trail_max_rows",
     }
 
 
@@ -1327,6 +1333,13 @@ def test_every_duration_setting_is_discovered() -> None:
         # is the spin the figure was chosen to avoid: "long enough that a poll cycle
         # costs one frame pair rather than being a spin".
         "gateway_notification_budget",
+        # ADR-0197 §7's routed-park lifetime. Deliberately **not** nullable, unlike
+        # ``confirmation_ttl`` beside it: a routed park is invisible — nothing
+        # enumerates it and no durable store recovers it — so "never expires" is the
+        # value that turns a client disconnecting between the park and its token into
+        # a ceiling slot nothing can ever free. The ``bool`` guard is the difference
+        # between a fifteen-minute card and one dead a second after it is rendered.
+        "routed_confirmation_ttl",
     }
 
 
