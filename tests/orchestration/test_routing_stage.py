@@ -755,6 +755,38 @@ async def test_a_query_whose_terms_the_record_does_not_carry_still_finds_nothing
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        pytest.param("that I have no pets", "I have pets", id="a-negation"),
+        pytest.param("that I run every morning", "I run on Sunday mornings", id="a-quantifier"),
+    ],
+)
+async def test_a_query_the_user_negated_or_quantified_does_not_name_its_opposite(
+    query: str, content: str
+) -> None:
+    """Negations and quantifiers say what a record **asserts**; they are not framing.
+
+    They are the words a query cannot afford to lose. Drop ``no`` and "I have no pets"
+    names the belief "I have pets" — one candidate, so §7 parks a destructive
+    confirmation on the record that says the opposite of what the user said. Drop
+    ``every`` and a habit becomes any instance of it. So the framing set holds articles,
+    demonstratives, pronouns, prepositions, copulas and the words naming a record's kind,
+    and stops there.
+
+    What this does not claim is symmetry: the containment runs query → record, so it has
+    no way to require a word's *absence*, and a query naming ``pets`` still finds "I have
+    no pets". That is §5's lookup as ratified, and §7's card — which renders the typed
+    record under ADR-0073 §5's show-then-confirm — is what stands between it and a
+    destroyed belief.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", content),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 

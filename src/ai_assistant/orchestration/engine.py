@@ -6469,11 +6469,23 @@ class Engine:
         previous process life, whose remedy is ``pending_confirmations``; or a
         **routed** park already claimed or expired, which ``pending_confirmations``
         never lists and never re-mints (ADR-0197 §7) because "the claim is what evicts
-        it". So the message carries §7's own sentence for the routed case — nothing has
-        happened yet, the operation was never performed, ask for it again — beside the
-        step park's, rather than naming one remedy that is wrong for half the callers
-        it is given to. Telling them apart instead would mean retaining what §7's claim
+        it". Naming only the first was wrong for half the callers it was given to — a
+        double-clicked confirm button and the loser of two concurrent ``resume`` calls
+        both land here — so the message now names the routed case too, and the way out
+        of it, which is to ask for the operation again rather than to resume this
+        token. Telling the two apart instead would mean retaining what §7's claim
         destroys, which is a decision and not a message.
+
+        **What it must not say is that nothing happened.** §7's own sentence — "nothing
+        has happened yet, and the operation is asked for again rather than resumed
+        again" — is true of a park that was *never answered*, and this branch cannot
+        establish that: §9 orders the claim before the row and the row before the
+        effect, so a claimed routed token is equally a park that expired unanswered, one
+        whose row failed to write, and one whose ``forget`` destroyed the belief a
+        moment ago. The expired path can say it and does, because it raises from inside
+        the claim with the entry in front of it; here the honest statement is that the
+        engine no longer knows, and asking again is what turns not knowing into an
+        answer the user reads.
 
         **``state`` is re-read here and never cached at settlement** (§2). It is
         defined as the durable execution state after the last transition committed,
@@ -6512,10 +6524,12 @@ class Engine:
             msg = (
                 "this token names no step awaiting confirmation in this engine, and no answer "
                 "this engine still holds; it may be from an earlier run of the process, or its "
-                "answer may have aged out. If it named a routed operation, nothing has happened "
-                "yet — the operation was never performed — so ask for it again rather than "
-                "resuming this token; if it named a parked step, pending_confirmations() "
-                "re-mints a token for any park that is still answerable"
+                "answer may have aged out. If it named a routed operation, this engine can no "
+                "longer say whether that operation ran: a routed park is evicted the moment it "
+                "is claimed, is never listed and is never re-minted, so ask for the operation "
+                "again rather than resuming this token, and the answer will say what it finds. "
+                "If it named a parked step, pending_confirmations() re-mints a token for any "
+                "park that is still answerable"
             )
             raise UnknownContinuationError(msg)
         state = await self._plans.get_execution(settled.execution_id)
