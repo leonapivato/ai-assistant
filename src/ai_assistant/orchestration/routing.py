@@ -535,9 +535,11 @@ async def resolve(
     Ambiguity ends the route."
 
     **What the query is matched against.** Every **distinctive** term of the query — its
-    words, less a leading run naming a record and less the function words a copied span
-    drags along (:func:`_wanted`) — must be one of the record's own words, give or take
-    an inflection (:func:`_names`). Term-wise rather than whole-span, because the router
+    words, less the run of framing it opens on and less a reference naming this
+    operation's own kind of record (:func:`_wanted`) — must be one of the record's own
+    words, give or take an inflection (:func:`_names`). Nothing from the body of the
+    query is ever dropped, so every word the user said after the opening still has to be
+    in the record. Term-wise rather than whole-span, because the router
     is asked for the user's own words and copies the sentence's connective with them, so
     ``that I drive a green estate car`` was never a contiguous substring of the belief
     ``I drive a green estate car`` and a routed forget of a belief that plainly existed
@@ -607,7 +609,7 @@ async def _candidates(
     apart.
     """
     field = _MATCH_ON[operation]
-    wanted = _wanted(query)
+    wanted = _wanted(query, operation)
     ceiling = DEFAULT_PAGE_SIZE + 1
     if not wanted:
         # A query that is nothing but framing names no record, and the store is not read
@@ -679,46 +681,64 @@ def _terms(value: str) -> tuple[str, ...]:
     return tuple(_WORD.findall(value.casefold().replace("\u2019", "'")))
 
 
-def _wanted(query: str) -> frozenset[str]:
-    """The query's **distinctive** terms: what is left once its framing is dropped.
+def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
+    """The query's **distinctive** terms: its words, less the run of framing it opens on.
 
-    Two steps, and the difference between them is the whole of how a word can be
-    framing *sometimes*:
+    **Only a leading run is dropped, and never a word from the body of the query.** That
+    is the whole rule, and it is what keeps the lookup from quietly widening past what
+    the user said: every word after the opening still has to be in the record, so a
+    query that negates, quantifies, joins, places or dates its subject goes on saying so.
+    "That I dislike him" keeps ``him`` and does not name the belief "I dislike her".
 
-    1. **A leading run is stripped.** Always the :data:`_FRAMING` words — the articles
-       and pronouns a copied span opens with, "that I …". And, *only* where the query
-       opens on an article followed by a record kind, the :data:`_REFERENCE` words as
-       well: "the question you asked me about my commute" is six words of reference and
-       then the one word that says which. That opening is what tells a reference from an
-       assertion, so "that I question authority" keeps its ``question`` and does not name
-       the belief "I respect authority".
-    2. **What remains is filtered by** :data:`_FRAMING` **alone**, which is what lets a
-       stored belief say ``his wife`` where the user said ``my wife``.
+    Two things are strippable there. Always :data:`_FRAMING` — the articles and pronouns
+    a copied span opens with, "**that I** drive a green estate car", and "**my** calendar"
+    for a grant whose source is ``calendar``. And, only where the query opens on an
+    article and a record kind **this operation resolves over**, :data:`_REFERENCE` as
+    well: "the question you asked me about my commute" is six words of reference and then
+    the one word that says which.
 
     A set rather than a sequence, because the match is on which words the query names
     and never on the order it named them in: the router copies a span out of a sentence,
     and the sentence's word order is the sentence's, not the record's.
+
+    Args:
+        query: The user's own words for which record they meant.
+        operation: The confirm-owed member being resolved for, which decides which record
+            kinds a reference may name.
+
+    Returns:
+        The terms every candidate has to carry, empty where the query named nothing but
+        framing.
     """
     terms = _terms(query)
-    strippable = _FRAMING | _REFERENCE if _opens_on_a_record(terms) else _FRAMING
+    strippable = _FRAMING | _REFERENCE if _opens_on_a_record(terms, operation) else _FRAMING
     start = 0
     while start < len(terms) and terms[start] in strippable:
         start += 1
-    return frozenset(terms[start:]) - _FRAMING
+    return frozenset(terms[start:])
 
 
-def _opens_on_a_record(terms: tuple[str, ...]) -> bool:
-    """Whether ``terms`` opens the way a person names a record: ``the`` then its kind.
+def _opens_on_a_record(terms: tuple[str, ...], operation: RoutableOperation) -> bool:
+    """Whether ``terms`` opens the way a person names a record: ``the``, then its kind.
 
-    Narrow on purpose, and narrower than "a record kind appears somewhere". Every word
-    of :data:`_REFERENCE` is an ordinary word in the middle of a sentence — ``question``
-    is a verb in "I question authority" and a subject in "I hate the question of taxes",
-    ``about`` asserts a relationship in "I talked about Alice" — so stripping them
-    wherever they turn up would resolve each of those to a record asserting something
-    else. What is distinctive about a reference is where it sits: it is how the sentence
-    *opens*, with the article that makes it a noun phrase in front of it.
+    Narrow twice over, because every word of :data:`_REFERENCE` is an ordinary word
+    somewhere — ``question`` is a verb in "I question authority" and a subject in "I hate
+    the question of taxes", ``about`` asserts a relationship in "I talked about Alice" —
+    and a rule that stripped them wherever they turned up would resolve each of those to
+    a record asserting something else.
+
+    - **By position**: a reference is how the sentence *opens*, with the article that
+      makes it a noun phrase in front of it. Past that, the subject has begun.
+    - **By kind**: the kind named has to be one **this operation resolves over**
+      (:data:`_KINDS_OF`). "The question of taxes" is a reference when the route is
+      ``forget_question`` and is a belief's own content when the route is ``forget``, and
+      the operation is the only thing in the pass that knows which.
     """
-    return len(terms) > 1 and terms[0] in _ARTICLES and terms[1] in _KINDS
+    return (
+        len(terms) > 1
+        and terms[0] in _ARTICLES
+        and terms[1] in _KINDS_OF.get(operation, frozenset())
+    )
 
 
 def _names(wanted: frozenset[str], value: str) -> bool:
@@ -812,44 +832,30 @@ _WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 #: a reference to a record (:func:`_opens_on_a_record`).
 _ARTICLES: Final[frozenset[str]] = frozenset(("a", "an", "the", "this", "that", "these", "those"))
 
-#: The words a query carries as framing wherever they appear, dropped from the query
-#: side of the comparison and from that side only (#1647).
+#: The words a query **opens** with as framing rather than as subject, stripped from the
+#: query side of the comparison and from that side only (#1647).
 #:
-#: **The test for membership is one question**: can the word be dropped, *anywhere in a
-#: sentence*, without changing which proposition the query is about? Two classes pass
-#: it and nothing else does — articles and demonstratives, and pronouns and possessives.
-#: They are what a copied span drags along ("**that I** drive a green estate car") and
-#: what differs between a user speaking in the first person and a belief stored in the
-#: third, and #1647's own arms are what each is here for: ``that`` for the connective
-#: the router keeps, ``my`` for "stop reading **my** calendar" against a grant whose
-#: source is ``calendar``.
+#: Two classes, and each is here because one of #1647's own arms needs it: the articles
+#: and demonstratives, for the connective the router copies out of the sentence ("**that
+#: I** drive a green estate car"), and the pronouns and possessives, for "stop reading
+#: **my** calendar" against a grant whose source is ``calendar``.
 #:
-#: **What is deliberately absent matters as much as what is here**, because a term
-#: dropped from the query stops constraining the match, and a query that no longer
-#: constrains can name the record that says something else:
-#:
-#: - **negations, contracted ones included** — ``no``, ``none``, ``not``, and every
-#:   ``n't`` form, which is why :func:`_terms` keeps a contraction whole: without
-#:   ``can't``, "I can't drive" names the belief "I can drive";
-#: - **quantifiers** — ``all``, ``any``, ``every``, ``some`` — without which a habit
-#:   becomes any instance of it;
-#: - **conjunctions** — ``and``, ``or``, ``but``, ``if``, ``when``, ``where`` — without
-#:   which "tea or coffee" names the belief that says "tea and coffee";
-#: - **every preposition** — ``for``, ``with``, ``to``, ``from``, ``in``, ``on`` —
-#:   which say what a thing's relationship to another is, or where it is, so without
-#:   them "I work for Acme" names the belief "I work with Acme";
-#: - **the copulas, auxiliaries and modals** — ``am``, ``is``, ``was``, ``can``,
-#:   ``will`` — which carry tense and modality, so without them "I am a doctor" names
-#:   the belief "I was a doctor" and "I can swim" names "I will swim". The contractions
-#:   of a pronoun with one of them (``I'm``, ``he's``) are absent for the same reason:
-#:   the copula is inside them;
-#: - **the mental-state and reporting verbs** — ``know``, ``remember``, ``think``,
-#:   ``say``, ``tell``, ``told`` — which are what a belief asserts, not how it is
-#:   referred to.
+#: **They are stripped from the opening and nowhere else** (:func:`_wanted`), which is
+#: what stops this set from quietly widening the lookup past what the user said. A word
+#: of it in the body of a query goes on constraining the match like any other — "that I
+#: dislike him" keeps its ``him`` — so the set can be read as what a copied span opens
+#: with rather than as a list of words that never matter. Nothing else is dropped
+#: anywhere: not a negation (``no``, and every ``n't`` form, which is why :func:`_terms`
+#: keeps a contraction whole), not a quantifier, not a conjunction, not a preposition,
+#: not a copula, auxiliary or modal, and not a verb of any kind. Each of those is
+#: something a record asserts, and a query that lost one could name the record saying the
+#: opposite of it: "I have no pets" naming "I have pets", "tea or coffee" naming "tea and
+#: coffee", "I work for Acme" naming "I work with Acme", "I am a doctor" naming "I was a
+#: doctor".
 #:
 #: The record side keeps all of its words, which is what makes the asymmetry safe: a
-#: record whose own words are ``the`` and ``my`` is still matched by a query naming
-#: them, because the match is tested against everything the record says.
+#: record whose own words are ``the`` and ``my`` is still matched by a query naming them,
+#: because the match is tested against everything the record says.
 _FRAMING: Final[frozenset[str]] = _ARTICLES | frozenset(
     word
     for group in (
@@ -859,40 +865,49 @@ _FRAMING: Final[frozenset[str]] = _ARTICLES | frozenset(
     )
     for word in group.split()
 )
-#: The kinds of record this engine holds, as a person names them.
-_KINDS: Final[frozenset[str]] = frozenset(
-    word
-    for group in (
-        "belief beliefs fact facts question questions memory memories note notes",
-        "record records source sources grant grants thing things",
-    )
-    for word in group.split()
-)
 
-#: The words that name a **record** rather than say what it holds, stripped from the
-#: start of a query and only where it opens on an article and one of :data:`_KINDS`
-#: (:func:`_wanted`).
+#: The record kinds a **reference** may name, per confirm-owed operation — the kinds that
+#: operation's lookup resolves over, and no others (:func:`_opens_on_a_record`).
+#:
+#: Per operation rather than one list, because the same noun is a reference for one route
+#: and a belief's own content for another: "the question of taxes" names a deferred
+#: question when the route is ``forget_question`` and is something the user believes when
+#: the route is ``forget``. The operation is the only thing in the pass that knows which,
+#: and a route that resolved over beliefs while stripping the word ``question`` would
+#: hand "the question of taxes" to the belief "I hate taxes".
+_KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
+    RoutableOperation.FORGET: frozenset(
+        (
+            "belief",
+            "beliefs",
+            "fact",
+            "facts",
+            "memory",
+            "memories",
+            "note",
+            "notes",
+            "record",
+            "records",
+            "thing",
+            "things",
+        )
+    ),
+    RoutableOperation.FORGET_QUESTION: frozenset(("question", "questions", "thing", "things")),
+    RoutableOperation.REVOKE: frozenset(
+        ("source", "sources", "grant", "grants", "thing", "things")
+    ),
+}
+
+#: The words that frame a **reference** to a record rather than say what it holds,
+#: stripped from the start of a query and only where it opens on an article and a record
+#: kind of :data:`_KINDS_OF` (:func:`_wanted`).
 #:
 #: A person refers to what the assistant keeps by its kind — "the question you asked me
-#: about my commute" — and those words are about the record's existence rather than
-#: about what ``Question.content`` says. But every one of them is an ordinary word
-#: elsewhere, which is why the opening is what admits them rather than their mere
-#: presence: ``about`` asserts a relationship in "I talked about Alice", ``question`` is
-#: a verb in "I question authority" and a subject in "I hate the question of taxes". A
-#: filter that dropped them there would name the belief that says something else, and
-#: position tells the two apart with no parsing and no second model call.
+#: about my commute" — and those words are about the record's existence rather than about
+#: what ``Question.content`` says. Every one of them is an ordinary word elsewhere, which
+#: is why the opening admits them rather than their mere presence.
 _REFERENCE: Final[frozenset[str]] = frozenset(
-    {
-        # the two prepositions that introduce a reference
-        "about",
-        "of",
-        # and the assistant's own asking, which is how a question gets referred to
-        "ask",
-        "asks",
-        "asked",
-        "asking",
-    }
-    | _KINDS
+    {"about", "of", "ask", "asks", "asked", "asking"} | frozenset().union(*_KINDS_OF.values())
 )
 
 
