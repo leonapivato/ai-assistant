@@ -237,6 +237,83 @@ class ModelResponseError(ModelError):
     routable: ClassVar[bool] = True
 
 
+class SpeechError(AssistantError):
+    """A speech seam failed (ADR-0200 §1).
+
+    The whole of the failure vocabulary :class:`~ai_assistant.core.protocols.SpeechTranscriber`
+    and :class:`~ai_assistant.core.protocols.SpeechSynthesizer` declare. A
+    conforming implementation raises this, or a subclass of it, and raises nothing
+    else that is not a defect.
+
+    **Its own family, and deliberately not a** :class:`ModelError`. That class's
+    documented subject is "a language-model provider failed", and
+    :class:`ModelTimeoutError`'s is a provider that "did not respond within the
+    deadline (HTTP 408 or a timeout)" — of which neither sentence is true of a
+    local speech engine, which ADR-0200 §5 permits and ADR-0200 §11 defaults to.
+    ADR-0118 refused exactly this reuse for exactly this reason, and its own words
+    are why: overloading them "would make the one class that currently means 'the
+    model provider timed out' also mean 'the local embedding runtime wedged',
+    which are different remedies". Nothing widens ``ModelError`` to reach a speech
+    engine, and neither speech Protocol raises one.
+
+    **What does carry across are the two axes and not the semantics.** ADR-0011
+    §1's and ADR-0013 §1's class attributes are declared here with the same
+    meanings and the same conservative defaults a bare ``ModelError`` takes, so
+    that ADR-0200 §11's deferred routing or retry wrapper is an implementation
+    someone writes rather than a contract someone reopens.
+
+    - ``retryable`` — would *this same call, to this same implementation*
+      plausibly succeed if repeated?
+    - ``routable`` — would *a different implementation* plausibly succeed?
+
+    A bare ``SpeechError`` remains valid for a failure that does not fit a
+    subclass, and is conservatively treated as neither.
+
+    **The taxonomy is two classes and stays two until something is observed.**
+    ADR-0200 §1 adds exactly one proper subclass, :class:`SpeechTimeoutError`, on
+    the ground that ADR-0011 §1's six were built from provider behaviour that had
+    actually been seen. A lane adds a third on evidence of a failure mode it has
+    met, never on speculation — and adds its ``SpeechFailure`` member in the same
+    change, because ADR-0200 §4 makes the two vocabularies a bijection.
+
+    **Its message is untrusted text and no component on this path writes it
+    down** (ADR-0200 §8). This class takes arbitrary text, so an implementation
+    that interpolated the clip it could not decode would have put the recording
+    inside the exception; what may be written for a seam failure is the project's
+    own classification and the project's own message for it.
+    """
+
+    retryable: ClassVar[bool] = False
+    routable: ClassVar[bool] = False
+
+
+class SpeechTimeoutError(SpeechError):
+    """A speech call outlived its deadline (ADR-0200 §1).
+
+    Raised by the ``Bounded...`` decorator the composition root wires over
+    whichever implementation it built — never by a seam, which takes no timeout at
+    all (ADR-0200 §1, on ADR-0118 §2's ground: a deadline written into the seam
+    binds one implementation, and a deadline written as a wrapper "composes over
+    *every* implementation").
+
+    Retryable: a second attempt may well be served. Routable: an engine slow
+    enough to miss the deadline is a reason to try a different one. Both flags
+    match :class:`ModelTimeoutError`'s for the same reasons, which is precisely
+    what makes reusing that *class* unnecessary.
+
+    **The work is not known to have stopped.** The deadline ends the caller's
+    wait; it cannot interrupt synchronous inference (ADR-0200 §5, ADR-0118 §7,
+    ADR-0029 §4). A caller may not assume the recording was not transcribed —
+    only that it was not transcribed in time.
+
+    It carries a message and nothing else, which is what lets it round-trip the
+    wire from that message alone (ADR-0085 §10a).
+    """
+
+    retryable: ClassVar[bool] = True
+    routable: ClassVar[bool] = True
+
+
 class EmbeddingDeadlineExpiredError(AssistantError):
     """An embedding call outlived its deadline (ADR-0118 §5).
 

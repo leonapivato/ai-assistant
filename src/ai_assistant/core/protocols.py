@@ -187,6 +187,8 @@ if TYPE_CHECKING:
         SourceReadRecord,
         SpendAdmissionHandle,
         SpendTotal,
+        SpokenAudio,
+        SpokenAudioFormat,
         StepTransition,
         ToolCall,
         ToolCost,
@@ -692,6 +694,176 @@ class StreamingCompleter(Protocol):
                 (ADR-0066 §3). Also raised, from the iteration, if a delta has no
                 UTF-8 encoding or the exchange with the provider fails, narrowed
                 to the most specific subclass.
+        """
+        ...
+
+
+@runtime_checkable
+class SpeechTranscriber(Protocol):
+    """Turns a recording into the words it carries (ADR-0200 §1).
+
+    A **sibling** of :class:`ModelProvider`, not a widening of it, and a sibling
+    of :class:`SpeechSynthesizer` beside it. Nothing here is added to
+    ``ModelProvider``, this Protocol inherits from nothing, and an object may
+    implement both speech seams without anything requiring that it does. The
+    ground is ``Embedder``'s and ``BatchCompleter``'s: speech recognition is a
+    capability most providers do not offer, and a member on ``ModelProvider``
+    would silently unsatisfy ``PydanticAIProvider``, ``RetryingProvider``,
+    ``RoutingProvider`` and every fake at once — the asymmetry ADR-0021 §3 ruled
+    and this module's own "prefer adding a new Protocol over widening an existing
+    one".
+
+    **Two members and no more**, and neither is a deadline. A timeout on this seam
+    would bind one implementation; the deadline is a decorator the composition
+    root wires over whichever implementation it built, so that it "composes over
+    *every* implementation" (ADR-0200 §1, ADR-0118 §2). ``models/`` ships
+    ``BoundedSpeechTranscriber`` for that.
+
+    **Where inference runs is not decided here** (ADR-0200 §5). What binds an
+    implementation that blocks is ADR-0118's two-layer containment: the deadline
+    above, and blocking work run off the event loop on threads the implementation
+    owns and bounds, never on the loop's default executor (ADR-0118 §7).
+    Nothing here names a model, a vendor, a language or a sample rate.
+
+    **Its failures are** :class:`~ai_assistant.core.errors.SpeechError` **and its
+    subclasses, and nothing else that is not a defect** (ADR-0200 §1). No
+    implementation raises a ``ModelError``. The one exception is the argument
+    refusal below, which is a ``ValueError`` because it is a caller error rather
+    than a seam failure and is settled before any I/O.
+
+    Cancelling :meth:`transcribe` is governed by this module's cancellation
+    clause (ADR-0060), and how it observes the value it is handed by the
+    input-observation clause (ADR-0065) — vacuously, since
+    :class:`~ai_assistant.core.types.SpokenAudio` is frozen and holds only
+    scalars.
+
+    **Nothing on this path retains the recording** (ADR-0200 §8). No
+    implementation writes it, a fragment of it, or a length that would let one be
+    reconstructed, to any store, index, trace, trail, outbox or log in either
+    tier; and none puts it inside an exception message, where ADR-0200 §8's
+    guarantee cannot see it and nobody looks.
+    """
+
+    @property
+    def formats(self) -> frozenset[SpokenAudioFormat]:
+        """The container-and-codec members this implementation can decode.
+
+        A capability read **before** a call, which is why it is a set and carries
+        no order: it expresses what can be read, never a preference among what
+        can. A caller reads it and refuses a recording it does not name rather
+        than handing one over to find out (ADR-0200 §1, §9).
+
+        It answers the same across the lifetime of the implementation. A property
+        that changed once a model had loaded would let a recording be admitted
+        against one answer and refused against another.
+        """
+        ...
+
+    async def transcribe(self, audio: SpokenAudio) -> EncodableText:
+        """Return the words heard in ``audio``.
+
+        **A blank return is not a failure.** Empty, or whitespace only — which is
+        exactly what :data:`~ai_assistant.core.types.NonBlankEncodableText`
+        refuses — means the recording carried no words, and the return type is the
+        unrefined :data:`~ai_assistant.core.types.EncodableText` precisely so that
+        a transcriber can say so without raising. What a caller does with it is
+        ADR-0200 §4's, not this seam's.
+
+        **The transcript is not normalised.** An implementation returns what it
+        heard; it does not strip, trim, case-fold or otherwise rewrite the value
+        to make a later blankness test easier, because a caller may compare the
+        value it gets against one it stored (ADR-0096 §2, ADR-0102 §2).
+
+        Args:
+            audio: The recording. Its ``media_type`` must be named by
+                :attr:`formats`.
+
+        Returns:
+            The words heard, or a blank string where there were none.
+
+        Raises:
+            ValueError: If ``audio.media_type`` is not named by :attr:`formats`.
+                Raised locally, **before any I/O**, and refused rather than
+                substituted — no implementation guesses at a container it did not
+                declare. ADR-0200 §3 has the engine read :attr:`formats` before it
+                calls, so a conforming caller never provokes this; it exists for
+                the caller that is not one.
+            SpeechError: If transcription failed. This class and its subclasses
+                are the whole of the vocabulary, and a ``ModelError`` is not in
+                it (ADR-0200 §1).
+        """
+        ...
+
+
+@runtime_checkable
+class SpeechSynthesizer(Protocol):
+    """Turns text into audio of it being spoken (ADR-0200 §1).
+
+    :class:`SpeechTranscriber`'s sibling, symmetric with it member for member,
+    and introduced under the same ruling and the same three grounds. Read that
+    Protocol's docstring for the seam-shape clauses — no deadline, containment
+    rather than a process boundary, a ``SpeechError`` vocabulary, and no
+    retention — each of which binds here identically.
+
+    **Two members, and the redundancy argument does not reach them** (ADR-0200
+    §1). *What this implementation can produce* and *what this rendering is in*
+    are two questions, not one asked twice: the first is a capability read before
+    a call, the second a fact about a value returned by one. What would have been
+    redundant is a format property beside a returned ``media_type`` that could
+    disagree with it — and :meth:`synthesize`'s equality clause is what forbids
+    the disagreement rather than a second answer to one question.
+
+    **That the audio is an audible rendering of the text is this seam's
+    obligation**, discharged in its conformance suite (ADR-0200 §4). No consumer
+    decodes, re-transcribes or otherwise inspects a rendering to check it, and no
+    lane adds an operation that does.
+
+    Cancelling :meth:`synthesize` is governed by this module's cancellation
+    clause (ADR-0060).
+    """
+
+    @property
+    def formats(self) -> frozenset[SpokenAudioFormat]:
+        """The container-and-codec members this implementation can produce.
+
+        The transcriber's property in the output direction, and a set for the same
+        reason: a capability expresses no preference. The *preference* is the
+        caller's, and ADR-0200 §3 puts it in an ordered argument on the promoted
+        surface rather than here.
+        """
+        ...
+
+    async def synthesize(
+        self,
+        text: NonBlankEncodableText,
+        *,
+        format: SpokenAudioFormat,  # noqa: A002 — ADR-0200 §1 fixes this signature
+    ) -> SpokenAudio:
+        """Render ``text`` as audio in ``format``.
+
+        **The returned value's ``media_type`` equals ``format``** (ADR-0200 §1).
+        An implementation asked for a format :attr:`formats` does not name refuses
+        it rather than substituting one, so no caller is handed a rendering it
+        cannot play in place of one it can.
+
+        One positional subject and every other argument keyword-only is ADR-0085
+        §2's convention, unchanged.
+
+        Args:
+            text: What to say. Non-blank, because there is no audio of nothing —
+                a caller with nothing to say does not call this seam (ADR-0200
+                §4's ``spoken`` is ``None`` on exactly those shapes).
+            format: The container-and-codec to produce. Must be named by
+                :attr:`formats`.
+
+        Returns:
+            The rendering, whose ``media_type`` is ``format``.
+
+        Raises:
+            ValueError: If ``format`` is not named by :attr:`formats`. Raised
+                locally, **before any I/O**, for the same reason and with the same
+                standing as the transcriber's refusal.
+            SpeechError: If synthesis failed.
         """
         ...
 
