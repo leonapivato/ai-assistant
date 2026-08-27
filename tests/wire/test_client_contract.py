@@ -64,6 +64,7 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SETTLED_SINGLE_SLOT,
     SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
@@ -71,6 +72,8 @@ from assistant_engine_contract import (
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
+    SettledParkSubject,
+    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -385,6 +388,65 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing.park("h-1", egress=_binding())
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
+
+    @pytest.fixture
+    async def settled_park(self, tmp_path: Path) -> AsyncIterator[SettledParkSubject]:
+        """A client of a hub whose park is settled, and the token that still names it.
+
+        **Settled hub-side and restated over the wire**, which is what this binding
+        adds: ADR-0198 §7 bumps no ``PROTOCOL_VERSION`` and changes no module under
+        ``wire/``, on the ground that the decision changes no byte any payload can
+        take — ``TurnOutcome``'s shape is untouched, and a client built against the
+        older behaviour is handed a success where it expected a typed refusal, a case
+        every ratified client already handles since a *first* resume produces it. If
+        that is true, the restatement crosses with no second declaration; if it is
+        not, these cases are where it shows.
+        """
+        backing = FakeAssistantEngine()
+        backing.park("h-1", egress=_binding())
+        token = ContinuationToken(handle="h-1")
+        await backing.resume(token, approved=True, timeout=_PATIENT)
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SettledParkSubject(engine=client, token=token)
+
+    @pytest.fixture
+    async def settled_park_without_its_execution(
+        self, tmp_path: Path
+    ) -> AsyncIterator[SettledParkSubject]:
+        """:attr:`settled_park`'s subject whose hub-side ``executions`` are empty.
+
+        Arranged hub-side, as it arises — a client reaches plan state through nothing
+        at all. What the binding adds is the failure's *classification* over a socket:
+        ADR-0198 §2's ``PlanningError`` has to arrive as a typed error frame the client
+        reconstructs, rather than as a dropped connection, which is what
+        ``wire/server.py`` turns anything that is not an ``AssistantError`` into.
+        """
+        backing = FakeAssistantEngine()
+        backing.park("h-1", egress=_binding())
+        token = ContinuationToken(handle="h-1")
+        await backing.resume(token, approved=True, timeout=_PATIENT)
+        backing.executions.clear()
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SettledParkSubject(engine=client, token=token)
+
+    @pytest.fixture
+    async def single_slot_parks(self, tmp_path: Path) -> AsyncIterator[SingleSlotParkSubject]:
+        """A client of a hub at a ceiling of one, holding a settled record and a park.
+
+        The ceiling is the hub engine's, as every construction-time property is: a
+        client supplies none of them and reads their consequences over the wire, which
+        is exactly how a spoke meets ADR-0198 §4's bound — as a token that stops
+        restating.
+        """
+        backing = FakeAssistantEngine(max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
+        backing.park("h-1", egress=_binding())
+        settled = ContinuationToken(handle="h-1")
+        await backing.resume(settled, approved=True, timeout=_PATIENT)
+        backing.park("h-2", egress=_binding())
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield SingleSlotParkSubject(
+                engine=client, settled=settled, parked=ContinuationToken(handle="h-2")
+            )
 
     @pytest.fixture
     async def decisions(self, tmp_path: Path) -> AsyncIterator[DecisionSubject]:

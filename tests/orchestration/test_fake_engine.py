@@ -33,6 +33,7 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SETTLED_SINGLE_SLOT,
     SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
@@ -40,6 +41,8 @@ from assistant_engine_contract import (
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
+    SettledParkSubject,
+    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -221,6 +224,58 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine()
         engine.park("h-1", egress=_binding())
         return engine
+
+    @pytest.fixture
+    async def settled_park(self) -> SettledParkSubject:
+        """One fake engine that has answered its park, and the token that named it.
+
+        Settled by calling ``resume`` rather than by seeding ``settled`` directly, so
+        the record under test is the one this fake's own resolution installs — a fake
+        whose lever wrote the record would pass the suite over a path no ``resume``
+        takes.
+        """
+        engine = FakeAssistantEngine()
+        engine.park("h-1", egress=_binding())
+        token = ContinuationToken(handle="h-1")
+        await engine.resume(token, approved=True, timeout=timedelta(seconds=30))
+        return SettledParkSubject(engine=engine, token=token)
+
+    @pytest.fixture
+    async def settled_park_without_its_execution(self) -> SettledParkSubject:
+        """:attr:`settled_park`'s subject whose ``executions`` have been emptied.
+
+        ``executions`` is this fake's stand-in for the plan store a restatement
+        re-reads (ADR-0198 §2), and emptying it is the fake's spelling of a store that
+        has stopped holding the settled binding's execution. It is done from the test
+        process because no call on the promoted surface removes one — which is the same
+        reason the concrete binding reaches for the store's own data-rights operation.
+        """
+        engine = FakeAssistantEngine()
+        engine.park("h-1", egress=_binding())
+        token = ContinuationToken(handle="h-1")
+        await engine.resume(token, approved=True, timeout=timedelta(seconds=30))
+        engine.executions.clear()
+        return SettledParkSubject(engine=engine, token=token)
+
+    @pytest.fixture
+    async def single_slot_parks(self) -> SingleSlotParkSubject:
+        """A fake at a ceiling of one, holding one settled record and one live park.
+
+        The parks are levered in and the settlement is real, which is the division
+        this fake keeps everywhere: a park is reached inside a turn no fake runs, and
+        what the suite is holding this one to is what ``resume`` does with them. The
+        ceiling binds only the retained set here — this fake admits no turn, so the
+        backpressure half has nothing to reach — and the retention is the half ADR-0198
+        §4's discard is about.
+        """
+        engine = FakeAssistantEngine(max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
+        engine.park("h-1", egress=_binding())
+        settled = ContinuationToken(handle="h-1")
+        await engine.resume(settled, approved=True, timeout=timedelta(seconds=30))
+        engine.park("h-2", egress=_binding())
+        return SingleSlotParkSubject(
+            engine=engine, settled=settled, parked=ContinuationToken(handle="h-2")
+        )
 
     @pytest.fixture
     async def decisions(self) -> DecisionSubject:

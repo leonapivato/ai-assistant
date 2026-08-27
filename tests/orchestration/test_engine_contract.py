@@ -40,6 +40,7 @@ from assistant_engine_contract import (
     _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
+    SETTLED_SINGLE_SLOT,
     SPEND_ZERO_CEILING,
     AssistantEngineContract,
     ConnectionSubject,
@@ -47,6 +48,8 @@ from assistant_engine_contract import (
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
+    SettledParkSubject,
+    SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
     overfull_invocation_rows,
@@ -100,6 +103,11 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+
+# The engine's own default confirmation ceiling, read from where it is declared so
+# this helper cannot drift from it. Every fixture below wires at the default; the
+# one that does not says which value it wants and why (ADR-0198 §4).
+from ai_assistant.orchestration.engine import _DEFAULT_MAX_OUTSTANDING
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -350,6 +358,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
     routes: str | None = None,
     memory: FakeMemoryStore | None = None,
+    plans: FakePlanStore | None = None,
+    max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -381,6 +391,18 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``memory`` is the record store, a knob so a routed ``forget``'s subject can be seeded:
     §5 resolves the argument by reading the store the operation itself reads, so a
     resolvable park needs a belief in it before the turn runs.
+
+    ``plans`` is the plan store, a knob for one clause only: ADR-0198 §2 rules that a
+    restatement re-reads ``StepOutcome.state`` from the store rather than answering from
+    a snapshot, and the case that separates the two needs the store emptied *behind* an
+    engine that has already settled a park. Nothing on the promoted surface reaches plan
+    state, so a fixture that could not hold the store could not arrange it.
+
+    ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
+    the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
+    reason — it is a construction-time property of a deployment — and at
+    :data:`SETTLED_SINGLE_SLOT` it is what makes §4's discard reachable in two
+    settlements.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -389,7 +411,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     # is about ordering in time.
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
-    plans = FakePlanStore(now=lambda: AT)
+    store = FakePlanStore(now=lambda: AT) if plans is None else plans
     audit: ConsumingTrail = FakeAuditTrail() if trail is None else trail
     read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
@@ -450,11 +472,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("g"),
     )
     runner = StepRunner(
-        plans=plans,
+        plans=store,
         registry=invoker,
         policy=FakeActionPolicy(),
         trail=audit,
-        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
+        executor=StepExecutor(plans=store, registry=invoker, invoker=invoker, now=lambda: AT),
         now=lambda: AT,
         id_factory=_counter("d"),
         binder=binder,
@@ -464,7 +486,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         closers=closers,
         loop=loop,
         runner=runner,
-        plans=plans,
+        plans=store,
         trail=audit,
         spend=audit,
         reads=read_trail,
@@ -507,6 +529,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         ),
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
+        max_outstanding_confirmations=max_outstanding_confirmations,
     )
 
 
@@ -715,6 +738,81 @@ class TestEngineContract(AssistantEngineContract):
             assert outcome.step is not None
             assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
             yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def settled_park(self) -> AsyncIterator[SettledParkSubject]:
+        """One wired engine that has answered its park, and the token that named it.
+
+        Settled by driving the **real** resolution — a real turn parks over a tool the
+        policy confirms, and a real ``resume`` records the answer through the runner —
+        so the retained record under test is the one ADR-0198 §1 installs inside the
+        resolution's own critical section, not a fixture's idea of one.
+        """
+        built = _wire(parks=True)
+        await built.start()
+        try:
+            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
+            assert outcome.step is not None
+            assert outcome.step.confirmation is not None
+            token = outcome.step.confirmation.token
+            resolved = await built.resume(token, approved=True, timeout=timedelta(seconds=30))
+            assert resolved.step is not None
+            assert resolved.step.disposition is Disposition.EXECUTED
+            yield SettledParkSubject(engine=built, token=token)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def settled_park_without_its_execution(self) -> AsyncIterator[SettledParkSubject]:
+        """:attr:`settled_park`'s subject whose plan store has been emptied behind it.
+
+        Emptied through the store's **own** data-rights operation rather than by
+        reaching into its dict, because that is how the state arises: a user erases
+        their history, or a store is rebuilt beneath a process still running. ``clear``
+        refuses while any execution has a live step, so it also witnesses that the
+        settlement really completed before the execution went away.
+        """
+        plans = FakePlanStore(now=lambda: AT)
+        built = _wire(parks=True, plans=plans)
+        await built.start()
+        try:
+            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
+            assert outcome.step is not None
+            assert outcome.step.confirmation is not None
+            token = outcome.step.confirmation.token
+            await built.resume(token, approved=True, timeout=timedelta(seconds=30))
+            assert await plans.clear() > 0
+            yield SettledParkSubject(engine=built, token=token)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def single_slot_parks(self) -> AsyncIterator[SingleSlotParkSubject]:
+        """One wired engine at a ceiling of one, holding a settled record and a park.
+
+        **The second turn is admitted only because retention holds no ceiling slot.**
+        This engine's ceiling is one, and ``_admit_and_reserve`` refuses a turn that
+        would exceed it — so an implementation that counted the settled record with
+        the parks would raise inside this fixture rather than fail an assertion, which
+        is the loudest place for it to happen.
+        """
+        built = _wire(parks=True, max_outstanding_confirmations=SETTLED_SINGLE_SLOT)
+        await built.start()
+        try:
+            first = await built.converse("send the note", timeout=timedelta(seconds=30))
+            assert first.step is not None
+            assert first.step.confirmation is not None
+            settled = first.step.confirmation.token
+            await built.resume(settled, approved=True, timeout=timedelta(seconds=30))
+
+            second = await built.converse("send another note", timeout=timedelta(seconds=30))
+            assert second.step is not None
+            assert second.step.confirmation is not None
+            yield SingleSlotParkSubject(
+                engine=built, settled=settled, parked=second.step.confirmation.token
+            )
         finally:
             await built.aclose()
 
