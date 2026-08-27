@@ -280,8 +280,9 @@ side-effect of this one.
 > certificate, or a failed handshake.
 
 > **Normative.** A gateway whose remote browser listener is configured on and
-> whose certificate or key is absent, unreadable, unusable, mismatched or already
-> expired **does not start, and reports why**. It does not bind the loopback
+> whose certificate or key is absent, unreadable, unusable, mismatched, or outside
+> the certificate's validity period at that moment **does not start, and reports
+> why**. It does not bind the loopback
 > listener alone and continue, and it does not bind the remote listener without
 > TLS.
 
@@ -515,8 +516,8 @@ when what an overlay's issuance discloses stops matching this section.
 
 > **Normative.** When the remote browser listener binds, the gateway discloses on
 > its own standard output, beside the address it bound: that the listener speaks
-> HTTPS, the name the certificate carries, and the instant the certificate
-> expires. It discloses nothing of the private key.
+> HTTPS, the name the certificate carries, and the instant the certificate's
+> validity ends. It discloses nothing of the private key.
 
 > **Normative.** That disclosure carries **Tier 2 facts only** — a name of the
 > gateway's own machine, an instant, and a scheme. ADR-0174 §3 classifies an
@@ -544,6 +545,15 @@ the clause above states the application rather than making an exception to it. T
 reason to state it at all is that a TLS listener is the first thing this gateway
 has that can fail *before* a request exists, and a lane looking at §6's four
 classes would otherwise have to decide whether to invent a fifth.
+
+**Both bounds, not just the far one, and the near one is not hypothetical.**
+Adversarial review found the asymmetry on its sixth round under this lane: §8 had
+enumerated expiry alone, so a certificate whose validity had not begun passed every
+check and bound a listener every browser rejects — §2's "unusable" reached by a
+route §8 did not test for. A certificate issued against a clock the gateway's
+machine disagrees with is the ordinary way to arrive there, and it is the one case
+where the gateway's refusal is more useful than the browser's, because the gateway
+can say which bound failed and the browser cannot.
 
 **The expiry instant is the renewal story's whole mechanism, and that is
 deliberate.** §4 puts renewal in the owner's hands and refuses to have the gateway
@@ -679,7 +689,9 @@ the one attribute of §6's set whose absence would look deliberate.
 > combinations above. The **gateway refuses at start**, before it binds or
 > discloses a bootstrap value, what only the machine can answer: existence,
 > custody and permissions (§3), that the key matches the certificate, that the
-> certificate is unexpired, and §6's name check.
+> moment of binding lies **inside the certificate's validity period at both
+> bounds** — one not yet in force is refused exactly as an expired one is, and the
+> refusal names the bound it failed — and §6's name check.
 
 > **Normative.** No third field is added and none is owed. `gateway_remote_address`
 > remains the switch (ADR-0174 §8); a field by which this listener could serve
