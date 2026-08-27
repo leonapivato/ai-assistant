@@ -130,6 +130,7 @@ from ai_assistant.core.types import (
     RoutedOperation,
     RoutedOperationRecord,
     RouteOutcome,
+    SpeechFailure,
     SpokenTurn,
     StepOutcome,
     StepStatus,
@@ -3204,23 +3205,21 @@ class Engine:
         def remaining() -> float:
             return budget - (loop.time() - started)
 
-        try:
-            heard = await transcribe_within(transcriber, utterance, seconds=remaining())
-        except SpeechError as exc:
-            failure = classify_speech_failure(exc)
-            # The seam's own words are never written down — not here, not to either
-            # log tier, not into the refusal (ADR-0200 §8). What is logged is this
-            # project's classification of it.
-            _log.warning("spoken_transcription_failed", failure=failure.value)
+        heard, failed = await self._transcribed(transcriber, utterance, seconds=remaining())
+        if failed is not None:
+            # Raised **outside** the ``except`` block that caught the seam's failure,
+            # which is stricter than ``from None`` alone. ``from None`` sets
+            # ``__cause__`` to ``None`` and suppresses the context in a rendered
+            # traceback, but leaves the seam's exception reachable as ``__context__``
+            # — and a ``SpeechError`` takes arbitrary text, so an implementation that
+            # interpolated the clip it could not decode would still have put the
+            # recording somewhere a caller can read (ADR-0200 §4, §8). Raising with no
+            # exception in flight leaves nothing to attach.
             msg = (
                 f"the recording could not be transcribed; this hub classifies the "
-                f"failure as {failure.value} (ADR-0200 §4)"
+                f"failure as {failed.value} (ADR-0200 §4)"
             )
-            # ``from None`` and not ``from exc``: a SpeechError takes arbitrary text,
-            # so an implementation that interpolated the clip it could not decode has
-            # put the recording in ``__cause__`` and in the traceback, where ADR-0200
-            # §8's guarantee cannot reach it and where nobody looks.
-            raise TranscriptionFailedError(msg, failure=failure) from None
+            raise TranscriptionFailedError(msg, failure=failed) from None
         if not heard.strip():
             # ADR-0200 §4: nothing was asked, so nothing was answered. No turn, no
             # capture, no conversation, and no exception — and ``heard`` is typed
@@ -3245,6 +3244,37 @@ class Engine:
         return self._within_payload_limit(
             SpokenTurn(heard=heard, outcome=outcome, spoken=spoken, spoken_degraded=degraded)
         )
+
+    async def _transcribed(
+        self, transcriber: SpeechTranscriber, utterance: SpokenAudio, *, seconds: float
+    ) -> tuple[str, SpeechFailure | None]:
+        """Transcribe, and classify a seam failure rather than raising one.
+
+        The failure is **returned** so its raise can happen with no exception in
+        flight (:meth:`_converse_spoken`). Everything that is not a ``SpeechError``
+        propagates from here unchanged, which is ADR-0200 §4's "every other
+        exception propagates" and the reason this catches one class rather than
+        ``Exception``.
+
+        Args:
+            transcriber: The seam.
+            utterance: The recording, already checked against ``formats`` and §6's
+                bound.
+            seconds: What is left of the call's budget.
+
+        Returns:
+            The transcript and ``None``, or ``""`` and this project's own
+            classification of what the seam raised.
+        """
+        try:
+            return await transcribe_within(transcriber, utterance, seconds=seconds), None
+        except SpeechError as exc:
+            failure = classify_speech_failure(exc)
+        # The seam's own words are never written down — not here, not to either log
+        # tier, not into the refusal (ADR-0200 §8). What is logged is this project's
+        # classification of it.
+        _log.warning("spoken_transcription_failed", failure=failure.value)
+        return "", failure
 
     async def _spoken_rendering(
         self,

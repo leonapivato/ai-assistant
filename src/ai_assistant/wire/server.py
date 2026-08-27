@@ -57,6 +57,7 @@ from ai_assistant.wire.surface import (
     METHODS,
     STREAMING_METHODS,
     argument_adapter,
+    audio_bearing,
     chunk_type,
     parameters,
 )
@@ -1133,14 +1134,53 @@ def _decode_arguments(method: str, payload: object) -> dict[str, Any]:
     if unknown:
         msg = f"a request to {method}() names arguments it does not declare: {unknown}"
         raise UndecodableFrameError(msg)
-    decoded: dict[str, Any] = {}
-    for name, value in payload.items():
-        try:
-            decoded[name] = argument_adapter(method, name).validate_python(value)
-        except Exception as exc:
+    return {name: _decoded_argument(method, name, value) for name, value in payload.items()}
+
+
+def _decoded_argument(method: str, name: str, value: object) -> Any:
+    """Validate one argument, refusing without echoing a recording (ADR-0200 §9).
+
+    **A refused recording never travels inside the refusal.** The ordinary refusal
+    quotes the validation failure, which is what an operator needs to see for a
+    malformed page argument or an unencodable string. For an argument whose
+    declared type can hold a :class:`~ai_assistant.core.types.SpokenAudio` that is
+    exactly wrong: a pydantic ``ValidationError`` carries the rejected **input**
+    whatever its message says, so quoting it would put the owner's voice into a
+    refusal a caller renders and a log records — and a near-valid clip with one bad
+    character is precisely the input an attacker or an unlucky browser produces.
+
+    So that refusal quotes nothing and **chains nothing**. It is raised outside the
+    handler rather than merely ``from None``: ``from None`` clears ``__cause__`` and
+    suppresses the context in a rendered traceback, but the ``ValidationError``
+    would still be reachable as ``__context__``, and the value with it.
+
+    Which arguments those are is read off the Protocol's own annotations
+    (:func:`~ai_assistant.wire.surface.audio_bearing`), so a second method taking a
+    recording is covered the day it lands.
+
+    Args:
+        method: The method being called.
+        name: The argument's name.
+        value: The argument, as decoded.
+
+    Returns:
+        The value, validated into the method's declared type.
+
+    Raises:
+        UndecodableFrameError: If the declared type refuses the value.
+    """
+    try:
+        return argument_adapter(method, name).validate_python(value)
+    except Exception as exc:
+        if name not in audio_bearing(method):
             msg = f"a request to {method}() carries a {name!r} its declared type refuses: {exc}"
             raise UndecodableFrameError(msg) from exc
-    return decoded
+    msg = (
+        f"a request to {method}() carries a {name!r} its declared type refuses; the value "
+        f"is a recording, so it is not echoed and this refusal chains nothing that could "
+        f"carry it (ADR-0200 §9)"
+    )
+    raise UndecodableFrameError(msg)
 
 
 async def _refuse(

@@ -328,10 +328,26 @@ class HubClient:
 
         Returns:
             The transcript, the turn it drove, and the rendering of its answer.
+
+        Raises:
+            ValueError: If ``plays`` is empty or ``conversation_id`` is blank —
+                refused here, before any I/O, so this client and the engine it
+                stands in for refuse the same values without a round trip (ADR-0085
+                §9). Spelled inline rather than shared with
+                ``orchestration.payloads``' twin, because ``wire`` depends on
+                ``core`` and nothing else; what keeps the two agreeing is the shared
+                conformance suite, which drives this refusal against both.
         """
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
+        if not plays:
+            msg = (
+                "plays must name at least one format the caller can render; an empty "
+                "preference order is a call that could not be answered whatever the "
+                "synthesizer produces (ADR-0200 §3)"
+            )
+            raise ValueError(msg)
         return await self._call(  # type: ignore[no-any-return]
             "converse_spoken",
             utterance=utterance,

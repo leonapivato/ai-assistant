@@ -141,6 +141,43 @@ def argument_adapter(method: str, parameter: str) -> TypeAdapter[Any]:
     return TypeAdapter[Any](_hints(method)[parameter])
 
 
+@cache
+def audio_bearing(method: str) -> frozenset[str]:
+    """The parameters of ``method`` whose declared type can hold a recording.
+
+    Derived from the Protocol's own annotations, like everything else here, so a
+    second method taking a :class:`~ai_assistant.core.types.SpokenAudio` is covered
+    the day it lands rather than the day somebody remembers a list.
+
+    It exists for ADR-0200 §9's refusal clause — "a refused recording never travels
+    inside the refusal" — which binds "every entry point that constructs a
+    ``SpokenAudio`` from a value it did not author — the wire server's argument
+    adapter and the gateway's body parse among them". A pydantic ``ValidationError``
+    carries the rejected **input** whatever its message says, so the server has to
+    know which arguments it must not echo.
+
+    Args:
+        method: The method's name.
+
+    Returns:
+        The parameter names whose annotation reaches ``SpokenAudio``.
+
+    Raises:
+        KeyError: If ``method`` is not on the promoted surface.
+    """
+    if method not in METHODS:
+        raise KeyError(method)
+    hints = _hints(method)
+    return frozenset(name for name in parameters(method) if _reaches_audio(hints.get(name)))
+
+
+def _reaches_audio(annotation: Any) -> bool:
+    """Whether ``annotation`` names :class:`SpokenAudio` anywhere inside it."""
+    if annotation is core_types.SpokenAudio:
+        return True
+    return any(_reaches_audio(arm) for arm in get_args(annotation))
+
+
 def _yielded(method: str) -> tuple[Any, ...] | None:
     """The union a streaming method yields, chunk first, or ``None`` if it is not one.
 

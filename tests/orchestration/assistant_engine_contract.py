@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
+from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -120,6 +121,8 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SourceReadRecord,
     SpendPeriod,
+    SpokenAudio,
+    SpokenAudioFormat,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -162,6 +165,15 @@ _PATIENT = timedelta(seconds=30)
 #: its result check entirely would still pass. At 512 the argument object of every
 #: setup call is comfortably inside the bound and only the *page* crosses it.
 _TINY_LIMIT = 512
+
+#: One recording, for the spoken turn's cases. Its octets are not audio and nothing
+#: decodes them: ADR-0200 §4 makes "the rendering says the text" the synthesizer's
+#: obligation and forbids any consumer inspecting one, and the same posture applies
+#: to what a recording carries — what a transcriber heard is the transcriber's
+#: answer, not something a caller may infer from bytes.
+_RECORDING = SpokenAudio(
+    content=b64encode(b"an utterance").decode("ascii"), media_type=SpokenAudioFormat.MP4
+)
 
 #: The one grantable identity every ``granting_engine`` fixture holds. A declared
 #: constant, which is what a reader's ``name`` is (ADR-0093 §7) and therefore what
@@ -1790,6 +1802,127 @@ class AssistantEngineContract(ABC):
             "and again", timeout=_PATIENT, conversation_id=outcome.conversation_id
         )
         assert continued.conversation_id == outcome.conversation_id
+
+    # --- ADR-0200 §3: the spoken turn call -----------------------------------
+
+    async def test_a_spoken_turn_hears_answers_and_renders(self, engine: AssistantEngine) -> None:
+        """§3, §4: one recording in, one :class:`SpokenTurn` back.
+
+        The whole composition is behind this one member (§2), so what a consumer
+        can hold both implementations to is the *shape* of what comes back: a
+        transcript disclosed to the caller, the turn that transcript drove, and the
+        rendering of that turn's answer in a format the caller said it could play.
+        """
+        spoken = await engine.converse_spoken(
+            _RECORDING, plays=(SpokenAudioFormat.MP4,), timeout=_PATIENT
+        )
+
+        assert spoken.heard is not None
+        assert spoken.outcome is not None
+        assert spoken.spoken is not None
+        assert spoken.spoken.media_type is SpokenAudioFormat.MP4
+        assert spoken.spoken_degraded is False
+
+    async def test_a_spoken_rendering_is_never_in_a_format_the_caller_did_not_name(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§3: "it never returns a rendering in a format the caller did not name".
+
+        The half a caller can check without reading either seam's ``formats``: what
+        comes back is one of the members it asked for, or nothing at all.
+        """
+        for named in ((SpokenAudioFormat.MP4,), (SpokenAudioFormat.WEBM_OPUS,)):
+            spoken = await engine.converse_spoken(_RECORDING, plays=named, timeout=_PATIENT)
+            assert spoken.spoken is None or spoken.spoken.media_type in named
+
+    async def test_a_spoken_turn_runs_under_a_conversation_and_reports_which(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0074 §2 through §3's ``conversation_id``, which carries ADR-0173 §8's meaning.
+
+        A spoken call composes a turn; it does not create a second kind of one, so
+        the conversation it ran under is on the ordinary ``TurnOutcome`` and a later
+        call continues it.
+        """
+        spoken = await engine.converse_spoken(
+            _RECORDING, plays=(SpokenAudioFormat.MP4,), timeout=_PATIENT
+        )
+
+        assert spoken.outcome is not None
+        assert spoken.outcome.conversation_id is not None
+        continued = await engine.converse_spoken(
+            _RECORDING,
+            plays=(SpokenAudioFormat.MP4,),
+            timeout=_PATIENT,
+            conversation_id=spoken.outcome.conversation_id,
+        )
+        assert continued.outcome is not None
+        assert continued.outcome.conversation_id == spoken.outcome.conversation_id
+
+    async def test_a_spoken_call_naming_no_conversation_this_engine_holds_is_refused(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0074 §1's refusal, unchanged on the third turn entry.
+
+        An id the store does not know is refused, not silently started — silently
+        starting one turns a typo or a stale copy-paste into "my conversation
+        vanished".
+        """
+        with pytest.raises(UnknownConversationError):
+            await engine.converse_spoken(
+                _RECORDING,
+                plays=(SpokenAudioFormat.MP4,),
+                timeout=_PATIENT,
+                conversation_id="no-such-id",
+            )
+
+    async def test_a_spoken_call_with_no_playable_format_is_refused_locally(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§3: ``plays`` is required, with no default, and non-empty.
+
+        ``ValueError`` and deliberately not an ``AssistantError``: an empty
+        preference order is a caller programming error — a call that could not be
+        answered whatever the synthesizer produces — and it is refused **before any
+        I/O**, so a wire client refuses it without a round trip (ADR-0085 §9).
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await engine.converse_spoken(_RECORDING, plays=(), timeout=_PATIENT)
+
+    async def test_a_spoken_call_with_a_blank_conversation_id_is_refused_locally(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §3c on this member's one identifier argument.
+
+        §4 is explicit that this refusal comes **before** transcription and
+        therefore before any transcript exists to be blank: "it never converts a
+        refusal into a no-words result".
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await engine.converse_spoken(
+                _RECORDING,
+                plays=(SpokenAudioFormat.MP4,),
+                timeout=_PATIENT,
+                conversation_id="  ",
+            )
+
+    async def test_an_oversized_spoken_argument_is_refused_by_the_contract_limit(
+        self, tiny_engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §8c reaches this member's arguments as it reaches every other's.
+
+        The recording is base64 text inside the ordinary argument object (§9), so
+        the *payload* limit binds it with no help from ADR-0200 §6's separate audio
+        bound — and both implementations refuse the same value without a round trip.
+        """
+        oversized = SpokenAudio(
+            content=b64encode(b"x" * (_TINY_LIMIT * 4)).decode("ascii"),
+            media_type=SpokenAudioFormat.MP4,
+        )
+        with pytest.raises(OversizedValueError):
+            await tiny_engine.converse_spoken(
+                oversized, plays=(SpokenAudioFormat.MP4,), timeout=_PATIENT
+            )
 
     # --- ADR-0173 §4: the streaming turn call --------------------------------
 

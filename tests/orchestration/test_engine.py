@@ -17,7 +17,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
 from pydantic import SecretStr
@@ -37,6 +37,8 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     AuditTrail,
     InvocationLedger,
+    SpeechSynthesizer,
+    SpeechTranscriber,
     SpendGate,
     SpendLedger,
 )
@@ -114,6 +116,8 @@ from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.ingestion import IngestionReport
 from ai_assistant.orchestration.loop import LearningLoop
+from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
+from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -133,6 +137,8 @@ from ai_assistant.testing import (
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
+    FakeSpeechSynthesizer,
+    FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -411,6 +417,19 @@ class RecordingBeliefStore(FakeMemoryStore):
         return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
 
 
+class _Default:
+    """The sentinel that tells "the harness picks one" from an explicit ``None``.
+
+    ADR-0200 lets an engine be built with **no** speech seams — a deployment with
+    no models — and refuses one built with exactly one of the two. A default of
+    ``None`` would make both of those shapes unreachable from this harness, so
+    ``None`` is passed through literally and this is what "unspecified" looks like.
+    """
+
+
+_DEFAULT: Final = _Default()
+
+
 class Harness:
     """A wired :class:`Engine` and the fakes behind it, for assertions."""
 
@@ -437,8 +456,13 @@ class Harness:
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
         routing: RoutingStage | None = None,
+        transcriber: SpeechTranscriber | None | _Default = _DEFAULT,
+        synthesizer: SpeechSynthesizer | None | _Default = _DEFAULT,
+        speakable_attested_sources: frozenset[str] = frozenset(),
+        max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
         routed_confirmation_ttl: timedelta = ROUTED_TTL,
         max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         now: Clock | None = None,
         id_factory: Callable[[], str] | None = None,
         epoch_factory: Callable[[], str] | None = None,
@@ -449,6 +473,16 @@ class Harness:
         # this module gets no stage at all, which is the deployment the pipeline had
         # before ADR-0197 and is why they are unaffected by it.
         self.routing = routing
+        # ADR-0200's two seams, wired **together** or not at all — the engine refuses
+        # half a pipeline. Defaulted to the canonical fakes so every spoken case in
+        # this suite has a subject, and kept on the harness so a case can read what
+        # reached each seam, arm a failure, or narrow a `formats` set.
+        self.transcriber: SpeechTranscriber | None = (
+            FakeSpeechTranscriber() if isinstance(transcriber, _Default) else transcriber
+        )
+        self.synthesizer: SpeechSynthesizer | None = (
+            FakeSpeechSynthesizer() if isinstance(synthesizer, _Default) else synthesizer
+        )
         # The **injected** clock (ADR-0009), settable so ADR-0197 §7's lifetime is
         # pinned by advancing it rather than by waiting: "a test advances it rather
         # than waits", and a case that reclaimed a slot before resuming would pass
@@ -642,8 +676,16 @@ class Harness:
             # Defaulted per harness instance, so two harnesses are two engines.
             epoch_factory=(lambda: "epoch") if epoch_factory is None else epoch_factory,
             routing=self.routing,
+            transcriber=self.transcriber,
+            synthesizer=self.synthesizer,
+            speakable_attested_sources=speakable_attested_sources,
+            max_spoken_audio_bytes=max_spoken_audio_bytes,
             routed_confirmation_ttl=routed_confirmation_ttl,
             max_outstanding_confirmations=max_outstanding_confirmations,
+            # ADR-0085 §8c's contract limit, a knob so a case can put a *result* over
+            # it cheaply — which is the only way ADR-0200 §4's fourth degradation and
+            # its one-step re-measure are reachable at all.
+            max_payload_bytes=max_payload_bytes,
             # The whole harness runs at one instant unless a case moves it, so the
             # horizon the sweep measures back from is a figure a case can name
             # (ADR-0119 §10) — and ADR-0197 §7's routed-park lifetime is a figure a
