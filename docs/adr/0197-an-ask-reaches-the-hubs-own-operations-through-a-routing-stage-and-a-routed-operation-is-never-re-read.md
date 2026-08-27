@@ -691,8 +691,16 @@ whole product is that it noticed.
 
 > **Normative.** `core/types.py` gains `OperationConfirmation`, frozen and
 > `extra="forbid"`, with exactly three fields: `operation: RoutableOperation`, the
-> resolved `subject: RoutedListing` holding exactly one element, and
-> `token: ContinuationToken`.
+> resolved `subject: RoutedListing`, and `token: ContinuationToken`.
+
+> **Normative.** `OperationConfirmation` states its own invariants as a
+> `model_validator(mode="after")`, and they are not left to the type annotations:
+> `subject` holds **exactly one** element — never zero, never more — and that
+> element is of the arm `operation` names. A zero-element subject is a card showing
+> the user nothing to approve, and a two-element one is §5's `AMBIGUOUS` case
+> rendered as a confirmation, which §5 forbids performing anything for. Both
+> construct under a bare `RoutedListing` annotation, so the cardinality is a
+> validator or it is nothing.
 
 > **Normative.** `core/types.py` gains `RoutedOperation`, frozen and
 > `extra="forbid"`, with exactly four fields: `operation: RoutableOperation`;
@@ -715,8 +723,13 @@ whole product is that it noticed.
 > `StepOutcome._confirmation_matches_disposition` states its own: `confirmation` is
 > present **iff** `outcome` is `AWAITING_CONFIRMATION`; `listing` is present **iff**
 > `outcome` is `AMBIGUOUS` or `outcome` is `PERFORMED` on a read-only operation;
-> and every element of `listing`, and of a confirmation's `subject`, is of the arm
-> `operation` names.
+> every element of `listing`, and of a confirmation's `subject`, is of the arm
+> `operation` names; and a present `confirmation`'s **own** `operation` equals the
+> outer `operation`. The last is the one an inner-model validator cannot reach: a
+> card is valid on its own terms while describing a different operation from the
+> route that produced it, and a user reading "revoke this grant?" would be
+> approving a `forget`. One discriminator per value is §8's rule, and two values
+> carrying it must agree or the pair is not a description of one route.
 
 > **Normative.** `TurnOutcome` gains a validator clause stating that `routed` and
 > `step` are never both non-`None`. §1 ends the pipeline at a taken route, so a pass
@@ -1284,23 +1297,55 @@ that conversation.
 
 ### 12. What the implementing lanes owe
 
-This decision is larger than one lane. ADR-0137 §2 makes the contract triad and its
-primary production implementation one unit of work, and ADR-0173's implementation
-across three PRs is the precedent for an ADR that lands in more than one.
+This decision is larger than one lane, and ADR-0173's implementation across three
+PRs is the precedent for an ADR that lands in more than one. Where it may be cut
+is ADR-0137 §2's, and that section decides the cut here rather than leaving it to
+the lanes.
 
-> **Normative.** §9's **two** triads — `RoutingRecorder`'s and `RoutingTrail`'s,
-> each Protocol, shared conformance suite and canonical fake — land with their one
-> primary production implementation in `permissions/` in one change (ADR-0137 §2,
-> §3). They are not split from it, and they are not deferred behind the router. The
-> shared suite for `RoutingRecorder` binds to **both** fakes, as ADR-0185 §12's
-> pair does, so the narrow seam is evidenced rather than asserted.
+> **Normative.** **One lane** lands all of it but §10's renderings: §8's `core`
+> surface, §9's two triads (`RoutingRecorder`'s and `RoutingTrail`'s — each
+> Protocol, shared conformance suite and canonical fake), the one `permissions/`
+> store that satisfies both, the routing stage of §2, the engine wiring that
+> consumes it, and §8's `PROTOCOL_VERSION` bump. The contracts are **not** landed
+> ahead of the router, and the store is not landed ahead of it either.
 
-> **Normative.** §8's `core` surface lands with the routing stage and the engine
-> wiring that consumes it, in one change, with §8's `PROTOCOL_VERSION` bump in the
-> same change.
+> **Normative.** The shared suite for `RoutingRecorder` binds to **both** fakes, as
+> ADR-0185 §12's pair does, so the narrow seam is evidenced rather than asserted.
 
-> **Normative.** The lane landing §8 ships tests pinning: `RoutedOperation`'s
-> validator in **both** directions on each of the three invariants; the
+**Why one lane and not the two this ADR first wrote.** ADR-0137 §2 pairs a triad
+with its **primary production implementation**, and it defines the term against the
+obvious reading: "Primary means the consumer whose demands shape the contract, not
+the one that is cheapest to write … What pairs is the triad's **code** with its
+first real caller." `RoutingRecorder`'s first real caller is the routing stage, not
+the `permissions/` store that satisfies it — the store is the *provider*. A lane
+landing both triads and the store first, with the router behind them, is precisely
+the sequence §2 exists to forbid: "A contract whose only exercise is its own
+conformance suite hardens before anything has tried to use it in anger, and the
+first real consumer must then either bend around a shape that is already ratified
+or reopen a settled decision." The store rides in the same lane because a stage
+wired to a fake is not a caller in anger either.
+
+`RoutingTrail`'s own first caller does not exist yet — §11 defers the read surface
+— and that is ADR-0185 §12's shape rather than a gap: it minted `SourceReadTrail`
+with `recent` and `export` and gave the user nothing to read them with, for the
+reason §9 gives above. What §2 requires is that a contract with a consumer land
+with it; it does not require inventing one for a contract whose consumer is
+deliberately deferred.
+
+**The cost is named rather than discovered.** This is a large lane — two triads,
+one store, one stage, the engine wiring and a `core` surface, across `core`,
+`permissions` and `orchestration`. ADR-0137 §2 is explicit that its widening of
+"one subsystem per change" is for exactly this and "does not create a general
+licence for cross-subsystem lanes"; nothing else in this decision is cited toward
+one. What §10's renderings buy by staying separate is stated below: they are a
+consumer group and not a second decision.
+
+> **Normative.** That lane ships tests pinning: `RoutedOperation`'s
+> validator in **both** directions on each of the four invariants, the fourth
+> asserted with a `confirmation` whose `operation` differs from the outer one and
+> which is otherwise wholly valid; `OperationConfirmation`'s own validator against
+> a **zero**-element subject, a **two**-element subject, and an element of the
+> wrong arm; the
 > `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape across
 > **all four** of its routed cases — a routed non-park carrying a `reply` beside a
 > `None` turn; the same pass with `reply` `None` and `reply_degraded` `True`, which
@@ -1379,7 +1424,7 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > and `routed_confirmation_ttl` is asserted refused at load for `None`, for zero and
 > for a negative duration.
 
-> **Normative.** The lane landing §9 ships `record`'s conflict cases: the same `id`
+> **Normative.** The same lane ships `record`'s conflict cases: the same `id`
 > presented with a differing field raises `RoutingTrailError`, appends nothing, and
 > the act it precedes does not proceed — asserted with the operation's store
 > observed untouched; the same for a `route_id` already held under a different
@@ -1428,7 +1473,7 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > that the operation **is** performed, that the pass returns `PERFORMED`, and that
 > the `GIVEN` row is appended. This is the case a bound and a state machine written
 > in one change can each pass alone and fail together, so it is required of the
-> lane landing §9 rather than left to the engine's own tests.
+> one lane rather than left to whichever half of it a reader thinks owns the case.
 
 > **Normative.** The same lane ships `record`'s atomicity as a **concurrency** test
 > in the shared conformance suite, so every implementation pays it: two `record`
@@ -1437,7 +1482,7 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > does not satisfy this clause, because the check-then-append implementation it is
 > written against passes sequentially.
 
-> **Normative.** The lane landing §9 ships its ordering tests, and they are the
+> **Normative.** The same lane ships §9's ordering tests, and they are the
 > ones that fail on the plausible wrong implementation: a `RoutingRecorder` double
 > whose `record` raises, asserted over a confirm-owed route the user approved
 > (nothing destroyed, no operation called, outcome `UNRECORDED`), over the routing
@@ -1455,7 +1500,7 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > It also ships a row asserted to carry no query, no utterance and no record
 > contents, and `RouteApproval`'s two-directional validator against the tag.
 
-> **Normative.** The lane landing §9 ships its residency clause as a test rather
+> **Normative.** The same lane ships §9's residency clause as a test rather
 > than as prose: the store's file is created **under `Settings.data_dir`** and
 > **owner-only**, asserted on the mode the platform reports, and no path outside
 > that directory is opened. It is the one clause of §9 that a working store can
