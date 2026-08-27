@@ -1,6 +1,6 @@
 # 42. The interface adapter contract
 
-- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`) and ADR-0197 (§4's guarantee that `approved=False` becomes a `DENY` ruling, only as it reaches a resume answering a routed park)
+- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`) and ADR-0197 (§4's guarantee that `approved=False` becomes a `DENY` ruling, only as it reaches a resume answering a routed park) and ADR-0198 (the same guarantee, only as it reaches a resume presenting a token whose binding the engine has already settled and still retains)
 - Date: 2026-07-22
 - Partially superseded: 2026-07-31 by ADR-0084 — **§1's refusal of an
   engine-facing Protocol, and the rule that an interface adapter builds its own
@@ -70,6 +70,38 @@
   to let an adapter read the trail to reconstruct a confirmation is likewise restated
   there rather than narrowed. ADR-0197 §7 is the operative text; this note records the
   supersession and does not restate its terms. Refs #1623, ADR-0197 §7, §13.
+
+- **Partially superseded: 2026-08-27 by
+  [ADR-0198](0198-a-settled-parks-answer-is-restated-rather-than-refused-and-a-second-resume-performs-nothing.md),
+  in the scope the `Status` line names.** The sentence is §4's same one: `ActionPolicy.resolve`
+  "is what turns `approved` into an `ALLOW` or `DENY` ruling, and only `approved=False → DENY`
+  is guaranteed". ADR-0198 §§1 and 3 answer a `resume` presenting a token whose binding this
+  engine has **already settled and still retains** by *restating* the answer already recorded:
+  no `ActionPolicy` is consulted, no `PermissionDecision` is recorded, and the call's
+  `approved` becomes no ruling at all, whatever it carries. The guarantee's *subject* is
+  absent rather than its value different, which is a replacement in a named case rather than
+  a sentence read too widely (ADR-0070 §1).
+
+  **A second pair on this line, added beside ADR-0197's rather than in place of it**
+  (ADR-0070 §4). The two scopes are disjoint and neither widens the other: ADR-0197 §7's is a
+  **routed** park, claimed once, whose second presentation still raises; ADR-0198 §§1 and 5's
+  is a **step** binding this engine settled and retains, whose second presentation is answered.
+  ADR-0198 §6 restates ADR-0197 §7 whole rather than extending it, so nothing that section
+  decided moves.
+
+  **Partial and narrow, on ADR-0197 §13's own terms.** Every `resume` that *resolves* a park
+  is ruled exactly as §4 rules it — the policy rules, the engine records, and a denial is a
+  `DENIED` disposition rather than an exception. What is replaced is only what happens on a
+  second answer to a binding already settled, which §4 did not contemplate and the engine used
+  to meet with `UnknownContinuationError`.
+
+  **§4's account of what an adapter may not do is untouched, and it binds a restatement as
+  hard as it binds a resolution.** "The adapter conveys consent; the policy rules; the engine
+  records and executes" survives whole: a restatement is engine-assembled from a record the
+  process holds, the continuation token stays opaque (§4, §6), and no adapter authors the
+  outcome or reconstructs the binding from the token. ADR-0198 §§1–5 is the operative text;
+  this note records the supersession and does not restate its terms.
+  Refs #1621, #1640, ADR-0198 §1, §3, §8.
 
 ## Context
 

@@ -115,6 +115,36 @@
   (ADR-0070 §3). ADR-0084 already partially superseded §3's *placement* claim, and this
   pair is added beside that one rather than in place of it (ADR-0070 §4). ADR-0197 §7 is
   the operative text; this note records both and restates neither's terms.
+- **Amended: 2026-08-27 by
+  [ADR-0198](0198-a-settled-parks-answer-is-restated-rather-than-refused-and-a-second-resume-performs-nothing.md)
+  — §3's "the in-process path is unchanged and still carries the real turn" now reads more
+  widely than it holds. Recorded in this note alone and with no `Status` edit, because this
+  line is led by `Partially superseded by` and ADR-0082 §2 excludes an amendment qualifier
+  from such a line.**
+
+  **What moved.** §3 made `TurnOutcome.turn` optional for a park recovered from durable
+  state and said the in-process path still carries the real turn. ADR-0198 §2 gives `turn`
+  `None` to a **restatement** — a second `resume` presenting a token whose binding this
+  engine has already settled and still retains — including where the settled park was one
+  this same process parked in-process. Retaining the `TurnResult` would keep a turn's
+  assembled context and retrieved memories alive for the life of the record and would show a
+  caller a turn the call did not drive, so the restatement takes the shape §3 already chose
+  for a resume with no live turn behind it: durable state, no turn.
+
+  **Why an amendment and not a supersession** (ADR-0082 §1's second limb). Nothing §3 decided
+  changes. A reader implementing it writes identical code; every resume that **resolves** a
+  park carries the turn §3 gives it, in-process or recovered; and §3's "the step outcome … is
+  always present" stays true of a restatement, which carries one. What went stale is the
+  *description* of the product — a sentence true of every resume §3 ranged over, and now read
+  across a call §3 did not contemplate.
+
+  **§§1–2 are untouched, and ADR-0198 §8 says so rather than leaving it to inference.** §1's
+  four-step algorithm still skips a binding the trail no longer holds pending, so a settled
+  binding is never listed and never re-minted; §2's idempotence and boundedness remain exactly
+  true of the `_parked` table they are about. ADR-0198 §4 adds a second, separately bounded
+  table and rules that neither §1's enumeration nor §2's reconciliation reaches it, which is a
+  stacked addition. ADR-0198 §§1–4 is the operative text; this note records the amendment and
+  does not restate its terms. Refs #1621, #1640, ADR-0198 §2, §4, §8.
 - **This is not a contract change.** `Engine` is the concrete `orchestration`
   façade ADR-0042 §1 deliberately did *not* make a Protocol; it has one
   implementation and one class of consumer. So this ADR is Accepted on merge and

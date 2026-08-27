@@ -1,6 +1,6 @@
 # 197. An ask reaches the hub's own operations through a routing stage, and a routed operation is never re-read
 
-- Status: Accepted
+- Status: Accepted, §7 amended by ADR-0198
 - Date: 2026-08-27
 - Amended: 2026-08-27 (§7 — the ordinary parked step's refusal is described as
   raising, and the tree returns a ruling). §7's clause bounding the routed resume
@@ -46,6 +46,27 @@
   Recorded as this dated note alone, with no `Status` edit and no sentence below
   rewritten, since no other ADR is the cause (ADR-0196's own shape, on #1620's
   precedent). Refs #1623, PR #1634, #1636, ADR-0042 §4, ADR-0082 §1.
+- **Amended: 2026-08-27 by
+  [ADR-0198](0198-a-settled-parks-answer-is-restated-rather-than-refused-and-a-second-resume-performs-nothing.md)
+  (§7 — its parenthetical enumeration of the tokens `UnknownContinuationError` covers).**
+  §7 describes that error as covering a token "unknown, expired, already claimed, or from a
+  previous process life". The "already claimed" limb reads across **both** kinds of park, and
+  after ADR-0198 §§1 and 5 it no longer holds of a **step** binding this engine has settled
+  and still retains: such a token is answered with a restatement of the recorded answer
+  rather than refused. ADR-0198 §5 states the list the tree now produces.
+
+  **Nothing §7 decided about a routed park changes, which is what makes this an amendment
+  rather than a supersession** (ADR-0082 §1's second limb). A reader implementing §7 writes
+  identical code: the enumeration describes ADR-0084 §7's rule rather than deciding anything,
+  and ADR-0198 §6 restates §7's one-shot claim in every respect — a routed park is claimed
+  once and atomically, the claim evicts it, a second `resume` presenting its token resolves
+  nothing and raises, and **no settled record is retained for a routed park**. §13's records
+  on ADR-0042 §4 and ADR-0052 §3 are likewise untouched; ADR-0198 adds its own pair beside
+  each rather than in place of it (ADR-0070 §4).
+
+  Recorded on the `Status` line as well as here, because this line carries no leading
+  supersession token and ADR-0082 §2 permits the qualifier to accumulate on such a line in
+  the established shape. Refs #1621, #1640, ADR-0198 §5, §6, §8.
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
   *`ask` → typed operation, one-directional — a typed operation is never re-read —
