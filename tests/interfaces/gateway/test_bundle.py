@@ -1287,6 +1287,60 @@ def test_a_late_playback_failure_cannot_land_under_a_later_answer() -> None:
     assert script.count("COULD_NOT_PLAY") == 2
 
 
+def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() -> None:
+    """Adversarial review, round 3, major. A press with no bound accumulates for as long
+    as a finger is down, and nothing discovers it until the upload — where the answer is a
+    size refusal after the owner has spoken for minutes.
+
+    **The bound is on what this page holds, and is not a copy of a bound that refuses.**
+    ``hub_max_spoken_audio_bytes`` and ``gateway_max_request_bytes`` are the hub's and the
+    gateway's, this page is told neither, and a guess at either here would be a second
+    place a figure lives with nothing keeping the two in step. What is chosen is a
+    browser-memory question, which is this page's own.
+
+    **And it is not a clock**, which is what keeps ADR-0182 §7's own invariant intact:
+    this file has exactly one ``setTimeout`` because an owner's wait is the owner's to
+    end, and a page-side deadline over a request would abandon a healthy turn and announce
+    that its outcome was not known. This bounds a *recording*, before any request exists,
+    and what measures it is the recorder handing over what it has.
+    """
+    script = _code("app.js")
+    starting = _functions(script)["startTalking"]
+
+    assert "LONGEST_RECORDING_BYTES = 384 * 1024" in script
+    assert "recorder.start(RECORDING_SLICE_MILLISECONDS)" in starting
+    assert "mine.held += event.data.size" in starting
+    assert "if (mine.held >= LONGEST_RECORDING_BYTES && !mine.released) {" in starting
+    assert "fault(RECORDING_TOO_LONG," in starting
+    # Stopped and *sent*, not stopped and discarded: the ending is the one the release
+    # performs, so what was said up to here is asked rather than thrown away.
+    assert "stopTalking();" in starting
+    # No clock of its own reaches this control, and the file's one `setTimeout` is still
+    # the delivery stream's.
+    assert len(_timeouts(script)) == 1
+    for name in ("startTalking", "stopTalking", "sendRecording", "abandonSpoken", "releaseTalk"):
+        body = _functions(script)[name]
+        for clock in ("setTimeout", "setInterval", "HEAD_DEADLINE_MILLISECONDS"):
+            assert clock not in body, (name, clock)
+
+
+def test_the_page_asks_its_encoder_for_the_bitrate_the_adrs_arithmetic_assumes() -> None:
+    """ADR-0200 §6 states its ceiling's meaning in seconds — "512 KiB is about three
+    minutes of speech at a 24 kbit/s Opus bitrate" — and a ``MediaRecorder`` given no
+    figure picks its own, which on some browsers is several times that.
+
+    A page taking the default would reach the hub's ceiling in a fraction of the time the
+    ADR's arithmetic says, and would do it opaquely: the refusal names a byte ceiling and
+    says nothing about the bitrate that reached it. It is a hint rather than a setting —
+    an encoder may honour it approximately or not at all — which is why the bound above is
+    on the bytes held and not on this.
+    """
+    script = _code("app.js")
+
+    assert "TALK_BITS_A_SECOND = 24000" in script
+    assert "audioBitsPerSecond: TALK_BITS_A_SECOND" in script
+
+
 def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
     """``getUserMedia``'s refusals are read off the error's ``name``, the one member the
     specification fixes — never off its ``message``, which is the browser's own prose.

@@ -3514,6 +3514,44 @@ async function askStreaming(half, asked, chosenAt, waiting) {
 // the codec named.
 const TALK_FORMATS = ["audio/webm;codecs=opus", "audio/mp4"];
 
+// **The bitrate this page asks its encoder for**, and the reason it asks at all.
+// ADR-0200 §6's own arithmetic is written against it — "512 KiB is about three minutes
+// of speech at a 24 kbit/s Opus bitrate" — and a `MediaRecorder` given no figure picks
+// its own, which on some browsers is five times that. A page taking the default would
+// hit `hub_max_spoken_audio_bytes` in half a minute where the ADR's arithmetic says
+// three, and would do it silently: the refusal is the gateway's, and the ceiling it
+// names says nothing about the bitrate that reached it. It is a hint rather than a
+// setting — an encoder may honour it approximately or not at all — which is exactly why
+// the bound below is on the *press* and not on this.
+const TALK_BITS_A_SECOND = 24000;
+
+// **The most this page will hold of one recording.** A press with no bound accumulates
+// for as long as a finger is down, and nothing discovers it until the upload — where the
+// answer is a size refusal after the owner has spoken for minutes. Adversarial review
+// found the class in round 3.
+//
+// **A bound on what this page holds, and not a copy of a bound that refuses.**
+// `hub_max_spoken_audio_bytes` and `gateway_max_request_bytes` are the hub's and the
+// gateway's, this page is told neither, and a guess at either here would be a second
+// place a figure lives with nothing keeping the two in step. What is chosen here is a
+// browser-memory question, which is this page's own — and it is chosen to sit inside
+// ADR-0200 §6's *default* arithmetic rather than to reproduce it: 384 KiB of audio is
+// under §6's 512 KiB default and its base64 is under `gateway_max_request_bytes`' 1 MiB
+// default with room for the head. Where an operator has set either lower, their refusal
+// still governs and is reported as itself.
+//
+// **And it is not a clock.** ADR-0182 §7 makes an owner's wait the owner's to end, and
+// this file keeps exactly one `setTimeout` for that reason — a page-side deadline over a
+// request would abandon a healthy turn and announce that its outcome was not known. This
+// bounds a *recording*, before any request exists and with no turn to be wrong about;
+// what measures it is the recorder handing over what it has, not a timer.
+const LONGEST_RECORDING_BYTES = 384 * 1024;
+
+// How often the recorder hands over what it has. Without an argument `MediaRecorder`
+// delivers everything once, at `stop` — which is exactly too late to bound anything, and
+// is why this figure exists rather than a clock.
+const RECORDING_SLICE_MILLISECONDS = 1000;
+
 const LISTENING = "Listening — let go when you have finished.";
 const SENDING = "Sending what you said…";
 
@@ -3553,6 +3591,16 @@ const RECORDER_REFUSED =
   "This browser would not start recording, so nothing was recorded and nothing was " +
   "sent. The microphone was opened and the recorder would not take it. Holding the " +
   "button again is the thing to try; typing works either way.";
+
+// The press that reached :data:`LONGEST_RECORDING_BYTES`. Said rather than silent,
+// because a recording that stopped while the owner was still speaking is a question with
+// its end missing, and an owner who is not told will read the answer as the assistant
+// having misunderstood them. **Stopped and sent, not stopped and discarded**: what they
+// said up to here is a real question, and throwing it away to enforce a bound this page
+// chose would cost them the whole press.
+const RECORDING_TOO_LONG =
+  "That press reached the longest recording this page holds, so it stopped there and " +
+  "sent what it had. If the question was longer than that, ask it in parts, or type it.";
 
 // A press that produced no bytes at all — a tap rather than a hold, or a recorder that
 // was stopped before it had written anything. Said rather than sent: an empty
@@ -3738,6 +3786,7 @@ async function startTalking() {
     recorder: null,
     stream: null,
     chunks: [],
+    held: 0,
     stopping: null,
   };
   press = mine;
@@ -3773,7 +3822,10 @@ async function startTalking() {
   // must not leave the browser's recording indicator up.
   let recorder;
   try {
-    recorder = new MediaRecorder(stream, { mimeType: format });
+    recorder = new MediaRecorder(stream, {
+      mimeType: format,
+      audioBitsPerSecond: TALK_BITS_A_SECOND,
+    });
   } catch (_) {
     releaseMicrophone(stream);
     press = null;
@@ -3783,8 +3835,18 @@ async function startTalking() {
   }
   mine.recorder = recorder;
   recorder.addEventListener("dataavailable", (event) => {
-    if (event.data.size > 0) {
-      mine.chunks.push(event.data);
+    if (event.data.size === 0) {
+      return;
+    }
+    mine.chunks.push(event.data);
+    mine.held += event.data.size;
+    // The bound, taken where the bytes actually arrive. `stopTalking` is the same act
+    // the release performs, so this is one ending of the press rather than a second
+    // path through it — and the guard is what keeps it from speaking over a release
+    // that has already happened.
+    if (mine.held >= LONGEST_RECORDING_BYTES && !mine.released) {
+      fault(RECORDING_TOO_LONG, "console");
+      stopTalking();
     }
   });
   // The upload is hung off `stop` rather than off the release, because the recorder
@@ -3794,7 +3856,7 @@ async function startTalking() {
     void sendRecording(mine);
   });
   try {
-    recorder.start();
+    recorder.start(RECORDING_SLICE_MILLISECONDS);
   } catch (_) {
     mine.recorder = null;
     releaseMicrophone(stream);
@@ -3807,9 +3869,10 @@ async function startTalking() {
   // the press released and stops a recorder only if there is one in `state`
   // `"recording"`, and until this line there was not — so a press let go in that window
   // would record until the page was closed. Taken after `start` rather than before,
-  // because a recorder that has not started cannot be stopped.
+  // because a recorder that has not started cannot be stopped, and taken through
+  // `stopTalking` rather than around it so the bound above is disarmed with it.
   if (mine.released) {
-    recorder.stop();
+    stopTalking();
   }
 }
 
