@@ -1,6 +1,6 @@
 # 203. On a channel of unbounded audience the withholding binds the whole turn, and nothing downstream inherits what it removed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0199](0199-the-audience-of-the-output-channel-decides-what-may-be-said-and-a-withheld-class-is-deflected-rather-than-redacted.md)
