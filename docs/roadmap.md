@@ -285,17 +285,18 @@ track's wave. **#1232** is the census and the conventions record. Return-brief
 items are not backlog: anything that needs the owner carries `ruling` instead
 (`CONTRIBUTING.md` → "The tracker").
 
-**The label carries a severity, and there is no bare one** (owner's ruling,
-2026-08-27). An issue on no program of work is labeled `backlog:blocker`,
-`backlog:major`, `backlog:minor` or `backlog:unknown`; bare `backlog` is retired.
-The three named severities are `docs/review/guide.md`'s words, applied to the
-issue rather than to a review finding, so a severity means here what it means
-there. **`unknown` means not yet sized** — it is the honest default when the
-issue is filed in passing, and it is re-sized lazily when the issue is next
-touched, under the same lazy-labelling rule as the rest (`CONTRIBUTING.md` →
-"The tracker"). **`backlog:blocker` means it enters the next batch**: a blocker
-against no program of work is a contradiction, so sizing an issue that way is
-what schedules it.
+**The label carries a severity, and there is no bare one.** An issue on no
+program of work is labeled `backlog:blocker`, `backlog:major`, `backlog:minor`
+or `backlog:unknown`; bare `backlog` is retired. The three named severities are
+`docs/review/guide.md`'s words, applied to the issue rather than to a review
+finding, so a severity means here what it means there. **`unknown` means not yet
+sized** — it is the honest default when the issue is filed in passing, and it is
+re-sized lazily when the issue is next touched, under the same lazy-labelling
+rule as the rest (`CONTRIBUTING.md` → "The tracker"). **`backlog:blocker` means
+it enters the next batch**: a blocker against no program of work is a
+contradiction, so sizing an issue that way is what schedules it. The ruling
+behind all of this is recorded on #1232, named above as the conventions record;
+this paragraph is the rule, not the ruling.
 
 ## Gap register
 
