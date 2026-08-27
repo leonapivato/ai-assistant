@@ -38,7 +38,6 @@ from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
 
 from ai_assistant.core.errors import (
-    ConfigurationError,
     GrantError,
     InvalidGrantError,
     NotificationBudgetError,
@@ -227,22 +226,38 @@ class FakeAssistantEngine:
                 admitting a turn, so the ceiling's *backpressure* half has nothing
                 here to bind; what it does bind is the retention, which is the half
                 a conformance case can reach. A subject built at one is how §4's
-                discard is made cheap to observe. Refused when it is not positive,
-                exactly as the concrete engine refuses it: ADR-0084 §4's
+                discard is made cheap to observe. Guarded exactly as the concrete
+                engine guards it, **classification included**: ADR-0084 §4's
                 substitutability runs in both directions, so a fake that admitted a
                 deployment no engine admits would let a consumer's tests pass over a
-                configuration production cannot be built into — and this one would
-                then fail inside the retention rather than at construction.
+                configuration production cannot be built into — and a fake that
+                refused the same value with a different class would make the two
+                disagree about what kind of failure it is. Unrefused, the value
+                surfaces later and as something else: ``1.5`` would bound the
+                retention at two, and ``0`` would discard from an empty table on the
+                first settlement.
 
         Raises:
-            ConfigurationError: If ``max_outstanding_confirmations`` is not positive.
+            TypeError: If ``max_outstanding_confirmations`` is not an integer. A
+                ``bool`` is excluded — it is an ``int`` subclass, and a flag is not a
+                count — and a ``float`` like ``1.5`` is refused rather than compared,
+                which is the guard the concrete engine states in these words.
+            ValueError: If it is not positive.
         """
+        if isinstance(max_outstanding_confirmations, bool) or not isinstance(
+            max_outstanding_confirmations, int
+        ):
+            msg = (
+                "max_outstanding_confirmations must be an integer, got "
+                f"{max_outstanding_confirmations!r}"
+            )
+            raise TypeError(msg)
         if max_outstanding_confirmations < 1:
             msg = (
                 "max_outstanding_confirmations must be positive, got "
                 f"{max_outstanding_confirmations}"
             )
-            raise ConfigurationError(msg)
+            raise ValueError(msg)
         self._max_payload_bytes = max_payload_bytes
         self._max_outstanding = max_outstanding_confirmations
         #: The notification surface's whole state, public so a consumer can
