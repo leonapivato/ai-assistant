@@ -209,6 +209,36 @@ clause above is what forbids the disagreement rather than a second answer.
 > implementation, and a deadline written as a wrapper "composes over *every*
 > implementation".
 
+> **Normative.** Both Protocols declare **`ModelError`** as the failure they
+> raise, and `core/errors.py`'s existing taxonomy under it is the whole of the
+> vocabulary: `ModelAuthError`, `ModelRateLimitError`, `ModelTimeoutError`,
+> `ModelUnavailableError`, `ModelContentFilterError` and `ModelResponseError`. A
+> conforming implementation raises a member of that taxonomy, or a subclass of
+> one, and raises nothing else that is not a defect. Neither Protocol mints a
+> failure class and neither adds one to `core/errors.py`.
+
+> **Normative.** Two argument refusals sit outside that vocabulary and are
+> `ValueError`, raised locally before any I/O: a `SpokenAudio` whose `media_type`
+> the transcriber's `formats` does not name, and a `format` the synthesizer's
+> `formats` does not name. §3 has the engine read both properties before it
+> calls, so a conforming engine never provokes either; they exist for the caller
+> that is not one.
+
+> **Normative.** The deadline decorator raises `ModelTimeoutError`, a member of
+> that taxonomy, rather than a class of its own.
+
+**Why `ModelError` rather than a speech taxonomy, and why the decorator differs
+from `BoundedEmbedder`.** A speech engine's failures *are* a model call's
+failures — an expired key, a rate limit, an unreachable endpoint, an unusable
+response — and inventing a second taxonomy for them would oblige every later
+wrapper to learn two. Reusing this one also carries ADR-0011 §1's `retryable` and
+ADR-0013 §1's `routable` classifications forward for free, which is what makes
+§11's deferred routing wrapper an implementation someone writes rather than a
+contract someone reopens. `BoundedEmbedder` raises
+`EmbeddingDeadlineExpiredError` under ADR-0118 §2 because `Embedder` declares no
+failure vocabulary at all, so a deadline there had nothing to land inside; these
+seams declare one, so it does.
+
 **What the seams do not decide.** Neither Protocol names a model, a vendor, a
 language, a voice, a sample rate or a device. Engine selection, the 3.14-wheel
 question and the on-device model's residency are the implementing lane's
@@ -395,12 +425,16 @@ caller may attest at this rung is nobody.
 > would throw away an answer the user already has — ADR-0170 §8's argument,
 > applied on its own terms rather than by analogy.
 
-> **Normative.** Both failure sets are **classified** and both are closed, on
-> ADR-0170 §8's shape: what either stage catches is a failure its seam declares,
-> and neither catches `Exception`. A defect in the composing code propagates
-> rather than degrading, for ADR-0170 §8's reason — a stage that could be wholly
-> broken while every call reported the same classified-looking degradation is
-> the state hardest to notice.
+> **Normative.** The translation at the orchestration boundary is **total and
+> stated both ways**, and `ModelError` (§1) is what makes each set closed. A
+> `ModelError` out of `transcribe` — and nothing else — becomes
+> `TranscriptionFailedError`. A `ModelError` out of `synthesize` — and nothing
+> else — degrades under this section. **Every other exception propagates
+> unchanged.** So each stage catches `ModelError` and neither catches
+> `Exception`, which is the shape ADR-0170 §8 already fixed for the composing
+> stage and the reason it fixed it: a stage that could be wholly broken while
+> every call reported the same classified-looking degradation is the state
+> hardest to notice.
 
 > **Normative.** A cancellation delivered to `converse_spoken` is **neither** a
 > transcription failure nor a synthesis failure. It propagates, after
@@ -417,11 +451,13 @@ caller may attest at this rung is nobody.
 
 > **Normative.** A transcription failure raises `TranscriptionFailedError`, a
 > new `AssistantError` subclass in `core/errors.py`, declared by this method and
-> by no other. It is not a `ModelError` subclass: it carries no `retryable` and
-> no `routable` claim, because whether a second attempt or a second engine would
-> help is not a property this seam can answer for every implementation. The
-> whole set of failures it names is the transcriber raising, and it is the only
-> error class this decision adds.
+> by no other, and raised **`from`** the `ModelError` that caused it so the
+> classified cause is not thrown away. It is not itself a `ModelError` subclass:
+> it carries no `retryable` and no `routable` claim, because whether a second
+> attempt or a second engine would help is a property of the seam's failure, not
+> of the promoted surface's. It is the only error class this decision adds, and
+> no `ModelError` reaches the promoted surface through this call — which is why
+> the wire's error registry gains one code rather than seven.
 
 > **Normative.** `heard` is disclosed to the caller on every call that produced
 > a transcript. A push-to-talk surface that cannot show the user what it heard
@@ -557,10 +593,22 @@ with no consumer, which ADR-0124 §9's second limb makes a second compatibility
 event for nothing. Milestone 21 is where the trigger and the channel *are* the
 point, and §11 defers it there.
 
-**And the error path retains nothing either.** `TranscriptionFailedError`
-carries an operator-facing message and never the recording, a fragment of it, or
-a length that would let one be reconstructed; the same rule `core/errors.py`
-already applies to the values it refuses to echo.
+> **Normative.** The error path retains nothing either, and this is the half a
+> happy-path test cannot show. `TranscriptionFailedError` carries an
+> operator-facing message and never the recording, a fragment of it, or a length
+> that would let one be reconstructed — and neither does anything it is raised
+> `from`: the `ModelError` cause is rendered by class and by the seam's own
+> message, and no implementation's exception text reaches a log or a surfaced
+> error uninspected. §13 makes this a deliberate failure-path test rather than an
+> inference from the retention test beside it.
+
+This is the rule `core/types.py`'s `encodable_text` already applies to the values
+it refuses to echo, for the reason stated there: "The value may be megabytes of
+untrusted text, and — the sharper reason — interpolating it raw would build an
+error message that is itself unencodable". Audio has the first half of that
+problem and a worse version of the second: an exception carrying a base64 clip
+is a recording that has escaped the one path §8 bounds, and it escapes into the
+place nobody inspects.
 
 ### 9. The wire carries audio as it stands, and nothing under `wire/` changes
 
@@ -762,9 +810,23 @@ ADR's status line, leading, with the parenthesis naming exactly what was
 replaced. This lane's fence is this file, so the edit is not made here; the
 scope text it owes is `Partially superseded by ADR-0200 (§1's thirty-operation
 enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which
-gains that operation's turn budget)`, and it is tracked as its own change in
-#1667. A reader of ADR-0177 who has not seen it is a reader this paragraph
-exists to catch.
+gains that operation's turn budget)`, appended to that line's existing
+supersession pair as `docs/adr/template.md` directs, and it is tracked as its
+own change in #1667. A reader of ADR-0177 who has not seen it is a reader this
+paragraph exists to catch.
+
+**Why the record is scheduled at merge rather than made here, stated because a
+reviewer asked for the opposite.** `CONTRIBUTING.md` → "Trivial ADR edits"
+describes the act as "recording on an ADR's status that a superseding ADR **has
+landed**", and this one has not: ADR-0200 stands `Proposed` on a branch, where —
+in ADR-0127 §3's words, applied to itself — it "has landed nowhere and binds no
+reader". A status line saying ADR-0177 is partially superseded by a document
+that binds nobody would be false for the whole reviewed life of this PR, and
+would stay false if this decision were withdrawn or returned to `Proposed` on a
+later round, which is a route step 3 of that same section keeps open. The record
+is owed the moment this merges and not before, which is what #1667 tracks and
+what §13 makes a precondition of the wave that would otherwise act on the stale
+enumeration.
 
 Three near misses, named so that a reviewer can check them rather than take
 them:
@@ -838,6 +900,9 @@ each wave must contain if it exists.
 | §9 | `SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()` | A round-trip test; a test that `wire/codec.py` is unmodified; a rejection test per malformed encoding |
 | §3 (channel) | `SpokenChannel`, `SpokenAudience`, required with no default | A test refusing the call with no channel; a test that `plays` is a non-empty tuple and that a `frozenset` does not project |
 | §3 (format pick) | The engine picks `channel.plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
+| §1 (failures) | Both Protocols declare `ModelError`; no new error class in `core/errors.py` beyond §4's one | A test asserting each seam's declared raises; a test that the deadline decorator raises `ModelTimeoutError` |
+| §4 (translation) | `ModelError` from `transcribe` becomes `TranscriptionFailedError` `from` it; `ModelError` from `synthesize` degrades; everything else propagates | Three tests: a classified failure each side, and a non-`ModelError` exception asserted to propagate from both |
+| §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
 | §10 (secure context) | Nothing capturing a microphone on a non-loopback origin ships before ADR-0174 §11's decision | The lane's own precondition, checked at briefing rather than by a test |
