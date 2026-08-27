@@ -49,6 +49,8 @@ from ai_assistant.memory.notification_store import check_notification_tuning
 from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
     BoundedEmbedder,
+    BoundedSpeechSynthesizer,
+    BoundedSpeechTranscriber,
     HashingEmbedder,
     PydanticAIProvider,
     PydanticAIStreamingCompleter,
@@ -113,6 +115,8 @@ if TYPE_CHECKING:
         OutboundTransport,
         Reader,
         Secrets,
+        SpeechSynthesizer,
+        SpeechTranscriber,
         TraceSink,
     )
 
@@ -1194,6 +1198,27 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # a `mypy --strict` failure rather than a review note. The façade is handed
             # no trail seam of any width, so this is the one position that names either.
             routing=RoutingStage(model=model, recorder=routing_trail),
+            # The two speech seams, each under the deadline decorator ADR-0200 §1
+            # puts on the *wrapper* rather than in the seam, "so that it composes
+            # over every implementation" (ADR-0118 §2). Wired **together**: half a
+            # pipeline can transcribe an utterance and never say the answer, and the
+            # engine refuses that shape at construction.
+            transcriber=BoundedSpeechTranscriber(_build_transcriber()),
+            synthesizer=BoundedSpeechSynthesizer(_build_synthesizer()),
+            # What ADR-0199 §3 places as **speakable** on a channel of unbounded
+            # audience among attested beliefs: the calendar source ADR-0093 §7
+            # configures, and nothing else. The identity comes from the reader that
+            # was actually built — ADR-0190 §7's minted discriminator included — and
+            # this is the only layer that can read it, since `orchestration` may not
+            # import `readers` (golden rule 1). No calendar configured means an empty
+            # set, which withholds every attested record rather than guessing.
+            speakable_attested_sources=(
+                frozenset() if facet_reader is None else frozenset({facet_reader.name})
+            ),
+            # ADR-0200 §6's fourth byte ceiling, on **decoded** audio, straight off
+            # `Settings`. It bounds a recording and a rendering with the same figure
+            # for the reason ADR-0085 §8's limit is symmetric.
+            max_spoken_audio_bytes=settings.hub_max_spoken_audio_bytes,
             # How long a routed park stays answerable (ADR-0197 §7). Straight off
             # `Settings`, positive and finite with no spelling for "never": a routed
             # park is invisible — `pending_confirmations` does not list it and no
@@ -2122,6 +2147,50 @@ def _build_email_reader(settings: Settings) -> EmailReader | None:
         read_timeout=settings.email_read_timeout,
         max_content_bytes=settings.email_max_content_bytes,
     )
+
+
+def _build_transcriber() -> SpeechTranscriber:
+    """Construct the on-device speech recogniser (ADR-0200 §1, §5).
+
+    ``MoonshineTranscriber`` is imported **here, lazily, not at module scope**, for
+    ``FastEmbedEmbedder``'s reason: the module pulls in ``sherpa_onnx`` and a second
+    ONNX runtime, and it is deliberately not re-exported from ``ai_assistant.models``
+    so that importing that package stays cheap. Only the resident hub builds a
+    composition, so only the hub pays it.
+
+    Construction stays **offline and cheap**: nothing is loaded here, and the model
+    files are read on the first ``transcribe``, inside the worker that call owns —
+    which is what puts the cold load inside the deadline the caller wraps this in
+    rather than outside it (ADR-0118 §4).
+
+    **Unbounded, and it never leaves this function that way.** The one caller wraps
+    it in :class:`~ai_assistant.models.bounded_speech.BoundedSpeechTranscriber`
+    immediately, which is where ADR-0200 §1's deadline lives.
+
+    Returns:
+        The transcriber, before it is bounded.
+    """
+    from ai_assistant.models.moonshine_transcriber import (  # noqa: PLC0415 — lazy: pulls in sherpa_onnx
+        MoonshineTranscriber,
+    )
+
+    return MoonshineTranscriber()
+
+
+def _build_synthesizer() -> SpeechSynthesizer:
+    """Construct the on-device speech synthesiser (ADR-0200 §1, §5).
+
+    :func:`_build_transcriber`'s sibling, imported lazily and bounded by its caller
+    for the same reasons. See that function; every clause of it binds here.
+
+    Returns:
+        The synthesizer, before it is bounded.
+    """
+    from ai_assistant.models.supertonic_synthesizer import (  # noqa: PLC0415 — lazy: pulls in sherpa_onnx
+        SupertonicSynthesizer,
+    )
+
+    return SupertonicSynthesizer()
 
 
 def _build_embedder(settings: Settings) -> Embedder:

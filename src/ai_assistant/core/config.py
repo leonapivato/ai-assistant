@@ -743,6 +743,19 @@ _MAX_CALENDAR_WINDOW: Final = timedelta(days=3650)
 #: reader's copy, exactly as the calendar's is pinned.
 _MAX_EMAIL_WINDOW: Final = timedelta(days=3650)
 
+#: ADR-0200 §6's named default for :attr:`Settings.hub_max_spoken_audio_bytes` —
+#: 512 KiB of **decoded** audio, bounding a recording and a rendering alike.
+#:
+#: The arithmetic, so a reader can check the figure rather than accept it: ADR-0200
+#: §9 carries audio as base64 text, four bytes of payload for every three of audio
+#: plus two of JSON quoting, so 512 KiB of audio is about 683 KiB on the wire —
+#: inside ``gateway_max_request_bytes``' 1 MiB default with room for the request
+#: line, the headers and the rest of the arguments, and far inside ADR-0085 §8c's
+#: ~16 MiB payload limit. Read the other way, 512 KiB is about three minutes of
+#: speech at a 24 kbit/s Opus bitrate: a long press and a short monologue. The two
+#: bounds meet where they should and the new one binds first.
+_DEFAULT_MAX_SPOKEN_AUDIO_BYTES: Final = 512 * 1024
+
 #: ADR-0168 §8's named default for :attr:`Settings.gateway_max_request_bytes` — one
 #: mebibyte, bounding a browser request *whole*. Its own constant rather than a
 #: reuse of any frame figure: it "is the gateway's own bound and does not replace
@@ -1178,6 +1191,29 @@ class Settings(BaseSettings):
             "The largest frame the hub will read or write, envelope and payload "
             "together (ADR-0084 §3). Bounded below by ADR-0085 §8d's floor and above "
             "by what the 4-byte length prefix can express."
+        ),
+    )
+    # ``hub_max_spoken_audio_bytes`` is the **fourth** byte ceiling and is nobody
+    # else's (ADR-0200 §6). It is measured on the **decoded** audio, not on its
+    # base64 form, because decoded length is what an inference call costs — and it
+    # is the same figure in both directions for the reason ADR-0085 §8's limit is
+    # symmetric, so a client is never silently less capable than the engine it
+    # stands in for. What differs is the *outcome*: an oversized utterance is
+    # refused with ``OversizedValueError`` locally and before any I/O (base64
+    # decoding is not I/O), while an oversized rendering **degrades** under ADR-0200
+    # §4, because the answer already exists and still travels as ``outcome.reply``.
+    #
+    # Without it the only ceiling on a transcription would be the payload limit:
+    # 16 MiB of audio is on the order of ninety minutes, and one press would buy an
+    # inference nobody budgeted. A bound on the recording is the only place that
+    # cost can be refused before it is incurred.
+    hub_max_spoken_audio_bytes: _IntegerSetting = Field(
+        default=_DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
+        ge=1,
+        description=(
+            "The largest spoken recording or rendering, in bytes of decoded audio "
+            "(ADR-0200 §6). An oversized utterance is refused locally before any "
+            "I/O; an oversized rendering degrades the spoken turn."
         ),
     )
     hub_read_timeout: _DurationSetting = Field(

@@ -95,8 +95,11 @@ from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
     NotificationBudgetError,
+    OversizedValueError,
     PlanningError,
+    SpeechError,
     TraceStoreError,
+    TranscriptionFailedError,
     UnknownContinuationError,
 )
 from ai_assistant.core.streams import closing_stream
@@ -127,6 +130,7 @@ from ai_assistant.core.types import (
     RoutedOperation,
     RoutedOperationRecord,
     RouteOutcome,
+    SpokenTurn,
     StepOutcome,
     StepStatus,
     TraceOutcome,
@@ -135,6 +139,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.disclosure import supply_for_unbounded_audience
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
@@ -163,6 +168,12 @@ from ai_assistant.orchestration.routing import (
 from ai_assistant.orchestration.routing import (
     resolve as resolve_route,
 )
+from ai_assistant.orchestration.speech import (
+    DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
+    classify_speech_failure,
+    synthesize_within,
+    transcribe_within,
+)
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
@@ -177,6 +188,8 @@ if TYPE_CHECKING:
         NotificationStore,
         PlanStore,
         SourceReadTrail,
+        SpeechSynthesizer,
+        SpeechTranscriber,
         SpendLedger,
         TraceRetention,
         TraceSink,
@@ -211,6 +224,8 @@ if TYPE_CHECKING:
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
+        SpokenAudio,
+        SpokenAudioFormat,
         TurnResult,
     )
     from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
@@ -1459,6 +1474,10 @@ class Engine:
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
+        transcriber: SpeechTranscriber | None = None,
+        synthesizer: SpeechSynthesizer | None = None,
+        speakable_attested_sources: frozenset[str] = frozenset(),
+        max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
         routed_confirmation_ttl: timedelta = _DEFAULT_ROUTED_CONFIRMATION_TTL,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
@@ -1802,6 +1821,32 @@ class Engine:
                 ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
                 façade never holds a trail seam of any width and cannot be wired into the
                 half-configured state where a stage could route without recording.
+            transcriber: The speech-recognition seam ``converse_spoken`` transcribes
+                through (ADR-0200 §1, §2), already wrapped in whatever deadline
+                decorator the composition root wired (ADR-0118 §2) — ``None`` on a
+                deployment with no speech engines, where ``converse_spoken`` refuses
+                with a ``ConfigurationError`` rather than failing as though a seam
+                had. Held here and nowhere else: no adapter in ``interfaces/`` calls
+                either speech Protocol, and the whole composition is this engine's
+                (ADR-0200 §2).
+            synthesizer: The speech-synthesis seam, its sibling, under the same
+                clauses. Wired or unwired **together** with ``transcriber``: half a
+                pipeline can transcribe an utterance and never say the answer, which
+                is a deployment nobody chose, so the constructor refuses it.
+            speakable_attested_sources: The ``Attestation.reported_by`` identities
+                ADR-0199 §3 places as **speakable** on a channel of unbounded
+                audience — the calendar source ADR-0093 §7 configures, and nothing
+                else. It is the composition root's to supply because that is the only
+                layer that knows which reader was built and what identity it carries
+                (ADR-0190 §7's minted discriminator included), and because
+                ``orchestration`` may not import ``readers`` (golden rule 1). Empty
+                by default, which withholds every attested record rather than
+                guessing at a name — ADR-0199 §3's fail-closed direction.
+            max_spoken_audio_bytes: ``Settings.hub_max_spoken_audio_bytes`` (ADR-0200
+                §6), in bytes of **decoded** audio. The same figure both ways, for
+                the reason ADR-0085 §8's limit is symmetric; what differs is the
+                outcome, an oversized utterance being refused before any I/O and an
+                oversized rendering degrading the turn.
             routed_confirmation_ttl: ``Settings.routed_confirmation_ttl`` (ADR-0197 §7).
                 How long a routed park stays answerable before it is evicted and its
                 ceiling slot released. Positive and finite, with no spelling for "never":
@@ -2026,7 +2071,19 @@ class Engine:
                 f"rendered, and there is no spelling for 'never' (ADR-0197 §7)"
             )
             raise ConfigurationError(msg)
+        if (transcriber is None) != (synthesizer is None):
+            msg = (
+                "a spoken turn needs both speech seams or neither: half a pipeline can "
+                "transcribe an utterance and never say the answer, which is a deployment "
+                "nobody chose. Wire a SpeechTranscriber and a SpeechSynthesizer together, "
+                "or leave both unwired and converse_spoken refuses (ADR-0200 §1, §2)"
+            )
+            raise ConfigurationError(msg)
         self._routing = routing
+        self._transcriber = transcriber
+        self._synthesizer = synthesizer
+        self._speakable_attested_sources = frozenset(speakable_attested_sources)
+        self._max_spoken_audio_bytes = max_spoken_audio_bytes
         self._routed_ttl = routed_confirmation_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
@@ -2939,6 +2996,427 @@ class Engine:
         # ``result()`` re-raises whatever the turn raised, which is the terminal
         # error frame's value one layer down (ADR-0173 §1).
         yield turn.result()
+
+    async def converse_spoken(
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget for the whole call, threaded to each stage (ADR-0029 §4)
+        conversation_id: Identifier | None = None,
+    ) -> SpokenTurn:
+        """Run one turn from a recording and speak its answer (ADR-0200 §3).
+
+        **The whole composition is here** (ADR-0200 §2): transcribe, decide whether
+        anything was said, run the ordinary turn with its answer composed for a
+        channel of unbounded audience, pick a format, render. No adapter performs any
+        part of it and none calls either speech Protocol at all.
+
+        **Every refusal below is local and comes before transcription**, which is
+        I/O — so a malformed ``conversation_id``, an empty ``plays``, a recording in
+        a container the transcriber cannot decode and a recording over ADR-0200 §6's
+        bound are each settled before a seam is called and before there is any
+        transcript to be blank. Base64 decoding is not I/O, which is what lets the
+        size check sit here rather than after the seam (ADR-0200 §6).
+
+        **A recording that carried no words is not an error** (ADR-0200 §4). Where
+        the transcript is blank — empty, or whitespace only — no turn runs, no
+        episode is captured, no conversation is created, and the result is four
+        members saying so.
+
+        Args:
+            utterance: The recording.
+            plays: What the caller can render, in **preference order**. Required,
+                non-empty, and read as a codec capability rather than as a claim
+                about who can hear (ADR-0200 §3): nothing on the disclosure path
+                reads it.
+            timeout: The budget for the whole call — transcription, the turn and
+                synthesis together — threaded to each stage.
+            conversation_id: The conversation to continue, or ``None``.
+
+        Returns:
+            The transcript, the turn it drove, the rendering of its answer, and
+            whether speaking that answer degraded.
+
+        Raises:
+            RuntimeError: If the engine is shutting down, exactly as
+                :meth:`converse` refuses.
+            ConfigurationError: If this engine was built with no speech seams. **A
+                property of this object's wiring rather than of the contract**, in
+                the shape :meth:`ingest_email` refuses an unconfigured source and
+                for the reason ``AssistantEngine``'s own docstring gives for a
+                shutting-down engine's ``RuntimeError``: it is not a declared
+                failure of the promoted method, and an implementation that has
+                speech never raises it. Deliberately **not**
+                :class:`~ai_assistant.core.errors.TranscriptionFailedError`, which
+                would report a deployment fact as a seam failure and invite a retry
+                that cannot succeed.
+            ValueError: If ``conversation_id`` is blank, ``plays`` is empty, or the
+                transcriber's ``formats`` does not name the recording's
+                ``media_type`` — refused locally, before any I/O.
+            OversizedValueError: If the recording's decoded length exceeds
+                ``max_spoken_audio_bytes``, refused locally and before any I/O; or if
+                the result breaches ADR-0085 §8c even with no rendering in it.
+            TranscriptionFailedError: If transcription failed, carrying this
+                project's own classification and raised ``from None``.
+            UnknownConversationError: If ``conversation_id`` names no conversation
+                this store holds — and only where a turn actually ran.
+        """
+        self._reject_if_closing()
+        transcriber, synthesizer = self._speech_seams()
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        if not plays:
+            msg = (
+                "plays must name at least one format the caller can render; an empty "
+                "preference order is a call that could not be answered whatever the "
+                "synthesizer produces (ADR-0200 §3)"
+            )
+            raise ValueError(msg)
+        check_arguments(
+            "converse_spoken",
+            max_bytes=self._max_payload_bytes,
+            utterance=utterance,
+            plays=plays,
+            timeout=timeout,
+            conversation_id=selected,
+        )
+        self._check_recording(utterance, transcriber=transcriber)
+        return await self._tracked(
+            self._converse_spoken(
+                utterance,
+                plays=plays,
+                timeout=timeout,
+                conversation_id=selected,
+                transcriber=transcriber,
+                synthesizer=synthesizer,
+            ),
+            "converse_spoken",
+            checked=True,
+        )
+
+    def _speech_seams(self) -> tuple[SpeechTranscriber, SpeechSynthesizer]:
+        """The two seams, or a refusal naming what this deployment lacks.
+
+        Returns:
+            The transcriber and the synthesizer.
+
+        Raises:
+            ConfigurationError: If this engine was built with neither.
+        """
+        if self._transcriber is None or self._synthesizer is None:
+            msg = (
+                "no speech seams are wired, so there is nothing to transcribe with and "
+                "nothing to speak through; a spoken turn needs both a SpeechTranscriber "
+                "and a SpeechSynthesizer from the composition root (ADR-0200 §1, §2)"
+            )
+            raise ConfigurationError(msg)
+        return self._transcriber, self._synthesizer
+
+    def _check_recording(self, utterance: SpokenAudio, *, transcriber: SpeechTranscriber) -> None:
+        """Refuse a recording this engine will not hand to a seam (ADR-0200 §6, §9).
+
+        Both refusals are **local and before any I/O**, which base64 decoding is
+        not. The container is checked against the transcriber's own ``formats``
+        rather than against the enum, because ADR-0200 §1 has the engine read that
+        property before it calls — so a conforming engine never provokes the seam's
+        own ``ValueError``.
+
+        **Neither message carries the recording.** ADR-0200 §8 keeps audio out of
+        every log and every surfaced error, and a refusal is exactly where a length
+        or a fragment would otherwise be interpolated for helpfulness. What is named
+        is the limit, the field and the measured size — which is
+        :class:`~ai_assistant.core.errors.OversizedValueError`'s own structured
+        state, the same three values every other oversized refusal carries.
+
+        Args:
+            utterance: The recording.
+            transcriber: The seam it would go to.
+
+        Raises:
+            ValueError: If the container is one this transcriber cannot decode.
+            OversizedValueError: If the decoded audio is over the bound.
+        """
+        if utterance.media_type not in transcriber.formats:
+            readable = ", ".join(sorted(member.value for member in transcriber.formats))
+            msg = (
+                f"this hub's transcriber decodes {readable or 'nothing'}, and the "
+                f"recording is {utterance.media_type.value}; a container it did not "
+                f"declare is refused rather than guessed at (ADR-0200 §1, §9)"
+            )
+            raise ValueError(msg)
+        size = len(utterance.decoded())
+        if size > self._max_spoken_audio_bytes:
+            msg = (
+                f"the recording decodes to {size} bytes, over the "
+                f"{self._max_spoken_audio_bytes}-byte hub_max_spoken_audio_bytes limit "
+                f"(ADR-0200 §6)"
+            )
+            raise OversizedValueError(
+                msg,
+                limit=self._max_spoken_audio_bytes,
+                size=size,
+                field="hub_max_spoken_audio_bytes",
+            )
+
+    async def _converse_spoken(  # noqa: PLR0913 — the call's four arguments plus the two seams it was checked against
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to each stage (ADR-0029 §4)
+        conversation_id: str | None,
+        transcriber: SpeechTranscriber,
+        synthesizer: SpeechSynthesizer,
+    ) -> SpokenTurn:
+        """Compose the three stages under one budget (ADR-0200 §3, §4).
+
+        **The budget is threaded rather than divided** (ADR-0029 §4). Each stage is
+        given what is left of the caller's, so the effective bound on a speech stage
+        is the lesser of that and the decorator's own — a stage never outlives the
+        call, and a generous deployment setting never overrides a tight caller. A
+        budget already exhausted when a stage is reached is that stage's expiry and
+        is not a separate case.
+
+        **The translation is total and stated both ways** (ADR-0200 §4). A
+        ``SpeechError`` out of ``transcribe`` — and nothing else — becomes
+        :class:`~ai_assistant.core.errors.TranscriptionFailedError`; a
+        ``SpeechError`` out of ``synthesize`` — and nothing else — degrades. Every
+        other exception propagates unchanged, so each stage catches ``SpeechError``
+        and neither catches ``Exception``: a stage that could be wholly broken while
+        every call reported the same classified-looking degradation is the state
+        hardest to notice (ADR-0170 §8's own shape). A delivered cancellation is
+        neither, and propagates.
+
+        Returns:
+            The spoken turn.
+
+        Raises:
+            TranscriptionFailedError: If transcription failed.
+            OversizedValueError: If the result breaches ADR-0085 §8c with no
+                rendering in it.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        budget = timeout.total_seconds()
+
+        def remaining() -> float:
+            return budget - (loop.time() - started)
+
+        try:
+            heard = await transcribe_within(transcriber, utterance, seconds=remaining())
+        except SpeechError as exc:
+            failure = classify_speech_failure(exc)
+            # The seam's own words are never written down — not here, not to either
+            # log tier, not into the refusal (ADR-0200 §8). What is logged is this
+            # project's classification of it.
+            _log.warning("spoken_transcription_failed", failure=failure.value)
+            msg = (
+                f"the recording could not be transcribed; this hub classifies the "
+                f"failure as {failure.value} (ADR-0200 §4)"
+            )
+            # ``from None`` and not ``from exc``: a SpeechError takes arbitrary text,
+            # so an implementation that interpolated the clip it could not decode has
+            # put the recording in ``__cause__`` and in the traceback, where ADR-0200
+            # §8's guarantee cannot reach it and where nobody looks.
+            raise TranscriptionFailedError(msg, failure=failure) from None
+        if not heard.strip():
+            # ADR-0200 §4: nothing was asked, so nothing was answered. No turn, no
+            # capture, no conversation, and no exception — and ``heard`` is typed
+            # ``NonBlankEncodableText | None``, so a blank transcript has nowhere
+            # else to go.
+            return SpokenTurn()
+        outcome = await self._run_turn(
+            heard,
+            timeout=timedelta(seconds=max(remaining(), 0.0)),
+            conversation_id=conversation_id,
+            compose=self._composed_spoken,
+            compose_routed=self._composed_routed_whole,
+        )
+        # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
+        # that an outcome over ADR-0085 §8c on its own raises exactly as it does on
+        # ``converse``: "Dropping a rendering cannot rescue it, and no implementation
+        # tries."
+        self._checked(outcome, "converse_spoken")
+        spoken, degraded = await self._spoken_rendering(
+            outcome.reply, plays=plays, synthesizer=synthesizer, seconds=remaining()
+        )
+        return self._within_payload_limit(
+            SpokenTurn(heard=heard, outcome=outcome, spoken=spoken, spoken_degraded=degraded)
+        )
+
+    async def _spoken_rendering(
+        self,
+        reply: str | None,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        synthesizer: SpeechSynthesizer,
+        seconds: float,
+    ) -> tuple[SpokenAudio | None, bool]:
+        """Render the answer, or say that speaking it did not complete (ADR-0200 §4).
+
+        Three of ``spoken_degraded``'s four cases live here — an empty format
+        intersection, a synthesis failure, and a rendering over ADR-0200 §6's bound
+        — and the fourth is the payload measurement one level up, which needs the
+        whole result to make its judgement.
+
+        **Nothing to say is not a degradation.** A park, a recovered resume and a
+        composition failure each leave ``reply`` ``None``, and nothing is invented to
+        fill the silence: ``spoken`` is ``None`` and ``spoken_degraded`` is ``False``.
+
+        **The format is the first member of ``plays`` this synthesizer names**
+        (ADR-0200 §3) — the caller's preference honoured as far as the seam can, and
+        never a substitution outside what the caller said it could play. An empty
+        intersection is discovered *before* the call rather than reported by one,
+        which is why nothing is spent on it.
+
+        Args:
+            reply: The answer, which is the only thing that is ever rendered
+                (ADR-0200 §4) — handed to the seam byte for byte, with nothing
+                derived from it and no second copy anywhere.
+            plays: The caller's preference order.
+            synthesizer: The seam.
+            seconds: What is left of the call's budget.
+
+        Returns:
+            The rendering and whether speaking degraded, in the pairing
+            :class:`~ai_assistant.core.types.SpokenTurn`'s validator admits.
+
+        Raises:
+            Exception: Anything that is not a ``SpeechError``. ADR-0200 §4 keeps the
+                degradation set closed, so a defect propagates rather than arriving
+                as an ordinary "the answer could not be spoken".
+        """
+        if reply is None:
+            return None, False
+        chosen = next((member for member in plays if member in synthesizer.formats), None)
+        if chosen is None:
+            _log.warning("spoken_rendering_degraded", reason="no_shared_format")
+            return None, True
+        try:
+            rendering = await synthesize_within(
+                synthesizer, reply, media_type=chosen, seconds=seconds
+            )
+        except SpeechError as exc:
+            # The classification is logged; the seam's message is not (ADR-0200 §8).
+            _log.warning(
+                "spoken_rendering_degraded",
+                reason="synthesis_failed",
+                failure=classify_speech_failure(exc).value,
+            )
+            return None, True
+        size = len(rendering.decoded())
+        if size > self._max_spoken_audio_bytes:
+            # Not refused, unlike an oversized *utterance*: the answer already exists
+            # and still travels as ``outcome.reply`` (ADR-0200 §6).
+            _log.warning("spoken_rendering_degraded", reason="over_audio_bound", size=size)
+            return None, True
+        return rendering, False
+
+    def _within_payload_limit(self, spoken: SpokenTurn) -> SpokenTurn:
+        """Apply ADR-0200 §4's fourth degradation case, and its one re-measure.
+
+        **Measured on the whole projected result, not on the rendering alone.**
+        ADR-0200 §6 bounds the recording and the rendering each on its own; ADR-0085
+        §8c bounds the *serialised whole*. A ``TurnOutcome`` lawful alone plus a
+        one-byte rendering can be over §8c, so a rendering well inside §6 can still
+        be the byte that breaks the frame — and without this case that result had no
+        legal value at all, since returning it would breach §8c and dropping the
+        rendering would contradict §4's own "exactly when".
+
+        **It degrades rather than refusing**, because an answer the caller can read
+        is worth more than a rendering that would make the whole result unsendable —
+        ADR-0170 §8's argument reaching a fourth stage.
+
+        **And it has exactly one step.** Where the result carrying ``spoken``
+        ``None`` still breaches §8c, that is §8c's oversized result and raises.
+        Nothing further is dropped: ``heard`` is owed to the caller by §4's
+        disclosure clause and ``outcome`` is the answer, so there is no third thing
+        to give up, and shortening either would be truncating a result rather than
+        degrading a rendering.
+
+        Args:
+            spoken: The result as the stages produced it.
+
+        Returns:
+            It, or the same result with its rendering dropped.
+
+        Raises:
+            OversizedValueError: If it is over the limit with no rendering in it.
+        """
+        if spoken.spoken is None:
+            return self._checked(spoken, "converse_spoken")
+        try:
+            check_payload(
+                spoken,
+                max_bytes=self._max_payload_bytes,
+                subject="the result of converse_spoken()",
+            )
+        except OversizedValueError:
+            _log.warning("spoken_rendering_degraded", reason="over_payload_limit")
+            return self._checked(
+                SpokenTurn(heard=spoken.heard, outcome=spoken.outcome, spoken_degraded=True),
+                "converse_spoken",
+            )
+        return spoken
+
+    async def _composed_spoken(
+        self, turn: TurnResult | None, step: StepOutcome | None, conversation: str
+    ) -> ComposedReply | None:
+        """Compose this pass's answer for a channel of unbounded audience (ADR-0200 §7).
+
+        :meth:`_composed_whole` with two differences and no others, both of them
+        ADR-0199's rather than this method's.
+
+        **The withholding is at supply.** ``orchestration.disclosure`` reduces what
+        the stage is given to what ADR-0199 §3 places as speakable on a channel of
+        unbounded audience, deciding each class from recorded origin and never by
+        inspecting a word of content. No stage composes a reply and then removes,
+        masks, blanks or rewrites part of it, and nothing here filters, redacts or
+        post-processes ``outcome.reply`` on any ground (ADR-0199 §5, ADR-0200 §7).
+
+        **The** :class:`~ai_assistant.core.types.TurnResult` **the turn produced is
+        unchanged**, which ADR-0199 §5 requires and which is why the reduction
+        produces a *supply* rather than editing the turn: the outcome carries the
+        turn's own result back, exactly as ``converse`` would for the same
+        transcript, and ADR-0200 §4 forbids a second difference.
+
+        **The audience reaches the stage from the operation being executed** and
+        from nothing else — not from an argument, a session, a transport or a device
+        (ADR-0200 §3, §7). It is the only input ADR-0200 adds to that stage; the
+        withholding *fact* is ADR-0199 §5's, which obliges the stage to be told
+        **that** a withholding occurred so it can compose an answer that states it.
+        The stage gains no ``ContextProvider``, no ``MemoryStore``, no second context
+        assembly and no second retrieval, and its context and memories still reach it
+        from the turn (ADR-0170 §2).
+
+        Args:
+            turn: What the turn produced, or ``None`` on a pass that owes no answer.
+            step: What became of the driven step.
+            conversation: Accepted and dropped, as :meth:`_composed_whole` drops it.
+
+        Returns:
+            What the stage composed, or ``None`` where no answer was owed.
+        """
+        del conversation
+        if turn is None or (step is not None and step.confirmation is not None):
+            return None
+        supply, withheld = supply_for_unbounded_audience(
+            turn, speakable_attested_sources=self._speakable_attested_sources
+        )
+        undriven = (
+            ()
+            if step is None
+            else tuple(one for one in supply.plan.steps if one.id != step.step_id)
+        )
+        return await self._composing.compose(
+            turn=supply,
+            step=step,
+            undriven=undriven,
+            unbounded_audience=True,
+            withheld=withheld,
+        )
 
     async def resume(
         self,
