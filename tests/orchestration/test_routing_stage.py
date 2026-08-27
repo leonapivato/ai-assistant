@@ -998,6 +998,45 @@ async def test_a_record_kind_word_after_the_subject_has_begun_is_not_a_reference
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+async def test_a_pronoun_in_the_body_of_a_query_still_constrains() -> None:
+    """Framing is stripped from the **opening** and from nowhere else.
+
+    A pronoun opening a copied span is framing — "**that I** drive a green estate car" —
+    and the same word in the body of the query names somebody: "I dislike him" and "I
+    dislike her" are claims about different people, and a filter that dropped pronouns
+    wherever they appeared would reduce both to ``dislike`` and park a destructive
+    confirmation on whichever one is held.
+
+    This is the general shape of it rather than a case about pronouns: no word after the
+    opening run is dropped, so every negation, quantifier, conjunction, preposition,
+    copula and verb the user said goes on having to be in the record.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I dislike her"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I dislike him")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+async def test_a_reference_names_a_kind_the_routed_operation_resolves_over() -> None:
+    """ "The question of taxes" is a reference for one route and belief content for another.
+
+    A routed ``forget`` resolves over beliefs, so a query opening "the question of…" is
+    the user saying what they believe rather than naming a record — and stripping those
+    words would hand it to the belief "I hate taxes", which is a different thing
+    entirely. The route is the only thing in the pass that knows which, so the kinds a
+    reference may name are per operation.
+
+    The question arm above is the same opening on the route that *does* resolve over
+    questions, and it still resolves.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I hate taxes"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "the question of taxes")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 
@@ -1020,7 +1059,7 @@ async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
 
 
 @pytest.mark.parametrize(
-    "query", ["that", "the fact", "  the thing you asked me about  ", "?!", "the question"]
+    "query", ["that", "the fact", "  the thing you asked me about  ", "?!", "the belief"]
 )
 async def test_a_query_that_is_nothing_but_framing_names_no_record(query: str) -> None:
     """A query with no distinctive term of its own resolves to nothing, reading no store.
