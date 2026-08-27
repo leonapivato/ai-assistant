@@ -367,8 +367,8 @@ third reason above is a cost to weigh rather than a prohibition.
 
 > **Normative.** The ADR-0082 §1 records §8 states are applied to the earlier ADRs'
 > bodies by that same lane, in the change that implements this decision. This ADR
-> states them and writes none of them, and the deferral is tracked as its own issue
-> so it cannot be lost.
+> states them and writes none of them, and the deferral is tracked as **#1640** so
+> it cannot be lost.
 
 ### 8. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
