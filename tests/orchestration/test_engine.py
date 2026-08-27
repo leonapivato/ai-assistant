@@ -1256,6 +1256,57 @@ async def test_the_settled_record_is_installed_before_the_resolution_awaits_anyt
     assert len(harness.invoker.invocations) == 1
 
 
+async def test_a_discarded_handle_is_never_re_minted_for_a_new_park() -> None:
+    """A spent handle stays spent, so a stale token never resolves somebody else's park.
+
+    **The case a bounded table cannot pass by being bounded.** ADR-0198 §4 keeps a
+    settled record only "while the record is retained", and the mint used to test a
+    candidate against the tables that are live — so the moment a record was discarded
+    under that bound its handle was mintable again. With a repeating ``id_factory``
+    the next park takes it, and the token the *first* caller still holds now names the
+    *third* park: an old confirmation authorising an action nobody offered it for.
+
+    The factory here repeats deliberately. That is not a contrivance but the condition
+    the mint already declares itself proof against — "a factory that repeats a handle
+    is disambiguated with a suffix rather than trusted or refused" (#287) — and the
+    defect was that the disambiguation only saw what was live. Production injects
+    ``uuid.uuid4``, so the exposure is a deployment with a counter or a warm restart;
+    what is under test is the promise, not the odds.
+
+    Filed as #1644 and taken on this lane's review round 3.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(
+        tools=(confirmable(),),
+        max_outstanding_confirmations=1,
+        loop_id_factory=lambda: next(goals),
+        id_factory=lambda: "same",
+    )
+
+    first = await harness.engine.converse("send one", timeout=PATIENT)
+    stale = first.step.confirmation.token  # type: ignore[union-attr]
+    await harness.engine.resume(stale, approved=True, timeout=PATIENT)
+
+    # A second settlement discards the first's record: the retained set holds one.
+    second = await harness.engine.converse("send two", timeout=PATIENT)
+    await harness.engine.resume(second.step.confirmation.token, approved=True, timeout=PATIENT)  # type: ignore[union-attr]
+    with pytest.raises(UnknownContinuationError):
+        await harness.engine.resume(stale, approved=True, timeout=PATIENT)
+
+    # A third park is minted while the first handle names nothing at all.
+    third = await harness.engine.converse("send three", timeout=PATIENT)
+    fresh = third.step.confirmation.token  # type: ignore[union-attr]
+    assert fresh != stale
+
+    # The stale token resolves nothing, and the third park is still answerable by its
+    # own token — which is the half that says the fix did not simply break the mint.
+    with pytest.raises(UnknownContinuationError):
+        await harness.engine.resume(stale, approved=True, timeout=PATIENT)
+    resolved = await harness.engine.resume(fresh, approved=True, timeout=PATIENT)
+    assert resolved.step is not None
+    assert resolved.step.disposition is Disposition.EXECUTED
+
+
 async def test_the_retained_set_is_bounded_and_discards_the_least_recently_settled() -> None:
     """ADR-0198 §4: a count is the whole of the bound, and the oldest is what goes.
 
