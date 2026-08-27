@@ -1,6 +1,6 @@
 # 174. A gateway may serve a browser on another overlay device, and that hop is the fourth egress boundary
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage)
 - Date: 2026-08-21
 - Note: 2026-08-23 — **the revisit §9 said this was not has landed, and it chose
   process-bound.** §9 ruled "this is not ADR-0168 §5's revisit… Milestone 16 is,
@@ -92,6 +92,65 @@
   capture — are gated on one. §7 rules the scheme, states the cost, and makes
   the requirement a **stop condition** on the milestone-14 surface lane rather
   than something it discovers with code written.
+
+- Partially superseded: 2026-08-27 by ADR-0202 — **the scheme §7 demanded and §11
+  deferred is decided, so the clause that stood in its place falls.** §7 made a lane
+  finding the surface needs a secure context **stop** and owe "a ratified decision on
+  the scheme, rather than working around the requirement, degrading it silently, or
+  reaching for a certificate on its own authority", and §11 deferred that decision
+  with the trigger "when voice's first rung (#1318) asks for microphone capture in a
+  browser on another device". `track:voice` milestone 19 asked (#1668). ADR-0202 is
+  that decision, taken rather than worked around.
+
+  **Replaced — §7's first clause, on its plain-HTTP and no-TLS-arrangement half.**
+  "The remote browser listener speaks the same plain HTTP the loopback listener
+  speaks. This ADR decides no transport-layer security arrangement for it,
+  authorises no certificate, no key material and no certificate-provisioning act."
+  The listener now serves **HTTPS**, terminated in the gateway's own process, on a
+  certificate the overlay obtains for a name it assigns and a private key generated
+  on that machine; a misconfigured, missing or out-of-period pair is a gateway that
+  does not start and reports why, with no plain-HTTP fallback and no redirect.
+  **§7's last limb is kept and is not superseded**: nothing reads §2's end-to-end
+  encryption as supplying a secure context, because the classification comes from a
+  certificate, which is a different property and is the distinction §7 drew.
+  **§7's second clause is satisfied, not superseded** — a lane finding such a
+  capability still stops, and what it owes now exists. **§11's deferral bullet is
+  covered by this pair** rather than earning its own: it is unmarked prose in a
+  marked ADR (ADR-0089 §3), its subject is §7's clause, and recording it separately
+  would be the book-keeping ADR-0082 §1 refuses.
+
+  **Replaced — one sentence of §8, only for a configured remote listener.** "Empty
+  is the default, so a gateway configured on serves the address it bound and nothing
+  else." A gateway with the remote listener configured on and an empty
+  `gateway_remote_host_names` no longer serves that address: it does not start.
+  Nothing else in §8's clause for that field moves — it still holds "the additional
+  authorities §6 admits a `Host` header to name", the comparison is still literal,
+  and the default is still empty for a gateway whose remote listener is off. §8's
+  other two fields, its refusals, its shared-port clause and its ceilings are
+  untouched.
+
+  **Replaced — §6's delegation clause, as to its *when it is refused* limb only.**
+  "`gateway_remote_host_names` is §8's field and §8 is the single statement of what
+  it holds, what its default is and when it is refused." ADR-0202 §6 states a
+  refusal condition for that field — every configured element must be a name the
+  certificate presents, and the list must be non-empty — and states it there rather
+  than in §8, so a reader holding only §6 would take §8's conditions for the complete
+  set. **The scope is that limb**: what the field holds is unchanged, its default is
+  still §8's to state, and §6's own second sentence — "This section states only what
+  the gateway does with it, and adds no condition on it" — stays true, because §6
+  itself gains nothing.
+
+  **Examined and not superseded.** §2's clauses are applied unchanged and its
+  prohibition on a proxy or tunnel in front of either listener is reinforced, not
+  lifted; its loopback-availability clause owes no record, because §2 and §8 already
+  end in a process that does not start on a bad remote configuration, so a reader
+  acts identically. §3's identity check is **ordered** ahead of the TLS handshake and
+  not modified — still obtained before anything is served and from the agent on the
+  gateway's own machine. §4's admission, §5's carry-over, §9's one-mint rule and
+  §10's direction rule ("the gateway never dials a browser") are untouched, §10's
+  being reinforced: a secure context is a browser classification, not a channel.
+  §6's `Host`-admission and resolves-nothing clauses gain no rule — ADR-0202 adds no
+  name-admission rule, no resolution step, and asks no resolver what any name means.
 
 ## Context
 
