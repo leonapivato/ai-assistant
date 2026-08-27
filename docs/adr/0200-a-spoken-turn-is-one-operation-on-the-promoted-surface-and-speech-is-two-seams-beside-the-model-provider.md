@@ -6,9 +6,10 @@
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `wire/`, from `interfaces/gateway/`, from `models/`, or from an issue — is of
   its text as it stood at this ADR's base, `5510efe8`, not of its text on any
-  later day. Every ADR this decision composes with reads `Accepted` there,
-  except ADR-0199, which is being drafted in parallel and is cited for its
-  subject only (§7). Where a later ADR changes one of the ADRs cited, this ADR
+  later day, **except ADR-0199**, which merged and was ratified after that base
+  and is quoted as it stands at `62724fe1`. Every other ADR this decision
+  composes with reads `Accepted` at both. Where a later ADR changes one of the
+  ADRs cited, this ADR
   is read against the text quoted here and that ADR's own record says what
   moved. This is ADR-0143's clause, taken for its reason.
 
@@ -304,8 +305,8 @@ nothing this decision adds.
 
 > **Normative.** `AssistantEngine` gains exactly one member, `converse_spoken`.
 > It is `async`, it returns a `SpokenTurn`, and it takes four arguments and no
-> others: `utterance`, a `SpokenAudio`, positional; and, keyword-only,
-> `channel`, a `SpokenChannel`; `timeout`, a `timedelta`; and
+> others: `utterance`, a `SpokenAudio`, positional; and, keyword-only, `plays`,
+> a non-empty `tuple[SpokenAudioFormat, ...]`; `timeout`, a `timedelta`; and
 > `conversation_id`, an `Identifier | None` defaulting to `None`. One positional
 > subject and every other argument keyword-only is ADR-0085 §2's convention,
 > unchanged.
@@ -317,7 +318,7 @@ async def converse_spoken(
     self,
     utterance: SpokenAudio,
     *,
-    channel: SpokenChannel,
+    plays: tuple[SpokenAudioFormat, ...],
     timeout: timedelta,
     conversation_id: Identifier | None = None,
 ) -> SpokenTurn
@@ -351,53 +352,54 @@ async def converse_spoken(
 > directions. The page-size clause has no subject here and the filter-materialisation
 > clause has none either; neither is exempted, both are vacuous.
 
-> **Normative.** The caller declares the output channel and no implementation
-> infers it, derives it from the transport it arrived on, reads it from a
-> session, or widens it. `SpokenChannel` is required with no default, so no
-> caller is placed in a channel by omission — ADR-0181 §3's ground for a member
-> required with no default, applied to an argument.
+> **Normative.** **This operation is the output channel, and its audience is
+> unbounded.** The answer it produces is bound for a loudspeaker: what that
+> channel emits reaches whoever is within range of the device with no act of
+> theirs, which is ADR-0199 §1's definition of an unbounded audience, and it is
+> declared here rather than computed anywhere.
 
-> **Normative.** `SpokenChannel` is a frozen `extra="forbid"` pydantic model in
-> `core/types.py` with exactly two members, both fixed here and neither left to
-> a lane or to another ADR: `audience`, a `SpokenAudience`; and `plays`, a
-> non-empty `tuple[SpokenAudioFormat, ...]` naming what the channel can play, in
-> the caller's order of preference.
+> **Normative.** **No caller supplies the audience and no value on this surface
+> expresses it.** There is no audience argument, no audience member on any type
+> this ADR adds, and no setting. A caller cannot assert an audience, cannot
+> narrow one, and cannot raise this channel's from unbounded to bounded — which
+> is ADR-0199 §8's third clause satisfied by having no value there to assert.
 
-> **Normative.** `SpokenAudience` is a closed `StrEnum` in `core/types.py`
-> naming what the caller can attest about who may hear the rendering. It has
-> exactly one member at this rung, `UNATTESTED`, meaning **the caller can attest
-> nothing**. A later ADR adds a member; removing one, or changing what one
-> means, is a change to what was decided and takes a superseding ADR.
+> **Normative.** **A bounded spoken channel is a later ADR's**, and it arrives as
+> its own declared channel — a further operation, or the spoke surface ADR-0094
+> §10 defers — never as an argument added to this one. No lane reads a caller's
+> playback capability, its transport, its session, or the device it runs on as a
+> declaration of audience (ADR-0199 §1's fourth clause).
 
-> **Normative.** ADR-0199 decides what may be spoken **to a given audience**; it
-> does not decide this vocabulary, and this ADR does not wait on it to be
-> implementable. Where ADR-0199 ratifies a richer audience vocabulary, that is a
-> partial supersession of the clause above by the ordinary mechanism (ADR-0070
-> §1, §3), recorded there and on this ADR's status line — not a gap this ADR
-> leaves open.
+> **Normative.** **This section is the surface ADR-0199 §8's second clause gates
+> shipping on**, and it discharges it in the narrowest form that clause admits: a
+> channel's audience reaches the composing stage from the *operation the engine is
+> executing*, and this ADR fixes this operation's. A channel that declares none
+> reads as unbounded (ADR-0199 §1), which this one does not need, since it
+> declares unbounded outright.
 
-**Why the vocabulary is fixed here rather than deferred.** `SpokenChannel` is a
-transitive type of a wire-derived method: `wire/surface.py` builds this call's
-argument adapter from its annotation, so an incompletely specified type is a
-call no implementation can conform to and no client can encode. A contract ADR
-that leaves a member's shape to a second ADR ratifies a surface nobody can build
-— which is exactly what ADR-0143 §9 avoids by fixing every annotation in the ADR
-rather than leaving it to the lane. One member is a small vocabulary, not an
-incomplete one: it is what the caller can honestly attest at a rung with no
-occupancy sensing anywhere in the system.
+**What is left as an argument, and why it is not an audience in disguise.**
+`plays` says what the caller can *render*, not who can *hear*. It is a codec
+capability — the same kind of fact as `SpeechTranscriber.formats` on the other
+side of the pipeline — and ADR-0199 §1's third clause is explicit that the
+posture "is not a function of the modality, the transport, the device, the
+authority the request carried, the session that admitted the request, or the
+identity of whoever asked". A format is further from audience than any item on
+that list. Nothing in §7 reads `plays`, and no implementation may.
 
-**Why an argument rather than something implied by the entry.** The entry
-already says the answer will be *audio*; what it cannot say is *whose ears*, and
-what it certainly cannot say is *what this listener can play*. A browser tab and
-a room speaker are the same modality and different audiences, and #1318's design
-note keys disclosure on that axis from day one so that milestone 20 adds a
-vocabulary member rather than a method. Requiring the declaration is also what
-keeps the conservative reading from being a hub-side guess: the hub is handed a
-declaration it can refuse, not a fact it invents.
+**An earlier draft got this wrong in the way ADR-0199 §8 was written to catch.**
+It carried a `SpokenChannel` with an `audience` member the caller supplied on
+every call, with a one-member vocabulary meaning "the caller can attest nothing".
+ADR-0199 §8's third clause forbids exactly that — an ADR deciding this surface
+"may not make the audience a value a spoke asserts per request" — on ADR-0094
+§5's ground read in the output direction: "a channel that could assert 'I am
+private' is a channel that can talk its way into content, and the assertion is
+unverifiable at the hub". The one-member vocabulary made the mistake harmless
+today and would have made it live on the day a second member landed, which is the
+worse half.
 
 **Why `plays` is a tuple and not a set.** `wire/codec.py`'s `project` dispatches
 `list | tuple` and has no branch for a `set` or a `frozenset`, so a set-typed
-member would fail closed at the first call — the same fallthrough that decides
+argument would fail closed at the first call — the same fallthrough that decides
 §9. Order is not merely tolerated by that constraint but wanted: a preference
 order lets a synthesizer produce the caller's first choice it can honour rather
 than any choice at all. The Protocol properties of §1 stay `frozenset`s, because
@@ -412,11 +414,10 @@ call cannot borrow `/ask`'s disclosure posture, and it is why the audience the
 caller may attest at this rung is nobody.
 
 > **Normative.** The engine chooses the rendering's format itself: the **first**
-> member of `channel.plays` that the synthesizer's `formats` property also
-> names. It never asks for one outside that intersection, and it never returns a
-> rendering in a format the channel did not name. Where the intersection is
-> empty the answer cannot be spoken to this channel, which §4 makes a
-> degradation rather than a failure.
+> member of `plays` that the synthesizer's `formats` property also names. It never asks for one outside that intersection, and it never returns a
+> rendering in a format the caller did not name. Where the intersection is empty
+> the answer cannot be rendered for this caller, which §4 makes a degradation
+> rather than a failure.
 
 > **Normative.** Adding this member bumps `PROTOCOL_VERSION`, on ADR-0124 §9's
 > rule as `wire/envelope.py` records it. The obligation falls on the lane that
@@ -427,7 +428,7 @@ caller may attest at this rung is nobody.
 > **Normative.** `converse_spoken` returns one `SpokenTurn`, a frozen
 > `extra="forbid"` pydantic model in `core/types.py` with four members:
 > `heard`, the transcript, `NonBlankEncodableText | None`; `outcome`, the
-> `TurnOutcome | None` that transcript drove; `spoken`, the `SpokenReply | None`
+> `TurnOutcome | None` that transcript drove; `spoken`, the `SpokenAudio | None`
 > that was synthesised; and `spoken_degraded`, a `bool`.
 
 > **Normative.** `heard` is `None` **exactly when** `outcome` is `None`, and that
@@ -440,27 +441,28 @@ caller may attest at this rung is nobody.
 > ADR-0170 §4, ADR-0173 §6 and ADR-0197 §8 place on it. This call composes a
 > turn; it does not create a second kind of one.
 
-> **Normative.** `SpokenReply` is a frozen `extra="forbid"` model with two
-> members: `audio`, the `SpokenAudio` that was synthesised, and `text`, the
-> `NonBlankEncodableText` **that was passed to** `SpeechSynthesizer.synthesize`
-> to produce it. Orchestration constructs the pair from the one call, so the two
-> agree by construction and no validator is asked to establish it.
+> **Normative.** `spoken` is the rendering of `outcome.reply` and of nothing
+> else: it is what `SpeechSynthesizer.synthesize` returned when handed exactly
+> that value. There is **one** answer on this call and `outcome.reply` is it —
+> §7 composes it for this channel — so nothing here carries a second copy of the
+> spoken words. A caller that cannot play audio reads `outcome.reply` and holds
+> exactly what was said.
 
 > **Normative.** That the audio is an audible rendering of that text is the
 > **synthesizer's** obligation, discharged in its conformance suite, and not an
 > invariant of this type. No component decodes, re-transcribes or otherwise
 > inspects a rendering to check it, and no lane adds an operation that does.
 
-**Why the invariant is constructive rather than semantic.** An earlier draft said
-"the two always agree", which read as a promise about what the audio *sounds
-like* — and nothing structural could establish it: a conforming synthesizer could
-return well-formed audio saying "no" for the text "yes", and the only check would
-be to transcribe the rendering, which is a second inference with its own
-failures, its own cost and its own retention question. Making `text` the *input*
-to synthesis is enforceable at the one place the pair is built, keeps the
-promise a caller actually relies on — that the words on screen are the words the
-hub asked to have spoken — and leaves fidelity where it belongs, as behaviour a
-conformance suite tests rather than a shape a model validator asserts.
+**Two earlier drafts of this pair were wrong in opposite directions, and the
+second correction is what removed the type.** The first said a `SpokenReply`
+carried its own `text` and that "the two always agree", which read as a promise
+about what the audio *sounds like* and which nothing structural could establish —
+a conforming synthesizer can return well-formed audio saying "no" for the text
+"yes". The second made `text` the *input* to synthesis, which was enforceable but
+became redundant the moment §7 was corrected to ADR-0199 §5: with the answer
+composed for this channel there is only one text, `outcome.reply`, and a second
+member holding a copy of it is ADR-0084 §3's second length. `SpokenReply`
+therefore does not exist; `spoken` is a `SpokenAudio`.
 
 > **Normative.** `spoken` is `None` wherever `outcome.reply` is `None`: a park,
 > a recovered resume, and a composition failure each leave nothing to say, and
@@ -635,41 +637,67 @@ a transcription is the payload limit: 16 MiB of audio is on the order of ninety
 minutes, and one press would buy an inference nobody budgeted. A bound on the
 recording is the only place that cost can be refused before it is incurred.
 
-### 7. The disclosure ruling is applied hub-side, and this ADR consumes it
+### 7. The withholding happens inside the turn, and the answer is composed for this channel
 
-> **Normative.** No lane implements this section before ADR-0199 has been
-> ratified and **merged**. That is ADR-0015 §5 read forward rather than a new
-> rule: a decision nobody has ratified is not one a lane may pick a behaviour
-> for, and a spoken surface that shipped with an implementation's own idea of
-> what may be read aloud is milestone 19's exit test failed in the one place it
-> is written to catch. §13's third wave carries this as a precondition. The
-> waves that build §1 through §6 and §9 are unaffected: none of them speaks
-> anything.
+> **Normative.** ADR-0199 decides what may be said on a channel of unbounded
+> audience, and this ADR decides nothing it decides. What this section fixes is
+> where its rules are *applied* on this operation: in `orchestration`, **inside
+> the turn**, and nowhere else.
 
-> **Normative.** ADR-0199 decides what may be spoken. This ADR decides only that
-> the ruling is applied in `orchestration`, after the turn has composed its
-> answer and before anything is synthesised, with the `SpokenChannel` of §3 as
-> its input; that its output is what `SpokenReply.text` carries and what
-> `SpeechSynthesizer.synthesize` is handed; and that `outcome.reply` is left
-> byte-unchanged by it, so a caller can always see both what was composed and
-> what was spoken.
+> **Normative.** The withholding is **at supply**, which is ADR-0199 §5's first
+> clause taken whole: content withheld from this channel does not reach the
+> composing stage among the inputs the reply is composed from. No stage of this
+> operation composes a reply and then removes, masks, blanks or rewrites part of
+> it, and no component filters, redacts or post-processes `outcome.reply` on any
+> ground.
 
-> **Normative.** No adapter applies, re-applies, relaxes or second-guesses that
-> ruling, and no adapter speaks `outcome.reply` in place of
-> `SpokenReply.text`. A caller that wants the composed answer reads
-> `outcome.reply`; a caller that wants the spoken one plays `spoken.audio` or
-> reads `spoken.text`. Those are two questions and the surface answers each
-> once.
+> **Normative.** There is **one** answer on this call and `outcome.reply` is it.
+> It is composed for this channel — an unbounded audience (§3) — so where a class
+> was withheld it *is* the deflection ADR-0199 §5 shapes, and where none was it is
+> the ordinary answer. No larger answer is composed first, none is retained, and
+> nothing on this surface carries what was withheld.
 
-**Why the composed answer is not reduced too.** The call is made by a client
-already admitted to `converse`, on a surface that would have handed it the same
-`reply` for the same utterance. Reducing the text as well would buy no
-confidentiality — the caller can ask again without the microphone — while
-costing the front end the ability to *show* what it declined to say, which is
-#665's deflection shape ("details on your phone") read at a rung where the
-authenticated surface is the same tab. Where a later channel has no such
-surface, that is a channel ADR-0199's audience vocabulary distinguishes and §11
-defers.
+> **Normative.** The composing stage is told the audience of the channel the
+> answer is bound for, and it reaches it from the operation being executed (§3),
+> not from an argument, a session, a transport or a device. This is the only
+> input this ADR adds to that stage; ADR-0199 §5's second clause binds unchanged,
+> so the stage gains no `ContextProvider`, no `MemoryStore`, no second context
+> assembly and no second retrieval, and its context and memories still reach it
+> from the turn and from nowhere else (ADR-0170 §2).
+
+> **Normative.** The deflection reaches the user **as speech on this channel**,
+> which is what ADR-0199 §8's fourth clause obliges an ADR deciding this
+> mechanism to state. It is `outcome.reply`, synthesised by §3's chosen format and
+> returned as `SpokenTurn.spoken`, and it is heard rather than merely rendered —
+> which is what milestone 19's exit test turns on. A turn on this operation is
+> always addressed to the assistant, so ADR-0199 §5's silence clause has no
+> subject here: this call never answers with silence.
+
+> **Normative.** No adapter applies, re-applies, relaxes or second-guesses
+> ADR-0199's ruling, and none composes, substitutes or amends a deflection.
+
+**Why the earlier draft of this section was wrong, and why the correction is
+strictly simpler.** It had the ruling applied *after* the turn composed, with
+`outcome.reply` kept byte-unchanged and a reduced spoken text derived beside it —
+on the reasoning that the caller was already admitted to `converse` and could see
+on screen what it declined to say. ADR-0199 §5 forbids exactly that construction,
+in terms, and for two reasons this ADR has no answer to: a filter over composed
+prose is content inspection, which §2 forbids as a decision procedure and which
+"fails silently on the first sentence phrased in a way the filter did not
+anticipate"; and "a composed answer with a hole cut in it" is an utterance a
+listener "cannot distinguish from a complete one". The correction removes a type
+(§4), removes a member, and removes the only place on this surface where the
+withheld content would still have existed.
+
+**The screen is not a loophole, and ADR-0199 §5's last clause is why it need not
+be one.** That clause forbids a reply composed for a *bounded* channel being
+emitted on an unbounded one; the converse is safe, and this call's answer is
+composed for the unbounded one. So the front end may show `outcome.reply` beside
+playing it without any further rule, and it shows the same words that were
+spoken. What the owner does *not* get from this operation is the withheld
+content — for that they ask on a channel of bounded audience, which is the
+deflection's own instruction and the surface ADR-0199 §5 has the answer name
+where one can be named.
 
 ### 8. Nothing about this path retains audio
 
@@ -886,10 +914,12 @@ worth deciding.
 - **Recording the channel on an episode.** §8 declines it, ADR-0074 §11 names
   the additive route. **Fires** at milestone 21, where a capture's trigger and
   channel are the fact being recorded.
-- **A second `SpokenAudience` member.** §3 fixes the vocabulary at one, meaning
-  the caller can attest nothing. **Fires** at milestone 20, the first
-  unsolicited utterance, or at any earlier point where something in the system
-  can attest an audience — which today nothing can.
+- **A spoken channel of bounded audience.** §3 declares this operation's
+  unbounded and admits no value that could say otherwise. A bounded one — a worn
+  earpiece is ADR-0199 §1's own example — arrives as its own declared channel,
+  never as an argument here. **Fires** with the first device that satisfies
+  ADR-0199 §1's bounded test, or with the spoke surface ADR-0094 §10 defers,
+  whichever comes first.
 - **A secure context for a non-loopback browser origin.** ADR-0174 §11 already
   defers it and §7 makes finding it a stop; §10 takes that stop rather than
   working around it. **Fires** at the first browser-facing capability the
@@ -930,9 +960,9 @@ worth deciding.
 > what a decision that names the member does not do.
 
 > **Normative.** Everything else about this ADR is additive: two new Protocols,
-> one new member on a provided contract, eight new `core/types.py` names —
-> `SpokenAudio`, `SpokenAudioFormat`, `Base64Audio`, `SpokenChannel`,
-> `SpokenAudience`, `SpokenReply`, `SpokenTurn` and `SpeechFailure` — three new
+> one new member on a provided contract, five new `core/types.py` names —
+> `SpokenAudio`, `SpokenAudioFormat`, `Base64Audio`, `SpokenTurn` and
+> `SpeechFailure` — three new
 > `core/errors.py` names (`SpeechError`, `SpeechTimeoutError`,
 > `TranscriptionFailedError`), one new `Settings` field. No other ratified clause
 > is read differently after it, and no existing member changes — `ModelError` and
@@ -992,6 +1022,14 @@ them:
 - **ADR-0094 §7 is applied, not narrowed.** §2 reads it as forbidding
   transcription at the gateway, which is the clause's own worked case for an
   audio-shaped spoke. Nothing here permits a spoke to derive anything.
+- **ADR-0199 is consumed and discharged, not touched.** §3 is the surface its §8
+  second clause gates shipping on, stated in the narrowest form that clause
+  admits; §7 applies its §5 rather than restating it, and states how a deflection
+  reaches the user on this channel, which its §8 fourth clause obliges. Every one
+  of its rules binds this operation exactly as ratified, and this ADR reads none
+  of them more widely: it adds the Protocols, types, setting and method signature
+  its §8 first clause says such a lane needs "its own change and, where golden
+  rule 5 reaches it, its own ADR" for. This is that ADR.
 
 **No *amendment* record is owed anywhere.** ADR-0082 §1 owes one "when the later
 ADR amends a named clause — and not otherwise", and this ADR amends none: the
@@ -1031,7 +1069,8 @@ each wave must contain if it exists.
 
 > **Normative.** That third wave carries **three preconditions**, and a lane
 > briefed against it before all three hold is briefed wrong: ADR-0199 ratified
-> and merged (§7); ADR-0177's status line carrying §12's supersession record; and,
+> and merged (§7 — satisfied at `62724fe1`); ADR-0177's status line carrying
+> §12's supersession record; and,
 > **for the remote-browser case only**, a ratified scheme decision under ADR-0174
 > §11 (§10). The loopback case waits on the first two alone.
 
@@ -1042,21 +1081,24 @@ each wave must contain if it exists.
 | §2 | Composition in `orchestration`; no speech call from `interfaces/` | A test asserts no module under `interfaces/` references either Protocol |
 | §3 | `converse_spoken` on `AssistantEngine`, with §3's exact signature | The engine surface closure test; an argument-order test pinning one positional and three keyword-only |
 | §3 (version) | `PROTOCOL_VERSION` bumped, with its comment recording why | The handshake test asserting mismatch is refused at connect |
-| §4 | `SpokenTurn`, `SpokenReply`, and a validator stating §4's invariants both ways | Tests constructing each admissible shape and rejecting each inadmissible one |
+| §4 | `SpokenTurn` and a validator stating §4's invariants both ways | Tests constructing each admissible shape and rejecting each inadmissible one |
 | §4 (line) | Transcription raises `TranscriptionFailedError`; synthesis degrades | Two tests, one per direction, over a seam made to fail |
 | §5 | Blocking work off the loop, bounded and abandonable; no `service` wiring | A test asserts `ai_assistant.service` holds neither Protocol; a test that a wedged seam does not stall the loop |
 | §6 | `hub_max_spoken_audio_bytes`, enforced both ways | A test refusing an oversized utterance before any seam call; a test degrading an oversized rendering |
 | §7 | The ruling applied between the turn and synthesis; `outcome.reply` unchanged | A test that a reduced rendering leaves `outcome.reply` byte-identical |
 | §8 | No audio in any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken turn |
 | §9 | `SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()` | A round-trip test; a test that `wire/codec.py` is unmodified; a rejection test per malformed encoding |
-| §3 (channel) | `SpokenChannel`, `SpokenAudience`, required with no default | A test refusing the call with no channel; a test that `plays` is a non-empty tuple and that a `frozenset` does not project |
-| §3 (format pick) | The engine picks `channel.plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
+| §3 (plays) | `plays` required with no default, a non-empty tuple | A test refusing the call with no `plays` and with an empty one; a test that a `frozenset` does not project |
+| §3 (format pick) | The engine picks `plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
 | §1 (failures) | `SpeechError` and `SpeechTimeoutError` in `core/errors.py`, carrying `retryable` and `routable`; `ModelError` byte-unchanged | A test asserting each seam's declared raises and both class attributes; a test that the deadline decorator raises `SpeechTimeoutError`; a test that `ModelError`'s subclass set is unchanged |
 | §4 (translation) | `SpeechError` from `transcribe` becomes `TranscriptionFailedError`; `SpeechError` from `synthesize` degrades; everything else propagates | Three tests: a classified failure each side, and a non-`SpeechError` exception asserted to propagate from both |
 | §4 (no chaining) | `TranscriptionFailedError(message, *, failure: SpeechFailure)` raised `from None`; `SpeechFailure` matched by identity over a frozen mapping | A test that `__cause__` is `None`; a test that a seam exception whose message embeds a recognisable fragment leaves no trace of it in the raised error or its rendering; a test that a class named after a known one is still `UNCLASSIFIED` |
 | §4 (failure vocabularies) | One `SpeechFailure` member per `SpeechError` class | A test enumerating both and asserting the bijection, so a later subclass cannot land without its member |
 | §3 (budget) | The caller's budget threaded to each stage; the effective speech bound is the lesser of it and the decorator's | Three expiry tests — in `transcribe`, in the turn, in `synthesize` — asserting `TIMED_OUT`, `converse`'s own behaviour, and degradation respectively |
-| §4 (`SpokenReply`) | Orchestration builds the pair from one `synthesize` call | A test that `text` is byte-identical to the argument passed; no test decodes the audio |
+| §4 (`spoken`) | `spoken` is the rendering of `outcome.reply` and nothing else | A test that the value handed to `synthesize` is byte-identical to `outcome.reply`; no test decodes the audio |
+| §3 (audience) | No audience argument, member or setting anywhere on this surface | A test enumerating this call's arguments and every added type's fields, asserting none expresses an audience |
+| §7 (at supply) | The withholding happens before the composing stage; no filter over composed prose | A test that a withheld class never reaches the composing stage's inputs; a test that no component rewrites `outcome.reply` |
+| §7 (one answer) | `outcome.reply` is the deflection where a class was withheld | A test that the deflected turn's `reply` carries no span of the withheld content and that `spoken` renders that same value |
 | §9 (`Base64Audio`) | The named annotation, padded RFC 4648 §4, canonical, never normalised | Rejection tests per defect class — bad alphabet, missing padding, non-canonical final group, URL-safe alphabet — and a byte-identity round trip |
 | §9 (refusal) | Every entry point constructing a `SpokenAudio` from untrusted input refuses `from None` with no input value | Two failure-path tests, in process and through the gateway, with a near-valid clip, asserting the clip appears in neither the refusal, its cause, its rendering, nor either log tier |
 | §8 (error path) | No audio in a surfaced error, its cause, or either log tier | A deterministic transcription-failure test whose seam exception embeds a recognisable audio fragment, asserting that fragment appears in neither the raised error, nor its `__cause__`'s rendering, nor either log tier, nor any store |
@@ -1090,15 +1132,23 @@ does.
 
 **What is blocked, and by what.** The remote-browser half of milestone 19's exit
 test waits on ADR-0174 §11's scheme decision, which nothing here can supply
-(§10, #1668). §7's ruling waits on ADR-0199. And ADR-0177's status line owes the
-record §12 names (#1667). None of the three blocks the hub-side waves, which is the useful part
-of discovering them at the ADR rather than in a surface lane.
+(§10, #1668). ADR-0177's status line owes the record §12 names (#1667). Neither
+blocks the hub-side waves, which is the useful part of discovering them at the
+ADR rather than in a surface lane. ADR-0199 was the third of these when this ADR
+was drafted and is no longer: it merged at `62724fe1`, and §3 and §7 are written
+against its ratified text rather than against an expectation of it.
+
+**What becomes possible that this ADR does not take.** §3 discharges ADR-0199
+§8's shipping gate in its narrowest form — the operation is the channel — so the
+richer surface ADR-0199 §9 defers, where a channel declares its audience as part
+of an enrolment record, is unblocked rather than pre-empted. When ADR-0094 §10's
+spoke surface arrives it declares audiences without superseding anything here,
+because there is no vocabulary here for it to contradict.
 
 **What would trigger revisiting this.** Any of §11's firing conditions.
 Sharpest: a measured time-to-first-sound that makes a whole-answer rendering
 unusable would reopen §10's one-POST shape and, with it, the streaming
-deferrals. And a `SpokenChannel` audience vocabulary from ADR-0199 that this
-ADR's single-member fallback cannot express would reopen §3.
+deferrals.
 
 **What is unblocked, and what is not.** The three waves of §13 may be briefed
 once this merges (ADR-0015 §5). Nothing implements against it before then, the
@@ -1164,12 +1214,22 @@ the recording in `__cause__` and in the traceback, where §8's guarantee cannot
 reach it and where nobody looks. The classification carries what a caller can act
 on; the implementation's own detail belongs in the implementation's own log.
 
-**Leave the audience vocabulary to ADR-0199 and carry "at least an audience".**
-Rejected in §3 after architecture review named the cost: `SpokenChannel` is a
-transitive type of a wire-derived method, so a type whose members another ADR
-fixes is a call no implementation can conform to and no client can encode. The
-coordination it was meant to buy is bought instead by ADR-0199 keying its tier
-on a vocabulary this ADR fixes, and superseding it if it needs a richer one.
+**Carry the audience as a value the caller declares on each call.** Rejected in
+§3, and it is the alternative this ADR spent two drafts on: first deferring the
+vocabulary to ADR-0199, then fixing a one-member vocabulary here. ADR-0199 §8's
+third clause forbids the shape outright — an ADR deciding this surface "may not
+make the audience a value a spoke asserts per request" — and its ground is
+ADR-0094 §5 read in the output direction. What replaced it costs nothing: the
+operation is the channel, its audience is declared in this text, and there is no
+value on the surface for anyone to assert.
+
+**Apply ADR-0199's ruling after the turn composed, keeping the full answer
+beside a reduced spoken one.** Rejected in §7. It is the intuitive design — the
+caller can see on screen what the hub declined to say — and ADR-0199 §5 forbids
+it in terms, because a filter over composed prose is content inspection and a
+composed answer with a hole in it is indistinguishable from a complete one. It
+also kept the withheld content alive on the surface, which is the property the
+correction removes.
 
 **Constrain the synthesizer to one format every caller can play.** Rejected in
 §1 and §3. There is no single media type every recording browser produces and
