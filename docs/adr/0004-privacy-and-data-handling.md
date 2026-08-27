@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential) and ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -309,6 +309,74 @@
   cites nor widens ADR-0124 §6's exemption or ADR-0126 §11's, and **#74 stays open
   on its own subject**. That §7 now carries three narrow exemptions, and whether
   the clause should be restated rather than exempted a fourth time, is **#1321**.
+- Partially superseded: 2026-08-27 by ADR-0202 — **two clauses, one closed class,
+  and the class exists because a browser will not hand a microphone to a page that
+  is not in a secure context.** ADR-0174 §7 ruled that the gateway's remote browser
+  listener speaks plain HTTP, decided no transport-layer security arrangement for
+  it, and made a lane that finds the surface needs a secure context **stop** and owe
+  "a ratified decision on the scheme". `track:voice` milestone 19 asks for
+  push-to-talk in a browser on another device, which fired that stop (#1668).
+  ADR-0202 is the scheme decision: the listener serves HTTPS on a certificate the
+  overlay obtains for a name it assigns, terminated in the gateway's own process,
+  and it refuses to bind without one. Its private key is a **file** on that machine,
+  which is what engages this ADR.
+
+  **Replaced — §3's keyring clause, only for the remote browser listener's TLS key
+  material.** "Tier 0 secrets are stored in the **OS keyring** via the `keyring`
+  library." The key is Tier 0 under §1 and it is not in the keyring. Two ratified
+  clauses close that route before any code: ADR-0125 §2 shuts `SecretScope` at
+  three members and rules that a fourth consumer needs a fourth member, "which is
+  `core` surface and therefore its own ADR", and ADR-0125 §8 rules that
+  `interfaces` — where the gateway lives — holds neither face of that seam. So the
+  keyring would cost two contract decisions ahead of any TLS code. It would also
+  **buy nothing**: the key is not this system's to mint, since the overlay agent
+  generates it on the machine, writes it, and rewrites it on every renewal, so
+  routing it through the keyring means copying a Tier 0 value into a second durable
+  store and keeping the copy in sync or serving a stale one. **The class is closed
+  by role and by path, not by provenance** — the key at the path ADR-0202 §8 names
+  and the certificate beside it, read at bind and for the sole purpose of building
+  that listener's TLS context — and ADR-0202 §3 forbids any lane citing it to place
+  another Tier 0 value outside the keyring, "however closely it resembles this one".
+  **The rest of the same bullet is applied rather than superseded**: the key is
+  never in the memory database and never in a committed file.
+
+  **Replaced — §7's gating clause, only as it reaches the same class.** "Access to
+  Tier 0/1 data and every side-effecting tool call is gated by the `permissions/`
+  layer and recorded in an **audit trail**." Both halves are **structurally**
+  unavailable rather than declined: `permissions/` runs inside the hub, the trail is
+  `<data_dir>/audit.db` which the hub owns exclusively (ADR-0083), and the read
+  happens at process start — before any hub connection, any session and any request
+  exists. There is no principal to check; the reader is the process the owner
+  started, on the machine whose key it is, opening a file the owner placed there.
+  ADR-0202 §10 puts **three replacements** in that exemption's place, an
+  implementation omitting any of which does not have it: the read is confined to
+  **one purpose and one path**, at bind, after which nothing else reads the key;
+  **custody is the operating system's own control**, on a file the gateway's user
+  owns with no group or other permission and the ancestor walk `wire/custody.py`
+  already performs; and the **bind is disclosed** to the owner, while a failure to
+  read is a gateway that does not start and reports why. That third replacement
+  reaches a **bind and not a use**, and its **emission and not its retention**: it
+  is a line on standard output, it makes no read reviewable after the fact, and
+  ADR-0202 forbids any lane presenting it as a durable or reviewable record. The
+  custody predicate is **ownership and mode** and is expressly not a claim that no
+  other user can read the key — ADR-0084 §1's caution that a filesystem walk "can be
+  wrong — a bind mount, an ACL, a symlinked ancestor" comes with it unchanged.
+  **§7's second bullet — data minimisation — is not superseded**, and neither is
+  §7's gate over every other Tier 0 and Tier 1 access anywhere in this system.
+
+  **Examined and not superseded.** §6's Tier 0 purge clause is untouched: unlike
+  ADR-0172's class there is a file at rest, but it is the overlay agent's to write
+  and remove and no delete act of this system's is made to miss it by ADR-0202,
+  which adds no store and no retention. §1's tiers are used as given — the key is
+  Tier 0 *because* of §1, and ADR-0202 refuses reclassification as the way to avoid
+  this record. §2, §4 and §5 are untouched; §4's `0600` posture is applied rather
+  than modified, and §5's rule that logs carry Tier 2 only is applied by ADR-0202's
+  Tier 2 classification of the bind disclosure. **ADR-0172 §3's bar on citing its
+  exemption toward a fourth is honoured**: ADR-0202 §10 makes the argument from
+  scratch and says so, and if that argument is rejected this exemption falls rather
+  than surviving on ADR-0172's, ADR-0124 §6's or ADR-0126 §11's. That §7 now carries
+  a fourth narrow exemption, and whether the clause should be restated rather than
+  exempted again, remains **#1321**.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated

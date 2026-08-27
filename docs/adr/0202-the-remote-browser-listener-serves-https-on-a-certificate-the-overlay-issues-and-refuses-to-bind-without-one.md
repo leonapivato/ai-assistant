@@ -27,10 +27,13 @@
   is refused. §10 applies ADR-0070 §1's test
   clause by clause to every other ADR a reader might expect this to falsify and
   finds no further record owed.
-- **The records on those two ADRs' own header lines are the implementing lane's
-  first act**, not this change's. ADR-0070 §1 permits the `Status` edit that
-  records "a supersession that has landed", and one lands when this ADR merges;
-  §10 writes the two pairs verbatim so the lane copies rather than composes them.
+- **The records on those two ADRs' own header lines are written in this change**,
+  as an atomic pair with the ADR that earns them. ADR-0082 §7 states the condition
+  directly — ADR-0070 §1's "a supersession that has landed" asks that the
+  superseding ADR **exist**, "not that it is ratified", because "the hazard §1 names
+  is a `Status` line pointing at nothing, and an atomic pair makes that
+  unreachable". ADR-0155's and ADR-0172's lanes each wrote their ADR-0004 record in
+  their own docs-only PR on that reading. §10 carries both pairs in full.
 - **Its required review set is adversarial *and* architecture.** It replaces a
   clause of ADR-0004 — the data-handling decision — for a Tier 0 value, and it
   decides the transport of a ratified egress boundary. ADR-0172 took both lenses
@@ -886,8 +889,8 @@ permission check would be the process asking itself.
 > superseded and is not read either way, and neither is §7's gate over every other
 > Tier 0 and Tier 1 access anywhere in this system.
 
-**The record owed on ADR-0004, written here in full for the implementing lane to
-copy.** ADR-0004's `Status` line carries the pre-ADR-0070 `Accepted, partially
+**The record owed on ADR-0004, written here in full and made on ADR-0004's own
+header line in this change.** ADR-0004's `Status` line carries the pre-ADR-0070 `Accepted, partially
 superseded …` shape, and **it keeps it**: ADR-0070 §4 names ADR-0004 in the list of
 lines it grandfathers, and rules that "reformatting a ratified status line to the
 new leading-token form is a forward-only convention, not a licence to rewrite
@@ -952,7 +955,8 @@ this ADR carries the argument, and records that an earlier draft classified this
 a stacked addition on the ground that §8's sentences stay true, which is so and
 answers the wrong clause.
 
-**The record owed on ADR-0174, written here for the implementing lane to copy.**
+**The record owed on ADR-0174, written here and made on ADR-0174's own header line
+in this change.**
 Its `Status` line reads `Accepted` today, so under ADR-0070 §4 the supersession
 leads and `Accepted` is dropped; ADR-0082 §2 then puts the amendment record in the
 appended dated note rather than as a `Status` qualifier, and ADR-0070 §1 requires
