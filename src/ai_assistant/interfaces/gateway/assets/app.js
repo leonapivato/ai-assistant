@@ -3543,6 +3543,17 @@ const MICROPHONE_UNAVAILABLE =
   "The microphone could not be opened, so nothing was recorded and nothing was sent. " +
   "Something else may be holding it.";
 
+// The recorder refusing what the microphone gave it, which is a **third** condition and
+// not either of the two above: the browser handed the page a track and then would not
+// encode it. Found by driving the page — a `MediaRecorder` handed a track that had
+// already ended throws `NotSupportedError` out of `start`, and without the guard below
+// that throw escaped `startTalking` and left the control saying "Listening" with no
+// press it would ever accept again.
+const RECORDER_REFUSED =
+  "This browser would not start recording, so nothing was recorded and nothing was " +
+  "sent. The microphone was opened and the recorder would not take it. Holding the " +
+  "button again is the thing to try; typing works either way.";
+
 // A press that produced no bytes at all — a tap rather than a hold, or a recorder that
 // was stopped before it had written anything. Said rather than sent: an empty
 // recording is not a question, and posting one would spend a turn to be told so.
@@ -3699,7 +3710,23 @@ async function startTalking() {
     return;
   }
   mine.stream = stream;
-  const recorder = new MediaRecorder(stream, { mimeType: format });
+  // **Guarded, because the failure here is the one that wedges the control.** Both the
+  // constructor and `start` throw synchronously — an unsupported type at the first, a
+  // track the browser will not encode at the second — and an escaping throw would leave
+  // this press in flight for the life of the page: `press` stays set, so every later
+  // press returns at the top, and the line on screen still says "Listening". The
+  // microphone goes back at the same time, because a page that has stopped listening
+  // must not leave the browser's recording indicator up.
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: format });
+  } catch (_) {
+    releaseMicrophone(stream);
+    press = null;
+    saying("");
+    fault(RECORDER_REFUSED, "console");
+    return;
+  }
   mine.recorder = recorder;
   recorder.addEventListener("dataavailable", (event) => {
     if (event.data.size > 0) {
@@ -3712,7 +3739,24 @@ async function startTalking() {
   recorder.addEventListener("stop", () => {
     void sendRecording(mine);
   });
-  recorder.start();
+  try {
+    recorder.start();
+  } catch (_) {
+    mine.recorder = null;
+    releaseMicrophone(stream);
+    press = null;
+    saying("");
+    fault(RECORDER_REFUSED, "console");
+    return;
+  }
+  // **The release that landed while the recorder was being built.** `stopTalking` marks
+  // the press released and stops a recorder only if there is one in `state`
+  // `"recording"`, and until this line there was not — so a press let go in that window
+  // would record until the page was closed. Taken after `start` rather than before,
+  // because a recorder that has not started cannot be stopped.
+  if (mine.released) {
+    recorder.stop();
+  }
 }
 
 function stopTalking() {
@@ -7164,8 +7208,12 @@ offerStopWaiting();
 // auto-repeating while held, which is not a second press.
 const talkButton = el("talk-button");
 talkButton.addEventListener("pointerdown", (event) => {
-  talkButton.setPointerCapture(event.pointerId);
+  // The recording first and the capture second, because the capture is an improvement
+  // on the mechanism rather than the mechanism: it is what makes the release land here
+  // after the pointer has drifted off the button, and a browser that will not give it
+  // should cost the drift case rather than the whole control.
   void startTalking();
+  talkButton.setPointerCapture(event.pointerId);
 });
 talkButton.addEventListener("pointerup", stopTalking);
 talkButton.addEventListener("pointercancel", stopTalking);

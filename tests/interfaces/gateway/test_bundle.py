@@ -1172,6 +1172,27 @@ def test_a_recording_with_no_words_and_an_unspoken_answer_are_neither_of_them_fa
     assert "fault(" not in rendering
 
 
+def test_a_recorder_that_refuses_to_start_does_not_wedge_the_control() -> None:
+    """Found by driving the page, and the reason it is pinned here.
+
+    ``new MediaRecorder`` and ``recorder.start`` both throw **synchronously** — an
+    unsupported type at the first, a track the browser will not encode at the second —
+    and an escaping throw leaves that press in flight for the life of the page: ``press``
+    stays set, so every later press returns at the top of ``startTalking``, and the line
+    on screen still reads "Listening". The control is then dead until the page is
+    reloaded, which is #1500's failure on a different control.
+
+    Both guards give the microphone back as well, because a page that has stopped
+    listening must not leave the browser's recording indicator up.
+    """
+    starting = _functions(_code("app.js"))["startTalking"]
+
+    assert starting.count("} catch (") == 3
+    assert starting.count("fault(RECORDER_REFUSED,") == 2
+    assert starting.count("releaseMicrophone(stream)") == 3
+    assert starting.count("press = null") == 4
+
+
 def test_the_page_never_relays_the_browsers_own_words_about_a_microphone() -> None:
     """``getUserMedia``'s refusals are read off the error's ``name``, the one member the
     specification fixes — never off its ``message``, which is the browser's own prose.
