@@ -13,12 +13,14 @@ annotation alone would permit gets a test that it does not survive construction.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from _int_str_digits import pinned_int_str_digits
 from pydantic import ValidationError
 
+from ai_assistant.core.errors import AssistantError, ClassifiedToolError, ToolError
 from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
@@ -335,3 +337,159 @@ def test_a_scalar_result_output_with_a_lone_surrogate_is_rejected() -> None:
     """
     with pytest.raises(ValidationError, match="no JSON encoding"):
         ToolResult(outcome=ToolOutcome.SUCCEEDED, output="\ud800")
+
+
+# --- ADR-0032 §1: the carrier a tool classifies its own failure with ---------
+#
+# Type-level, so it belongs here rather than in the shared suite: no
+# ``ToolInvoker`` can vary what an exception class's own constructor refuses.
+# What the *seam* does with one is the suite's, and every clause of it is there.
+
+
+def classified(
+    kind: ToolFailureKind = ToolFailureKind.RATE_LIMITED,
+    message: str = "the upstream throttled us",
+    *,
+    committed: bool = False,
+    cost: ToolCost | None = None,
+) -> ClassifiedToolError:
+    """A carrier built the way an integration author writes one."""
+    return ClassifiedToolError(
+        ToolFailure(kind=kind, message=message),
+        effect_may_have_committed=committed,
+        incurred_cost=cost,
+    )
+
+
+def test_a_carrier_holds_the_three_values_it_was_given() -> None:
+    """ADR-0032 §1 and ADR-0195 §3: a failure, a fact, and what the call cost."""
+    price = ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.03"), currency="USD")
+
+    error = classified(committed=True, cost=price)
+
+    assert error.failure == ToolFailure(
+        kind=ToolFailureKind.RATE_LIMITED, message="the upstream throttled us"
+    )
+    assert error.effect_may_have_committed is True
+    assert error.incurred_cost == price
+
+
+def test_the_effect_fact_is_required_and_keyword_only() -> None:
+    """ADR-0032 §2: the raiser answers it explicitly, every time.
+
+    Both candidate defaults are wrong in a direction, so ``core`` must not pick
+    one on the author's behalf — ``False`` silently records a possibly-committed
+    effect as certainly-nothing-happened, which is the one direction ADR-0014 §4
+    refuses to guess in, and ``True`` floods the system with an ``INDETERMINATE``
+    that is never auto-retried. The cost is a keyword on every raise, and it is
+    the point: an author who has to type it has to think about it once per
+    failure path.
+    """
+    failure = ToolFailure(kind=ToolFailureKind.REFUSED, message="the upstream declined it")
+
+    with pytest.raises(TypeError):
+        ClassifiedToolError(failure)  # type: ignore[call-arg]  # the point of this case
+    with pytest.raises(TypeError):
+        ClassifiedToolError(failure, True)  # type: ignore[call-arg]  # keyword-only, deliberately
+
+
+def test_the_reported_cost_is_defaulted_and_keyword_only() -> None:
+    """ADR-0195 §3: the asymmetry with the fact is argued rather than inherited.
+
+    A defaulted ``None`` asserts "no figure", which is what silence already means
+    everywhere else and is the fail-closed direction under ADR-0194 §2. Requiring
+    it would break every raise site to make authors type the answer silence
+    already gives.
+    """
+    failure = ToolFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down")
+
+    assert ClassifiedToolError(failure, effect_may_have_committed=False).incurred_cost is None
+    with pytest.raises(TypeError):
+        ClassifiedToolError(  # type: ignore[call-arg]  # keyword-only, deliberately
+            failure, False, ToolCost(basis=CostBasis.FREE)
+        )
+
+
+def test_the_carrier_is_an_assistant_error_and_deliberately_not_a_tool_error() -> None:
+    """ADR-0032 §1: the placement is load-bearing.
+
+    ``ToolError``'s children are faults *the seam raises*, and ADR-0029 §8 spends
+    a paragraph on why an executor must never derive a retry from one — "retry is
+    scheduled only from a ``ToolResult``, never from an exception". ``except
+    ToolError`` is a plausible line for an executor or an interface adapter to
+    write, and it must not catch a carrier whose whole purpose is to *become* a
+    result the executor may retry. Keeping it off that branch means the
+    conflation is not available; ``AssistantError`` still holds it, so this
+    module's stated invariant is preserved.
+    """
+    error = classified()
+
+    assert isinstance(error, AssistantError)
+    assert isinstance(error, Exception), "a BaseException would be swallowed by ADR-0029 §3"
+    assert not isinstance(error, ToolError)
+    assert not issubclass(ClassifiedToolError, ToolError)
+
+    caught: BaseException | None = None
+    try:
+        raise classified()
+    except ToolError as by_the_seams_branch:  # pragma: no cover - the point is that it misses
+        caught = by_the_seams_branch
+    except ClassifiedToolError:
+        pass
+
+    assert caught is None, "an executor's `except ToolError` must not catch the carrier"
+
+
+def test_the_carrier_renders_as_nothing_and_carries_no_arguments() -> None:
+    """ADR-0032 §5, made unbreakable-by-accident rather than merely forbidden.
+
+    The seam may render nothing derived from this object — ``str()``, ``repr()``,
+    ``args``, ``__cause__``, ``__context__``, ``__notes__`` — into a message or a
+    log. A carrier holding no text of its own is the form in which that cannot be
+    broken by an implementation reaching for the obvious diagnostic. What an
+    operator reads is ``failure``, which the seam passes through by value.
+    """
+    error = classified(message="the upstream throttled us")
+
+    assert error.args == ()
+    assert str(error) == ""
+    assert "throttled" not in repr(error)
+
+
+def test_a_blank_message_fails_in_the_tools_own_frame_before_a_carrier_exists() -> None:
+    """ADR-0032 §1: the validation happens where it is useful.
+
+    ``ToolFailure._message_is_present`` fires at the raise site, in the tool
+    author's own frame, so a blank message never gets as far as a carrier. That
+    is the *ordinary* path and not a guarantee — ``model_construct`` bypasses
+    every validator while still satisfying ``isinstance``, which is why ADR-0032
+    §6 has the seam revalidate rather than trust the raise site, and why the
+    suite pins both routes.
+    """
+    with pytest.raises(ValidationError, match="visible text"):
+        classified(message="   ")
+
+
+def test_a_cause_chain_stays_available_because_the_seam_renders_none_of_it() -> None:
+    """``raise ClassifiedToolError(...) from upstream`` is good practice (§5).
+
+    The chain is exactly what a developer wants in a traceback, and it is also
+    where an upstream's error body lives — quoting a recipient or a subject line.
+    Keeping it out of everything the seam renders is what makes ``from`` safe to
+    write, and that half is pinned at the seam; here it is only that the chain is
+    ordinary and available.
+    """
+    upstream = RuntimeError("recipient alice@example.com rejected")
+
+    def integration() -> None:
+        """What an integration author writes on a failure path it can classify."""
+        try:
+            raise upstream
+        except RuntimeError as exc:
+            raise classified() from exc
+
+    with pytest.raises(ClassifiedToolError) as raised:
+        integration()
+
+    assert raised.value.__cause__ is upstream
+    assert "alice@example.com" not in str(raised.value)

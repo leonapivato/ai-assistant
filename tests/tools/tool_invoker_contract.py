@@ -36,11 +36,12 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast
 
 import pytest
 import structlog.testing
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ai_assistant.core.errors import (
     AuditError,
     AuthorisationSpentError,
+    ClassifiedToolError,
     SpendCeilingError,
     SpendUndeterminedError,
     ToolBindingError,
@@ -63,10 +64,18 @@ from ai_assistant.core.types import (
     ToolCall,
     ToolCost,
     ToolDefinition,
+    ToolFailure,
     ToolFailureKind,
     ToolOutcome,
 )
-from ai_assistant.testing import APPEND_FAILED, CLAIM, COMPLETION, FakeAuditTrail
+from ai_assistant.testing import (
+    APPEND_FAILED,
+    CLAIM,
+    COMPLETION,
+    REPORTED_FAILURE,
+    RESERVED_KIND,
+    FakeAuditTrail,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -955,6 +964,231 @@ def cancel_this_task() -> None:
     task = asyncio.current_task()
     assert task is not None, "these cases drive `invoke` inside a task"
     task.cancel()
+
+
+# --- ADR-0032: a failure the tool classified itself -------------------------
+#
+# The producer here is test-only for ADR-0195 §7's reason one type over: no
+# integration in the tree classifies its own failure yet, ADR-0017 §3's egress
+# conditions are undischarged, and the first real one arrives with its own ADR.
+
+#: The message a classified failure carries, so a case can assert it **verbatim**
+#: — ADR-0032 §5's by-value rule is that the seam never edits, wraps, prefixes,
+#: truncates or re-authors a tool's text.
+REPORTED_MESSAGE = "the upstream returned 429 and asked us to back off"
+
+#: What a classified failure reports about a call that was nonetheless billed.
+CLASSIFIED_COST = ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.07"), currency="USD")
+
+#: ADR-0029 §3's six **integration-facing** kinds — the ones that had no carrier
+#: at all, which is what #192 asked for and what ADR-0032 gives them. ``INTERNAL``
+#: is accepted as raised too but is the seam's own synthesis elsewhere, and
+#: ``TIMED_OUT`` is reserved (§3); both are covered by the exhaustive case.
+INTEGRATION_KINDS: Final = (
+    ToolFailureKind.INVALID_REQUEST,
+    ToolFailureKind.NOT_AUTHORISED,
+    ToolFailureKind.UNAVAILABLE,
+    ToolFailureKind.RATE_LIMITED,
+    ToolFailureKind.REFUSED,
+    ToolFailureKind.CANCELLED,
+)
+
+#: Means "delete this attribute" rather than "assign this value" — ADR-0032 §6
+#: names deletion specifically, because ``del exc.failure`` is as reachable as
+#: assigning ``None`` to it and an implementation reading the attribute directly
+#: raises a raw ``AttributeError`` where the rule requires a result.
+DELETED: Final = object()
+
+
+def carrier(
+    kind: ToolFailureKind = ToolFailureKind.RATE_LIMITED,
+    message: str = REPORTED_MESSAGE,
+    *,
+    committed: bool = False,
+    cost: ToolCost | None = None,
+) -> ClassifiedToolError:
+    """A carrier built the way an integration author writes one."""
+    return ClassifiedToolError(
+        ToolFailure(kind=kind, message=message),
+        effect_may_have_committed=committed,
+        incurred_cost=cost,
+    )
+
+
+def tampered(
+    *, committed: bool | object = False, cost: ToolCost | None = None, **attributes: object
+) -> ClassifiedToolError:
+    """A validly-constructed carrier, then written to **past** its constructor.
+
+    ADR-0032 §6's subject: an exception's attributes are ordinary attributes, an
+    integration is not required to have been type-checked, and ``isinstance`` is
+    not evidence that a pydantic model was validated. Every arrangement here is
+    reachable in ordinary Python on an object the seam did not write.
+    """
+    built = carrier(cost=cost)
+    if committed is not False:
+        attributes = {"effect_may_have_committed": committed, **attributes}
+    for name, value in attributes.items():
+        if value is DELETED:
+            delattr(built, name)
+        else:
+            setattr(built, name, value)
+    return built
+
+
+def unreadable(
+    name: str, *, committed: bool = False, cost: ToolCost | None = None
+) -> ClassifiedToolError:
+    """A carrier whose access to ``name`` **raises**, as a tool's property would.
+
+    ``isinstance`` admits a subclass, so every attribute of a carrier is a
+    tool-authored read — and an exception raised inside an ``except`` body is not
+    caught by the sibling ``except`` clauses of the same ``try``, so an unguarded
+    read leaves ``invoke`` uncaught exactly where the rule requires a result.
+    """
+
+    class UnreadableError(ClassifiedToolError):
+        def __getattribute__(self, attribute: str) -> object:
+            if attribute == name:
+                msg = f"{attribute} is not available"
+                raise RuntimeError(msg)
+            return super().__getattribute__(attribute)
+
+    return UnreadableError(
+        ToolFailure(kind=ToolFailureKind.RATE_LIMITED, message=REPORTED_MESSAGE),
+        effect_may_have_committed=committed,
+        incurred_cost=cost,
+    )
+
+
+def dumped(behaviour: Callable[[], Mapping[str, object] | None]) -> ToolFailure:
+    """A ``ToolFailure`` whose ``model_dump`` runs ``behaviour`` before answering.
+
+    Overriding it is **legitimate** — ADR-0032 §6 declines to arbitrate between
+    two accounts a tool gives of its own failure, and rules that "the round-trip's
+    result is what crosses" — which is precisely why the seam runs it under a
+    guard rather than trusting it. ``behaviour`` returning ``None`` means "answer
+    normally".
+    """
+
+    class Dumped(ToolFailure):
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            substitute = behaviour()
+            if substitute is not None:
+                return dict(substitute)
+            return super().model_dump(*args, **kwargs)
+
+    return Dumped(kind=ToolFailureKind.RATE_LIMITED, message=REPORTED_MESSAGE)
+
+
+class Impostor(BaseModel):
+    """A ``ToolFailure``-shaped value of another class entirely (ADR-0032 §6)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: ToolFailureKind
+    message: str
+
+
+class Reads:
+    """How many times each of a watched carrier's three attributes was read."""
+
+    def __init__(self) -> None:
+        """Nothing read yet."""
+        self.counts: dict[str, int] = {
+            "failure": 0,
+            "effect_may_have_committed": 0,
+            "incurred_cost": 0,
+        }
+
+
+def watched_carrier(
+    *,
+    committed: bool = False,
+    cost: ToolCost | None = None,
+    intercept: Callable[[str, int], object] | None = None,
+) -> tuple[ClassifiedToolError, Reads]:
+    """A carrier **subclass** that counts, and can sabotage, its three reads.
+
+    ``isinstance`` admits a subclass, so every attribute of a carrier is a
+    tool-authored read (ADR-0032 §6). ``intercept`` is called with the attribute's
+    name and its 1-based access count *before* the real value is handed back; it
+    may raise, cancel the invoking task, or return a substitute, and returning
+    :data:`PASS` means "the real value".
+
+    The counter is armed only after construction, so the constructor's own writes
+    are not what a case measures.
+    """
+    seen = Reads()
+    armed = False
+
+    class WatchedError(ClassifiedToolError):
+        def __getattribute__(self, name: str) -> object:
+            if armed and name in seen.counts:
+                seen.counts[name] += 1
+                if intercept is not None:
+                    substitute = intercept(name, seen.counts[name])
+                    if substitute is not PASS:
+                        return substitute
+            return super().__getattribute__(name)
+
+    built = WatchedError(
+        ToolFailure(kind=ToolFailureKind.RATE_LIMITED, message=REPORTED_MESSAGE),
+        effect_may_have_committed=committed,
+        incurred_cost=cost,
+    )
+    armed = True
+    return built, seen
+
+
+def refuses_to_dump() -> Mapping[str, object] | None:
+    """A ``model_dump`` that raises — legitimate to override, so guarded not trusted."""
+    msg = "this value refuses to be dumped"
+    raise RuntimeError(msg)
+
+
+class BlankMessage:
+    """A tool whose classified raise never gets built (ADR-0032 §1).
+
+    ``ToolFailure._message_is_present`` fires in the **tool's own frame**, at the
+    raise site where the author can see it, so the carrier never exists and what
+    escapes is an ordinary ``ValidationError``. That is the ordinary path and not
+    a guarantee, which is why the suite pins the ``model_construct`` route beside
+    it.
+    """
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> FrozenJson:
+        """Try to classify a failure with a message that renders as nothing."""
+        raise ClassifiedToolError(
+            ToolFailure(kind=ToolFailureKind.RATE_LIMITED, message="   "),
+            effect_may_have_committed=False,
+        )
+
+
+class SwallowingClassifier:
+    """A tool that **absorbs** its cancellation and raises a carrier anyway.
+
+    The shape that makes ADR-0032 §4's ranks 1 and 2 assertable against rank 3: a
+    seam checking the carrier first would answer with the tool's own kind for a
+    call it had already stopped waiting for, and one checking only after reading
+    would still have entered the carrier's accessors.
+    """
+
+    def __init__(self, raising: ClassifiedToolError) -> None:
+        """Raise ``raising`` after absorbing whatever cancellation arrives."""
+        self.entered = asyncio.Event()
+        self._raising = raising
+
+    async def __call__(
+        self, parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> FrozenJson:
+        """Absorb the cancellation and raise the carrier regardless."""
+        self.entered.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(3600)
+        raise self._raising
 
 
 class ToolInvokerContract:
@@ -4122,3 +4356,833 @@ class ToolInvokerContract:
 
         with pytest.raises(SpendCeilingError):
             await invoked(invoker, trail, call_for(priced, decision_id="d-third"), timeout=PATIENT)
+
+    # --- ADR-0032: the failure a tool classified itself ---------------------
+
+    @pytest.mark.parametrize("kind", INTEGRATION_KINDS, ids=lambda each: each.value)
+    async def test_each_integration_facing_kind_crosses_with_its_message_verbatim(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, kind: ToolFailureKind
+    ) -> None:
+        """ADR-0032 §9's first obligation, and #192's whole point.
+
+        Six of ADR-0029 §3's eight kinds had no carrier at all, so an integration
+        could not report any of them and every real failure arrived as
+        ``INTERNAL``. Each of them now crosses as the tool raised it: the kind
+        unchanged, and the message **verbatim** — the seam never edits, wraps,
+        prefixes, truncates or re-authors a tool's text (§5).
+        """
+        invoker.register(tool(), Raiser(carrier(kind)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is kind
+        assert result.failure.message == REPORTED_MESSAGE
+        assert result.output is None
+
+    @pytest.mark.parametrize(
+        ("definition", "committed", "expected"),
+        [
+            (tool("smtp"), True, ToolOutcome.INDETERMINATE),
+            (read_only("inbox"), True, ToolOutcome.FAILED),
+            (natural("upsert"), True, ToolOutcome.FAILED),
+            (tool("smtp"), False, ToolOutcome.FAILED),
+            (read_only("inbox"), False, ToolOutcome.FAILED),
+            (natural("upsert"), False, ToolOutcome.FAILED),
+        ],
+        ids=[
+            "side-effecting-may-have-committed",
+            "read-only-may-have-committed",
+            "natural-may-have-committed",
+            "side-effecting-did-not",
+            "read-only-did-not",
+            "natural-did-not",
+        ],
+    )
+    async def test_the_outcome_is_the_fact_conjoined_with_the_declaration(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        definition: ToolDefinition,
+        committed: bool,
+        expected: ToolOutcome,
+    ) -> None:
+        """ADR-0032 §2's table over **both** inputs, asserted rather than sampled.
+
+        Kind is what the tool knows; outcome is what the seam rules. The two
+        middle rows are the ones that pin the conjunction — an implementation
+        reading the fact alone passes the other four. A read-only tool reporting a
+        possible commit is contradicting the declaration the policy approved, and
+        the declaration is the trusted value; a ``NATURAL`` tool is idempotent by
+        nature, so ignorance costs nothing.
+
+        The conjunction is read off ``definition.interrupted_outcome`` rather than
+        recomputed here, which is ADR-0031 §1's single copy acquiring its third
+        reader instead of a fourth spelling of the same comparison.
+        """
+        invoker.register(definition, Raiser(carrier(committed=committed)))
+
+        result = await invoked(invoker, trail, call_for(definition), timeout=PATIENT)
+
+        assert result.outcome is expected
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.RATE_LIMITED, (
+            "the kind is the tool's either way"
+        )
+
+    async def test_no_report_makes_a_raise_succeed(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """§2's monotonicity, stated as the property rather than as a row.
+
+        There is no value of the fact that produces ``SUCCEEDED`` — a raise is
+        never a success — so the worst a lying or careless integration achieves is
+        ``INDETERMINATE`` for a call that definitely failed: pessimistic, not
+        auto-retried, resolved explicitly.
+        """
+        outcomes = set()
+        for index, committed in enumerate((True, False)):
+            invoker.register(tool(f"t-{index}"), Raiser(carrier(committed=committed)))
+            result = await invoked(
+                invoker, trail, call_for(tool(f"t-{index}"), decision_id=f"d-{index}")
+            )
+            outcomes.add(result.outcome)
+
+        assert ToolOutcome.SUCCEEDED not in outcomes
+        assert outcomes == {ToolOutcome.INDETERMINATE, ToolOutcome.FAILED}
+
+    @pytest.mark.parametrize("kind", list(ToolFailureKind), ids=lambda each: each.value)
+    async def test_every_kind_a_tool_may_raise_is_accepted_or_refused_exhaustively(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail, kind: ToolFailureKind
+    ) -> None:
+        """ADR-0032 §3, in the shape ADR-0029 §10 already requires of ``retryable``.
+
+        Asserted over the **whole enum** rather than sampled, so a member added
+        later cannot become silently reachable. ``TIMED_OUT`` is the only reserved
+        member — stated as an enumeration of one rather than as a category
+        ("seam-owned kinds"), because a category drifts as members are added — and
+        ``CANCELLED`` is accepted, which ADR-0031 §3 requires: refusing it would
+        leave that member with no producer at all.
+        """
+        reserved = kind is ToolFailureKind.TIMED_OUT
+        invoker.register(tool(), Raiser(carrier(kind)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.failure is not None
+        assert result.failure.kind is (ToolFailureKind.INTERNAL if reserved else kind)
+        assert (result.failure.message == REPORTED_MESSAGE) is not reserved
+
+    async def test_a_reserved_timed_out_is_refused_and_its_message_never_crosses(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §3: the seam's deadline is the seam's alone.
+
+        ``TIMED_OUT`` means **this** deadline expired, which ADR-0029 §4 requires
+        the seam to *establish* rather than infer — so a tool naming it is the
+        misclassification that rule refuses, arriving by the front door. The
+        tool-authored ``ToolFailure`` is discarded **whole**: refused rather than
+        remapped to ``UNAVAILABLE``, because choosing a neighbouring kind on the
+        tool's behalf is the seam interpreting a broken integration's meaning, one
+        step from interpolating its text. It fails safe — ``INTERNAL`` is not
+        retryable — and the message the tool wrote reaches neither the result nor
+        anything the seam logs.
+        """
+        invoker.register(tool(), Raiser(carrier(ToolFailureKind.TIMED_OUT)))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert not result.failure.kind.retryable, "nothing is retried on a claim the seam rejected"
+        assert REPORTED_MESSAGE not in result.failure.message
+        assert "smtp" in result.failure.message
+        assert ToolFailureKind.TIMED_OUT.value in result.failure.message
+        assert REPORTED_MESSAGE not in repr(captured)
+        [line] = [each for each in captured if each["event"] == RESERVED_KIND]
+        assert line["tool_id"] == "smtp"
+        assert line["kind"] is ToolFailureKind.TIMED_OUT
+
+    async def test_the_fact_survives_a_refused_reserved_kind(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """§3's last clause, which nothing else pins and which reads as tidy-up.
+
+        A tool that got the *kind* wrong may still be telling the truth about its
+        side effect, and discarding that with the payload would record a possible
+        commit as certainly-nothing-happened. Structurally: the seam throws away
+        the whole ``ToolFailure`` and keeps the fact, because they are separable
+        values — which is why the fact is a field on the exception rather than on
+        ``ToolFailure``.
+        """
+        invoker.register(tool(), Raiser(carrier(ToolFailureKind.TIMED_OUT, committed=True)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+
+    async def test_a_raised_cancelled_is_accepted_as_the_tool_reported_it(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The mirror of the reserved case, and together they pin one member.
+
+        ADR-0031 §3 re-scoped ``CANCELLED`` to "what an integration reports when
+        its own upstream cancelled or aborted the operation" and stated that the
+        seam never synthesises it. Refusing a raised one here would leave the
+        member with no producer at all. Stating the reservation as an enumeration
+        of one rather than as a category is what makes this pair meaningful.
+        """
+        invoker.register(tool(), Raiser(carrier(ToolFailureKind.CANCELLED, committed=True)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.INDETERMINATE, "ADR-0031 §3's own rule, computed"
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.CANCELLED
+        assert result.failure.message == REPORTED_MESSAGE
+
+    async def test_a_retryable_classified_failure_admits_a_keyed_retry_and_refuses_an_unkeyed_one(
+        self, consuming: Callable[[InvocationLedger], InvocableToolRegistry]
+    ) -> None:
+        """The retry algebra's first non-``INTERNAL`` exercise (ADR-0032 §9, #1583).
+
+        ADR-0029 §5's conjunction was inert for every real failure: the only kind a
+        spendable authorisation could reach was ``INTERNAL``, which is not
+        retryable, or the ``INDETERMINATE`` an expiry gives such a tool — so "a
+        retryable ``FAILED`` on a spendable ``KEYED`` authorisation" had no
+        producer through ``invoke`` at all, which is what #1583 records. A raised
+        ``RATE_LIMITED`` is that producer.
+
+        **Both conjuncts, because asserting only the first would certify an
+        implementation that reads ``retryable`` as permission** — which is the
+        misreading ADR-0029 §3 says the clause exists to prevent. The ``KEYED``
+        tool satisfies both and its further claim is admitted; the
+        ``Idempotency.NONE`` tool satisfies conjunct 1, fails conjunct 2, and is
+        refused at the seam.
+        """
+        trail = FakeAuditTrail()
+        invoker = consuming(trail)
+        invoker.register(keyed("keyed"), Raiser(carrier()))
+        invoker.register(tool("unkeyed"), Raiser(carrier()))
+        keyed_call = call_for(keyed("keyed"), decision_id="d-keyed")
+        unkeyed_call = call_for(tool("unkeyed"), decision_id="d-unkeyed")
+        await trail.record(keyed_call.decision)
+        await trail.record(unkeyed_call.decision)
+
+        first = await invoker.invoke(keyed_call, timeout=PATIENT)
+        assert first.outcome is ToolOutcome.FAILED
+        assert first.failure is not None
+        assert first.failure.kind.retryable, "conjunct 1, answering something other than False"
+        (completion,) = await completions(trail)
+        assert completion.failure_kind is ToolFailureKind.RATE_LIMITED, "the kind is not dropped"
+
+        await invoker.invoke(keyed_call, timeout=PATIENT)
+        assert len(await claims(trail)) == 2, "conjunct 2 holds, so the retry's claim is admitted"
+
+        await invoker.invoke(unkeyed_call, timeout=PATIENT)
+        with pytest.raises(AuthorisationSpentError):
+            await invoker.invoke(unkeyed_call, timeout=PATIENT)
+
+    async def test_this_seams_expired_deadline_outranks_the_tools_classification(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §4's rank 2 over rank 3, with the carrier never read.
+
+        A tool that maps its aborted request to ``UNAVAILABLE`` while the seam's
+        deadline actually fired would, on a side-effecting non-``NATURAL`` tool,
+        produce ``FAILED`` — certainly-nothing-happened for a call that outran its
+        budget, where ADR-0029 §4 requires ``INDETERMINATE``. The seam knows and
+        the tool does not, so the seam's knowledge wins and the carrier is
+        discarded fact and all. Discarding the fact loses nothing: on this path
+        the outcome is ``interrupted_outcome`` alone.
+        """
+        raising, seen = watched_carrier(committed=False, cost=CLASSIFIED_COST)
+        invoker.register(tool(), SwallowingClassifier(raising))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=BRIEF)
+
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.TIMED_OUT
+        assert result.incurred_cost is None, "one carrier has one fate (ADR-0195 §4)"
+        assert seen.counts == {
+            "failure": 0,
+            "effect_may_have_committed": 0,
+            "incurred_cost": 0,
+        }, "no attribute of the carrier was read"
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    async def test_a_pending_cancellation_outranks_the_tools_classification(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §4's rank 1: no result is constructed at all.
+
+        The classified raise may itself be a consequence of the cancellation — an
+        SDK mapping its aborted request to ``UNAVAILABLE`` on the way out — and
+        answering a cancellation with a value is what ADR-0029 §4 forbids
+        everywhere. A separate case from the deadline because an implementation
+        can hold one and drop the other: the deadline is the seam's own state,
+        while this is read off the task.
+        """
+        raising, seen = watched_carrier(committed=True, cost=CLASSIFIED_COST)
+        swallowing = SwallowingClassifier(raising)
+        invoker.register(tool(), swallowing)
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        await swallowing.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert seen.counts["failure"] == 0, "no attribute of the carrier was read"
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_the_causes_text_reaches_neither_the_message_nor_a_log(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §5's enumeration, and the cause chain is the new hazard.
+
+        ``raise ClassifiedToolError(...) from upstream_exc`` is good practice and
+        should stay possible — the chain is exactly what a developer wants in a
+        traceback. It is also where the upstream's error body lives, quoting a
+        recipient or a subject line. So nothing derived from the exception object
+        enters a message or a log: not ``str``, ``repr``, ``args``, ``__cause__``,
+        ``__context__`` or ``__notes__``.
+        """
+        upstream = RuntimeError("recipient alice@example.com rejected")
+        raising = carrier()
+        raising.__cause__ = upstream
+        raising.add_note("subject: quarterly numbers")
+        invoker.register(tool(), Raiser(raising))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await invoker.invoke(call, timeout=PATIENT)
+
+        assert result.failure is not None
+        assert result.failure.message == REPORTED_MESSAGE
+        for leaked in ("alice@example.com", "rejected", "quarterly numbers"):
+            assert leaked not in result.failure.message
+            assert leaked not in repr(captured)
+
+    async def test_the_log_line_carries_the_kind_and_never_the_tools_message(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §5 and §9, asserted **positively and negatively**.
+
+        Only the negative half is a rule an implementation can violate silently —
+        the natural log line includes the message, because it is the useful part —
+        so a suite asserting only that the *cause* text is absent passes it. What
+        the seam may log about a translated failure is the tool's id and
+        ``failure.kind``: an identifier and a member of a closed enum.
+
+        Declining to log the message is not a mitigation and §5 says so: it lands
+        in ``ToolResult.failure.message``, and its onward destinations are the
+        executor's — a log and a durable ``StepFailure`` when the outcome is
+        ``FAILED``.
+        """
+        invoker.register(tool(), Raiser(carrier(ToolFailureKind.UNAVAILABLE)))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with structlog.testing.capture_logs() as captured:
+            await invoker.invoke(call, timeout=PATIENT)
+
+        [line] = [each for each in captured if each["event"] == REPORTED_FAILURE]
+        assert line["tool_id"] == "smtp"
+        assert line["kind"] is ToolFailureKind.UNAVAILABLE
+        assert REPORTED_MESSAGE not in repr(line)
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            BlankMessage,
+            lambda: Raiser(
+                tampered(failure=ToolFailure.model_construct(kind="rate_limited", message=" "))
+            ),
+        ],
+        ids=["validated-at-the-raise-site", "model-construct-evading-the-validator"],
+    )
+    async def test_a_blank_message_never_reaches_a_result_by_either_route(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        build: Callable[[], FakeToolImplementation],
+    ) -> None:
+        """ADR-0032 §9, and the second arm is what makes the first worth writing.
+
+        A tool raising with a message that renders as nothing fails
+        ``ToolFailure``'s own validator in its **own frame** and comes back
+        ``INTERNAL``; one evading that validator with ``model_construct`` comes
+        back ``INTERNAL`` too, from §6's revalidation. Only the second fails
+        against an implementation that trusts the raise site because
+        ``isinstance`` passed.
+        """
+        invoker.register(tool(), build())
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert result.failure.message.strip() != ""
+
+    async def test_the_round_trip_repairs_what_pydantic_can_repair(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §6, pinned so a later lane cannot tighten it into a refusal.
+
+        The line between repair and refusal is pydantic's own. ``"rate_limited"``
+        names a member, so validation coerces it and the ``AttributeError`` a
+        downstream ``failure.kind.retryable`` would otherwise raise is gone —
+        which is the outcome to want. Surrounding whitespace is stripped, the same
+        normalisation ``ToolFailure(...)`` performs at the raise site, which is
+        why §5's pass-through is a pass-through for every normally-constructed
+        failure. Requiring an exact runtime type instead would refuse a value
+        pydantic can make correct, for no gain.
+        """
+        evaded = ToolFailure.model_construct(kind="rate_limited", message=f"  {REPORTED_MESSAGE}  ")
+        invoker.register(tool(), Raiser(tampered(failure=evaded)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.RATE_LIMITED
+        assert result.failure.kind.retryable is True, "a member, not the string it arrived as"
+        assert result.failure.message == REPORTED_MESSAGE
+
+    async def test_a_dumped_failure_that_differs_crosses_as_the_round_trips_result(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §6's stated limit, pinned as a limit.
+
+        A subclass may override ``model_dump()`` to return something other than
+        its own fields, and the value that crosses is the dumped one. Not a hole:
+        the tool authored both accounts and could have raised the dumped failure
+        directly, and a seam arbitrating between two stories a tool tells about
+        its own failure would be settling a dispute neither side has an interest
+        in — closing it would mean refusing subclasses, which buys nothing and
+        forbids a legitimate integration-side base class.
+        """
+        substitute = {"kind": ToolFailureKind.REFUSED, "message": "the upstream declined it"}
+        invoker.register(tool(), Raiser(tampered(failure=dumped(lambda: substitute))))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.failure == ToolFailure(
+            kind=ToolFailureKind.REFUSED, message="the upstream declined it"
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: tampered(failure=None),
+            lambda: tampered(failure="rate_limited"),
+            lambda: tampered(failure=Impostor(kind=ToolFailureKind.RATE_LIMITED, message="x")),
+            lambda: tampered(failure=DELETED),
+            lambda: tampered(failure=ToolFailure.model_construct(kind="no such kind", message="x")),
+            lambda: tampered(failure=ToolFailure.model_construct(kind=ToolFailureKind.REFUSED)),
+            lambda: unreadable("failure"),
+        ],
+        ids=[
+            "none",
+            "a-string",
+            "another-class",
+            "deleted",
+            "a-kind-naming-no-member",
+            "a-missing-field",
+            "an-accessor-that-raises",
+        ],
+    )
+    async def test_a_malformed_payload_is_refused_for_the_seams_own_internal(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        build: Callable[[], ClassifiedToolError],
+    ) -> None:
+        """ADR-0032 §6, across every shape the attribute can take.
+
+        ``isinstance`` is not evidence that a pydantic model was validated, and
+        neither is an annotation: an exception's attributes are ordinary
+        attributes. Each of these comes back ``INTERNAL``, and specifically **not**
+        as an ``AttributeError`` or a ``ValidationError`` escaping ``invoke``. The
+        deletion case is the one a natural implementation fails — reading
+        ``exc.failure`` directly raises where the rule requires a result — and a
+        suite testing only ``None`` certifies it. The accessor that raises is the
+        one that fails against a guard placed only around the round-trip.
+        """
+        invoker.register(tool(), Raiser(build()))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert await trail.open_invocations(decision_id=call.decision.id) == [], (
+            "the completion is written, so nothing escaped in place of the result"
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda committed: tampered(failure=None, committed=committed),
+            lambda committed: tampered(failure=DELETED, committed=committed),
+            lambda committed: tampered(
+                failure=ToolFailure.model_construct(kind="no such kind", message="x"),
+                committed=committed,
+            ),
+            lambda committed: unreadable("failure", committed=committed),
+        ],
+        ids=["none", "deleted", "a-kind-naming-no-member", "an-accessor-that-raises"],
+    )
+    @pytest.mark.parametrize(
+        ("committed", "expected"),
+        [(True, ToolOutcome.INDETERMINATE), (False, ToolOutcome.FAILED)],
+        ids=["may-have-committed", "did-not"],
+    )
+    async def test_the_fact_outlives_a_refused_payload(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        build: Callable[[bool], ClassifiedToolError],
+        committed: bool,
+        expected: ToolOutcome,
+    ) -> None:
+        """ADR-0032 §6, for §3's reason applied twice — and it is the whole point
+        of reading the two attributes independently.
+
+        A tool that built its ``ToolFailure`` with ``model_construct`` may still
+        have had its request land upstream. Dropping the fact would make §6 the
+        one path in the ADR that resolves an ambiguity in the direction ADR-0014
+        §4 refuses to guess in, and would do so on the malformed input most likely
+        to come from a *careless* integration rather than an adversarial one. So a
+        side-effecting non-``NATURAL`` tool raising a garbage payload with the
+        fact ``True`` gets ``INDETERMINATE`` with an ``INTERNAL`` kind: the seam
+        says "this tool is broken **and** we do not know whether it acted", which
+        is both of the true things.
+
+        The accessor arm is the one that pins the independence itself — an
+        implementation refusing the whole carrier on any defect passes every other
+        case in this list.
+        """
+        invoker.register(tool(), Raiser(build(committed)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is expected
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: tampered(effect_may_have_committed="yes"),
+            lambda: tampered(effect_may_have_committed=1),
+            lambda: tampered(effect_may_have_committed=DELETED),
+            lambda: unreadable("effect_may_have_committed"),
+        ],
+        ids=["a-string", "an-int", "deleted", "an-accessor-that-raises"],
+    )
+    async def test_a_malformed_fact_refuses_the_whole_carrier(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        build: Callable[[], ClassifiedToolError],
+    ) -> None:
+        """§6's converse, and the asymmetry is the rule rather than a lapse in it.
+
+        A bad payload costs the *kind*; a bad fact costs the *carrier*. Losing the
+        fact would be unsafe, because the lost value might be ``True`` and the
+        loss records a possible commit as certainly-nothing-happened — so it is
+        never inferred. Losing the kind is safe, because what a refused kind costs
+        is a ``retryable=True`` the seam has no reason to trust: a carrier missing
+        a *required, keyword-only* argument never went through ``__init__``, so
+        nothing about it was checked, and reporting a confident ``RATE_LIMITED``
+        off it would be the seam authorising a retry on the strength of an object
+        assembled around its own constructor.
+
+        The subject is a side-effecting non-``NATURAL`` tool, whose
+        ``interrupted_outcome`` is ``INDETERMINATE`` — so ``FAILED`` here is the
+        rule being applied and not the declaration answering for it.
+        """
+        invoker.register(tool(), Raiser(build()))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED, "whatever the payload said"
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert result.failure.message != REPORTED_MESSAGE
+
+    async def test_a_carrier_whose_payload_dump_raises_is_internal(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §6's guard, which every other malformed case passes without.
+
+        ``isinstance`` admits a subclass, so ``model_dump()`` is a dispatch to a
+        method a tool may have overridden — and it runs from inside an ``except``
+        body, where no sibling clause catches what it raises. The durable form of
+        the rule: **the seam's total failure path may not itself contain an
+        unguarded call into tool-supplied code.**
+        """
+
+        def explode() -> Mapping[str, object] | None:
+            msg = "the failure refuses to be dumped"
+            raise RuntimeError(msg)
+
+        invoker.register(tool(), Raiser(tampered(failure=dumped(explode))))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_base_exception_from_the_payloads_dump_propagates(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """Paired with the case above, so the guard is not a bare ``except
+        BaseException``.
+
+        ADR-0029 §3 requires a ``BaseException`` to propagate unchanged
+        everywhere else, and §6 takes that exemption identically: a process being
+        torn down is not a tool failure.
+        """
+
+        def interrupt() -> Mapping[str, object] | None:
+            raise KeyboardInterrupt
+
+        invoker.register(tool(), Raiser(tampered(failure=dumped(interrupt))))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        with pytest.raises(KeyboardInterrupt):
+            await invoker.invoke(call, timeout=PATIENT)
+
+    async def test_each_of_the_carriers_attributes_is_read_exactly_once(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """One read per attribute, captured into a local before it is judged.
+
+        The caller must not find two instructions to choose between: a carrier
+        whose first access succeeds and whose second raises or answers differently
+        would otherwise put a different value on the ``ToolResult`` than the one
+        the seam judged. The counts are the assertion — a matrix of hostile
+        *first* accesses alone is satisfiable by an implementation that reads
+        ``exc.failure`` a second time when it builds the result.
+        """
+        raising, seen = watched_carrier(
+            committed=True, cost=CLASSIFIED_COST, intercept=hostile_after_the_first
+        )
+        invoker.register(tool(), Raiser(raising))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert seen.counts == {"failure": 1, "effect_may_have_committed": 1, "incurred_cost": 1}
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.RATE_LIMITED
+        assert result.incurred_cost == CLASSIFIED_COST
+
+    async def test_a_payload_dump_that_cancels_the_invoking_task_is_not_answered_with_a_result(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §4's re-read, and nothing else pins it.
+
+        Every other carrier case leaves the delta alone, so an implementation
+        checking interruption once on entry to the handler passes all of them.
+        This ``model_dump()`` cancels the invoking task and then returns **valid**
+        data, so only a check made *after* the read can see it — otherwise a
+        ``FAILED`` result leaves a task carrying a pending cancellation, which is
+        rank 1 violated by the mechanism §6 introduced.
+        """
+
+        def cancel_and_answer() -> Mapping[str, object] | None:
+            cancel_this_task()
+            return None
+
+        invoker.register(tool(), Raiser(tampered(failure=dumped(cancel_and_answer))))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_payload_dump_that_cancels_and_then_raises_is_not_answered_either(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The same carrier on the guard's **fallback** path (§4, §9).
+
+        The ``INTERNAL`` §6 synthesises is itself a result the re-read must
+        precede. An implementation re-reading only after a *successful*
+        translation passes the case above and still returns a result from a
+        cancelled task — which is the whole failure "before **any** result" exists
+        to name.
+        """
+
+        def cancel_and_explode() -> Mapping[str, object] | None:
+            cancel_this_task()
+            msg = "the failure refuses to be dumped"
+            raise RuntimeError(msg)
+
+        invoker.register(tool(), Raiser(tampered(failure=dumped(cancel_and_explode))))
+        call = call_for(tool())
+        await trail.record(call.decision)
+
+        task = asyncio.create_task(invoker.invoke(call, timeout=PATIENT))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (completion,) = await completions(trail)
+        assert completion.outcome is ToolOutcome.INDETERMINATE
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    # --- ADR-0195 §3, §4: what a classified failure reports it cost ---------
+
+    async def test_a_classified_failure_lands_its_figure_with_the_kind_unchanged(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0195 §11's first owed case, and the clause it exists for.
+
+        A failed call may genuinely have cost money — an upstream that billed a
+        request it then rejected, a message accepted and not delivered — and
+        ADR-0194 §2 requires such a row to be counted, "including one whose
+        outcome is ``INDETERMINATE``". Without this field a priced integration
+        would poison its own period on every failure, so this is what stops the
+        channel working only while nothing goes wrong.
+        """
+        invoker.register(tool(), Raiser(carrier(committed=True, cost=CLASSIFIED_COST)))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.INDETERMINATE, "the figure changes no ruling"
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.RATE_LIMITED
+        assert result.incurred_cost == CLASSIFIED_COST
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == CLASSIFIED_COST
+
+    async def test_a_classified_failure_reporting_nothing_records_an_unknown_cost(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The control the case above is only meaningful against (ADR-0195 §3).
+
+        ``incurred_cost`` is **defaulted** where ``effect_may_have_committed``
+        deliberately is not: silence about a price already means "no figure" and
+        is the fail-closed direction under ADR-0194 §2, while silence about a side
+        effect would assert one.
+        """
+        invoker.register(tool(), Raiser(carrier()))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: tampered(cost=ToolCost.model_construct(basis=CostBasis.PER_CALL)),
+            lambda: unreadable("incurred_cost"),
+            lambda: tampered(cost=dumping(refuses_to_dump)),
+        ],
+        ids=["fails-revalidation", "an-accessor-that-raises", "a-dump-that-raises"],
+    )
+    async def test_a_classified_cost_that_does_not_survive_is_discarded_alone(
+        self,
+        invoker: InvocableToolRegistry,
+        trail: FakeAuditTrail,
+        build: Callable[[], ClassifiedToolError],
+    ) -> None:
+        """ADR-0195 §11's second owed case: a malformed cost costs the **cost**.
+
+        The failure and ``effect_may_have_committed`` stand and the row records
+        ``UNKNOWN``, which is that field's own pessimistic direction — ADR-0194 §2
+        already refuses to read ``UNKNOWN`` as zero. Every step of the read is
+        tool-authored code, so all three defects resolve identically.
+        """
+        invoker.register(tool(), Raiser(build()))
+        call = call_for(tool())
+
+        result = await invoked(invoker, trail, call, timeout=PATIENT)
+
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.RATE_LIMITED, "the classification stands"
+        assert result.failure.message == REPORTED_MESSAGE
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
+        assert await trail.open_invocations(decision_id=call.decision.id) == []
+
+    async def test_a_refused_payload_keeps_a_reported_cost_that_is_sound(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """ADR-0032 §6's independence, extended to the third attribute.
+
+        The carrier itself went through ``__init__``, so the figure is an ordinary
+        attribute revalidated on its own: a malformed payload costs the *kind*, a
+        malformed cost costs the *cost*, and neither costs the other. An
+        implementation refusing everything on any defect passes the plain case and
+        fails this one.
+        """
+        invoker.register(tool(), Raiser(tampered(failure=None, cost=CLASSIFIED_COST)))
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert result.incurred_cost == CLASSIFIED_COST
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == CLASSIFIED_COST
+
+    async def test_a_refused_carrier_discards_its_reported_cost_with_it(
+        self, invoker: InvocableToolRegistry, trail: FakeAuditTrail
+    ) -> None:
+        """The converse, and it turns on **which** defect was found (ADR-0195 §4).
+
+        ADR-0032 §6 refuses "the *whole* carrier" where the fact does not
+        validate, on the ground that such an object never went through
+        ``__init__`` and so nothing about it was checked. A price read off that
+        same unchecked object is a figure stated by the very object whose kind is
+        being refused for that reason, so it goes with it and the row records
+        ``UNKNOWN`` — that field's own pessimistic direction. ADR-0195 §4 states
+        the three costs in the same breath: a malformed payload costs the kind, a
+        malformed fact costs the carrier, a malformed cost costs the cost.
+        """
+        invoker.register(
+            tool(), Raiser(tampered(effect_may_have_committed="yes", cost=CLASSIFIED_COST))
+        )
+
+        result = await invoked(invoker, trail, call_for(tool()), timeout=PATIENT)
+
+        assert result.outcome is ToolOutcome.FAILED
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.INTERNAL
+        assert result.incurred_cost is None
+        (completion,) = await completions(trail)
+        assert completion.incurred_cost == ToolCost(basis=CostBasis.UNKNOWN)
