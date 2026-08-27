@@ -651,6 +651,173 @@ async def test_the_scan_walks_past_the_first_page() -> None:
     )
 
 
+# --- §5's lookup against the words a router actually copies (#1647) ---------
+
+
+@pytest.mark.parametrize(
+    ("query", "content"),
+    [
+        pytest.param(
+            "that I drive a green estate car",
+            "I drive a green estate car",
+            id="the-leading-connective",
+        ),
+        pytest.param(
+            "that I play the tenor saxophone on Tuesdays",
+            "I play the tenor saxophone on Tuesdays",
+            id="the-leading-connective-again",
+        ),
+        pytest.param(
+            "I keep my bicycle in the hallway",
+            "I keep my bicycle in the hallway",
+            id="the-span-the-router-copied-clean",
+        ),
+        pytest.param("that I like jazz", "the user likes jazz", id="the-adrs-worked-example"),
+    ],
+)
+async def test_a_query_carrying_the_sentences_own_framing_still_finds_the_belief(
+    query: str, content: str
+) -> None:
+    """The exact queries the milestone-26 QA run recorded the real router producing.
+
+    #1647: the router is asked for "the user's own words … copied from their sentence"
+    and it keeps the sentence's connective for some sentences and drops it for others —
+    so a whole-query substring match found the belief in the third case here and missed
+    it in the first two, deterministically, with the user given no way to tell which
+    sentence they were about to say. The fourth is the ADR's own worked example
+    ("forget that I like jazz", §4), which missed for the same reason plus the person
+    shift a stored belief carries.
+
+    Every one of these is a belief that **is in the store**: ``beliefs`` lists it and a
+    typed ``forget`` destroys it, and only the routed door could not find it.
+    """
+    held = belief("b-1", content)
+    operations = Operations(beliefs_held=(held, belief("b-2", "the user sails")))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Resolved(subject=(held,), argument="b-1")
+
+
+async def test_a_query_naming_the_source_in_the_users_own_words_still_finds_the_grant() -> None:
+    """#1647's source-grant arm: "stop reading my calendar" routes with query ``my calendar``.
+
+    A ``SourceGrant.source`` is the source's own identifier and carries none of the
+    user's framing, so the copied span is longer than the stored value and the
+    containment ran the wrong way round: ``"my calendar" in "calendar"`` is false. Terms
+    have no direction — every distinctive term of the query must appear in the record,
+    and ``my`` is not one.
+    """
+    held = grant("calendar")
+    operations = Operations(grants_held=(held, grant("email")))
+
+    resolution = await resolve(operations, RoutableOperation.REVOKE, "my calendar")
+
+    assert resolution == Resolved(subject=(held,), argument="calendar")
+
+
+async def test_a_query_naming_a_question_by_its_kind_still_finds_it() -> None:
+    """#1647's question arm: "delete the question you asked me about my commute".
+
+    The query names the record by its **kind** — "the question you asked me" — and only
+    its last words say which one. Those framing words are about the record's existence
+    rather than about what ``Question.content`` says, so they are dropped from the query
+    side and what is looked up is the one term the record can carry.
+
+    What this does **not** claim is that any paraphrase resolves: the record has to carry
+    the distinctive term itself, which is what keeps this a lookup rather than a
+    generation (§5). The case below is the other half of that.
+    """
+    held = question("q-1", "How long is your commute now?")
+    operations = Operations(questions_held=(held, question("q-2", "Did the user move?")))
+
+    resolution = await resolve(
+        operations, RoutableOperation.FORGET_QUESTION, "the question you asked me about my commute"
+    )
+
+    assert resolution == Resolved(subject=(held,), argument="q-1")
+
+
+async def test_a_query_whose_terms_the_record_does_not_carry_still_finds_nothing() -> None:
+    """The lookup is widened, not softened: it is still a lookup and not a generation.
+
+    §5: "every candidate it returns is a record that exists", resolved by "deterministic
+    local code". A query and a record that share no distinctive term have no relation
+    this module can see, however plainly a reader would say they mean the same thing —
+    and inventing one would be the generation §5 refuses.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "the user owns a Volvo"),))
+
+    resolution = await resolve(
+        operations, RoutableOperation.FORGET, "that I drive a green estate car"
+    )
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
+    """Widening the match does not widen what may be **performed** (§5).
+
+    "Ambiguity ends the route", and it ends it on the framed query exactly as it ends it
+    on a bare one: nothing is performed, nothing is confirmed, and both candidates ride
+    the outcome for the user to choose between. This is the half that makes the widening
+    safe to make — a term-wise match admits more candidates than a whole-span one, and
+    every extra one it admits lands here rather than in a confirmation.
+    """
+    first = belief("b-1", "I drive a green estate car")
+    second = belief("b-2", "I drive a green estate car to the coast")
+    operations = Operations(beliefs_held=(first, second))
+
+    resolution = await resolve(
+        operations, RoutableOperation.FORGET, "that I drive a green estate car"
+    )
+
+    assert resolution == Unresolved(outcome=RouteOutcome.AMBIGUOUS, listing=(first, second))
+    assert "forget" not in operations.called
+
+
+@pytest.mark.parametrize(
+    "query", ["that", "the fact", "  the thing you told me  ", "?!", "the question"]
+)
+async def test_a_query_that_is_nothing_but_framing_names_no_record(query: str) -> None:
+    """A query with no distinctive term of its own resolves to nothing, reading no store.
+
+    The dangerous reading is the other one: every record's words contain the empty set,
+    so a lookup that matched on it would resolve "forget the thing" to whatever the store
+    happens to hold one of — and §7 would park a confirmation on a record the user never
+    named. ``NOT_FOUND`` performs nothing, confirms nothing and writes no row (§9), which
+    is the honest answer to a sentence that named nothing.
+
+    The store is not read at all, which is the assertion that says this is decided by the
+    query rather than by what happens to be held.
+    """
+    operations = Operations(
+        beliefs_held=(belief("b-1", "the user likes jazz"),),
+        questions_held=(question("q-1", "did the user move?"),),
+        grants_held=(grant("calendar"),),
+    )
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, query)
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+    assert operations.called == []
+
+
+async def test_the_match_does_not_depend_on_the_order_the_query_named_its_terms() -> None:
+    """The router copies a span out of a **sentence**, and a sentence's order is its own.
+
+    A whole-query substring match is an assertion about adjacency and order, neither of
+    which the record owes the sentence. Dropping both is what makes the framing a copied
+    span drags along harmless rather than fatal.
+    """
+    held = belief("b-1", "I keep my bicycle in the hallway")
+    operations = Operations(beliefs_held=(held,))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "hallway bicycle")
+
+    assert resolution == Resolved(subject=(held,), argument="b-1")
+
+
 # --- §5's mapping, per confirm-owed member ----------------------------------
 
 

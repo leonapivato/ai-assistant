@@ -763,6 +763,54 @@ async def test_a_park_held_past_its_lifetime_releases_its_slot_and_its_token() -
     assert fresh.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
 
 
+@pytest.mark.parametrize("expired", [False, True], ids=["already claimed", "expired"])
+async def test_an_unresolvable_routed_token_is_told_the_remedy_that_can_help_it(
+    expired: bool,
+) -> None:
+    """§7's own sentence reaches the caller on **both** routed paths (#1649).
+
+    A routed park is unresolvable two ways — claimed, because "the claim is what evicts
+    it", and expired — and §7 gives both the same remedy: "nothing has happened yet, and
+    the operation is asked for again rather than resumed again". The expired path carried
+    that already; the claimed path fell through to the parked-step message, which names
+    ``pending_confirmations`` — and §7 rules that it "does **not** list a routed park",
+    so the one remedy the message offered was the one that cannot ever help the caller it
+    was given to. That caller is not exotic: it is a double-clicked confirm button, and
+    the loser of two concurrent ``resume`` calls on one token.
+
+    The engine cannot tell the two kinds of token apart at that point — the claim
+    destroyed the entry, which is what §7 asks of it — so what is pinned is that the
+    routed remedy is stated and that the step-park remedy is never offered unqualified,
+    rather than that one message is chosen over the other.
+    """
+    clock = _Clock()
+    harness = _routed_harness(now=clock)
+    await _seed_belief(harness.memory)
+    parked = await _parked(harness)
+    token = _token(parked)
+
+    if expired:
+        clock.advance(ROUTED_TTL)
+    else:
+        answered = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+        assert answered.routed is not None
+        assert answered.routed.outcome is RouteOutcome.PERFORMED
+
+    with pytest.raises(UnknownContinuationError) as raised:
+        await harness.engine.resume(token, approved=True, timeout=PATIENT)
+
+    message = str(raised.value)
+    assert "nothing has happened yet" in message
+    assert "ask for it again rather than resuming this token" in message
+    before, names_it, _ = message.partition("pending_confirmations")
+    assert not names_it or "parked step" in before, (
+        "the remedy ADR-0197 §7 rules out for a routed park is offered unconditionally"
+    )
+    # And it is ruled out here rather than merely unhelpful: the park this token named is
+    # not enumerable, whichever way it became unresolvable.
+    assert await harness.engine.pending_confirmations() == ()
+
+
 class _Clock:
     """An injected clock a case advances (ADR-0009, ADR-0197 §7)."""
 
