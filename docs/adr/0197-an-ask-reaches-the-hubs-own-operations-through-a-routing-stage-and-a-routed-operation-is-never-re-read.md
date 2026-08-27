@@ -1,6 +1,6 @@
 # 197. An ask reaches the hub's own operations through a routing stage, and a routed operation is never re-read
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
