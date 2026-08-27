@@ -717,6 +717,54 @@ async def test_a_refusal_comes_back_as_an_outcome_and_not_as_a_fault() -> None:
         assert body["outcome"]["step"]["confirmation"] is None
 
 
+async def test_a_second_answer_on_a_settled_binding_crosses_as_an_outcome() -> None:
+    """ADR-0198 §§1-2 at this relay, which is what makes the page's re-offer possible
+    (#1621).
+
+    A ``resume`` presenting a token whose binding this engine has settled and still
+    retains "restates that binding's answer: it returns a ``TurnOutcome`` describing the
+    settled binding and raises no ``UnknownContinuationError``" — and it does so
+    "**whatever the call's ``approved`` carries**", the recorded answer standing
+    unchanged. So the second answer here says ``False`` and the disposition that comes
+    back is still ``executed``.
+
+    **The two crossings are indistinguishable, and that is the point rather than a gap.**
+    §2 gives a restatement ADR-0170 §4's second shape exactly — ``turn`` ``None``,
+    ``routed`` ``None``, ``reply`` ``None``, ``reply_degraded`` ``False``, a ``step`` —
+    which is the same shape a resume driven from a **recovered** park produces
+    (ADR-0052 §3, and ``_compose`` declines on a pass with no turn). The bodies are
+    therefore equal, so no front end can tell a restatement from a resolution by reading
+    one; ``app.js`` states its own history instead of guessing, and ``_outcome_view``
+    invents no member to tell them apart, which would be this adapter authoring a fact
+    the engine did not state (ADR-0168 §1).
+    """
+    async with _harness(_holding(_confirmation(_span("body")))) as one:
+        first_status, first = await one.whole(
+            "POST", "/confirmation/resume", {"token": "h-1", "approved": True}
+        )
+        second_status, second = await one.whole(
+            "POST", "/confirmation/resume", {"token": "h-1", "approved": False}
+        )
+
+        assert first_status == 200, first
+        # Not a fault, which is the whole of what the page needed: an
+        # ``UnknownContinuationError`` here would cross as ``422 assistant-declined``
+        # and read as a denial for an action that ran (ADR-0084 §7).
+        assert second_status == 200, second
+        assert second["outcome"]["step"]["disposition"] == "executed"
+        assert second["outcome"]["reply"] is None
+        assert second["outcome"]["reply_degraded"] is False
+        assert second["outcome"]["routed"] is None
+        assert second["outcome"]["steps"] == []
+        assert second["outcome"] == first["outcome"]
+        # And it reached the engine: the gateway relayed the second answer rather than
+        # holding state of its own about which tokens it had already spent.
+        assert one.engine.calls == [
+            ("resume", {"token": "h-1", "approved": True}),
+            ("resume", {"token": "h-1", "approved": False}),
+        ]
+
+
 class _Unknown(FakeAssistantEngine):
     """An engine that resolves no token, as one that has restarted does."""
 
