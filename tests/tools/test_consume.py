@@ -477,31 +477,25 @@ def unavailable() -> ToolResult:
 async def test_a_retryable_failure_on_a_spendable_keyed_call_admits_the_retry() -> None:
     """ADR-0192 §9's retry arm, driven at the boundary where it is constructible.
 
-    **Not through ``invoke``, and that is a property of the tree rather than a
-    choice.** The seam produces exactly two failure shapes: a raising callable
-    becomes ``FAILED``/``INTERNAL``, which is not retryable, and an expired
-    deadline becomes ``interrupted_outcome``/``TIMED_OUT`` — and
+    **At this boundary rather than through ``invoke``, and the two are now both
+    reachable.** The seam once produced exactly two failure shapes — a raising
+    callable becoming ``FAILED``/``INTERNAL``, which is not retryable, and an
+    expired deadline becoming ``interrupted_outcome``/``TIMED_OUT``, where
     ``interrupted_outcome`` is ``FAILED`` exactly when the tool is **not**
-    *spendable*, the precise complement of §1's discriminator. So on a spendable
-    authorisation the deadline always yields ``INDETERMINATE``, which spends, and
-    "a retryable ``FAILED`` on a spendable ``KEYED`` authorisation" has no
-    producer through ``invoke`` today.
+    *spendable*, the precise complement of ADR-0192 §1's discriminator. So a
+    retryable ``FAILED`` on a spendable authorisation had no producer at all, and
+    that is what #1583 recorded.
 
-    **The carrier that would give it one is ADR-0032's, not #1558's**, and the
-    distinction matters because the two answer different halves: #1558 is
-    ADR-0192 §5's *cost* transport, while ADR-0032 §1 mints ``ClassifiedToolError``
-    as the **failure** transport — "a tool reporting a failure it classified
-    itself … caught by ``ToolInvoker.invoke``, which turns it into a
-    ``ToolResult``". That ADR is Accepted and **unimplemented**: the symbol
-    appears nowhere under ``src/``, which is what issue #596 records. So the case
-    is owed by ADR-0032's implementation lane, and is tracked on #1583.
-
-    What is constructible is the boundary ADR-0192 §5 and §2 actually decide, and
-    it carries the whole of what §9's clause is for: the kind is **transcribed**
-    onto the completion rather than dropped, and the ledger then admits a further
-    claim inside the window. An implementation dropping ``failure_kind`` for a
-    keyed side-effecting ``FAILED`` produces a valid kindless completion that
-    silently refuses a legitimate retry as spent — which this case fails on.
+    ADR-0032's ``ClassifiedToolError`` is the carrier that gives it one, and the
+    end-to-end case now runs where it belongs: through ``invoke``, in the shared
+    ``ToolInvoker`` conformance suite, against both implementations at once. What
+    stays here is the boundary ADR-0192 §5 and §2 actually decide, driven at
+    :func:`~ai_assistant.tools.consume.consumed_call` with no seam in the way — the
+    kind is **transcribed** onto the completion rather than dropped, and the ledger
+    then admits a further claim inside the window. An implementation dropping
+    ``failure_kind`` for a keyed side-effecting ``FAILED`` produces a valid
+    kindless completion that silently refuses a legitimate retry as spent — which
+    this case fails on.
     """
     trail = FakeAuditTrail()
     call = call_for(keyed())

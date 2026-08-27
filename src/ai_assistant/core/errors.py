@@ -14,6 +14,8 @@ from ai_assistant.core.types import encodable_text
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.types import ToolCost, ToolFailure
+
 
 class AssistantError(Exception):
     r"""Base class for every error raised by ai-assistant.
@@ -738,6 +740,97 @@ class ToolBindingError(ToolError):
     cause, the shape ADR-0026 §2 uses when ``core`` translates an arbitrary
     fault into its own error.
     """
+
+
+class ClassifiedToolError(AssistantError):
+    """A tool reporting a failure it classified itself (ADR-0032 §1).
+
+    Raised by a ``ToolImplementation`` that knows *why* it failed, and caught by
+    ``ToolInvoker.invoke``, which turns it into a
+    :class:`~ai_assistant.core.types.ToolResult`. **It never escapes ``invoke``**
+    — so no consumer of that Protocol catches it, and nothing about it is ever
+    rendered into an error payload for the wire (ADR-0085 §10a).
+
+    **Not a :class:`ToolError`**: that branch holds the seam's own faults, which
+    an executor must never turn into a retryable result (ADR-0029 §8), and
+    ``except ToolError`` is a plausible line for an executor or an interface
+    adapter to write. This is the opposite — a value in flight, on its way to
+    becoming one — so keeping it off that branch means the conflation is not
+    available. :class:`AssistantError` still holds it, so this module's stated
+    invariant is preserved.
+
+    **Its home is ``core/errors.py`` and the decisive argument is the canonical
+    fake.** ``ai_assistant.testing.invoker`` re-implements this seam's rules and
+    must not import ``ai_assistant.tools`` (ADR-0031 §1); a ``tools/``-homed
+    carrier would leave it importing that subsystem or declaring a second,
+    structurally-equal exception type — and ``except`` keys on identity, so that
+    divergence would be silent and total rather than a test failure.
+
+    **It carries a constructed ``ToolFailure``, not a ``kind`` and a ``str``**, so
+    that ``ToolFailure``'s own validators fire inside the tool's frame at the
+    raise site, where the author can see them. That is the *ordinary* path and not
+    a guarantee: ``model_construct`` bypasses every validator while still
+    satisfying ``isinstance``, which is why ADR-0032 §6 has the seam revalidate
+    the carrier rather than trust that the raise site did.
+
+    **Nothing is passed to :class:`AssistantError`'s initialiser**, so ``args`` is
+    empty and ``str()`` renders as nothing. ADR-0032 §5 forbids the seam to render
+    anything derived from this object — ``str()``, ``repr()``, ``args``,
+    ``__cause__``, ``__context__``, ``__notes__`` — into a message or a log, and a
+    carrier holding no text is the form in which that rule cannot be broken by
+    accident. What an operator reads is :attr:`failure`, which the seam passes
+    through by value.
+
+    ``raise ClassifiedToolError(...) from upstream`` is good practice and stays
+    safe: the cause chain is what a developer wants in a traceback, and the seam
+    renders no part of it.
+
+    Attributes:
+        failure: The classification, as the tool built it. Its ``kind`` is the
+            tool's to choose from :class:`~ai_assistant.core.types.ToolFailureKind`
+            except ``TIMED_OUT``, which is reserved to the seam's own deadline and
+            refused (ADR-0032 §3); ``message`` is operator-facing **Tier 2** text
+            the integration authors rather than copies from an upstream error body
+            (ADR-0029 §3). It crosses by value and unedited, or is discarded whole.
+        effect_may_have_committed: Whether this call's effect may already have
+            landed upstream — a request that failed at the transport layer with no
+            response, a connection reset, a client-side abort after the bytes went
+            out. **Keyword-only and undefaulted**: the raiser answers it explicitly
+            every time, because both candidate defaults are wrong in a direction
+            (ADR-0032 §2). It is a *fact the seam rules on*, never the outcome: the
+            seam answers ``INDETERMINATE`` only when this is true **and** the
+            registry's own ``definition.interrupted_outcome`` is ``INDETERMINATE``,
+            and ``FAILED`` otherwise — so a report can only make an outcome more
+            ignorant, never less, and never reaches ``SUCCEEDED``.
+        incurred_cost: What the call cost, as the tool reports it (ADR-0192 §5,
+            ADR-0195 §3). **Keyword-only and defaulted to ``None``**, where
+            ``effect_may_have_committed`` deliberately is not: silence about a
+            price already means "no figure" and is the fail-closed direction under
+            ADR-0194 §2, while silence about a side effect would assert one. A
+            failed call may genuinely have been billed — an upstream that charged
+            for a request it then rejected — and ADR-0194 §2 requires such a row to
+            be counted. It states a price and **never** whether the effect
+            committed; nothing infers either from the other.
+    """
+
+    def __init__(
+        self,
+        failure: ToolFailure,
+        *,
+        effect_may_have_committed: bool,
+        incurred_cost: ToolCost | None = None,
+    ) -> None:
+        """Carry one classified failure across the invocation seam.
+
+        Args:
+            failure: The tool's own classification of why the call failed.
+            effect_may_have_committed: Whether the effect may already have landed.
+            incurred_cost: What the call cost, or ``None`` for no figure.
+        """
+        super().__init__()
+        self.failure: ToolFailure = failure
+        self.effect_may_have_committed: bool = effect_may_have_committed
+        self.incurred_cost: ToolCost | None = incurred_cost
 
 
 class PermissionDeniedError(AssistantError):

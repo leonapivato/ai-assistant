@@ -9322,8 +9322,9 @@ class ToolResult(BaseModel):
     populates it on an exit it composes itself** (ADR-0195, which answered
     #1558): a successful call returns a :class:`ReportedOutput`, which the
     invocation seam unwraps and revalidates onto this field, and a classified
-    failure will carry one on ``ClassifiedToolError`` once ADR-0032's own lane
-    builds that carrier (#1614). On the two exits a tool does **not** compose —
+    failure carries one on
+    :class:`~ai_assistant.core.errors.ClassifiedToolError`, which that seam
+    revalidates onto it the same way. On the two exits a tool does **not** compose —
     an exception escaping, and this seam's deadline expiring or a cancellation
     being delivered — it reports nothing and the row records an ``UNKNOWN``
     basis, because that is the truth (ADR-0195 §1). The disclosure-report half of
@@ -9380,8 +9381,9 @@ class ReportedOutput(BaseModel):
     """A successful call's output together with what that call cost (ADR-0195 §2).
 
     The carrier for the **success exit** — one of the two exits a tool composes
-    itself, the other being the ``ClassifiedToolError`` ADR-0032 specifies and
-    ADR-0195 §3 gives a matching field to (ratified, unbuilt, #1614). A tool that
+    itself, the other being the
+    :class:`~ai_assistant.core.errors.ClassifiedToolError` ADR-0032 specifies and
+    ADR-0195 §3 gives a matching field to. A tool that
     knows what its call cost returns one of these in place of its bare output;
     the invocation seam discriminates the two by ``isinstance`` and by no other
     test, revalidates the figure, and records it on
