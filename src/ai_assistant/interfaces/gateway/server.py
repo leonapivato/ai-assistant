@@ -1263,34 +1263,43 @@ class Gateway:
         re-read here and is not re-read while the process runs, so a renewal takes
         effect at the next start and nothing watches a file.
 
-        **Its validity is asked about again here, and that is one sentence of §8
-        read as written.** §8 puts the check "at start, **before it binds or discloses
-        a bootstrap value**" *and* states it about "the moment of binding", and those
-        are two instants: the constructor's, and this one, with the overlay agent's
-        query between them and however long a caller held a constructed gateway
-        before serving it. Adversarial review raised the gap on this PR's first two
-        rounds; the first answer here was that §4 has a running gateway serve a
-        certificate that expires under it until the next restart, which is true and
-        does not reach a gateway that has not bound anything yet. Asking twice reads
-        nothing but the bounds :mod:`.tls` already parsed, so §4's "does not re-read
-        them while it runs" is untouched — no file is opened, and a renewal that
-        landed in the interval is still not seen until the next start.
+        **Its validity is not re-checked here, and three rounds of adversarial
+        review on this PR are why that is written down rather than assumed.** §8's
+        one sentence says two things that cannot both be literal once the bind is
+        later than the start: the gateway "refuses at start, **before it binds or
+        discloses a bootstrap value**", and what it refuses on is "that the moment of
+        binding lies inside the certificate's validity period at both bounds". Round
+        2 read the second half as obliging a second check immediately before the
+        bind; round 3 found what implementing that costs — :func:`run_gateway` mints
+        and discloses between the constructor and here (ADR-0168 §5, deliberately),
+        so a refusal at the bind is a refusal *after* a bootstrap value has been
+        handed to the owner, which is the clause's explicit half.
 
-        **What it deliberately does not become is a continuous check.** Once bound,
-        this gateway serves the certificate it has for as long as it runs, expiry
-        included; §4 says so and §5's disclosure is what makes it a date the owner
-        already knows rather than a surprise.
+        **The explicit half governs.** "Before it binds or discloses a bootstrap
+        value" is an ordering, stated in terms, about where the check goes; "the
+        moment of binding" names *which instant of the certificate's life* is in
+        question — now rather than some other time — and the constructor is that
+        instant to the precision the sentence can carry. §4 is the second ground and
+        it is independent: a gateway that binds a certificate expiring a second later
+        serves it until it is restarted, because "a renewed certificate takes effect
+        when the gateway is **next started**" and an owner who never renews
+        "discovers it at a restart rather than at the moment of expiry". A running
+        gateway holding an expired certificate is a state this ADR accepts in terms,
+        so refusing microseconds before the bind while accepting the same state
+        microseconds after it would claim a guarantee the design does not make.
+
+        What covers the interval instead is §5's disclosure: the expiry is on the
+        owner's own terminal at every start.
 
         Returns:
             The bound server, or ``None`` where the listener is off.
 
         Raises:
             ConfigurationError: If the overlay agent places no node at the configured
-                address or cannot be asked, if the address is not one this machine
-                holds, or if the certificate's validity does not cover this moment.
-                Each is a stay-down deployment fault (ADR-0083 §5): restarting
-                unchanged never succeeds, and what has to change is the configuration,
-                the overlay, or the certificate.
+                address or cannot be asked, or if the address is not one this machine
+                holds. Each is a stay-down deployment fault (ADR-0083 §5): restarting
+                unchanged never succeeds, and what has to change is the configuration
+                or the overlay.
             OSError: If the bind fails for any other reason. Left to propagate for
                 the reason :mod:`ai_assistant.service.remote` leaves it — "the raw
                 errno distinguishes a stay-down fault from a transient one" — and an
@@ -1302,7 +1311,6 @@ class Gateway:
             return None
         await self._confirm_the_address_is_on_the_overlay(address)
         _refuse_an_address_this_machine_does_not_hold(address)
-        tls.refuse_outside_its_validity(self._now())
         server = await asyncio.start_server(
             partial(self._handle, remote=True), host=address, port=self._settings.gateway_port
         )
