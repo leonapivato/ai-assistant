@@ -447,6 +447,14 @@ third reason above is a cost to weigh rather than a prohibition.
 > settlement passes every other case in this section and answers with an
 > `ExecutionState` the store has stopped holding.
 
+> **Normative.** A case resolves a park with one `approved` value and replays it
+> with the **opposite** one, asserting that the restatement carries the
+> disposition the first call reached and that no second `PermissionDecision`,
+> tool invocation, composition or captured episode was added. §1's "whatever the
+> call's `approved` carries" is the clause an implementation is likeliest to
+> narrow to "the same answer twice", and every other case in this section passes
+> under that narrowing because each presents one value twice.
+
 > **Normative.** The race this decision exists to close is pinned, not left to the
 > sequential cases. A shared-contract case issues **two concurrent** `resume`
 > calls for one token and asserts that both return the one settled outcome, that
