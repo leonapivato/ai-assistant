@@ -274,7 +274,19 @@ class SupertonicSynthesizer:
             msg = "the speech-synthesis engine produced no audio for this text"
             raise SpeechError(msg)
         try:
-            content = encode_mono(samples, sample_rate=voice.sample_rate, media_type=media_type)
+            rate = voice.sample_rate
+        except Exception as exc:
+            # Read in its own guarded step rather than inline in the call below.
+            # It is a *property on the engine*, so it can fail for every reason
+            # `speak` can — and evaluated as an argument it would escape the arm
+            # beneath, which catches only this module's own `ContainerError`. A
+            # raw exception out of here would be a failure the seam's declared
+            # vocabulary does not cover (ADR-0200 §1). Found by architecture
+            # review, round 2.
+            msg = "the speech-synthesis engine could not report the rate it renders at"
+            raise SpeechError(msg) from exc
+        try:
+            content = encode_mono(samples, sample_rate=rate, media_type=media_type)
         except ContainerError as exc:
             msg = f"the rendering could not be written as {media_type.value}"
             raise SpeechError(msg) from exc

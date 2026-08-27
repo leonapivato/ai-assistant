@@ -255,6 +255,27 @@ async def test_a_voice_that_produces_nothing_is_a_failure_not_a_silence() -> Non
         )
 
 
+async def test_a_voice_that_cannot_report_its_rate_becomes_a_speech_error() -> None:
+    # `sample_rate` is a property on the engine, so it can fail for every reason
+    # `speak` can. Evaluated inline as an argument to the encoder it would escape
+    # the arm that catches this module's own container failures, and a raw
+    # exception out of a seam whose declared vocabulary is `SpeechError` is a
+    # contract violation rather than a defect the caller can act on (ADR-0200 §1).
+    class _RateLessVoice:
+        @property
+        def sample_rate(self) -> int:
+            msg = "the runtime lost its configuration"
+            raise RuntimeError(msg)
+
+        def speak(self, text: str) -> np.ndarray:
+            return np.zeros(_STUB_RATE, dtype=np.float32)
+
+    with pytest.raises(SpeechError, match="could not report the rate"):
+        await SupertonicSynthesizer(backend=_StubBackend(_RateLessVoice())).synthesize(
+            "hello", format=SpokenAudioFormat.MP4
+        )
+
+
 async def test_no_failure_writes_a_message_this_project_did_not_author() -> None:
     # ADR-0200 §8's authorship clause, at this seam. Nothing on this path renders
     # a library's message into what it raises; the cause is chained for diagnosis.
