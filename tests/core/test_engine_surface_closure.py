@@ -166,8 +166,28 @@ _NAMESPACE: Final = {
 #: walk reached them — the failure this lane resolved by adding them here. Declared
 #: ahead of that boundary they would have been sorted as pre-existing leaves and
 #: this check would never have asked.
+#:
+#: The last four are ADR-0197 §8's — ``RoutedOperation``, which ``TurnOutcome.routed``
+#: names, and the three values it carries: ``RoutableOperation``, ``RouteOutcome`` and
+#: the ``OperationConfirmation`` a routed park is answered through. The walk reaches
+#: them through ``converse``, ``converse_streaming`` and ``resume`` alike, and
+#: terminates immediately: ``ContinuationToken`` is already here, and
+#: ``RoutedListing``'s seven arms are ``Belief``, ``Question``, ``PermissionDecision``,
+#: ``RecordedInvocation``, ``SourceGrant``, ``SourceReadRecord`` and ``SpendTotal`` —
+#: every one of them already inside this closure, which is exactly what ADR-0197 §8
+#: means by "it mints no payload type of its own".
+#:
+#: ``RoutedOperationRecord`` and ``RouteApproval`` are **not** here, and their absence
+#: is ADR-0197 §9 rather than an omission: that section mints the routing trail's row
+#: and gives ``AssistantEngine`` **no method** for it, so nothing on this surface
+#: returns one and the walk is right not to reach it. They are ``core`` surface the
+#: read-surface ADR §11 defers will promote when it gives them a door.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "RoutedOperation",
+        "RoutableOperation",
+        "RouteOutcome",
+        "OperationConfirmation",
         "SpendTotal",
         "SpendPeriod",
         "ToolInvocation",
@@ -621,6 +641,23 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     moves — and §5 states that it is not a defence, because ADR-0124 §9 asks what a
     new peer may *send* rather than whether an old spelling moved.
 
+    **ADR-0197 §8 is under the second limb alone**, and moves only the version, to 17
+    against the same thirty-nine methods. ``TurnOutcome`` gains ``routed``, and 10's
+    and 13's reading of the tree carries over unchanged: ``TurnOutcome`` is
+    ``extra="forbid"``, ``return_adapter`` validates every result against the method's
+    declared return annotation, and ``wire.codec``'s ``project`` renders a model by
+    ``model_dump()``, which includes a ``None`` member rather than omitting it — so a
+    version 17 hub emits ``"routed": null`` on **every** turn and a version 16 client
+    fails ``extra_forbidden`` on it. The field is additive with a default, so the
+    reverse direction decodes to the default instead of failing ``missing``, and one
+    direction biting is all ADR-0124 §9 asks for. The promoted **method set does not
+    move**: ADR-0197 §9 mints a routing trail and gives ``AssistantEngine`` no method
+    for it, and §11 is explicit that this decision changes no method signature on the
+    surface — what it moves is one method's *contract*, ``resume``'s, which is a
+    different claim and not one ADR-0124 §9 reaches. ADR-0197 §8 states the bump in
+    the deciding ADR and §12 puts it on the implementing lane, rather than leaving
+    either to be discovered here.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -629,7 +666,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (39, 16), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (39, 17), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

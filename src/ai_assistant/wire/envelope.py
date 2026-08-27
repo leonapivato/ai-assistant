@@ -427,7 +427,41 @@ from ai_assistant.wire.errors import (
 #: listeners carry it, by the default those constants already produce — and a
 #: ``SpendTotal`` carries no Tier 0 credential and no content of any call
 #: (ADR-0194 §4, §5).
-PROTOCOL_VERSION: Final[int] = 16
+#:
+#: **17 since ADR-0197 §8**, which adds ``routed`` to
+#: :class:`~ai_assistant.core.types.TurnOutcome` — what the operation-routing stage
+#: did, where an ask reached one of the hub's own operations instead of the world.
+#: It is the **second** limb of ADR-0124 §9 alone, and 10's and 13's reading of the
+#: tree decides it unchanged: ``TurnOutcome`` sets ``extra="forbid"``,
+#: ``wire.surface.return_adapter`` validates every result against the method's
+#: declared return annotation, and ``wire.codec``'s ``project`` renders a model by
+#: ``model_dump()``, which includes a ``None`` member rather than omitting it. So a
+#: version 17 hub emits ``"routed": null`` on **every** ``converse``,
+#: ``converse_streaming`` and ``resume``, and a version 16 client fails
+#: ``extra_forbidden`` on it. The field is additive with a default, so the reverse
+#: direction decodes to the default rather than failing ``missing``, and one
+#: direction biting is all §9 asks for.
+#:
+#: **The method set does not move**, and stands at thirty-nine. ADR-0197 §9 mints a
+#: routing trail and gives ``AssistantEngine`` no method for it — the trail is
+#: therefore unreachable from the CLI and from a browser, and ADR-0177 §1's count of
+#: thirty does not move either. §11 is explicit that the decision "changes no method
+#: **signature** on ``AssistantEngine``"; what it moves is one method's *contract*,
+#: ``resume``'s, in the two sentences ADR-0197 §7 names and §13 records. A contract
+#: is not a signature and ADR-0124 §9 does not reach it, which is why this entry is
+#: the second limb alone.
+#:
+#: **Beyond this constant and this note, no module under** ``wire/`` **changes for
+#: it** (ADR-0197 §8). A result payload takes the shape of the method's own declared
+#: return annotation (ADR-0085 §10), so the field crosses the wire without a second
+#: declaration: ``METHODS``, ``STREAMING_METHODS``, both adapters and the error
+#: mapping are all derived from the Protocol, and ``wire/client.py``'s three turn
+#: methods already forward whatever a ``TurnOutcome`` carries. No connect member, no
+#: :class:`FrameKind` and no existing frame's encoding moves. What the field carries
+#: is a closed vocabulary this system owns and rows of types the surface already
+#: returns — no Tier 0 credential, no query, and no free text the router produced
+#: (ADR-0197 §6, §7).
+PROTOCOL_VERSION: Final[int] = 17
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

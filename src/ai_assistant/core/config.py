@@ -2168,6 +2168,33 @@ class Settings(BaseSettings):
         description="Lifetime of a parked confirmation before its answer is refused as stale.",
     )
 
+    # --- The routed confirmation's lifetime (ADR-0197 §7) -----------------
+    # How long a **routed** park stays answerable. Deliberately a
+    # ``_DurationSetting`` and not the ``_NullableDuration`` beside it: it takes no
+    # part in ``confirmation_ttl``'s disable sentinel, which is exactly the wrong
+    # default to inherit here. A routed park is invisible — ``pending_confirmations``
+    # does not list it (§7) and no durable store recovers it — so a client that
+    # disconnected between the park and its token would otherwise hold a slot at
+    # ``max_outstanding_confirmations`` that nothing could ever free, and at a
+    # ceiling of one the very next "forget that I ..." would meet backpressure rather
+    # than a fresh card. ``None`` is therefore not a value this field accepts, and
+    # ``gt=timedelta(0)`` refuses a zero or negative lifetime at load rather than
+    # producing a card unusable the instant it is rendered.
+    #
+    # **It is the whole of this decision's lifetime configuration** (ADR-0197 §7):
+    # no second setting scales it, extends it or disables it. Parsed from an
+    # ISO-8601 duration or ``HH:MM:SS`` string in the environment
+    # (e.g. ``ASSISTANT_ROUTED_CONFIRMATION_TTL=PT5M``).
+    routed_confirmation_ttl: _DurationSetting = Field(
+        default=timedelta(minutes=15),
+        gt=timedelta(0),
+        description=(
+            "How long a routed operation's confirmation stays answerable before it is "
+            "evicted and its ceiling slot released (ADR-0197 §7). Positive and finite, "
+            "with no spelling for 'never'."
+        ),
+    )
+
     # --- Conversations (ADR-0074) ----------------------------------------
     # How long a captured episode is retained, and how long a deleted
     # conversation's tombstone outlives the deletion that stamped it. Both are
@@ -3207,6 +3234,27 @@ class Settings(BaseSettings):
         description=(
             "The most source-read records the trail holds; beyond it the earliest "
             "recorded are pruned rather than a new one refused (ADR-0185 §6). Positive, "
+            "with no unlimited spelling."
+        ),
+    )
+
+    # --- The routing trail's horizon (ADR-0197 §9) ------------------------
+    # The shape and the number ``source_read_trail_max_rows`` already carries, and
+    # ADR-0197 §9 chooses them for a stated reason rather than by imitation: a
+    # routing row is smaller than a read row, and the two trails are read by the
+    # same kind of operator. **No spelling for "unlimited"** (ADR-0185 §6 applied
+    # here), and pruning is earliest-recorded-first inside ``record``'s critical
+    # section and blind to what the row says — an unanswered park's ``OWED`` row is
+    # pruned at the bound like any other, and pruning it neither evicts the park nor
+    # releases its slot nor makes its token unresolvable. The park is in memory and
+    # the trail is the record rather than the state.
+    routing_trail_max_rows: _IntegerSetting = Field(
+        default=200_000,
+        gt=0,
+        lt=2**63,
+        description=(
+            "The most routed-operation records the trail holds; beyond it the earliest "
+            "recorded are pruned rather than a new one refused (ADR-0197 §9). Positive, "
             "with no unlimited spelling."
         ),
     )

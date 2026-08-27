@@ -179,6 +179,7 @@ if TYPE_CHECKING:
         RecordChunk,
         RecordedInvocation,
         ReplyChunk,
+        RoutedOperationRecord,
         SecretName,
         SecretValue,
         SourceGrant,
@@ -5380,6 +5381,232 @@ class SourceReadTrail(Protocol):
 
 
 @runtime_checkable
+class RoutingRecorder(Protocol):
+    """Records what a routing stage decided, and can answer nothing (ADR-0197 §9).
+
+    The **write** half of the routing seam. The routing stage of ADR-0197 §2 holds
+    this and only this, as a required constructor argument with no default, so a
+    composition that omits the recorder does not type-check — :class:`SourceReadRecorder`'s
+    own arrangement on ADR-0097 §5's pattern.
+
+    **The split from :class:`RoutingTrail` is ADR-0185 §4's move, and here it
+    forecloses something worse than a cursor.** There the capability removed from the
+    driver was the ability to *read* the trail. Here the stage must write, and the
+    capability removed is the same one plus ``clear`` — which means a routing stage
+    handed the whole trail could **erase the record of its own decisions**. ``clear``
+    exists for ADR-0007's deletion right and belongs to the surface that answers to
+    the user; a stage whose acts the rows are *about* is the last thing that should be
+    able to call it. Making that a ``mypy --strict`` failure rather than a review note
+    is ADR-0185 §4's own standard on ADR-0097 §3's argument.
+
+    **It is a static guarantee and is stated as one.** Structural typing means the one
+    ``permissions/`` store satisfies both Protocols, so the composition root passes one
+    object to the stage and to a future hub-owned read surface alike; what the stage
+    cannot do is *name* ``recent``, ``export`` or ``clear``.
+
+    **The two names are deliberately not close**, for :class:`SourceReadRecorder`'s
+    reason: the *wide* seam is the dangerous one here, so the two should not be
+    substitutable at a glance.
+
+    Cancelling :meth:`record` is governed by this module's cancellation clause
+    (ADR-0060 §1), and no member orphans a resource it acquired when the call is
+    cancelled.
+    """
+
+    async def record(self, record: RoutedOperationRecord) -> None:
+        """Append ``record`` to the trail (ADR-0197 §9).
+
+        **Returns nothing, and takes the identity the caller minted** rather than
+        producing one. A store that minted the id could not be handed a frozen record,
+        and a retry could not name the row it was retrying.
+
+        **The checks and the append are one critical section**: the row-``id``
+        equality test, the ``route_id`` test, the route state machine, the append and
+        ADR-0197 §9's prune happen under one transaction or one lock, so two
+        concurrent calls carrying a colliding ``route_id`` cannot both observe no
+        conflict and both append. Exactly one succeeds and the other raises, and the
+        loser's act does not proceed.
+
+        **Idempotent over the whole record and never over the id alone.** A row
+        already present under the same ``id`` *whose every field is equal to the one
+        supplied* is not appended twice and is not an error, so a retried write is
+        safe; a row present under the same ``id`` differing in **any** field raises
+        and appends nothing. A repeating id factory would otherwise let a routed
+        ``revoke`` be performed while the trail kept only an earlier ``forget``'s row,
+        which is the one failure this store exists to make impossible.
+
+        **The ``route_id`` rule is a consistency check over the rows the store
+        retains**, and never a fact about a park it is not the authority for. It
+        refuses a row whose ``route_id`` is already held by a **retained** row
+        differing in ``operation``, ``subject`` or ``conversation_id``. The route's
+        rows form a **state machine** it enforces in the same critical section: a
+        read-only route is exactly one ``NOT_OWED`` row, so a second row of any kind
+        under a ``route_id`` retaining one is refused, an answer included; a
+        confirm-owed route holds at most one ``OWED`` row and at most one answer, so a
+        second ``OWED``, and a ``GIVEN`` or ``REFUSED`` under a ``route_id`` already
+        retaining either answer, are refused.
+
+        **An answer arriving under a ``route_id`` that retains no row is accepted**,
+        and no ``OWED`` row is required to admit one. That is forced by the bound:
+        pruning is by recording order alone, so a live park's ``OWED`` row can be
+        pruned while the park is still registered and still claimable. Requiring the
+        row would make a *retention* setting decide whether a user's approval of a
+        live confirmation is honoured, which is the strictly worse failure of the two
+        — an orphan ``GIVEN`` costs an operator one join that finds no ``OWED``, where
+        the refusal costs the user the operation they had just approved.
+
+        **Called before the act it precedes, always** (ADR-0197 §9). Where this
+        raises, the caller does **not** proceed: the operation is not called, no park
+        is registered, no token is minted, and the pass ends in
+        :attr:`~ai_assistant.core.types.RouteOutcome.UNRECORDED`. One ordering, one
+        failure mode, and no partial mode in which some routed operations are recorded
+        and others are not.
+
+        Args:
+            record: The row to append, whose ``id`` and ``route_id`` the caller
+                minted and whose ``decided_at`` came from the injected clock.
+
+        Raises:
+            RoutingTrailError: If the record is not a valid one, if its ``id`` is
+                already recorded under a differing record, if its ``route_id`` is held
+                by a retained row of another route, if the sequence is one the state
+                machine does not admit, or if the store cannot be written. One class
+                for all of them, because the caller's recourse is identical (ADR-0197
+                §9).
+        """
+        ...
+
+
+@runtime_checkable
+class RoutingTrail(Protocol):
+    """The append-only record of what every routed operation decided (ADR-0197 §9).
+
+    A **Tier 1 local store**, so ADR-0155 §1's residency clause governs it:
+    implementations persist **locally only**, the file lives under
+    ``Settings.data_dir`` and is created owner-only (ADR-0004 §4, ADR-0084 §9), and
+    the hub owns it exclusively as it owns every other database in that directory
+    (ADR-0083 §1, §10). ``ai-assistant-purge`` destroys it as part of destroying the
+    data directory, with no per-store step (ADR-0126 §1).
+
+    **The wide seam, and the one nothing but a future hub-owned read surface holds.**
+    It carries :meth:`RoutingRecorder.record` with exactly the semantics stated there,
+    so one ``permissions/`` class satisfies both Protocols structurally. This Protocol
+    deliberately does **not** inherit :class:`RoutingRecorder`: keeping them unrelated
+    is what stops a stage's annotation from being widened by an ``isinstance`` habit.
+
+    **A fourth row kind, joining neither of ADR-0186 §10's two partitions.** A routed
+    operation is never a ``PermissionDecision`` and never a ``SourceReadRecord``, and
+    no lane widens ``recent_decisions``, ``export_decisions``, ``recent_reads`` or
+    ``export_reads`` to return one.
+
+    **Nothing can read it yet, and that is ADR-0185 → ADR-0186's own sequence**
+    (ADR-0197 §9, §11). ``AssistantEngine`` gains **no method** for this trail, so the
+    row is written for a surface a later decision gives it, and an operator debugging
+    a routed act reads the store directly until then. The two unreached members are
+    specified now rather than added later because widening a ratified Protocol is a
+    breaking change, and a store built against a two-member seam would be rebuilt
+    against a four-member one.
+
+    **The store has a horizon, and it is uniform.** It holds at most
+    ``Settings.routing_trail_max_rows`` rows; when an append would exceed that, the
+    **earliest-recorded** rows are deleted until it does not, atomically with the
+    append, and there is **no spelling for "unlimited"** (ADR-0185 §6). Pruning takes
+    no account of a route's state: an unanswered park's ``OWED`` row is pruned at the
+    bound like any other, and pruning it neither evicts the park, releases its ceiling
+    slot, nor makes its token unresolvable. The park is in memory and the trail is the
+    record rather than the state, so a pruned row costs history and never costs a
+    resolution — which is true only because :meth:`RoutingRecorder.record` admits an
+    answer under a ``route_id`` retaining no row. The two clauses are one decision read
+    from its two ends, and a lane may not implement one without the other.
+
+    **Every query returns a detached snapshot** — the tuple, the records in it, and
+    everything mutable those reach (ADR-0018 §3, ADR-0021 §4).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060 §1).
+    """
+
+    async def record(self, record: RoutedOperationRecord) -> None:
+        """Append ``record`` to the trail.
+
+        Exactly :meth:`RoutingRecorder.record`'s semantics — one critical section over
+        the id check, the ``route_id`` check, the state machine, the append and the
+        prune; idempotent over the whole record; and called before the act it
+        precedes.
+
+        Args:
+            record: The row to append.
+
+        Raises:
+            RoutingTrailError: As :meth:`RoutingRecorder.record` states.
+        """
+        ...
+
+    async def recent(self, *, limit: int) -> tuple[RoutedOperationRecord, ...]:
+        """Return the most recently recorded rows, **newest-recorded first**.
+
+        Ordered by **recording order**, reversed — never by ``decided_at``, which is
+        caller-supplied and which a host clock corrected backwards would send the
+        prune after the rows it just wrote (ADR-0185 §6's reasoning, which this store
+        inherits along with the bound).
+
+        ``limit`` is **required with no default**, unlike
+        :meth:`SourceReadTrail.recent`'s: nothing reads this trail yet (ADR-0197 §9),
+        so there is no consumer whose page size a default here would be guessing at,
+        and the surface ADR that gives it one will state its own.
+
+        Args:
+            limit: Maximum number of rows to return. Refused outside ``[1, 2**63)``
+                **locally and before any I/O**, as ADR-0186 §3 requires of every
+                bounded listing: a store issuing ``LIMIT ?`` against SQLite turns
+                ``limit=-1`` into no limit at all, so the one call offering a bounded
+                read becomes the unbounded read it exists to avoid.
+
+        Returns:
+            Up to ``limit`` rows, newest-recorded first.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[1, 2**63)``.
+            RoutingTrailError: If the trail cannot be read.
+        """
+        ...
+
+    async def export(self) -> tuple[RoutedOperationRecord, ...]:
+        """Return every row the store holds, in recording order (ADR-0004 §6).
+
+        The user's export right. **It delivers the horizon rather than the history**:
+        the store prunes, so this reconstructs every decision it still holds and rows
+        older than the configured cap are gone. Bounded only by ADR-0085 §8c's payload
+        limit.
+
+        Returns:
+            Every row held, oldest-recorded first.
+
+        Raises:
+            RoutingTrailError: If the trail cannot be read.
+        """
+        ...
+
+    async def clear(self) -> None:
+        """Destroy every row, for ADR-0007's deletion right.
+
+        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason: it destroys the
+        trail visibly and completely, which is what a data-rights operation should look
+        like, where a selective delete would be indistinguishable from tampering
+        (ADR-0004 §6, ADR-0021 §4). This and the prune are the only deletions the store
+        performs.
+
+        **Returns nothing**, unlike :meth:`SourceReadTrail.clear`'s count. Nothing reads
+        this trail (ADR-0197 §9), so a count would be a value with no consumer, and
+        ADR-0197 §9 fixes the member's shape rather than leaving it to imitation.
+
+        Raises:
+            RoutingTrailError: If the trail cannot be cleared.
+        """
+        ...
+
+
+@runtime_checkable
 class ConversationStore(Protocol):
     """The durable index of conversations and the turns under them (ADR-0074).
 
@@ -7923,7 +8150,28 @@ class AssistantEngine(Protocol):
         ``turn`` is ``None`` on a resume driven from a **recovered** park: a
         confirmation reconstructed from durable state after a restart has no live
         turn, and fabricating one would misrepresent what the turn saw. The step is
-        what a resume is for and is always present.
+        what a resume is for and is always present — **except where
+        ``TurnOutcome.routed`` is present**, which ADR-0197 §7 creates and §13 records
+        as a partial supersession of ADR-0052 §3, scoped to exactly that case.
+
+        **A resume answering a routed park differs in exactly three respects and in no
+        others** (ADR-0197 §7). Its outcome carries ``step`` ``None`` and ``routed``
+        non-``None``, which is ADR-0197 §8's mutual exclusion read from this end. Its
+        refusal is **returned, never raised**: ``approved`` ``False`` yields
+        ``RouteOutcome.REFUSED`` on that member and **no**
+        :class:`~ai_assistant.core.errors.PermissionDeniedError`, because no
+        ``ActionPolicy`` is consulted and no ``PermissionDecision`` is recorded, so
+        there is no ruling for a refusal to be — which partially supersedes ADR-0042
+        §4's "only ``approved=False → DENY`` is guaranteed", again scoped to exactly
+        that case (ADR-0197 §13). And its ``turn`` is ``None`` for ADR-0197 §8's reason
+        rather than ADR-0052 §3's. **Everything else is unchanged**, the ``timeout``
+        argument's meaning and ``UnknownContinuationError`` included, and every resume
+        that continues a parked step is ruled exactly as it was before — carrying its
+        step, and raising ``PermissionDeniedError`` on a refusal.
+
+        ``resume`` **routes nothing**: it carries an opaque token and a boolean and no
+        utterance, so there is no input a router could consume, and what it performs is
+        the operation an earlier pass already routed to (ADR-0197 §1).
 
         Args:
             token: The opaque continuation the engine minted. Relayed, never
@@ -7937,10 +8185,16 @@ class AssistantEngine(Protocol):
 
         Raises:
             UnknownContinuationError: If the token names no parked step this engine
-                can resume — a restart, or eviction under the outstanding-park cap.
-                **Never a denial**: nobody ruled on this action (ADR-0084 §7).
+                can resume — unknown, expired, already claimed, or from a previous
+                process life. **Never a denial**: nobody ruled on this action
+                (ADR-0084 §7). A routed park (ADR-0197 §7) obeys that rule whole: it
+                is claimed once and atomically, so a second presentation of its token
+                — concurrent or later, and whatever its ``approved`` value — resolves
+                nothing and raises this.
             PermissionDeniedError: If the human refused, or the recorded ruling
-                does not authorise the call.
+                does not authorise the call. **Not raised on a resume answering a
+                routed park**, whose refusal is returned as
+                ``RouteOutcome.REFUSED`` (ADR-0197 §7, §13).
             AuditError: If the resolution could not be recorded.
             ToolBindingError: If the selected tool could not be bound.
         """
