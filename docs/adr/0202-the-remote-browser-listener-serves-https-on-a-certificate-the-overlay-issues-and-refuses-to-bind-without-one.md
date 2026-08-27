@@ -691,12 +691,19 @@ permission check would be the process asking itself.
 > superseded and is not read either way, and neither is §7's gate over every other
 > Tier 0 and Tier 1 access anywhere in this system.
 
-**The record owed on ADR-0004, written here for the implementing lane to copy.**
-Its `Status` line is led by `Accepted, partially superseded by …`; the pair to
-append with `and`, and to state in the dated note ADR-0070 §1 requires, is:
+**The record owed on ADR-0004, written here in full for the implementing lane to
+copy.** ADR-0004's `Status` line carries the pre-ADR-0070 `Accepted, partially
+superseded …` shape, and **it keeps it**: ADR-0070 §4 names ADR-0004 in the list of
+lines it grandfathers, and rules that "reformatting a ratified status line to the
+new leading-token form is a forward-only convention, not a licence to rewrite
+settled records … New partial supersessions use the leading-token form; the
+existing ones stand." What §4's accumulation rule asks of a seventh pair is that it
+be added without dropping the six, which is what five earlier ADRs have each done
+to this same line. The whole line, with the new pair and no other change, and the
+same pair stated in the dated note ADR-0070 §1 requires:
 
 ```text
-ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential) and ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material)
 ```
 
 **ADR-0174 §7's first clause — superseded.** The clause is "The remote browser
