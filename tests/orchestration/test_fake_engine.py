@@ -53,7 +53,7 @@ from assistant_engine_contract import (
     seeded_trail,
 )
 
-from ai_assistant.core.errors import ConfigurationError, OversizedValueError
+from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     AnswerKind,
@@ -646,17 +646,27 @@ class _SteplessEngine(FakeAssistantEngine):
         return TurnOutcome(turn=None)
 
 
-async def test_a_non_positive_retention_ceiling_is_refused_at_construction() -> None:
-    """The fake refuses a ceiling the concrete engine refuses (ADR-0084 §4).
+def test_the_retention_ceiling_is_guarded_exactly_as_the_concrete_engine_guards_it() -> None:
+    """The fake refuses every value ``Engine`` refuses, with the class ``Engine`` uses.
 
-    Substitutability runs in both directions: a fake admitting a deployment no engine
-    admits lets a consumer's tests pass over a configuration production cannot be built
-    into. Unrefused, the value would surface much later and as something else — the
-    retention would try to discard from an empty table on the first settlement.
+    ADR-0084 §4's substitutability runs in both directions. A fake admitting a
+    deployment no engine admits lets a consumer's tests pass over a configuration
+    production cannot be built into — and a fake refusing the same value with a
+    different class makes the two disagree about what kind of failure it is, which is
+    the half a positivity check on its own would leave open.
+
+    The three shapes are the ones the concrete engine names: a ``bool``, which is an
+    ``int`` subclass and would silently mean one; a ``float``, which would compare
+    fine and then bound the retention at ``int``-of-itself; and a non-positive count,
+    which would discard from an empty table on the first settlement.
     """
-    for ceiling in (0, -1):
-        with pytest.raises(ConfigurationError):
-            FakeAssistantEngine(max_outstanding_confirmations=ceiling)
+    for wrong_type in (True, 1.5, "1"):
+        with pytest.raises(TypeError):
+            FakeAssistantEngine(max_outstanding_confirmations=wrong_type)  # type: ignore[arg-type]
+
+    for not_positive in (0, -1):
+        with pytest.raises(ValueError, match="must be positive"):
+            FakeAssistantEngine(max_outstanding_confirmations=not_positive)
 
     # And the smallest admitted value really is one, which is what the shared suite's
     # bound case is built at.
