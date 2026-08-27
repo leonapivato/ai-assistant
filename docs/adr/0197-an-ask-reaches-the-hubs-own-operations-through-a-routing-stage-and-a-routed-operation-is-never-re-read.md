@@ -22,6 +22,13 @@
   "the confirmations a user may still answer" is true of every confirmation it
   ranges over and is not true of §7's routed park, which holds no plan state for
   §1's algorithm to recover. §13 states the record.
+- **It partially supersedes ADR-0052 §3 and ADR-0042 §4**, in one scope each and
+  no further: `resume`'s ratified "the step … is always present", and ADR-0042
+  §4's guarantee that `approved=False` becomes a `DENY` ruling, each only as it
+  reaches a `resume` answering §7's routed park. `AssistantEngine` gains no
+  method, but one method's **contract** moves, and that is what these two records
+  are for. §7 states the routed resume's replacement invariants, §12 the
+  conformance coverage that pins them as narrow, and §13 the records.
 - **`AssistantEngine` gains no method and the browser's reach does not move.**
   ADR-0177 §1's enumeration of thirty already contains `converse`,
   `converse_streaming` and `resume`, and this ADR admits no operation to it and
@@ -501,6 +508,21 @@ change what the listing beside the reply says.
 > `resume` whose `approved` is `False` performs nothing and returns
 > `RouteOutcome.REFUSED`.
 
+> **Normative.** A `resume` that answers a routed park differs from a `resume` that
+> continues a parked step in exactly **three** respects and in no others. Its
+> `TurnOutcome` carries `step` `None` and `routed` non-`None`, which is §8's mutual
+> exclusion read from the resume end. Its refusal is **returned, never raised**:
+> `approved` `False` yields `RouteOutcome.REFUSED` on that member and **no**
+> `PermissionDeniedError`, because no `ActionPolicy` is consulted and no
+> `PermissionDecision` is recorded, so there is no ruling for a refusal to be — and
+> a refusal is a `REFUSED` row (§9) rather than an exception. And its `turn` is
+> `None` for §8's reason rather than ADR-0052 §3's. Everything else is unchanged:
+> `UnknownContinuationError` on a token this engine cannot resolve — unknown,
+> expired, already claimed, or from a previous process life (ADR-0084 §7) — the
+> `timeout` argument's meaning, and the whole of a `resume` answering an ordinary
+> parked step, which continues to carry its step and to raise
+> `PermissionDeniedError` on a refusal exactly as it does today.
+
 > **Normative.** A routed park holds a slot at the engine's existing
 > **outstanding-confirmation ceiling** — `max_outstanding_confirmations`, the bound
 > that exists because "a client that requests confirmable actions and abandons every
@@ -582,6 +604,18 @@ change what the listing beside the reply says.
 > **Normative.** ADR-0073 §5's show-then-confirm binds the routed `forget` whole,
 > including its band-appropriate warning and its `--yes` idiom, which renders
 > before acting rather than skipping the render.
+
+**Two sentences of the ratified `resume` contract move, and §13 records both.**
+`core/protocols.py`'s `AssistantEngine.resume` docstring states "The step is what a
+resume is for and is always present" — ADR-0052 §3's sentence, carried onto the
+surface ADR-0084 §5 promoted — and declares `PermissionDeniedError: If the human
+refused`, whose guarantee is ADR-0042 §4's "only `approved=False → DENY` is
+guaranteed". A routed resume has no step and produces no ruling, so both read more
+widely than they hold the moment `routed` is present. A method's *contract* moving
+is a change to a promoted surface whether or not the surface gains a method, and
+this one gains none: §13 classifies the two as two partial supersessions, scoped to
+exactly those two sentences and exactly that case, rather than leaving them as an
+implementation detail of this decision.
 
 **Why the card is not a `Confirmation`.** That type's four content members are
 `tool_id`, `tool_description`, `parameters` and `reason`, and ADR-0177 §8 as
@@ -1057,9 +1091,12 @@ that conversation.
 ### 11. What this ADR does not decide
 
 > **Normative.** Beyond §§1–10 and §13, this ADR decides nothing. It registers no
-> tool, designates no seam, changes no method signature on `AssistantEngine`, and
-> adds no `core` name other than §8's five, §9's two types, its one Protocol and
-> its one error class. A lane needing any of those
+> tool, designates no seam, changes no method **signature** on `AssistantEngine`,
+> and adds no `core` name other than §8's five, §9's two types, its one Protocol
+> and its one error class. It does move one method's **contract** — `resume`'s, in
+> the two sentences §7 names and §13 records — and that is not the same claim: a
+> signature is what a caller compiles against, a contract is what it may rely on,
+> and this ADR moves the second and not the first. A lane needing any of those
 > needs its own change and, where golden rule 5 reaches it, its own ADR.
 
 - **Milestone 27 — multi-step plan driving** (#242). ADR-0170 §5's "at most a
@@ -1160,6 +1197,20 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > scalar identity and never handed the record; and §7's park-and-resume pair
 > asserting that a refused resume performs nothing and that a routed park does not
 > appear in `pending_confirmations`.
+
+> **Normative.** The promoted surface's contract moved (§7, §13), so the lane
+> landing §8 ships the coverage that pins the move as **narrow**, and ships it in
+> the shared `AssistantEngine` conformance suite rather than in one
+> implementation's own tests, because every implementation of that surface owes it:
+> a routed park resumed `True`, asserting `step` `None`, `routed` present and the
+> operation called; the same park resumed `False`, asserting
+> `RouteOutcome.REFUSED`, that **no** `PermissionDeniedError` is raised, that the
+> operation was not called and that no `PermissionDecision` was recorded; and,
+> beside them in the same suite, an ordinary parked step resumed `False`, asserting
+> that it still raises `PermissionDeniedError` and that its outcome still carries a
+> `step`. The third case is not decoration: without it the suite pins the new
+> behaviour and not its scope, and an implementation that stopped raising on every
+> refusal would pass.
 
 > **Normative.** The same lane ships §7's one-shot claim as **concurrency** tests
 > rather than sequential ones: two `resume` calls on one token raced with
@@ -1286,6 +1337,48 @@ amendment, recorded as an appended dated note and a qualifier on the `Status` li
 — except that ADR-0052's `Status` is led by `Partially superseded by`, so ADR-0082
 §2 puts the record in the note alone.
 
+**ADR-0052 §3 — a second record is owed on the same ADR, and it is a partial
+supersession.** That section ruled that a resumed step's outcome "is what a resume
+is *for*, and it is always present", and that sentence stands on the promoted
+surface today: `core/protocols.py`'s `AssistantEngine.resume` docstring reads "The
+step is what a resume is for and is always present". §7 above creates a resume
+with no step at all, so what §3 decided is **replaced** in the case §7 creates
+rather than merely read too widely: a reader acting on §3 does not act identically
+before and after, which is ADR-0070 §1's line between the two, and partial
+supersession is the sanctioned form for replacing part of an earlier ADR
+(ADR-0070 §3). It is **partial** and it is narrow:
+every resume that continues a parked step is ruled exactly as ADR-0052 §3 ruled
+it, and the clause fails only where `TurnOutcome.routed` is present. ADR-0084
+already partially superseded §3's *placement* claim — that the widened
+`TurnOutcome` sits outside contract surface — and this pair is added beside that
+one rather than in place of it (ADR-0070 §4).
+
+**ADR-0042 §4 — a record is owed, and it is a partial supersession.** That section
+ruled how a confirmation's answer becomes a ruling: `ActionPolicy.resolve` "is what
+turns `approved` into an `ALLOW` or `DENY` ruling, and only `approved=False → DENY`
+is guaranteed". §7 above answers a routed park with no `ActionPolicy.resolve` call
+and no `PermissionDecision`, so an `approved` of `False` becomes no ruling at all
+and raises no `PermissionDeniedError`: the guarantee's subject is absent rather
+than its value different, which is again a replacement in a named case and not an
+over-wide reading. Partial and narrow in the same way — a `resume` answering a
+parked step is ruled exactly as before — and §4's account of what an adapter may
+**not** do, author the permission outcome, is untouched and binds the routed card
+of §7 as hard as it binds a tool's.
+
+**ADR-0085 §9 — no record is owed, and this one is worth stating rather than
+omitting.** Its per-method table declares the failures each method may raise, and
+`PermissionDeniedError` stays among `resume`'s: every step-driving resume still
+raises it on a refusal, and the clause declares a method's failure **set** rather
+than guaranteeing that some particular input produces one. No sentence of §9
+becomes false or reads more widely than it holds, so ADR-0082 §1's test comes out
+the other way and nothing is taken — recorded here because a reader checking the
+records above will look for one on the ADR that ratified the surface, and because
+ADR-0082 §1 forbids a record demanded on book-keeping grounds alone. That
+the two moving sentences trace to ADR-0052 §3 and ADR-0042 §4 rather than to
+ADR-0085 is ADR-0085 §3's own doing: it omits the docstrings deliberately and
+states that their obligations are ratified elsewhere, naming the two it does carry
+(§1's and §7's), neither of which is either of these.
+
 **Everything else is a stacked addition and no record is owed.** ADR-0170 §§1, 5,
 6 and 8 (the pipeline gains a second stage without any clause of ADR-0170's
 becoming false; §6's rendering rule is cited and obeyed, not narrowed; §8's
@@ -1297,7 +1390,11 @@ strictness is *followed* here, not modified). ADR-0177 §1 (its enumeration of
 thirty is unchanged, its third clause's count is unchanged because §9 adds no
 `AssistantEngine` method, and its fourth clause is obeyed by §12's consumer group).
 ADR-0148, ADR-0021 §5, ADR-0154 and ADR-0017 §3 (§7 asserts that none of them is
-engaged, which is a claim about routing and not about them). ADR-0186 §10 (its
+engaged, which is a claim about routing and not about them). ADR-0084 §7 (§7
+above cites its unresolvable-token rule and obeys it whole — a routed park's
+unknown, expired, already-claimed and cross-restart token each yield
+`UnknownContinuationError` and never a denial, which is §7's own instruction
+applied to a new kind of park rather than widened). ADR-0186 §10 (its
 partition is a rule about the relation between two named trails and is restated,
 not widened, by §9's fourth row kind; ADR-0192 already added a third without
 disturbing it). ADR-0185 §§2, 6 and 12 (§9 follows their shapes; it changes none of
@@ -1325,10 +1422,14 @@ closed set and a two-directional validator is the shape that keeps
 
 **This ADR supersedes nothing wholly and withdraws nothing.**
 
-**The two records are stated here in their exact form and are not made by this
-change** (ADR-0026 §6, ADR-0030 §6, ADR-0032 §8): writing "amended by ADR-0197"
-onto a ratified ADR while ADR-0197 is only `Proposed` is the state claim ADR-0019
-forbids. The lane that ratifies this ADR makes them, and no other lane does.
+**The four records — on three ADRs — are stated here in their exact form and are
+not made by this change** (ADR-0026 §6, ADR-0030 §6, ADR-0032 §8): writing
+"amended by ADR-0197" onto a ratified ADR while ADR-0197 is only `Proposed` is the
+state claim ADR-0019 forbids. The lane that ratifies this ADR makes them, and no
+other lane does. ADR-0052 takes two of the four, in two different forms, and the
+difference is not a slip: a **supersession** pair accumulates on a leading-token
+`Status` line (ADR-0070 §4), where an **amendment** qualifier is excluded from one
+(ADR-0082 §2) and lives in the note alone.
 
 - **ADR-0170.** Its `Status` line, which today reads `Partially superseded by
   ADR-0173 (…)`, gains this ADR's pair on the same line without dropping ADR-0173's
@@ -1336,13 +1437,30 @@ forbids. The lane that ratifies this ADR makes them, and no other lane does.
   in the "turn is None" direction, each only as it reaches an outcome carrying
   TurnOutcome.routed)`. It gains an appended dated header note recording the
   supersession's scope and its ground, ending `Refs #1623, ADR-0197 §8, §13`.
-- **ADR-0052.** Its `Status` line is led by `Partially superseded by ADR-0084 (…)`,
-  so no qualifier is written on it (ADR-0082 §2). It gains an appended note:
-  `Amended: <ratification date> by ADR-0197 — §1's "the confirmations a user may
-  still answer" is true of every confirmation §1's algorithm ranges over and does
-  not reach ADR-0197 §7's routed park, which holds no execution, no step and no
-  recorded CONFIRM for §1's four steps to recover. Nothing §1 decided changes.
-  Refs #1623, ADR-0197 §7, §13.`
+- **ADR-0052.** Its `Status` line, which today reads `Partially superseded by
+  ADR-0084 (…)`, gains this ADR's pair on the same line without dropping
+  ADR-0084's (ADR-0070 §4): `and ADR-0197 (§3's clause that the step "is what a
+  resume is for, and it is always present", only as it reaches a resume whose
+  TurnOutcome carries routed)`. No **amendment** qualifier is written on that line
+  for the §1 record, because the line is led by `Partially superseded by`
+  (ADR-0082 §2). Both records go in one appended dated note: `Amended and
+  partially superseded: <ratification date> by ADR-0197 — §1's "the confirmations
+  a user may still answer" is true of every confirmation §1's algorithm ranges
+  over and does not reach ADR-0197 §7's routed park, which holds no execution, no
+  step and no recorded CONFIRM for §1's four steps to recover; nothing §1 decided
+  changes. §3's "the step … is always present" is superseded only where
+  TurnOutcome.routed is present: ADR-0197 §7's routed resume carries step None,
+  and every resume continuing a parked step is ruled as §3 ruled it. Refs #1623,
+  ADR-0197 §7, §13.`
+- **ADR-0042.** Its `Status` line, which today reads `Partially superseded by
+  ADR-0084 (…)`, gains this ADR's pair on the same line without dropping
+  ADR-0084's (ADR-0070 §4): `and ADR-0197 (§4's guarantee that approved=False
+  becomes a DENY ruling, only as it reaches a resume answering a routed park)`. It
+  gains an appended dated note recording that scope and its ground — that ADR-0197
+  §7 consults no ActionPolicy and records no PermissionDecision for a routed park,
+  so a refusal is returned as RouteOutcome.REFUSED and raises no
+  PermissionDeniedError, while §4's rule that an adapter never authors the
+  permission outcome is untouched — ending `Refs #1623, ADR-0197 §7, §13.`
 
 ## Consequences
 
