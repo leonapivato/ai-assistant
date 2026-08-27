@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 
 ## Context
