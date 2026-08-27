@@ -770,18 +770,21 @@ async def test_an_unresolvable_routed_token_is_told_the_remedy_that_can_help_it(
     """§7's own sentence reaches the caller on **both** routed paths (#1649).
 
     A routed park is unresolvable two ways — claimed, because "the claim is what evicts
-    it", and expired — and §7 gives both the same remedy: "nothing has happened yet, and
-    the operation is asked for again rather than resumed again". The expired path carried
-    that already; the claimed path fell through to the parked-step message, which names
-    ``pending_confirmations`` — and §7 rules that it "does **not** list a routed park",
-    so the one remedy the message offered was the one that cannot ever help the caller it
-    was given to. That caller is not exotic: it is a double-clicked confirm button, and
-    the loser of two concurrent ``resume`` calls on one token.
+    it", and expired — and both reach the caller through ``UnknownContinuationError``.
+    The expired path already said what §7 says; the claimed path fell through to the
+    parked-step message, which names ``pending_confirmations`` — and §7 rules that it
+    "does **not** list a routed park", so the one remedy the message offered was the one
+    that cannot ever help the caller it was given to. That caller is not exotic: it is a
+    double-clicked confirm button, and the loser of two concurrent ``resume`` calls.
 
-    The engine cannot tell the two kinds of token apart at that point — the claim
-    destroyed the entry, which is what §7 asks of it — so what is pinned is that the
-    routed remedy is stated and that the step-park remedy is never offered unqualified,
-    rather than that one message is chosen over the other.
+    **What the two paths may claim is not the same, and that is the second half of this
+    case.** The expired path raises from inside the claim with the entry in front of it,
+    so it can say §7's sentence — nothing has happened yet — and does. The claimed path
+    cannot: §9 orders the claim before the row and the row before the effect, so a token
+    that reaches here is equally a park that expired unanswered and one whose ``forget``
+    destroyed the belief a moment ago. Telling that caller the operation was never
+    performed is a falsehood about their own data, so this asserts its **absence** on
+    the claimed path with the belief already gone as the standing proof.
     """
     clock = _Clock()
     harness = _routed_harness(now=clock)
@@ -800,8 +803,7 @@ async def test_an_unresolvable_routed_token_is_told_the_remedy_that_can_help_it(
         await harness.engine.resume(token, approved=True, timeout=PATIENT)
 
     message = str(raised.value)
-    assert "nothing has happened yet" in message
-    assert "ask for it again rather than resuming this token" in message
+    assert "rather than resuming this token" in message
     before, names_it, _ = message.partition("pending_confirmations")
     assert not names_it or "parked step" in before, (
         "the remedy ADR-0197 §7 rules out for a routed park is offered unconditionally"
@@ -809,6 +811,13 @@ async def test_an_unresolvable_routed_token_is_told_the_remedy_that_can_help_it(
     # And it is ruled out here rather than merely unhelpful: the park this token named is
     # not enumerable, whichever way it became unresolvable.
     assert await harness.engine.pending_confirmations() == ()
+    if expired:
+        assert "nothing has happened yet" in message
+        assert await harness.memory.get(_BELIEF) is not None
+    else:
+        assert "nothing has happened" not in message
+        assert "never performed" not in message
+        assert await harness.memory.get(_BELIEF) is None
 
 
 class _Clock:

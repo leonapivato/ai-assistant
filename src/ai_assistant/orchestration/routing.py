@@ -720,7 +720,10 @@ _WORD: Final = re.compile(r"[^\W_]+")
 #:    one-letter fragments an apostrophe leaves (``user's`` reads as ``user`` and
 #:    ``s``). These discriminate nothing: a belief store's records are sentences, so
 #:    ``the`` narrows a listing not at all, while a query that carried one and a record
-#:    that did not was the whole of the miss #1647 recorded.
+#:    that did not was the whole of the miss #1647 recorded. **Negations and
+#:    quantifiers are not among them** — ``no``, ``none``, ``all``, ``any``, ``every``
+#:    and their kind say what a record asserts rather than frame it, and a query the
+#:    user negated must not name the record that says the opposite.
 #: 2. **The words that name a record rather than its content** — a person refers to
 #:    what the assistant holds by its kind ("the question you asked me about my
 #:    commute"), and those words are about the record's *existence*, which is not what
@@ -732,8 +735,11 @@ _WORD: Final = re.compile(r"[^\W_]+")
 _FRAMING: Final[frozenset[str]] = frozenset(
     word
     for group in (
-        # articles, determiners and demonstratives
-        "a an the this that these those any some all each every both either no none",
+        # articles and demonstratives — and **no quantifier and no negation**, which
+        # say what a record asserts rather than frame it: dropping `no` would let
+        # "I have no pets" name the belief "I have pets" and park a destructive
+        # confirmation on the record that says the opposite.
+        "a an the this that these those",
         # pronouns and possessives
         "i me my mine myself we us our ours you your yours he him his she her hers",
         "it its they them their theirs who whom whose which what",
