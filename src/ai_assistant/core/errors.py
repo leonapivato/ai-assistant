@@ -1360,10 +1360,40 @@ class UnknownContinuationError(PlanningError):
 
     ADR-0084 §7 ratified that presenting a token the server cannot resolve "yields
     one specific, typed refusal — an unknown-continuation error — and never a
-    generic failure, and never a denial", covering both a hub restart, after which
-    a process-scoped handle table is empty, and eviction under
-    ``max_outstanding_confirmations``. Before this the engine raised a bare
+    generic failure, and never a denial". Before this the engine raised a bare
     :class:`PlanningError`, indistinguishable from four other planning faults.
+
+    **The cases it covers, as ADR-0198 §5 enumerates them** — the states the tree
+    produces, rather than an inherited example (#1641):
+
+    * an unknown handle;
+    * a handle from a previous process life, after which the process-scoped handle
+      table is empty;
+    * a park ``pending_confirmations``' own reconciliation evicted because the trail
+      no longer holds its binding pending (ADR-0052 §2);
+    * a routed park already claimed, and an **expired routed** park, whose entry is
+      evicted and whose slot is released so the token really does name nothing
+      afterwards (ADR-0197 §7);
+    * a settled record discarded under ADR-0198 §4's bound.
+
+    **Two states are deliberately not among them.** The outstanding-confirmation
+    ceiling **evicts nothing**: ``Engine._admit_and_reserve`` keeps the table bounded
+    "without ever dropping a live continuation … at the ceiling the engine refuses to
+    drive another step rather than parking one and having to strand it", raising
+    before a park exists. And an ordinary parked step answered past its
+    ``expires_at`` is refused by the runner's freshness check with
+    :class:`PermissionDeniedError` before anything is authored, its park still
+    registered — ADR-0084 §7 rules in terms that such a token "is not 'expired'",
+    because collapsing the two "would tell a user their answer was too late when in
+    fact the hub restarted".
+
+    **A token whose binding the engine has settled and still retains is not one of
+    these** (ADR-0198 §§1, 5). It is answered by a restatement of the recorded
+    outcome instead, because the remedy differs: a token that names nothing is
+    answered by enumerating ``pending_confirmations()`` and re-minting, and a token
+    whose binding is settled is answered by reading what was decided — and ADR-0052
+    §1 step 2 never lists a settled binding, so there is nothing to re-mint. Where
+    the remedies coincide the error stays one, which is ADR-0084 §7's own test.
 
     **Never a denial**, and that is the distinction the type exists to keep: an
     unresolvable token means nobody ruled on the action, whereas
