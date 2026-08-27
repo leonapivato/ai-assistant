@@ -441,6 +441,7 @@ class Harness:
         max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
         now: Clock | None = None,
         id_factory: Callable[[], str] | None = None,
+        epoch_factory: Callable[[], str] | None = None,
     ) -> None:
         # ADR-0197's knobs. The recorder lives on the *stage* (§9), so a case that wants
         # to read the rows builds its own ``RoutingStage(model=…, recorder=…)`` and keeps
@@ -636,6 +637,10 @@ class Harness:
             email_ingestion=self.email_ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=(lambda: next(self.handles)) if id_factory is None else id_factory,
+            # The handle epoch (#1644), a knob so a restart case can hand two engines
+            # two epochs it chose rather than two real UUIDs and the hope they differ.
+            # Defaulted per harness instance, so two harnesses are two engines.
+            epoch_factory=(lambda: "epoch") if epoch_factory is None else epoch_factory,
             routing=self.routing,
             routed_confirmation_ttl=routed_confirmation_ttl,
             max_outstanding_confirmations=max_outstanding_confirmations,
@@ -1383,14 +1388,24 @@ async def test_a_restarted_engine_does_not_re_mint_a_previous_engine_s_handle() 
     records, moved one lifetime over, and it is the exposure the sibling case names as
     a warm restart.
 
-    A fresh random epoch per engine is what closes it — the pair
-    ``InMemoryPlanStore`` and ``FakePlanStore`` already mint ids from for ADR-0044
-    §1's non-reuse guarantee, in the same words: "the sequence alone is process-local,
-    so a restart would re-mint a prior id".
+    A fresh epoch per engine is what closes it — the pair ``InMemoryPlanStore`` and
+    ``FakePlanStore`` already mint ids from for ADR-0044 §1's non-reuse guarantee, in
+    the same words: "the sequence alone is process-local, so a restart would re-mint a
+    prior id".
+
+    **Both epochs are chosen here rather than left to the default**, which is what the
+    injected ``epoch_factory`` buys (``CONTRIBUTING`` → "Determinism"). A case resting
+    on two real UUIDs would pass on the odds, and it would go on passing against an
+    engine that had stopped composing the epoch into the handle at all as long as it
+    kept reading a random one — the assertion would be about ``uuid4`` rather than
+    about the mint.
     """
     goals = iter(f"g-{n}" for n in range(1, 100))
     before = Harness(
-        tools=(confirmable(),), loop_id_factory=lambda: next(goals), id_factory=lambda: "same"
+        tools=(confirmable(),),
+        loop_id_factory=lambda: next(goals),
+        id_factory=lambda: "same",
+        epoch_factory=lambda: "before",
     )
     parked = await before.engine.converse("send it", timeout=PATIENT)
     stale = parked.step.confirmation.token  # type: ignore[union-attr]
@@ -1399,6 +1414,7 @@ async def test_a_restarted_engine_does_not_re_mint_a_previous_engine_s_handle() 
         tools=(confirmable(),),
         loop_id_factory=lambda: next(iter(("g-99",))),
         id_factory=lambda: "same",
+        epoch_factory=lambda: "after",
     )
     fresh = await after.engine.converse("send something else", timeout=PATIENT)
     assert fresh.step is not None
