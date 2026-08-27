@@ -368,11 +368,22 @@ before it bites rather than after.
 > its own sake: it is public by construction (§4). It is named in the class only so
 > that the pair is provisioned, renewed and refused together.
 
-> **Normative.** The gateway refuses at start a key file readable or writable by
-> any user other than the one the gateway runs as, and refuses a certificate or
-> key path failing the custody conditions `wire/custody.py` already owns for a
-> path trusted rather than authenticated. It reports which condition failed and on
-> which path.
+> **Normative.** The gateway refuses at start a key file whose **owner is not the
+> user the gateway runs as**, or whose mode grants any permission to group or
+> other, and refuses a certificate or key path failing the custody conditions
+> `wire/custody.py` already owns for a path trusted rather than authenticated. It
+> reports which condition failed and on which path.
+
+> **Normative.** That predicate is **ownership and mode**, and it is deliberately
+> not a claim that no other user can read the key. ADR-0084 §1 rules that a
+> filesystem walk "can be wrong — a bind mount, an ACL, a symlinked ancestor", and
+> `wire/custody.py` says of itself that it is "defence in depth, not the thing that
+> closes the hole". A POSIX ACL granting another user access survives an owner-only
+> mode, and **this ADR requires no ACL-aware check**: no such check exists in this
+> tree, adding one would be a `wire/` decision rather than this one's, and it would
+> not close the class ADR-0084 §1 names. **No lane may present the check as
+> establishing that the key is unreadable by other users**, in a disclosure under §5
+> or anywhere else; a lane that needs that guarantee owes its own decision.
 
 **Why the keyring is not available here, checked against ADR-0125 rather than
 assumed.** ADR-0125 §2 closes `SecretScope` at exactly three members — `PROVIDER`,
