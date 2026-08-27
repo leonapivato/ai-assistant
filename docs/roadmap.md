@@ -276,7 +276,12 @@ spoke that speaks, so it waits on nothing else here.
   the ambient collision first** (stance 7): whoever opens it rules that
   collision before building. It also owes the remote-hop ruling — room audio to
   a non-local hub under ADR-0017 §1, where transcript-only does not rescue the
-  hop.
+  hop. And it is the producer ADR-0094 §7–§8 wait on: a spoke may not destroy
+  the material a submission was derived from while that submission is
+  unresolved, the hub retains that material only for a bounded verification
+  window, raw source material is never an episode, and the window's figures —
+  like the buffer's, and like the custody handoff §8 leaves undecided — are
+  named by this milestone's deciding ADR rather than by ADR-0094 (§8, §10).
   *Exit: the owner says "capture that"; the preceding ~30s lands as an
   inspectable episode at the hub with who-triggered-retention provenance; and
   the buffer's non-retention outside a capture is demonstrable.*
