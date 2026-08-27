@@ -1320,9 +1320,19 @@ def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() 
     # arrives after the release, when there is no recorder left to stop, and a check
     # skipped there is exactly the unbounded upload the bound exists to prevent.
     assert "if (!mine.released) {\n        stopTalking();" in starting
-    # And a press whose every chunk was over the bound is not then told it was too short,
-    # which would be the opposite of what happened.
-    assert 'saying(mine.dropped ? "" : NOTHING_RECORDED)' in _functions(script)["sendRecording"]
+    # **And a press that crossed it sends nothing at all** (round 5's major). A recording
+    # is a container and its last chunk is where a `MediaRecorder` writes what finishes
+    # one, so keeping the chunks before it and uploading them uploads a clip that may not
+    # decode — the hub handed something it cannot read, having been told the recording was
+    # sent. There is no container-aware middle: this page parses no WebM and no MP4.
+    assert "mine.overran = true" in starting
+    assert "mine.chunks = []" in starting
+    assert "if (mine.overran) {" in _functions(script)["sendRecording"]
+    assert "nothing was sent" in _constant(script, "RECORDING_TOO_LONG")
+    # And the line that says a press is happening comes off with it. Found by driving:
+    # an overrun never reaches `SENDING`, so a release clearing only that one left
+    # "Listening" on screen beside a fault saying the press had been stopped.
+    assert "if (said === LISTENING || said === SENDING) {" in _functions(script)["releaseTalk"]
     # No clock of its own reaches this control, and the file's one `setTimeout` is still
     # the delivery stream's.
     assert len(_timeouts(script)) == 1

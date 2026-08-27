@@ -3542,11 +3542,19 @@ const TALK_BITS_A_SECOND = 24000;
 //
 // **It is asked before a chunk is kept, so what is held never exceeds it** — not by one
 // slice, not by a final chunk arriving after the release, and not by a browser that
-// hands over one very large block instead of the slices it was asked for. Adversarial
-// review found each of those three in turn, and asking about the *prospective* total
-// rather than the running one answers all three with one comparison. What it costs is
-// the chunk that would have crossed — a second of speech at the bitrate below — and that
-// is announced rather than dropped quietly.
+// hands over one very large block instead of the slices it was asked for. Asking about
+// the *prospective* total rather than the running one answers all three with one
+// comparison.
+//
+// **And a press that crosses it sends nothing at all**, which is the second half and the
+// one two rounds of review arrived at together. A recording is a container, and its last
+// chunk is where a `MediaRecorder` writes what finishes one; keeping the chunks before it
+// and uploading them is uploading a clip that may not decode — so the hub would be handed
+// something it cannot read, having been told the recording was sent. There is no
+// container-aware middle: this page does not parse WebM or MP4 and must not learn to.
+// Discarding is also the honest reading of what happened — the question ran past what
+// this page will hold, so there is no complete question to ask — and at this size it is a
+// runaway press rather than an ordinary one: two minutes of speech at the bitrate below.
 //
 // **And it is not a clock.** ADR-0182 §7 makes an owner's wait the owner's to end, and
 // this file keeps exactly one `setTimeout` for that reason — a page-side deadline over a
@@ -3607,9 +3615,10 @@ const RECORDER_REFUSED =
 // said up to here is a real question, and throwing it away to enforce a bound this page
 // chose would cost them the whole press.
 const RECORDING_TOO_LONG =
-  "That press reached the longest recording this page holds, so recording stopped there " +
-  "and anything said after that point was not sent. If the question was longer than " +
-  "that, ask it in parts, or type it.";
+  "That press ran past the longest recording this page holds, so it was stopped and " +
+  "nothing was sent: a recording cut off part-way through is not one the assistant can " +
+  "read, and sending it would ask a question this browser had already broken. Hold the " +
+  "button for a shorter question, ask it in parts, or type it.";
 
 // A press that produced no bytes at all — a tap rather than a hold, or a recorder that
 // was stopped before it had written anything. Said rather than sent: an empty
@@ -3796,7 +3805,7 @@ async function startTalking() {
     stream: null,
     chunks: [],
     held: 0,
-    dropped: false,
+    overran: false,
     stopping: null,
   };
   press = mine;
@@ -3859,7 +3868,11 @@ async function startTalking() {
     // prevent. `stopTalking` is the same act the release performs, so it is one ending
     // of the press rather than a second path through it.
     if (mine.held + event.data.size > LONGEST_RECORDING_BYTES) {
-      mine.dropped = true;
+      mine.overran = true;
+      // Let go of what was kept at the moment it stops being worth keeping, rather than
+      // holding a recording nothing will send until the press record is collected.
+      mine.chunks = [];
+      mine.held = 0;
       fault(RECORDING_TOO_LONG, "console");
       if (!mine.released) {
         stopTalking();
@@ -3915,9 +3928,17 @@ function releaseTalk() {
   press = null;
   el("talk-button").disabled = false;
   el("stop-talking").hidden = true;
-  // Only the sentence this wait put there. `NOTHING_RECORDED` and `HEARD_NOTHING` are
-  // both written on the way out and are the answer rather than a state to clear.
-  if (el("talk-state").textContent === SENDING) {
+  // **Only the sentences that describe a press still happening.** `NOTHING_RECORDED` and
+  // `HEARD_NOTHING` are written on the way out and are the answer rather than a state, so
+  // clearing them would take the reply off the screen.
+  //
+  // `LISTENING` belongs here as well as `SENDING`, which driving the page is what found:
+  // a press that ran past `LONGEST_RECORDING_BYTES` never reaches `SENDING`, so a release
+  // that cleared only that one left "Listening — let go when you have finished." on
+  // screen beside a fault saying the recording had been stopped and the button handed
+  // back.
+  const said = el("talk-state").textContent;
+  if (said === LISTENING || said === SENDING) {
     saying("");
   }
 }
@@ -3955,13 +3976,16 @@ async function sendRecording(mine) {
   }
   const asked = {};
   try {
+    // **A press that ran past the bound sends nothing**, and the fault slot has already
+    // said so — at the moment it happened, while the owner was still holding the button.
+    // Taken before everything below, because everything below is about a recording there
+    // is something to do with.
+    if (mine.overran) {
+      return;
+    }
     const recording = new Blob(mine.chunks, { type: mine.format });
     if (recording.size === 0) {
-      // **"Too short" only where nothing was dropped.** A press whose every chunk was
-      // over the bound kept none of them, and telling that owner the press was too short
-      // would be the opposite of what happened; the bound has already said what did, in
-      // the fault slot.
-      saying(mine.dropped ? "" : NOTHING_RECORDED);
+      saying(NOTHING_RECORDED);
       return;
     }
     saying(SENDING);
