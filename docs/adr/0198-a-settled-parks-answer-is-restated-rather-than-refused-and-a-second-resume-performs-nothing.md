@@ -205,14 +205,34 @@ same fact and this decision adds no store query, on the seam or off it.
 
 > **Normative.** A restatement calls no `StepRunner`, consults no `ActionPolicy`,
 > records no `PermissionDecision`, invokes no tool, composes no reply and captures
-> no episode. One park yields one resolution, one ruling, at most one execution
-> attempt and at most one captured resumption, however many times its token is
-> presented.
+> no episode. A **settled** binding therefore yields one resolution, one ruling,
+> one execution attempt and at most one captured resumption, however many times
+> its token is presented.
+
+> **Normative.** A resolution that does **not** complete installs no settled
+> record. The record exists only where the answer was recorded, the runner
+> returned and the park was evicted — all three inside §1's one critical section —
+> so a resolution that raised leaves its park registered, leaves its token naming
+> a park rather than a settled record, and is re-entered by a later `resume`
+> exactly as it is re-entered today. Nothing in §§1–5 reaches that path, and this
+> decision makes no claim about it.
 
 > **Normative.** A restatement is not an exchange, so it is not captured under the
 > conversation that parked. Capturing it would file a second episode for one
 > answer, which ADR-0074 §3's binding cannot describe and a user reading their own
 > history would read as two.
+
+**The half-committed resolution is a real state, it is somebody else's, and saying
+so is part of this decision.** A ruling can be recorded and the transition that
+should have applied it can then fail — the hazard ADR-0044 §3 names and that
+`AuditTrail.resolution_of` was added to answer, tracked as **#257** and still
+open. Such a resume leaves its park registered and no settled record, so a retry
+re-enters resolution and meets the trail's single-resolution index rather than a
+restatement. That is the behaviour on `main` today, before and after this
+decision, and driving such a binding to the disposition already decided is #257's
+work. Absorbing it here would make one decision of two, and the second is neither
+about a replayed token nor answerable without reopening what a partly applied
+resolution means.
 
 **This is ADR-0044 §2b's refusal reaching the caller as an answer instead of as an
 error.** The trail's single-resolution index would refuse a second resolution
@@ -274,9 +294,15 @@ the bound narrows the improvement and regresses nothing.
 
 > **Normative.** `UnknownContinuationError` covers, unchanged: an unknown handle, a
 > handle from a previous process life, a park evicted under
-> `max_outstanding_confirmations`, an expired park, a routed park already claimed,
-> an expired routed park, and a settled record discarded under §4's bound. In every
-> one of them it is **never a denial** (ADR-0084 §7).
+> `max_outstanding_confirmations`, a routed park already claimed, an expired
+> **routed** park, and a settled record discarded under §4's bound. In every one of
+> them it is **never a denial** (ADR-0084 §7).
+
+> **Normative.** An ordinary parked step answered past its `expires_at` is **not**
+> among them and does not become one. It is refused by `StepRunner._check_fresh`
+> with `PermissionDeniedError` before anything is authored, its park stays
+> registered, no settled record is created for it, and nothing in this decision
+> touches that path.
 
 > **Normative.** It ceases to cover exactly one case — a token whose binding this
 > engine has settled and still retains — and it gains none.
@@ -284,6 +310,18 @@ the bound narrows the improvement and regresses nothing.
 > **Normative.** No error class is added to `core/errors.py` by this decision, and
 > `resume`'s declared failure set (ADR-0085 §9) is unchanged: every class it
 > declares is still raised by some input.
+
+**The expiry exclusion is ADR-0084 §7's own clause and it is restated rather than
+narrowed.** That section rules in terms that an unresolvable token "is not
+'expired'": an expired confirmation "is refused at *answer* time by `_check_fresh`
+(ADR-0044 §4), the park is still real, and the remedy is different", and
+"collapsing the two would tell a user their answer was too late when in fact the
+hub restarted". ADR-0059 §1 fixes the deadline on the record at ask time, and
+§Consequences of that decision leaves the step `AWAITING_APPROVAL` because nothing
+is committed. A **routed** park's expiry is the opposite case and is
+`UnknownContinuationError` on ADR-0197 §7's own authority: there the entry is
+evicted and its slot released, so the token really does name nothing afterwards.
+The two lifetimes are not one rule, and the list above keeps them apart.
 
 **The test that decides which case gets which answer is ADR-0084 §7's own.** It
 gave one error to a restart and to a ceiling eviction "because the client's remedy
@@ -353,6 +391,17 @@ third reason above is a cost to weigh rather than a prohibition.
 > execution ran once and the trail holds one resolution.
 > `test_a_routed_park_is_answered_once` is left exactly as it stands, which is what
 > pins §6's scope.
+
+> **Normative.** The suite gains a case that pins §4's bound, over a subject built
+> at a `max_outstanding_confirmations` of **one** — a new abstract fixture, in the
+> shape the suite already uses for a zero-ceiling ledger. Over that subject it
+> settles two parks in order and asserts three things: the second park was
+> admitted at all, which is retention holding no ceiling slot; the **older**
+> token now raises `UnknownContinuationError`, which is the discard being least
+> recently settled and the retention being bounded; and the **newer** token
+> restates. Without it an implementation that retained every settled record
+> forever, or discarded the newest instead of the oldest, passes every other case
+> in this section.
 
 > **Normative.** `FakeAssistantEngine` conforms in the same change. A fake that
 > raised where the real engine restates would let every consumer's tests pass
