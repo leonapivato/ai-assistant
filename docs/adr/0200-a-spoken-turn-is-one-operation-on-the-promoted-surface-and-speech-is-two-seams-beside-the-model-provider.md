@@ -405,13 +405,19 @@ order lets a synthesizer produce the caller's first choice it can honour rather
 than any choice at all. The Protocol properties of §1 stay `frozenset`s, because
 a capability is a set and expresses no preference.
 
-**And the browser tab is not the private audience it looks like.** ADR-0174 §1
-records that the recipient program is "a general-purpose runtime this project
-did not write, running our front end beside whatever else the owner has open".
-When that runtime *speaks*, the answer leaves the screen the session
-authenticated and enters a room nobody attested. That is the whole reason this
-call cannot borrow `/ask`'s disclosure posture, and it is why the audience the
-caller may attest at this rung is nobody.
+**And the browser tab is not the bounded channel it looks like — which is why
+one session owns two channels here.** ADR-0199 §1's fourth clause says "One
+session may own channels of differing audience, and a posture decided for one of
+its channels does not reach another", and this operation is where that first
+bites. The rendered page is bounded: what it emits reaches the owner through an
+act of theirs, looking at a surface the gateway tied to the session it admitted.
+The loudspeaker on the same device is not, and ADR-0174 §1's account of the
+recipient is why — "a general-purpose runtime this project did not write, running
+our front end beside whatever else the owner has open", in a room the system
+holds no fact about. So this call cannot borrow `/ask`'s posture, and the
+tempting inference ADR-0199 §1 refuses in terms — that anything the page may
+render it may also speak, because it is one admitted session either way — is the
+one this operation exists to keep unavailable.
 
 > **Normative.** The engine chooses the rendering's format itself: the **first**
 > member of `plays` that the synthesizer's `formats` property also names. It never asks for one outside that intersection, and it never returns a
@@ -436,10 +442,18 @@ caller may attest at this rung is nobody.
 > answered, no turn ran, no episode was captured and no conversation was
 > created. It is not an error and no exception is raised for it.
 
-> **Normative.** Where `outcome` is not `None` it is exactly the `TurnOutcome`
-> `converse` would have produced for that transcript, under every clause
-> ADR-0170 §4, ADR-0173 §6 and ADR-0197 §8 place on it. This call composes a
-> turn; it does not create a second kind of one.
+> **Normative.** Where `outcome` is not `None` it is an ordinary `TurnOutcome`,
+> under every clause ADR-0170 §4, ADR-0173 §6 and ADR-0197 §8 place on one. This
+> call composes a turn; it does not create a second kind of one, and no member of
+> the type means anything different here.
+
+> **Normative.** **One thing about it does differ from what `converse` would
+> return for the same transcript, and it is the whole point of the operation:**
+> `reply` is composed for a channel of unbounded audience (§7), where `converse`
+> composes for whatever channel *its* caller is bound for. Everything else — the
+> turn, the step, the conversation, the routing account, and every degradation
+> flag — is what that transcript would have produced either way. No lane reads
+> this clause as licence for a second difference.
 
 > **Normative.** `spoken` is the rendering of `outcome.reply` and of nothing
 > else: it is what `SpeechSynthesizer.synthesize` returned when handed exactly
@@ -1085,7 +1099,6 @@ each wave must contain if it exists.
 | §4 (line) | Transcription raises `TranscriptionFailedError`; synthesis degrades | Two tests, one per direction, over a seam made to fail |
 | §5 | Blocking work off the loop, bounded and abandonable; no `service` wiring | A test asserts `ai_assistant.service` holds neither Protocol; a test that a wedged seam does not stall the loop |
 | §6 | `hub_max_spoken_audio_bytes`, enforced both ways | A test refusing an oversized utterance before any seam call; a test degrading an oversized rendering |
-| §7 | The ruling applied between the turn and synthesis; `outcome.reply` unchanged | A test that a reduced rendering leaves `outcome.reply` byte-identical |
 | §8 | No audio in any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken turn |
 | §9 | `SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()` | A round-trip test; a test that `wire/codec.py` is unmodified; a rejection test per malformed encoding |
 | §3 (plays) | `plays` required with no default, a non-empty tuple | A test refusing the call with no `plays` and with an empty one; a test that a `frozenset` does not project |
