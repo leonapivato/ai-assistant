@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     GrantScope,
     NotificationCondition,
     NotificationReach,
+    RoutableOperation,
 )
 from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import (
@@ -4072,28 +4073,83 @@ def test_the_routed_account_is_rendered_below_the_answer_and_never_instead_of_it
     )
 
 
-def test_the_page_says_where_a_routed_record_it_cannot_render_is_read() -> None:
-    """The boundary this consumer group stops at, stated on the page.
+def test_every_routed_operation_has_an_arm_and_every_arm_has_a_renderer() -> None:
+    """ADR-0197 §10: an adapter renders "the listing where one is carried", and the
+    clause admits no exception for an arm this page had no panel for.
 
-    ADR-0186 §6 and §10 rule that a browser view of the decision or read trail "is a
-    later consumer lane with its own ratified decision", and ADR-0177 §1's
-    enumeration has admitted none of the four operations below — so this page has no
-    view for their records and says so, naming the surface that shows them.
+    An earlier shape of this lane rendered three of the seven and named the CLI for
+    the other four, on the reading that ADR-0186 §6 and §10 reserve a browser view of
+    either trail for "a later consumer lane with its own ratified decision".
+    Adversarial review blocked it, correctly: that bar is on the **route** and not on
+    the rendering, a routed pass makes no browser request for any of them, and a
+    referral where a listing should be is a turn that did something rendered as a
+    turn that did nothing.
 
-    **It is a sentence and not a summary** (ADR-0197 §5's last clause): the assertion
-    below is that each operation has one, and ``test_gateway_routed.py`` is where the
-    matching half is pinned — that no part of the withheld records crosses at all.
+    Both maps are read, because a hole in either is the same silent failure: an
+    operation with no arm, or an arm with no renderer, renders nothing and says
+    nothing about having rendered nothing.
     """
     script = _code("app.js")
+    arms = re.search(r"const ROUTED_ARM = \{(.*?)\n\};", script, re.DOTALL)
+    renderers = re.search(r"const ROUTED_ARM_RENDERERS = \{(.*?)\n\};", script, re.DOTALL)
+    assert arms is not None
+    assert renderers is not None
 
-    for operation, surface in (
-        ("recent_reads", "assistant reads"),
-        ("recent_invocations", "assistant invocations"),
-        ("recent_decisions", "assistant decisions"),
-        ("spend_totals", "assistant spend"),
-    ):
-        assert f"{operation}:" in script, operation
-        assert f"'{surface}' is where" in script, operation
+    named = dict(re.findall(r"(\w+): \"(\w+)\"", arms.group(1)))
+    assert set(named) == {one.value for one in RoutableOperation}
+    assert set(named.values()) <= set(re.findall(r"(\w+): render", renderers.group(1)))
+
+
+def test_a_routed_ruling_says_it_is_a_ruling_and_not_an_event() -> None:
+    """ADR-0186 §8's first and third clauses, on the page's new decision renderer.
+
+    "Liveness is not derivable from history" — a row states that a ruling was made,
+    never that it still stands, that a grant is current, that an account is connected
+    or that the call ever ran — and no verb here presents a ruling as a transmission.
+    The sentence is printed rather than assumed, because the reader who most needs it
+    is the one treating this as a permissions screen.
+
+    **No control appears on a row** (§8's last clause): a ruling is answered through
+    ``pending_confirmations`` and ``resume``, and a renderer offering an approve or a
+    deny here would be a second door onto a decision that was already taken.
+    """
+    body = _functions(_code("app.js"))["renderDecisionFields"]
+
+    assert "It does not say the ruling still stands" in body
+    assert "createElement" not in body, "no control on a history row"
+    for verb in ("sent", "delivered", "transmitted", "emailed"):
+        assert not re.search(rf"\b{verb}\b", body), verb
+
+
+def test_a_routed_read_row_never_says_what_a_use_did_with_it() -> None:
+    """ADR-0185 §10 and ADR-0186 §8's third clause: a row states what was
+    **attempted**, never what any use did with the reading.
+
+    ``remembering`` is what the ``ingest`` scope phrase says the read was *for*, so
+    the check is on word boundaries — a substring test would fail on prose that
+    claims nothing, which is the CLI's own reason for taking it that way.
+    """
+    body = _functions(_code("app.js"))["renderReadFields"]
+
+    for verb in ("remembered", "learned", "stored", "notified", "told"):
+        assert not re.search(rf"\b{verb}\b", body), verb
+    assert "never the thing itself" in body, "a count, said to be one"
+
+
+def test_a_routed_total_is_never_presented_as_a_bill() -> None:
+    """ADR-0194 §6: a total is the sum of what this system's own tools reported, and
+    no surface presents one as an amount billed, owed or charged.
+
+    **And the consequence line comes from that period's own ceiling**, never from the
+    absence of a total: §2 refuses nothing on an indeterminate period the owner set
+    no ceiling for, so a renderer keying on a missing figure alone tells them their
+    calls are blocked when they are not.
+    """
+    body = _functions(_code("app.js"))["renderSpendFields"]
+
+    assert "not checked against anyone's statement" in body
+    assert "total.ceiling === null" in body, "the ceiling decides it, not the total"
+    assert "!total.ceiling" not in body, "a configured ceiling of zero refuses the most"
 
 
 def test_the_routed_listing_renders_every_record_and_summarises_none() -> None:

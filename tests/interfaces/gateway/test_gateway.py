@@ -834,15 +834,14 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
 
     The cost that entry recorded — ADR-0197's own Consequences, "a client that ignores
     ``routed`` renders a turn that did something as a turn that did nothing" — is
-    therefore paid rather than outstanding. What is *not* carried is four of
-    :data:`~ai_assistant.core.types.RoutedListing`'s seven arms: this page has no view
-    for a ``SourceReadRecord``, a ``RecordedInvocation``, a ``PermissionDecision`` or a
-    ``SpendTotal``, because ADR-0186 §6 and §10 rule that a browser view of either
-    trail "is a later consumer lane with its own ratified decision", and ADR-0177 §1's
-    enumeration has admitted none of the four operations. Those listings cross as an
-    absence that says so and the page states it — never a summary and never a count
-    (ADR-0197 §5's last clause). ``tests/interfaces/gateway/test_gateway_routed.py``
-    is where that boundary is pinned.
+    therefore paid rather than outstanding, and paid whole: all seven of
+    :data:`~ai_assistant.core.types.RoutedListing`'s arms cross as their records,
+    including the four this page had no panel for. ADR-0177 §1's enumeration still
+    admits no browser *request* for ``recent_reads``, ``recent_invocations``,
+    ``recent_decisions`` or ``spend_totals`` — ``test_gateway_decisions.py`` and
+    ``test_gateway_reads.py`` pin that — because that bar is on the route and not on
+    the rendering, and a routed pass makes no browser request for any of them.
+    ``tests/interfaces/gateway/test_gateway_routed.py`` is where the arms are pinned.
     """
     assert set(TurnOutcome.model_fields) == {
         "turn",

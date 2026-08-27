@@ -1149,6 +1149,333 @@ function disclosureWords(provenance) {
   return provenance;
 }
 
+// --- the four arms this page had no panel for (ADR-0197 §10) ------------------
+//
+// **They render here because §10 is unqualified.** ADR-0177 §1's enumeration has
+// never admitted `recent_reads`, `recent_invocations`, `recent_decisions` or
+// `spend_totals` to a *browser request*, and ADR-0186 §6 and §10 keep it that way —
+// but that bar is on the **route** and not on the rendering. A routed pass makes no
+// browser request for any of them: the hub decided the route (ADR-0197 §12), and
+// what reaches this page is a result it must render or misreport. An earlier shape
+// of this lane named the CLI instead, and adversarial review blocked it correctly.
+//
+// **Each of the four owes what its own decision already obliges of every surface
+// that renders it**, inherited rather than invented, and the wording is the CLI's
+// because the two render the same record: ADR-0186 §7's enumeration and §8's bars
+// for a ruling and a read, ADR-0192 §4's two-rows rule for an act, ADR-0194 §5 and
+// §6 for a total. Where the CLI's own renderer says something, this says it in the
+// same words, so the two surfaces cannot drift into two vocabularies for one fact.
+//
+// **None of it is a panel.** No control appears on a row (ADR-0186 §8's last
+// clause), nothing here is offered as something to answer or revoke, and no path
+// resolves to any of the four operations. A browser panel for them is the later
+// consumer lane ADR-0186 §6 names, and is #1642.
+
+// How a read attempt ended, and what that states about opening — the pair
+// `interfaces/cli._read_ending` returns, in the same words (ADR-0185 §1).
+const READ_ENDINGS = {
+  completed: ["completed", "opened, and the grant still stood at the re-check"],
+  refused: ["refused", "not opened: you allowed no live grant for it"],
+  unanswered: ["unanswered", "not opened: I could not find out whether you allowed it"],
+  failed: ["failed", "the read raised; whether it was opened is not recorded"],
+  discarded: [
+    "discarded",
+    "opened, then the grant was gone at the re-check, so the reading was dropped whole",
+  ],
+  unconfirmed: [
+    "unconfirmed",
+    "opened, then the re-check could not be answered, so the reading was dropped whole",
+  ],
+};
+
+// Which grant an attempt cited, or why it cited none. **It is not looked up now**
+// (ADR-0186 §8's first clause): the row says what the attempt cited then, and this
+// page derives no liveness, no scope and no grant history from it.
+function readGrantWords(record) {
+  if (record.grant !== null) {
+    return `${record.grant} (what the attempt cited then; it is not looked up now)`;
+  }
+  if (record.outcome === "unanswered") {
+    return "none cited — the check did not answer, so whether you allowed it is unknown";
+  }
+  return "none — you had allowed no live grant when I checked";
+}
+
+// One recorded read attempt, whole (ADR-0185 §2, ADR-0186 §7).
+//
+// All seven fields, none summarised. **`produced` is a count and is labelled as
+// one**: the record holds no content, no entry and no path, so a line reading "what
+// it said" would be reaching for something ADR-0004 §5 forbids being written down.
+function renderReadFields(item, record) {
+  const ending = READ_ENDINGS[record.outcome] || [record.outcome, ""];
+  line(item, `${ending[0]} — ${record.checked_at}`, "reply");
+  if (ending[1]) {
+    line(item, ending[1], "hint");
+  }
+  line(item, `Source: ${record.source} (as the reader declares it)`, "hint");
+  line(item, `Read for: ${usePhrase([record.use])}`, "hint");
+  line(item, `Under grant: ${readGrantWords(record)}`, "hint");
+  line(
+    item,
+    `Produced: ${record.produced} item(s) (a count of what the source returned, ` +
+      "never the thing itself)",
+    "hint"
+  );
+  line(item, `id: ${record.id}`, "hint");
+}
+
+// How an attempted call ended, and what that does and does not state — the pair
+// `interfaces/cli._invocation_outcome` returns. The `succeeded` arm differs on an
+// outbound call, because "attempted and reported success" is the whole of what this
+// system observes of one (ADR-0192 §4).
+function invocationEnding(outcome, egressCall) {
+  if (outcome === "succeeded") {
+    return egressCall
+      ? "the tool reported success. This was an outbound call, and what that states " +
+          "is that it was attempted and reported success — no more than that"
+      : "the tool reported success";
+  }
+  if (outcome === "failed") {
+    return "the tool reported that the call did not succeed";
+  }
+  if (outcome === "indeterminate") {
+    return (
+      "the tool could not say whether the call took effect, and I cannot resolve " +
+      "that in either direction"
+    );
+  }
+  return "";
+}
+
+// What a call cost, in the three states ADR-0195 gives it. **`free` and `not known`
+// are different statements and neither is a number**, which is why the basis decides
+// this line and the amount never does.
+function costWords(cost) {
+  if (cost.basis === "free") {
+    return "free (the tool reported this invocation carried no charge)";
+  }
+  if (cost.basis === "unknown") {
+    return (
+      "not known (the tool reported no cost for this invocation; that is not the " +
+      "same as free)"
+    );
+  }
+  return `${cost.amount} ${cost.currency}`;
+}
+
+// One recorded act on an authorisation (ADR-0192 §4).
+//
+// **A claim and a completion are two rows and are said to be**, and nothing here
+// pairs them or counts them as one. **Nothing names who or where an outbound call
+// went**: `egress_call` says only whether the ruling this row names carried an
+// outbound binding.
+function renderInvocationFields(item, row) {
+  const claim = row.completes === null;
+  line(item, `${claim ? "call begun" : "call finished"} — ${row.recorded_at}`, "reply");
+  line(
+    item,
+    claim
+      ? "a claim: I spent an authorisation and attempted a call. It does not say the " +
+          "tool itself was entered, and it says nothing about how the call ended"
+      : "a completion: how an attempted call ended, written after it",
+    "hint"
+  );
+  line(item, `Tool: ${row.tool} (capability ${row.capability})`, "hint");
+  line(
+    item,
+    `Outbound call: ${row.egress_call ? "yes" : "no"} (whether the ruling this row ` +
+      "names carried an outbound binding; who or where is not on this row)",
+    "hint"
+  );
+  line(
+    item,
+    `Under authorisation: ${row.decision_id} (what it cited then; it is not looked up now)`,
+    "hint"
+  );
+  if (row.outcome !== null) {
+    line(item, `Ended: ${row.outcome} — ${invocationEnding(row.outcome, row.egress_call)}`, "hint");
+    if (row.outcome !== "succeeded") {
+      line(
+        item,
+        `Failure kind: ${row.failure_kind === null ? "none was reported — the record holds no kind for this one" : row.failure_kind}`,
+        "hint"
+      );
+    }
+    if (row.cost !== null) {
+      line(item, `Cost: ${costWords(row.cost)}`, "hint");
+    }
+  }
+  line(item, `id: ${row.id}`, "hint");
+}
+
+// What a ruling was — a verdict, and never an event (ADR-0186 §8's third clause).
+function decisionWords(outcome) {
+  if (outcome === "allow") {
+    return "allowed";
+  }
+  if (outcome === "deny") {
+    return "refused";
+  }
+  return "asked (a question put to you)";
+}
+
+// What authorised an `allow`, in exactly the three states ADR-0193 §11 names, read
+// off the pair the row carries and off no field that pre-computes it (§6).
+//
+// **The second state says exactly what the row says and nothing more**: that this
+// decision *names* a standing authorisation. It does not state that the named grant
+// exists, is held, is live, is unrevoked or covers anything now — ADR-0186 §8's
+// first clause, read on this fact.
+//
+// **A row carrying both a different `resolves` and an `authorised_by` is not one
+// this page chooses between.** The CLI raises there; a view that raised would take
+// the whole turn's rendering with it, so this says what the row is instead. Either
+// way nothing guesses: "this listing states what authorised a call rather than
+// guessing between them".
+function authorisationWords(decision) {
+  if (decision.authorised_by === null) {
+    return "the policy's own rules, resting on no decision of yours";
+  }
+  if (decision.resolves === null) {
+    return (
+      "a standing authorisation this ruling names, recorded as " +
+      `${decision.authorised_by} (what the row names, and no more)`
+    );
+  }
+  if (decision.authorised_by === decision.resolves) {
+    return `a decision you took about this call, recorded as ${decision.authorised_by}`;
+  }
+  return (
+    `this row answers ${decision.resolves} and rests on ${decision.authorised_by}. No ` +
+    "ruling an audit trail accepts carries both, so nothing here chooses between " +
+    "them — 'assistant export-decisions' writes the record as it stands."
+  );
+}
+
+// The call's origin as the recorded predicate carries it, including the arm that
+// carries none. **ADR-0184 §2's unrecorded arm states nothing either way**, and a
+// renderer reading its absence as "no external content" would make a claim the
+// record does not.
+function recordedOriginWords(binding) {
+  if (binding.origin_unrecorded) {
+    return (
+      "not recorded — this ruling was made before this assistant kept the origin of " +
+      "a call, so the record states nothing either way about the material it selected"
+    );
+  }
+  return originWords(binding.planned_with_external_content);
+}
+
+// The binding a ruling was taken over (ADR-0186 §7, ADR-0178 §7's facts).
+//
+// **The labels are what change from the card's** (ADR-0186 §8's third clause): a
+// card says where a call is going because it has not gone; a row says what a ruling
+// was taken over, because the trail bounds resolutions and no row knows whether
+// anything ran. "Goes to" on a history row would be a transmission claim in two
+// words.
+//
+// **Every span, none omitted, none reordered, none truncated** (§7's
+// last-but-one clause), through the same `spanWords` and `destinationWords` the card
+// uses — one vocabulary, so a history cannot render a disclosure the card did not.
+function renderRecordedBinding(item, binding) {
+  line(item, `Account: ${binding.account_identity}`, "hint");
+  line(item, `Planned over: ${recordedOriginWords(binding)}`, "hint");
+  line(item, "Ruled over these recipients:", "hint");
+  binding.destinations.forEach((one) => line(item, destinationWords(one), "hint"));
+  line(item, "Payload described as:", "hint");
+  if (binding.spans.length === 0) {
+    line(item, "the payload description names no span", "hint");
+  }
+  binding.spans.forEach((one) => line(item, spanWords(one), "hint"));
+}
+
+// One recorded ruling, whole (ADR-0186 §7).
+//
+// **What is deliberately absent is as load-bearing as what is here.** No `reads`,
+// `writes` or `discloses` — they are ceilings rather than per-call measurements
+// (§8's fifth clause) — nothing computes `authorises` (§8's second), and no answer,
+// approve or deny control appears on a row (§8's last). **A liveness sentence is
+// printed rather than assumed**, because the reader who most needs it is the one
+// treating this as a permissions screen.
+function renderDecisionFields(item, decision) {
+  line(item, `${decisionWords(decision.outcome)} — ${decision.decided_at}`, "reply");
+  line(item, `Tool: ${decision.tool_id} (capability ${decision.capability})`, "hint");
+  line(item, `Why: ${decision.reason}`, "hint");
+  line(item, `Digest: ${decision.parameters_digest} (a digest, never the arguments)`, "hint");
+  if (decision.resolves !== null) {
+    line(item, `Answers the question: ${decision.resolves}`, "hint");
+  }
+  if (decision.outcome === "allow") {
+    line(item, `Authorised by: ${authorisationWords(decision)}`, "hint");
+  }
+  if (decision.binding !== null) {
+    renderRecordedBinding(item, decision.binding);
+  }
+  line(item, `id: ${decision.id}`, "hint");
+  line(
+    item,
+    "This is a ruling that was made. It does not say the ruling still stands, that a " +
+      "grant is current, that an account is still connected, or that the tool is still " +
+      "registered under the identifier above — and it does not say the call ever ran.",
+    "hint"
+  );
+}
+
+const PERIOD_NAMES = { calendar_day: "Today", calendar_month: "This month" };
+
+// One period's total, in the states ADR-0194 §5 and §6 give it.
+//
+// **An absence is rendered as the state it is, and `currency` tells the two apart**:
+// `currency` null means none is configured and no total was computed; a currency
+// beside a null `accounted` means the period could not be measured. Collapsing them
+// would tell an owner "no total" while their calls are being refused.
+//
+// **The consequence line is printed from that period's own ceiling and never from
+// the absence of a total** — a renderer keying on a missing figure alone tells an
+// owner their calls are blocked when they are not — and **nothing here reads
+// falsiness of a ceiling**, because a configured ceiling of zero refuses the most.
+function renderSpendFields(item, total) {
+  line(item, PERIOD_NAMES[total.period] || total.period, "reply");
+  line(item, `from ${total.period_start} (${total.start_offset})`, "hint");
+  line(item, `up to (not including) ${total.period_end} (${total.end_offset})`, "hint");
+  if (total.currency === null) {
+    line(item, "No spend currency is configured, so I am not keeping a total.", "hint");
+    return;
+  }
+  if (total.accounted === null) {
+    line(
+      item,
+      `Not measurable. Something in this period has no price I may add — a call still ` +
+        `in flight, or one whose cost nobody reported — so I will not state a ` +
+        `${total.currency} figure I would be inventing.`,
+      "notice"
+    );
+    line(
+      item,
+      total.ceiling === null
+        ? "Nothing is being refused on that account: you have set no ceiling for this period."
+        : `Nothing further will run in this period while that is so: there is a ceiling ` +
+            `of ${total.ceiling} ${total.currency} here and I cannot tell whether a call ` +
+            "would cross it.",
+      total.ceiling === null ? "hint" : "failed"
+    );
+    return;
+  }
+  line(
+    item,
+    total.ceiling === null
+      ? `${total.accounted} ${total.currency} — no ceiling set for this period.`
+      : `${total.accounted} ${total.currency} of a ceiling of ${total.ceiling} ${total.currency}`,
+    "reply"
+  );
+  line(
+    item,
+    "These are the prices my own tools reported for the calls I made. They are not a " +
+      "bill, not an amount owed, and not checked against anyone's statement.",
+    "hint"
+  );
+}
+
 // --- the routed account (ADR-0197 §10) ---------------------------------------
 //
 // **Beside the reply, never instead of it, and never suppressed.** §10 is ADR-0170
@@ -1208,28 +1535,6 @@ const ROUTED_DONE = {
   forget_question: "Done. That question is destroyed.",
 };
 
-// Where a record this page does not render is read instead.
-//
-// **This is not a summary and it is not a count** (ADR-0197 §5's last clause). It is
-// the statement that a listing was carried and that this surface has no renderer for
-// it — which is true because ADR-0177 §1's enumeration of what a browser request may
-// resolve to has never admitted `recent_reads`, `recent_invocations`,
-// `recent_decisions` or `spend_totals`, so this page has no panel, no view and no
-// discharged rendering obligations for any of their records. Building them here
-// would be the browser's first trail surface decided inside a rendering lane, which
-// is what ADR-0197 §12's "with the renderer it already has for the operation" bounds
-// this consumer group against. Filed for its own lane.
-const ROUTED_ELSEWHERE = {
-  recent_reads: "I read that from my own record, but this page has no view for read " +
-    "attempts yet. 'assistant reads' is where they are shown.",
-  recent_invocations: "I read that from my own record, but this page has no view for " +
-    "acts on an authorisation yet. 'assistant invocations' is where they are shown.",
-  recent_decisions: "I read that from my own record, but this page has no view for " +
-    "the permission layer's rulings yet. 'assistant decisions' is where they are shown.",
-  spend_totals: "I worked that out from my own record, but this page has no view for " +
-    "spend totals yet. 'assistant spend' is where they are shown.",
-};
-
 // The sentences a routed confirm card carries around its subject.
 //
 // **Every word is this page's own, selected by the enum member** (ADR-0197 §7). No
@@ -1261,14 +1566,34 @@ const ROUTED_CARD_NOTES = {
 // Which of ADR-0197 §8's arms each operation lists, read off `operation` and never
 // off the value's shape — §8 in terms, because "an empty tuple is a legal value of
 // every arm, so the shape decides nothing on exactly the case a listing is most
-// likely to take". The gateway sends records only for the three arms below; the four
-// it withholds arrive as `listing: null` with `listing_unrendered` true.
+// likely to take".
+//
+// **Total over the nine operations**, so §10's "the listing where one is carried"
+// has a renderer for every listing that can arrive. A member added under ADR-0197
+// §3's widening rule renders nothing here until it is added, which is why the
+// omission is a missing key rather than a silent fallback.
 const ROUTED_ARM = {
   questions: "question",
   forget_question: "question",
   forget: "belief",
   revoke: "grant",
   standing_grants: "grant",
+  recent_reads: "read",
+  recent_invocations: "invocation",
+  recent_decisions: "decision",
+  spend_totals: "spend",
+};
+
+// The renderer for each arm — the one this page uses for that record wherever it
+// appears, so a routed listing and a panel cannot render one record two ways.
+const ROUTED_ARM_RENDERERS = {
+  belief: renderBeliefFields,
+  question: renderQuestionFields,
+  grant: renderGrantFields,
+  read: renderReadFields,
+  invocation: renderInvocationFields,
+  decision: renderDecisionFields,
+  spend: renderSpendFields,
 };
 
 // What became of the routed operation, in this page's own words. Total over
@@ -1358,10 +1683,6 @@ function renderRouted(body, routed) {
   line(body, routedHeadline(routed), routedClass(routed.outcome));
   if (routed.listing !== null) {
     renderRoutedListing(body, routed.operation, routed.listing);
-    return;
-  }
-  if (routed.listing_unrendered) {
-    line(body, ROUTED_ELSEWHERE[routed.operation] || "", "notice");
   }
 }
 
@@ -1385,17 +1706,9 @@ function renderRoutedListing(body, operation, listing) {
 // One record, rendered with the renderer this page already has for its arm — which
 // is ADR-0197 §12's last Normative and the whole of why this is a consumer group.
 function renderRoutedRecord(item, operation, record) {
-  const arm = ROUTED_ARM[operation];
-  if (arm === "belief") {
-    renderBeliefFields(item, record);
-    return;
-  }
-  if (arm === "question") {
-    renderQuestionFields(item, record);
-    return;
-  }
-  if (arm === "grant") {
-    renderGrantFields(item, record);
+  const render = ROUTED_ARM_RENDERERS[ROUTED_ARM[operation]];
+  if (render) {
+    render(item, record);
   }
 }
 
