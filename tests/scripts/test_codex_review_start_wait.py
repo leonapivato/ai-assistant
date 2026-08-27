@@ -269,29 +269,36 @@ def test_wait_reports_a_round_that_died_without_recording(tmp_path: Path) -> Non
     assert "codex produced an empty review" in result.stderr
 
 
-def _release_blocking_artifact(path: Path, seconds: float = 60.0) -> None:
-    """Unblock a reader stuck on the named pipe at ``path``, and unname it.
+def _hold_round_until(gate: Path) -> str:
+    """A ``FAKE_CODEX_PRE_CMD`` that parks the round until ``gate`` exists.
 
-    Opened non-blocking, which fails with ``ENXIO`` until a reader is there, so
-    this polls instead of hanging the suite when nothing ever reads it.
+    The round is what publishes the artifact, so gating it is what lets a test
+    state *when* publication happens instead of racing a `sleep` against it. It
+    gives up after a minute rather than parking forever, so a test that fails
+    before it opens the gate leaves nothing behind.
+    """
+    return f'for _ in $(seq 600); do [ -e "{gate}" ] && break; sleep 0.1; done'
 
-    The name is removed as soon as the reader is attached, and before the write:
-    both descriptors are already open, so the write still lands, and no later
-    directory listing can reopen the pipe and block on it with no writer left. A
-    pipe unlinked one statement later would leave the poller's next listing racing
-    this process — timing-dependent, which is the one thing the test below is not.
+
+def _attach_to_blocking_artifact(path: Path, seconds: float = 60.0) -> int:
+    """Block until something is reading the named pipe at ``path``; hold a writer.
+
+    Non-blocking, so the open fails with ``ENXIO`` until a reader is there rather
+    than hanging the suite when nothing ever reads it — which makes its success a
+    *proof* that the reader has arrived, and that is what the test below needs
+    before it may let anything else happen.
+
+    The returned descriptor is deliberately left open and empty: a writer exists,
+    so the reader stays blocked with nothing to read, and the caller decides when
+    it is released by writing into it. Closing it here instead would send the
+    reader an immediate EOF, which is the opposite of a hold.
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
         except OSError:
             time.sleep(0.05)
-            continue
-        path.unlink()
-        with os.fdopen(fd, "w") as handle:
-            handle.write("not a review artifact\n")
-        return
     raise AssertionError(f"nothing read {path} within {seconds}s")
 
 
@@ -307,17 +314,26 @@ def test_wait_reports_a_round_that_finished_while_the_poll_was_looking(tmp_path:
     `worker.md` tells a lane a 4 is never a reason to wait again, so the natural
     next move is to relaunch the round that just succeeded.
 
-    The interleaving is forced rather than raced for. A named pipe in the artifact
-    directory blocks the `head` that reads each candidate's provenance, so `--wait`
-    is held *inside* a listing expanded before the round recorded anything, and the
-    hold is released only once the round has recorded and exited. Under the
-    inverted order that listing is the one the answer is computed from, and the
-    answer is exit 4; under this one the listing is taken after the liveness
-    observation it must outlive, and the artifact is found.
+    The interleaving is forced in BOTH directions rather than raced for, because a
+    test that only raced would fail in the silent direction: if the poll were
+    scheduled late, its listing would be expanded after publication, the inverted
+    order would answer 0 as well, and the test would pass while covering nothing.
+    So a named pipe in the artifact directory blocks the `head` that reads each
+    candidate's provenance, and the round itself is parked until this test opens
+    its gate. The four steps below then establish, in order and by construction:
+    the poll is inside a listing (the pipe has a reader), that listing predates
+    publication (the round is still parked), the round has published and exited
+    (the gate is open and it is reaped), and only then is the listing released.
+
+    Under the inverted order that stale listing is the one the answer is computed
+    from, and the answer is exit 4 about a green round. Under this one the listing
+    is taken after the liveness observation it must outlive, so the round is seen
+    running, and the artifact is found on the next poll.
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 4")
+    gate = tmp_path / "let-the-round-publish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(gate))
     assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
 
     # Created only now: the round's own round-count scan reads this directory
@@ -333,18 +349,29 @@ def test_wait_reports_a_round_that_finished_while_the_poll_was_looking(tmp_path:
         stderr=subprocess.PIPE,
         text=True,
     )
+    held = -1
     try:
-        # The round is gone, so its artifact is already renamed into place — it is
-        # written before the process exits. Nothing reads `.review/` here: a reader
-        # would block on the pipe alongside `--wait`, and the assertion it would
-        # make is made below, off what `--wait` reports.
+        # 1. The poll is inside a listing, and 2. that listing was expanded while
+        #    the round was still parked, so it cannot contain the artifact.
+        held = _attach_to_blocking_artifact(blocker)
+        blocker.unlink()
+        # 3. Let the round publish and exit. Its artifact is renamed into place
+        #    before the process goes, so reaping it establishes both.
+        gate.touch()
         _reap(repo)
-        _release_blocking_artifact(blocker)
+        # 4. Release the listing from step 1 — the stale one.
+        os.write(held, b"not a review artifact\n")
+        os.close(held)
+        held = -1
         stdout, stderr = waiter.communicate(timeout=120)
     finally:
+        if held != -1:
+            os.close(held)
+        gate.touch()  # never leave a parked round behind, however this exited
         if waiter.poll() is None:
             waiter.kill()
             waiter.communicate()
+        _reap(repo)
         with contextlib.suppress(FileNotFoundError):
             blocker.unlink()
 
