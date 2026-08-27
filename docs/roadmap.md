@@ -275,16 +275,19 @@ the lane this track opens with and it waits on nothing else here.
   `ATTESTED` with the spoke as `reported_by` and capture-triggered provenance.
   ADR-0094 §10 defers the spoke surface until a second spoke exists, and
   `track:web-client`'s gateway is that second spoke, so that surface is a
-  prerequisite of this milestone rather than part of it. **This milestone pays
-  the ambient collision first** (stance 7): whoever opens it rules that
-  collision before building. It also owes the remote-hop ruling — room audio to
-  a non-local hub under ADR-0017 §1, where transcript-only does not rescue the
-  hop. And it is the producer ADR-0094 §7–§8 wait on: a spoke may not destroy
-  the material a submission was derived from while that submission is
-  unresolved, the hub retains that material only for a bounded verification
-  window, raw source material is never an episode, and the window's figures —
-  like the buffer's, and like the custody handoff §8 leaves undecided — are
-  named by this milestone's deciding ADR rather than by ADR-0094 (§8, §10).
+  prerequisite of this milestone rather than part of it. **What this milestone
+  rules before it builds anything**, none of it settled here: the ambient
+  collision (stance 7); the remote hop, since room audio to a non-local hub is
+  ADR-0017 §1's question and transcript-only does not rescue it; the custody
+  terms of ADR-0094 §7–§8 — a spoke may not destroy the material a submission
+  was derived from while that submission is unresolved, the hub retains it only
+  for a bounded verification window, raw source material is never an episode,
+  and the figures (the window's, the buffer's, and the custody handoff §8 leaves
+  undecided) are named by this milestone's deciding ADR rather than by ADR-0094;
+  and the mixed-origin seam, because a captured room carries a third party's
+  speech, which ADR-0098 §1 rules external content where the owner's own
+  utterance is not — the mechanism for a record holding both, and the gate
+  consequence behind it, are ADR-0098 §12's first deferral (ADR-0163 §8).
   *Exit: the owner says "capture that"; the preceding ~30s lands as an
   inspectable episode at the hub with who-triggered-retention provenance; and
   the buffer's non-retention outside a capture is demonstrable.*
