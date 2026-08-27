@@ -1,7 +1,47 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded)
 - Date: 2026-08-27
+- **Partially superseded: 2026-08-28 by ADR-0203 — §4's second-difference clause,
+  only as it reaches an operation whose output channel's audience is unbounded, and
+  nothing else of §4 or of this ADR.** §4 rules that on `converse_spoken`
+  "`outcome.reply` is the one thing that differs" and that "everything else — the
+  turn, the step, the conversation, the routing account, and every degradation flag
+  — is what that transcript would have produced either way. No lane reads this
+  clause as licence for a second difference." The milestone-19 QA run (#1691) filed
+  #1692 and #1693 against the arrangement that sentence describes, and ADR-0203 §1
+  takes them by subtracting what ADR-0199 §3 withholds **before the turn plans**.
+
+  **Replaced — the turn and the step, on such an operation.** The `TurnResult` such
+  a call returns is now the turn that actually ran on that channel: its `context`,
+  its `memories` and the `plan` those inputs produced. And the step is not
+  independent of the plan — `Engine._run_turn` drives `turn.plan.steps[0]` — so a
+  plan authored over a narrower supply may drive a different step or none at all.
+  A reader holding only this ADR would refuse the implementation ADR-0203 requires,
+  which is ADR-0070 §1's test, so this is a supersession and it is **partial** in
+  ADR-0070 §3's sense. ADR-0203 §3 states the whole of the difference it admits and
+  forbids a third.
+
+  **Not replaced — the two the plan does not determine.** The conversation the turn
+  runs under and its resolution, and the routing account of a routed pass, stay true
+  word for word, as do `heard` and `TurnResult.memory_degraded`, which
+  `LearningLoop.respond` computes from the history read and the retrieval — both of
+  them upstream of the subtraction.
+
+  **Not replaced — the degradation ladder, whose rules are untouched.** A
+  degradation flag is no longer *pinned to a value*, since `reply_degraded`,
+  `capture_degraded` and `spoken_degraded` are each computed from something ADR-0203
+  may change; its rule and its shape are exactly as §4 wrote them, §4's exactly-when
+  clause for `spoken_degraded` included, and no implementation may suppress, force
+  or second-guess a flag to hold one stable.
+
+  **Not replaced — anything else in this ADR.** `SpokenTurn`'s four members, the
+  `heard`/`outcome` pairing, the blank-transcript shape, the local refusals ordered
+  ahead of it, the byte-for-byte transcript, `spoken` as the rendering of
+  `outcome.reply` and of nothing else, §3's declaration that this operation's
+  audience is unbounded, §7 in full — whose third clause ADR-0203 makes true rather
+  than narrows — and §8's refusal to add a field to `EpisodicMemory`, to
+  `Provenance` or a record of the channel, all bind exactly as they did.
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `wire/`, from `interfaces/gateway/`, from `models/`, or from an issue — is of
