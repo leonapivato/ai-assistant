@@ -562,12 +562,19 @@ files and did not replace them. Labels are how work is found, and they are a
 small fixed set (#1226 §6).
 
 **Track labels — at most one per issue.** A track is a standing program of work
-with a purpose, ordered milestones and driveable exits. **The live set is
-`gh label list --limit 100`**, which is not enumerated here: this file went two
-tracks stale the last time it was, and a list that decays is worse than a
-pointer. Pass the `--limit`: `gh` defaults it to 30, and a listing silently cut
-at 30 is the failure this pointer exists to avoid — the same caveat the `ruling`
-query carries below.
+with a purpose, ordered milestones and driveable exits. **The live set is the
+tracker's own**, and it is not enumerated here: this file went two tracks stale
+the last time it was, and a list that decays is worse than a pointer. Read it
+whole with
+
+```bash
+gh api --paginate repos/{owner}/{repo}/labels --jq '.[].name'
+```
+
+rather than with `gh label list`, whose `--limit` is a maximum and defaults to
+30 — a listing silently cut at its limit is the failure this pointer exists to
+avoid.
+
 `docs/roadmap.md` carries each track's shape, its own issue carries its live
 state, and the label's own description names that issue.
 
@@ -576,12 +583,14 @@ a finding that belongs to a subsystem another track has a lane open in: file it
 to the track that holds that subsystem, not to both (`docs/roadmap.md` →
 "Concurrency").
 
-**The backlog is a severity family, not a track and not a bare label** (owner's
-ruling, 2026-08-27). An issue that has been triaged onto *no* program of work —
-opportunistic hardening and debt, which is what distinguishes it from one nobody
-has looked at yet — carries exactly one of `backlog:blocker`, `backlog:major`,
+**The backlog is a severity family, not a track and not a bare label.** An issue
+that has been triaged onto *no* program of work — opportunistic hardening and
+debt, which is what distinguishes it from one nobody has looked at yet — carries
+exactly one of `backlog:blocker`, `backlog:major`,
 `backlog:minor` or `backlog:unknown`, *instead of* a `track:*` label and never
-alongside one. Census: #1232.
+alongside one. **#1232 is the census and the conventions record**, and it is
+where the ruling behind this rule is written down — so a later ruling moves it
+there and this section stays a rule rather than a snapshot of one.
 
 - The three named severities are **`docs/review/guide.md`'s words** — `blocker`
   (must fix before merge), `major` (should fix), `minor` (worth noting) — read
