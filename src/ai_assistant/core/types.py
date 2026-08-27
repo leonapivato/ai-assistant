@@ -9318,10 +9318,16 @@ class ToolResult(BaseModel):
     asynchronous, so a ``spent`` field would hold a number the tool made up — is
     answered rather than waived: the field is a :class:`ToolCost`, so a tool that
     cannot know reports ``UNKNOWN`` and an accumulator fails closed on it, which
-    is ADR-0016 §4's own distinction between *free* and *unknown*. **Nothing
-    populates it yet**: ``ToolImplementation`` returns ``FrozenJson`` and no ADR
-    owns minting a carrier, which is #1558's. The disclosure-report half of §3's
-    sentence stands and issue #57 is untouched.
+    is ADR-0016 §4's own distinction between *free* and *unknown*. **A tool
+    populates it on an exit it composes itself** (ADR-0195, which answered
+    #1558): a successful call returns a :class:`ReportedOutput`, which the
+    invocation seam unwraps and revalidates onto this field, and a classified
+    failure will carry one on ``ClassifiedToolError`` once ADR-0032's own lane
+    builds that carrier (#1614). On the two exits a tool does **not** compose —
+    an exception escaping, and this seam's deadline expiring or a cancellation
+    being delivered — it reports nothing and the row records an ``UNKNOWN``
+    basis, because that is the truth (ADR-0195 §1). The disclosure-report half of
+    §3's sentence stands and issue #57 is untouched.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9368,6 +9374,64 @@ class ToolResult(BaseModel):
             msg = f"a {self.outcome} result carries no output, got a {type(self.output).__name__}"
             raise ValueError(msg)
         return self
+
+
+class ReportedOutput(BaseModel):
+    """A successful call's output together with what that call cost (ADR-0195 §2).
+
+    The carrier for the **success exit** — one of the two exits a tool composes
+    itself, the other being the ``ClassifiedToolError`` ADR-0032 specifies and
+    ADR-0195 §3 gives a matching field to (ratified, unbuilt, #1614). A tool that
+    knows what its call cost returns one of these in place of its bare output;
+    the invocation seam discriminates the two by ``isinstance`` and by no other
+    test, revalidates the figure, and records it on
+    :attr:`ToolResult.incurred_cost`.
+
+    **The envelope is unwrapped at that seam and travels no further.** No
+    ``ToolResult``, ``StepExecution``, audit row, wire message or consumer of
+    ``ToolInvoker`` ever holds one, so ADR-0087's encoding is untouched.
+
+    :attr:`incurred_cost` is **required**. A tool with nothing to report returns
+    its output bare, which is what every registered tool in this system does
+    today, and an envelope whose cost was optional would be a second spelling of
+    that bare return — the shape ADR-0031 §1 exists to remove. Reporting an
+    ``UNKNOWN`` basis is permitted and lands identically to reporting nothing
+    (ADR-0195 §5), so an integration computing a figure from a tariff table that
+    sometimes yields ``UNKNOWN`` need not branch at its return statement.
+
+    :attr:`output` carries :data:`FrozenJsonValue`, the same annotation
+    :attr:`ToolResult.output` carries, so the envelope opens **no** route by
+    which content reaches a result that a bare return does not already reach. A
+    value that annotation refuses raises here, at the envelope's own
+    construction, in the tool's own frame, and escapes as an ordinary exception —
+    which the seam classifies ``INTERNAL``, exactly where the same value lands
+    when it is returned bare (ADR-0029 §3). It cannot nest either:
+    :data:`FrozenJsonValue` admits no ``BaseModel``, so :attr:`output` can never
+    hold another envelope and there is no unwrapping loop to get wrong.
+
+    **It states a price and never an outcome.** There is no field here for a
+    ``ToolOutcome``, a ``ToolFailure`` or anything else the seam rules, and
+    ``extra="forbid"`` stops one being smuggled in: a callable's own account of
+    what happened to it is not evidence (ADR-0031 §2), while a price is the one
+    thing about the call that only the integration can know (ADR-0195 §1, §5).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    output: FrozenJsonValue = Field(
+        default=None, description="What the call produced, exactly as a bare return would carry it."
+    )
+    incurred_cost: ToolCost = Field(
+        description=(
+            "What *this* call cost, as the integration itself learned it: a charge "
+            "the upstream returned, a metered quantity its response carried, or a "
+            "tariff the integration's provider publishes. Never "
+            "``ToolDefinition.cost``, never a configured allowance and never a "
+            "number constructed to fill the field (ADR-0192 §5, ADR-0195 §5) — a "
+            "tool that cannot price the call returns its output bare or reports an "
+            "``UNKNOWN`` basis, which land identically."
+        )
+    )
 
 
 class ToolCall(BaseModel):

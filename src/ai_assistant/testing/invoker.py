@@ -45,6 +45,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     UNREPRESENTABLE_FAULT_CLASS,
     CostBasis,
+    ReportedOutput,
     ToolCall,
     ToolCost,
     ToolFailure,
@@ -67,6 +68,12 @@ if TYPE_CHECKING:
         ToolInvocation,
     )
 
+    #: What a fake binding's callable may hand back: the output bare, or the
+    #: output with what the call cost (ADR-0195 §2). A parallel declaration of
+    #: what `tools/` widened, for the reason everything in this module is
+    #: parallel — the fake may not import the subsystem it stands in for.
+    ReportedReturn = FrozenJson | ReportedOutput
+
 
 class FakeToolImplementation(Protocol):
     """The callable a fake binding runs.
@@ -75,6 +82,23 @@ class FakeToolImplementation(Protocol):
     callable's shape internal to that subsystem, so this is a parallel
     declaration rather than a shared contract, and the conformance suite is what
     holds the two to the same observable behaviour.
+
+    Since ADR-0195 §2 that includes the **cost channel**: an implementation may
+    return its output inside a
+    :class:`~ai_assistant.core.types.ReportedOutput` rather than bare, and this
+    fake unwraps it by the same rules the real seam does. The envelope lives in
+    ``core`` precisely so this module can reach it without importing
+    ``ai_assistant.tools`` — ADR-0032's own argument for ``ClassifiedToolError``'s
+    home, one type over.
+
+    **One callable shape, and the egress one is deliberately not modelled here.**
+    ``tools/`` resolves a second shape at registration
+    (``EgressToolImplementation.invoke_bound``), and which callable a declaration
+    binds is `tools/`-internal and contracted nowhere (ADR-0152 §10). Giving this
+    fake a second shape would widen ``ai_assistant.testing`` to cover a concern
+    none of its consumers has (ADR-0029 §1), so the egress arm of ADR-0195 §2's
+    widening is proved at the real seam instead — issue #1618, and the narrowing
+    recorded there.
     """
 
     async def __call__(
@@ -82,8 +106,8 @@ class FakeToolImplementation(Protocol):
         parameters: Mapping[str, FrozenJson],
         *,
         idempotency_key: str | None,
-    ) -> FrozenJson:
-        """Perform the call and return its JSON-shaped output."""
+    ) -> ReportedReturn:
+        """Perform the call and return its JSON-shaped output, priced or bare."""
         ...
 
 
@@ -395,6 +419,10 @@ class FakeToolInvoker:
         cancellation and returns a value would otherwise be reported
         ``SUCCEEDED`` after a cancelled turn, or after outrunning its deadline.
 
+        A normal return may be ADR-0195 §2's envelope rather than a bare output,
+        and :func:`_succeeded` owns what happens then: the figure is revalidated
+        onto ``ToolResult.incurred_cost`` and no envelope travels past this frame.
+
         ``timeout`` is what is **left** of the caller's budget after the admission
         (ADR-0194 §3); ``stated`` is the whole of it, and names the figure an expiry
         message carries so a user reads the deadline they set.
@@ -416,14 +444,117 @@ class FakeToolInvoker:
                 binding.definition, exc
             )
 
+        # ADR-0195 §4's **first** interruption check, in the place it already had:
+        # a call this seam has ruled interrupted has nothing read off what it
+        # returned, so a hostile accessor on an envelope is never entered at all.
         interrupted = _interruption(binding.definition, named, deadline, entered_with)
         if interrupted is not None:
             return interrupted
 
-        try:
-            return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=output)
-        except ValidationError as exc:
-            return _internal(binding.definition, exc)
+        return _succeeded(
+            output,
+            definition=binding.definition,
+            timeout=named,
+            deadline=deadline,
+            entered_with=entered_with,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportedRead:
+    """What one pass over a returned envelope's two fields captured (ADR-0195 §2).
+
+    See ``ai_assistant.tools.invocation``: a record rather than a tuple, because
+    the ``output`` a defect leaves behind is not an output and ``FrozenJson`` has
+    no sentinel to spare — ``None`` is a perfectly ordinary tool output.
+    """
+
+    #: The local the single guarded read of ``output`` captured.
+    output: FrozenJson = None
+    #: The validated, detached figure, or ``None`` where the tool reported none,
+    #: where the round-trip refused it, or where reading it raised.
+    cost: ToolCost | None = None
+    #: What the read of ``output`` raised, where it did.
+    defect: Exception | None = None
+
+
+def _revalidated_cost(envelope: ReportedOutput) -> ToolCost | None:
+    """Round-trip the reported figure, or answer ``None`` (ADR-0195 §4).
+
+    ``ToolCost.model_construct`` bypasses every validator while satisfying
+    ``isinstance``, so the figure that crosses is
+    ``ToolCost.model_validate(cost.model_dump())`` — a validated, detached value.
+    The whole read runs under one ``Exception`` guard because every step of it is
+    tool-authored code: the attribute access can be a property and ``model_dump``
+    can be overridden, which ADR-0032 §6 rules legitimate. This sits after the
+    claim, so an exception escaping would leave a claim with no completion.
+
+    A ``BaseException`` that is not an ``Exception`` propagates unchanged: a
+    cancellation is not an accounting fact. Nothing derived from the
+    ``ValidationError`` a refusal produces reaches a message or a log.
+    """
+    try:
+        return ToolCost.model_validate(envelope.incurred_cost.model_dump())
+    except Exception:
+        return None
+
+
+def _reported_read(envelope: ReportedOutput) -> _ReportedRead:
+    """Read the envelope's two fields **once each**, under their guards (ADR-0195 §2).
+
+    ``isinstance`` admits a subclass, so both fields are tool-authored reads and
+    neither is read bare. The two defects resolve differently on their subject: a
+    cost that cannot be read or does not survive is discarded **alone** and the
+    row records ``UNKNOWN``, while an ``output`` that cannot be read leaves
+    nothing to record as the call's result and takes the ``INTERNAL`` path, its
+    reported cost discarded with it and never read.
+    """
+    try:
+        output = envelope.output
+    except Exception as exc:
+        return _ReportedRead(defect=exc)
+    return _ReportedRead(output=output, cost=_revalidated_cost(envelope))
+
+
+def _succeeded(
+    returned: ReportedReturn,
+    *,
+    definition: ToolDefinition,
+    timeout: timedelta,
+    deadline: asyncio.Timeout,
+    entered_with: int,
+) -> ToolResult:
+    """Classify a normal return, unwrapping a reported cost if one came with it.
+
+    ADR-0195 §4's fixed order, and it is **two** interruption checks rather than
+    one moved: the caller's keeps its place before any tool-authored value is
+    read, and the one here follows the reads, because reading such a value can
+    itself deliver a cancellation or let the deadline expire. Where the second
+    answers, the values read are discarded with the classification they
+    accompanied — one carrier has one fate.
+
+    A malformed cost does not turn a successful call into ``INTERNAL``: it is
+    discarded alone and the row records ``UNKNOWN``, while an unreadable output
+    leaves nothing to record and takes ``INTERNAL``.
+
+    Raises:
+        CancelledError: If a cancellation of the invoking task is pending — a
+            read of a tool-authored value delivering one included.
+    """
+    cost: ToolCost | None = None
+    if isinstance(returned, ReportedOutput):
+        read = _reported_read(returned)
+        interrupted = _interruption(definition, timeout, deadline, entered_with)
+        if interrupted is not None:
+            return interrupted
+        if read.defect is not None:
+            return _internal(definition, read.defect)
+        returned, cost = read.output, read.cost
+
+    try:
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=returned, incurred_cost=cost)
+    except ValidationError as exc:
+        return _internal(definition, exc)
 
 
 def _pending_cancellations() -> int:
