@@ -839,3 +839,24 @@ def test_every_transcription_failure_raised_in_orchestration_names_its_failure()
     assert raises, "no TranscriptionFailedError is constructed in orchestration/"
     for call in raises:
         assert any(keyword.arg == "failure" for keyword in call.keywords), ast.dump(call)
+
+
+# --- §6: the bound has to be able to bind ------------------------------------
+
+
+@pytest.mark.parametrize("unusable", [float("nan"), float("inf"), 1.5, True, 0, -1])
+def test_an_audio_bound_that_could_not_bind_is_refused_at_construction(
+    unusable: object,
+) -> None:
+    """§6's ceiling is guarded where it is injected, not only where it is configured.
+
+    ``Settings`` refuses these at load, but this is a **constructor** argument and a
+    composition root is not the only caller. The failure mode is also the silent
+    kind rather than the loud one: ``float("nan")`` compares ``False`` against every
+    ``>``, so an engine built with one would admit a recording of any length and
+    return a rendering of any length while reporting health — a bound that cannot
+    bind is not a weaker bound but an absent one. ``True`` earns its place twice
+    over: a one-byte audio ceiling refuses every recording a browser can produce.
+    """
+    with pytest.raises((TypeError, ValueError), match="max_spoken_audio_bytes"):
+        _wired(max_spoken_audio_bytes=unusable)
