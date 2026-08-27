@@ -186,12 +186,22 @@ once. And speech is a capability most providers do not offer, which is
 > the words it heard. A blank return is not a failure: it means the recording
 > carried no words, and §4 decides what the engine does with it.
 
-> **Normative.** `SpeechSynthesizer` has one member and no more:
-> `async synthesize(text: NonBlankEncodableText) -> SpokenAudio`, returning the
-> spoken rendering of that text together with the format it is in. It declares
-> no separate format property, because the returned value already states its
-> format and two members answering one question is the redundancy ADR-0084 §3
-> refuses on the envelope's length.
+> **Normative.** `SpeechSynthesizer` has two members and no more, symmetric with
+> the transcriber's: a `formats` property answering the `SpokenAudioFormat`
+> members this implementation can **produce**, and
+> `async synthesize(text: NonBlankEncodableText, *, format: SpokenAudioFormat) -> SpokenAudio`.
+
+> **Normative.** The returned value's `media_type` **equals** the requested
+> `format`. An implementation asked for a format its `formats` property does not
+> name refuses it rather than substituting one, so no caller is handed a
+> rendering it cannot play in place of one it can.
+
+**Two members, and the redundancy argument does not reach them.** *What this
+implementation can produce* and *what this rendering is in* are two questions,
+not one asked twice: the first is a capability read before a call, the second a
+fact about a value returned by one. What would have been redundant is a format
+property beside a returned `media_type` that could disagree with it, and the
+clause above is what forbids the disagreement rather than a second answer.
 
 > **Normative.** Neither Protocol takes a timeout. The deadline is a decorator
 > the composition root wires over whichever implementation it built, on
@@ -275,20 +285,55 @@ async def converse_spoken(
 
 > **Normative.** The caller declares the output channel and no implementation
 > infers it, derives it from the transport it arrived on, reads it from a
-> session, or widens it. `SpokenChannel` is a `core/types.py` value carrying at
-> least the channel's **audience** — who may hear the answer — because that is
-> what a disclosure ruling keys on. The audience vocabulary and its disclosure
-> meaning are ADR-0199's to fix; where ADR-0199 fixes none, the implementing
-> lane carries exactly one member, meaning *the caller can attest nobody*, and
-> widening the vocabulary is a later ADR's act.
+> session, or widens it. `SpokenChannel` is required with no default, so no
+> caller is placed in a channel by omission — ADR-0181 §3's ground for a member
+> required with no default, applied to an argument.
 
-**Why the channel is an argument rather than implied by the entry.** The entry
-already says the answer will be *audio*; what it cannot say is *whose ears*. A
-browser tab and a room speaker are the same modality and different audiences,
-and #1318's design note keys disclosure on that axis from day one so that
-milestone 20 adds a vocabulary member rather than a method. The argument is also
-what keeps the conservative default from being a hub-side guess: the hub is
-handed a declaration it can refuse, not a fact it invents.
+> **Normative.** `SpokenChannel` is a frozen `extra="forbid"` pydantic model in
+> `core/types.py` with exactly two members, both fixed here and neither left to
+> a lane or to another ADR: `audience`, a `SpokenAudience`; and `plays`, a
+> non-empty `tuple[SpokenAudioFormat, ...]` naming what the channel can play, in
+> the caller's order of preference.
+
+> **Normative.** `SpokenAudience` is a closed `StrEnum` in `core/types.py`
+> naming what the caller can attest about who may hear the rendering. It has
+> exactly one member at this rung, `UNATTESTED`, meaning **the caller can attest
+> nothing**. A later ADR adds a member; removing one, or changing what one
+> means, is a change to what was decided and takes a superseding ADR.
+
+> **Normative.** ADR-0199 decides what may be spoken **to a given audience**; it
+> does not decide this vocabulary, and this ADR does not wait on it to be
+> implementable. Where ADR-0199 ratifies a richer audience vocabulary, that is a
+> partial supersession of the clause above by the ordinary mechanism (ADR-0070
+> §1, §3), recorded there and on this ADR's status line — not a gap this ADR
+> leaves open.
+
+**Why the vocabulary is fixed here rather than deferred.** `SpokenChannel` is a
+transitive type of a wire-derived method: `wire/surface.py` builds this call's
+argument adapter from its annotation, so an incompletely specified type is a
+call no implementation can conform to and no client can encode. A contract ADR
+that leaves a member's shape to a second ADR ratifies a surface nobody can build
+— which is exactly what ADR-0143 §9 avoids by fixing every annotation in the ADR
+rather than leaving it to the lane. One member is a small vocabulary, not an
+incomplete one: it is what the caller can honestly attest at a rung with no
+occupancy sensing anywhere in the system.
+
+**Why an argument rather than something implied by the entry.** The entry
+already says the answer will be *audio*; what it cannot say is *whose ears*, and
+what it certainly cannot say is *what this listener can play*. A browser tab and
+a room speaker are the same modality and different audiences, and #1318's design
+note keys disclosure on that axis from day one so that milestone 20 adds a
+vocabulary member rather than a method. Requiring the declaration is also what
+keeps the conservative reading from being a hub-side guess: the hub is handed a
+declaration it can refuse, not a fact it invents.
+
+**Why `plays` is a tuple and not a set.** `wire/codec.py`'s `project` dispatches
+`list | tuple` and has no branch for a `set` or a `frozenset`, so a set-typed
+member would fail closed at the first call — the same fallthrough that decides
+§9. Order is not merely tolerated by that constraint but wanted: a preference
+order lets a synthesizer produce the caller's first choice it can honour rather
+than any choice at all. The Protocol properties of §1 stay `frozenset`s, because
+a capability is a set and expresses no preference.
 
 **And the browser tab is not the private audience it looks like.** ADR-0174 §1
 records that the recipient program is "a general-purpose runtime this project
@@ -297,6 +342,13 @@ When that runtime *speaks*, the answer leaves the screen the session
 authenticated and enters a room nobody attested. That is the whole reason this
 call cannot borrow `/ask`'s disclosure posture, and it is why the audience the
 caller may attest at this rung is nobody.
+
+> **Normative.** The engine chooses the rendering's format itself: the **first**
+> member of `channel.plays` that the synthesizer's `formats` property also
+> names. It never asks for one outside that intersection, and it never returns a
+> rendering in a format the channel did not name. Where the intersection is
+> empty the answer cannot be spoken to this channel, which §4 makes a
+> degradation rather than a failure.
 
 > **Normative.** Adding this member bumps `PROTOCOL_VERSION`, on ADR-0124 §9's
 > rule as `wire/envelope.py` records it. The obligation falls on the lane that
@@ -342,6 +394,26 @@ caller may attest at this rung is nobody.
 > there is one leaves nothing worth returning, and a failure after there is one
 > would throw away an answer the user already has — ADR-0170 §8's argument,
 > applied on its own terms rather than by analogy.
+
+> **Normative.** Both failure sets are **classified** and both are closed, on
+> ADR-0170 §8's shape: what either stage catches is a failure its seam declares,
+> and neither catches `Exception`. A defect in the composing code propagates
+> rather than degrading, for ADR-0170 §8's reason — a stage that could be wholly
+> broken while every call reported the same classified-looking degradation is
+> the state hardest to notice.
+
+> **Normative.** A cancellation delivered to `converse_spoken` is **neither** a
+> transcription failure nor a synthesis failure. It propagates, after
+> cancellation-safe cleanup, under this module's cancellation clause (ADR-0060)
+> exactly as it does on `converse` — it never becomes `TranscriptionFailedError`
+> and never sets `spoken_degraded`. A cancellation landing inside `transcribe`
+> or inside `synthesize` is such a delivery and is governed by this clause and
+> not by the two above it.
+
+> **Normative.** An empty format intersection (§3) is a synthesis failure in the
+> sense of this section: `spoken` is `None`, `spoken_degraded` is `True`, and no
+> synthesizer is called at all. It is discovered before the call rather than
+> reported by one, which is why nothing is spent on it.
 
 > **Normative.** A transcription failure raises `TranscriptionFailedError`, a
 > new `AssistantError` subclass in `core/errors.py`, declared by this method and
@@ -427,6 +499,15 @@ minutes, and one press would buy an inference nobody budgeted. A bound on the
 recording is the only place that cost can be refused before it is incurred.
 
 ### 7. The disclosure ruling is applied hub-side, and this ADR consumes it
+
+> **Normative.** No lane implements this section before ADR-0199 has been
+> ratified and **merged**. That is ADR-0015 §5 read forward rather than a new
+> rule: a decision nobody has ratified is not one a lane may pick a behaviour
+> for, and a spoken surface that shipped with an implementation's own idea of
+> what may be read aloud is milestone 19's exit test failed in the one place it
+> is written to catch. §13's third wave carries this as a precondition. The
+> waves that build §1 through §6 and §9 are unaffected: none of them speaks
+> anything.
 
 > **Normative.** ADR-0199 decides what may be spoken. This ADR decides only that
 > the ruling is applied in `orchestration`, after the turn has composed its
@@ -550,6 +631,36 @@ available: §11 names the condition that would make it worth its supersession.
 > browser's ordinary audio playback. It does not call `SpeechRecognition`,
 > `webkitSpeechRecognition` or `speechSynthesis`, and no lane may wire one.
 
+> **Normative.** **Nothing in this ADR authorises microphone capture on a
+> browser the gateway serves over a non-loopback origin.** ADR-0174 §7 names
+> microphone capture among the capabilities a browser gates on a secure context,
+> rules that such a capability "is not authorised by this ADR", and makes a lane
+> that finds the surface requires one **stop** and owe "a ratified decision on
+> the scheme, rather than working around the requirement, degrading it silently,
+> or reaching for a certificate on its own authority". This ADR takes that stop
+> rather than working around it: the wave of §13 that builds this section does
+> not begin for the remote-browser case until such a decision is ratified and
+> merged, and no lane may read this ADR as supplying one, as authorising a
+> certificate, or as permitting the requirement to be degraded.
+
+> **Normative.** The **loopback** case is unaffected and is buildable now. A
+> browser on the gateway's own machine reaches it over a loopback origin, which
+> is a potentially trustworthy origin without any scheme decision at all — the
+> classification ADR-0174 §7 says "loopback got… for free and nobody had to
+> notice". Everything §1 through §9 decides is likewise unaffected: not one of
+> those sections is browser-facing.
+
+**What that costs the milestone, stated rather than absorbed.** `track:voice`
+milestone 19's exit test is the owner holding push-to-talk in a browser **on
+another device**. That half of it is blocked on ADR-0174 §11's deferred scheme
+question and on nothing this ADR can decide — the mechanism is ready, the
+browser will not hand it a microphone. The loopback half is reachable as soon as
+the waves land. Whoever schedules the milestone owns the choice between ruling
+the scheme question and ruling the exit test met on loopback; this ADR's job is
+to make the discovery here rather than in the surface lane, which is exactly
+what ADR-0174 §7's stop condition exists for. #1668 carries the choice, with
+ADR-0174 §7's own survey of the three routes and why it took none.
+
 **Three reasons, and the third is the one that would survive the other two being
 argued away.** Some implementations of those APIs transmit to the browser
 vendor, which is an egress no boundary in ADR-0174 §1 authorises and which the
@@ -589,8 +700,15 @@ worth deciding.
 - **Recording the channel on an episode.** §8 declines it, ADR-0074 §11 names
   the additive route. **Fires** at milestone 21, where a capture's trigger and
   channel are the fact being recorded.
-- **A second `SpokenChannel` audience member.** §3 leaves the vocabulary to
-  ADR-0199. **Fires** at milestone 20, the first unsolicited utterance.
+- **A second `SpokenAudience` member.** §3 fixes the vocabulary at one, meaning
+  the caller can attest nothing. **Fires** at milestone 20, the first
+  unsolicited utterance, or at any earlier point where something in the system
+  can attest an audience — which today nothing can.
+- **A secure context for a non-loopback browser origin.** ADR-0174 §11 already
+  defers it and §7 makes finding it a stop; §10 takes that stop rather than
+  working around it. **Fires** at the first browser-facing capability the
+  milestone actually needs — which microphone capture now is, so it has fired
+  and this ADR is where the firing is recorded.
 - **Speaker identification.** #691's `undetermined` attribution channel. Dodged
   by construction at this rung: the press on an authenticated web session is the
   principal (#1318, ruling recorded at opening). **Fires** at milestone 21,
@@ -604,11 +722,49 @@ worth deciding.
 
 ### 12. What this ADR is, under ADR-0070 §1 and ADR-0082 §1
 
-> **Normative.** This ADR supersedes no ADR, wholly or partially, and amends
-> none. Every clause above is additive: two new Protocols, one new member on a
-> provided contract, four new `core/types.py` names, one new `core/errors.py`
-> name, one new `Settings` field, one new gateway route. No ratified clause is
+> **Normative.** This ADR **partially supersedes ADR-0177**, in ADR-0070 §3's
+> sense, and supersedes nothing else wholly or partially. The scope is exactly
+> two clauses of ADR-0177 §1 and no other clause of that ADR or of any other:
+>
+> **(a) §1's enumeration.** "A browser request resolves to calls on exactly these
+> **thirty** operations of the promoted engine surface and no others" becomes
+> **thirty-one**, the addition being `converse_spoken` and nothing else. §1's
+> own arithmetic moves with it, and every other clause of §1 binds the
+> thirty-first exactly as it binds the thirty — including that it is reached
+> "with the arguments the promoted surface declares and with no others", that the
+> gateway "derives none of them, defaults none of them, composes no operation out
+> of two", and that `learn` and `next_notification` stay where §1 put them.
+>
+> **(b) §1's deadline carve-out.** "On this surface the class has exactly two
+> members" becomes **three**, the addition being the budget given to
+> `converse_spoken`. It is the same class as the turn budget §1 already admits
+> for `converse`, `converse_streaming` and `resume` — ADR-0029 §4's caller-owned
+> deadline — and it is added by this ratified decision rather than by
+> resemblance, which is what §1's "no lane widens it by resemblance" forbids and
+> what a decision that names the member does not do.
+
+> **Normative.** Everything else about this ADR is additive: two new Protocols,
+> one new member on a provided contract, seven new `core/types.py` names — the
+> six of §3, §4 and §9 plus the base64 refinement §9 names — one new
+> `core/errors.py` name, one new `Settings` field. No other ratified clause is
 > read differently after it, and no existing member changes.
+
+**ADR-0175 §6 is satisfied rather than superseded, and the difference is in its
+own text.** Its third clause says every other operation "is unreached from a
+browser, and **no lane may add one without its own ratified decision**". This
+ADR is that decision, so §6 needs no record: it wrote its own route out and this
+change takes it. ADR-0177 §1 wrote one for `learn` alone and none for the
+enumeration, which is why (a) is a supersession where §6 is not.
+
+**The record ADR-0177's own status line owes is named here and filed.** ADR-0070
+§3 and `docs/adr/template.md` put a partial supersession on the *superseded*
+ADR's status line, leading, with the parenthesis naming exactly what was
+replaced. This lane's fence is this file, so the edit is not made here; the
+scope text it owes is `Partially superseded by ADR-0200 (§1's thirty-operation
+enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which
+gains that operation's turn budget)`, and it is tracked as its own change in
+#1667. A reader of ADR-0177 who has not seen it is a reader this paragraph
+exists to catch.
 
 Three near misses, named so that a reviewer can check them rather than take
 them:
@@ -624,10 +780,11 @@ them:
   transcription at the gateway, which is the clause's own worked case for an
   audio-shaped spoke. Nothing here permits a spoke to derive anything.
 
-**So no record is owed on any earlier ADR's status line.** ADR-0082 §1 owes one
-"when the later ADR amends a named clause — and not otherwise", and this ADR
-amends none. The three near misses above are the whole of what a reader might
-have expected a record for.
+**No *amendment* record is owed anywhere.** ADR-0082 §1 owes one "when the later
+ADR amends a named clause — and not otherwise", and this ADR amends none: the
+one thing it changes it *supersedes*, which is ADR-0070 §1's other side and is
+recorded above. The three near misses are the whole of what a reader might
+otherwise have expected a record for.
 
 ### 13. The work order: what the implementing lanes owe
 
@@ -659,6 +816,12 @@ each wave must contain if it exists.
 > land in a lane fenced to `interfaces/gateway/`, briefed against the merged text
 > of the wave above, under `track:web-client`'s concurrency rule (#1226 §3).
 
+> **Normative.** That third wave carries **three preconditions**, and a lane
+> briefed against it before all three hold is briefed wrong: ADR-0199 ratified
+> and merged (§7); ADR-0177's status line carrying §12's supersession record; and,
+> **for the remote-browser case only**, a ratified scheme decision under ADR-0174
+> §11 (§10). The loopback case waits on the first two alone.
+
 | Clause | Deliverable | Test item |
 | --- | --- | --- |
 | §1 | `SpeechTranscriber` and `SpeechSynthesizer` in `core/protocols.py`; `ModelProvider` byte-unchanged | `tests/core/test_protocol_triad.py` passes for both; a test asserts `ModelProvider`'s member set is unchanged |
@@ -673,7 +836,12 @@ each wave must contain if it exists.
 | §7 | The ruling applied between the turn and synthesis; `outcome.reply` unchanged | A test that a reduced rendering leaves `outcome.reply` byte-identical |
 | §8 | No audio in any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken turn |
 | §9 | `SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()` | A round-trip test; a test that `wire/codec.py` is unmodified; a rejection test per malformed encoding |
+| §3 (channel) | `SpokenChannel`, `SpokenAudience`, required with no default | A test refusing the call with no channel; a test that `plays` is a non-empty tuple and that a `frozenset` does not project |
+| §3 (format pick) | The engine picks `channel.plays`' first member the synthesizer names | A test over a synthesizer naming the caller's second choice; a test degrading on an empty intersection |
+| §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
+| §10 (secure context) | Nothing capturing a microphone on a non-loopback origin ships before ADR-0174 §11's decision | The lane's own precondition, checked at briefing rather than by a test |
+| §12 | ADR-0177's status line carries the supersession record, in a change of its own | A reader of ADR-0177 reaches ADR-0200 from its header |
 
 > **Normative.** A lane satisfies the rows of this table that fall inside its
 > fence and adds none: a deliverable this table does not name is out of that
@@ -697,6 +865,12 @@ which §6 accounts for and which would need revisiting if a rung ever wanted a
 long recording. And the tree now has three `bytes`-shaped ceilings in three
 layers; §6 states the arithmetic connecting them because nothing mechanical
 does.
+
+**What is blocked, and by what.** The remote-browser half of milestone 19's exit
+test waits on ADR-0174 §11's scheme decision, which nothing here can supply
+(§10, #1668). §7's ruling waits on ADR-0199. And ADR-0177's status line owes the
+record §12 names (#1667). None of the three blocks the hub-side waves, which is the useful part
+of discovering them at the ADR rather than in a surface lane.
 
 **What would trigger revisiting this.** Any of §11's firing conditions.
 Sharpest: a measured time-to-first-sound that makes a whole-answer rendering
@@ -750,6 +924,19 @@ ruling never saw.
 not about what a hub *keeps*, and the milestone's exit test needs no re-reading.
 A stored voice corpus is a decision with its own disclosure surface, and it is
 not one this ADR should make in passing.
+
+**Leave the audience vocabulary to ADR-0199 and carry "at least an audience".**
+Rejected in §3 after architecture review named the cost: `SpokenChannel` is a
+transitive type of a wire-derived method, so a type whose members another ADR
+fixes is a call no implementation can conform to and no client can encode. The
+coordination it was meant to buy is bought instead by ADR-0199 keying its tier
+on a vocabulary this ADR fixes, and superseding it if it needs a richer one.
+
+**Constrain the synthesizer to one format every caller can play.** Rejected in
+§1 and §3. There is no single media type every recording browser produces and
+every playing client accepts, and a native spoke at milestone 21 has different
+constraints again; a caller-declared preference order costs one member on a type
+the call already carries and survives all three.
 
 **Record the channel on the captured episode.** Rejected in §8 for this rung and
 deferred to milestone 21 in §11. It is additive whenever it is wanted, and
