@@ -1117,6 +1117,23 @@ async def test_a_long_run_of_framing_is_walked_rather_than_recursed_into() -> No
     assert resolution == Resolved(subject=(held,), argument="b-1")
 
 
+async def test_an_asking_verb_with_nobody_asking_is_content_and_not_a_reference() -> None:
+    """ "The memory of asking Alice" is a memory *of an act*, not a way of pointing at one.
+
+    An asking verb is how a question gets referred to — "the question **you asked** me
+    about my commute" — and what makes that a reference is the person doing the asking,
+    who in a reference is the user or the assistant. With nobody in front of it the word
+    is content: strip it here and the query names ``alice`` alone, which resolves
+    whatever else the store happens to say about her and parks a destructive confirmation
+    on it.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "Alice lives in Paris"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "the memory of asking Alice")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 

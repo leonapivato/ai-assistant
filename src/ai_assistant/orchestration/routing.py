@@ -707,6 +707,8 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
     - **a reference to a record**, where the query opens on an article and a kind this
       operation resolves over (:func:`_opens_on_a_record`): "the question you asked me
       about my commute" is six words of reference and then the one word that says which.
+      An asking verb inside that reference needs a person in front of it as well
+      (:data:`_ASKING`), since a reference is the user or the assistant doing the asking.
 
     A set rather than a sequence, because the match is on which words the query names and
     never on the order it named them in: the router copies a span out of a sentence, and
@@ -726,8 +728,16 @@ def _wanted(query: str, operation: RoutableOperation) -> frozenset[str]:
     start = 0
     held = 0
     while start + held < len(terms):
-        term = terms[start + held]
+        at = start + held
+        term = terms[at]
         if reference is not None and term in reference:
+            start += held + 1
+            held = 0
+        elif term in _ASKING and reference is not None and at > 0 and terms[at - 1] in _FRAMING:
+            # "the question **you asked** me": an asking verb is a reference only where a
+            # person is doing the asking, which in a reference is the user or the
+            # assistant. "The memory of asking Alice" is the act itself, and stripping it
+            # would leave the query naming Alice and nothing else.
             start += held + 1
             held = 0
         elif term in _DEMONSTRATIVES:
@@ -945,12 +955,21 @@ _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
 #: the start of a query beside :data:`_KINDS_OF`'s entry for the route and only where the
 #: query opens on a reference (:func:`_wanted`).
 #:
-#: A person refers to what the assistant keeps by its kind — "the question **you asked
-#: me about** my commute" — and those words are about the record's existence rather than
-#: about what ``Question.content`` says. Every one of them is an ordinary word elsewhere,
-#: which is why the opening admits them rather than their mere presence: ``about``
-#: asserts a relationship in "I talked about Alice".
-_REFERENCE: Final[frozenset[str]] = frozenset(("about", "of", "ask", "asks", "asked", "asking"))
+#: A person refers to what the assistant keeps by its kind — "the question you asked me
+#: **about** my commute" — and those words are about the record's existence rather than
+#: about what ``Question.content`` says. Both are ordinary words elsewhere, which is why
+#: the opening admits them rather than their mere presence: ``about`` asserts a
+#: relationship in "I talked about Alice".
+_REFERENCE: Final[frozenset[str]] = frozenset(("about", "of"))
+
+#: The asking verbs, which are how a *question* gets referred to — "the question **you
+#: asked** me about my commute". Held apart from :data:`_REFERENCE` because they need one
+#: more condition than position: a person has to be doing the asking, and in a reference
+#: that person is the user or the assistant, so the word before must be one of
+#: :data:`_FRAMING`'s. Without that, "the memory of asking Alice" would be stripped down
+#: to ``alice`` and name whatever else the store says about her — the act of asking is
+#: content there, not a way of pointing at a record.
+_ASKING: Final[frozenset[str]] = frozenset(("ask", "asks", "asked", "asking"))
 
 
 #: Raised where §3's vocabulary has grown a confirm-owed member and :data:`_MATCH_ON`
