@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import structlog
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
+from ai_assistant.core.errors import (
+    ClassifiedToolError,
+    ToolBindingError,
+    ToolRegistrationError,
+)
 from ai_assistant.core.types import (
     UNREPRESENTABLE_FAULT_CLASS,
     ReportedOutput,
@@ -76,6 +80,15 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+#: The event key a failure the tool classified is logged under. What it carries
+#: is the tool's id and ``failure.kind`` — an identifier and a member of a closed
+#: enum — and never the tool's message (ADR-0032 §5).
+REPORTED_FAILURE = "tool_reported_failure"
+
+#: The event key a refused ``TIMED_OUT`` is logged under: the kind is reserved to
+#: the seam's own deadline, and a tool naming it is broken (ADR-0032 §3).
+RESERVED_KIND = "tool_reported_reserved_kind"
+
 
 class ToolImplementation(Protocol):
     """The callable an integration binds to a declaration at registration.
@@ -91,10 +104,22 @@ class ToolImplementation(Protocol):
     direction (ADR-0029 §6).
 
     An implementation **raises** to report a failure it cannot classify; the
-    seam turns that into an ``INTERNAL`` result. One that can classify its own
-    failure returns nothing useful by raising — it should be given the vocabulary
-    of :class:`~ai_assistant.core.types.ToolFailureKind` by a future integration
-    ADR, which this one does not decide.
+    seam turns that into an ``INTERNAL`` result. One that **can** classify its own
+    failure raises
+    :class:`~ai_assistant.core.errors.ClassifiedToolError` instead, carrying a
+    constructed :class:`~ai_assistant.core.types.ToolFailure` and the keyword-only
+    ``effect_may_have_committed`` — whether this call's effect may already have
+    landed upstream, which only the integration can know (ADR-0032 §1, §2). The
+    seam translates that into a ``ToolResult``: the kind and the message cross by
+    value, and the *outcome* stays the seam's ruling, conjoining the reported fact
+    with the registry's own declaration. ``TIMED_OUT`` is the one member reserved
+    to the seam's own deadline and is refused; an upstream that did not answer is
+    ``UNAVAILABLE``, which carries the same ``retryable``.
+
+    **A classified failure may also report what the call cost**, through that
+    carrier's keyword-only ``incurred_cost`` (ADR-0195 §3) — defaulted, where
+    ``effect_may_have_committed`` deliberately is not, because silence about a
+    price already means "no figure".
 
     **It may also report what the call cost**, by returning its output inside a
     :class:`~ai_assistant.core.types.ReportedOutput` rather than bare (ADR-0195
@@ -411,7 +436,19 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
     redactor cannot see. The cost is a thinner diagnostic for a broken
     integration, accepted because the alternative is a disclosure on the failure
     path of every tool nobody thought about.
+
+    The outcome is ``FAILED`` because every caller here is an exception that
+    escaped: a raise is never a success and none of these paths reads a fact that
+    could make it more ignorant. The classified path splits the two — it needs
+    this same failure *value* under an outcome ADR-0032 §2 rules from the tool's
+    own report — so the value is :func:`_internal_failure_value` and this is the
+    result built from it.
     """
+    return ToolResult(outcome=ToolOutcome.FAILED, failure=_internal_failure_value(definition, exc))
+
+
+def _internal_failure_value(definition: ToolDefinition, exc: BaseException) -> ToolFailure:
+    """The seam's own ``INTERNAL`` failure, and the one log line that goes with it."""
     fault = _fault_class(exc)
     with contextlib.suppress(Exception, asyncio.CancelledError):
         # Guarded because this runs **after** the claim: a configured processor
@@ -434,12 +471,9 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
             # The type, never the instance: rendering the exception is the leak.
             error_type=fault,
         )
-    return ToolResult(
-        outcome=ToolOutcome.FAILED,
-        failure=ToolFailure(
-            kind=ToolFailureKind.INTERNAL,
-            message=f"{fault} escaped tool {definition.id!r}",
-        ),
+    return ToolFailure(
+        kind=ToolFailureKind.INTERNAL,
+        message=f"{fault} escaped tool {definition.id!r}",
     )
 
 
@@ -768,6 +802,345 @@ def _succeeded(
         return internal_failure(definition, exc)
 
 
+@dataclass(frozen=True, slots=True)
+class _ClassifiedRead:
+    """What one pass over a raised carrier's three attributes captured (ADR-0032 §6).
+
+    **Every field here is the result of a guarded, independent read**, because an
+    exception's attributes are ordinary attributes: ``isinstance`` is not evidence
+    a pydantic model was validated, ``del exc.failure`` is as reachable as
+    assigning ``None`` to it, and either access may be a property a tool wrote.
+    The reads are by sentinel — ``None`` for each — so the total path is total,
+    and a defect in one does not take the others down with it: "a ``failure``
+    property that explodes must not take the ``bool`` down with it".
+
+    Judging them is :func:`_classified_result`'s, deliberately, so that nothing
+    between the two reads and the ``ToolResult`` runs tool-supplied code: the
+    caller re-reads the interruption state in that gap (ADR-0032 §4).
+    """
+
+    #: The revalidated, detached failure, or ``None`` where the payload did not
+    #: survive — absent, not a ``ToolFailure``, refused by the round-trip, or a
+    #: read that raised. A refused payload costs the *kind* and nothing else.
+    failure: ToolFailure | None = None
+    #: The validated fact, or ``None`` where it was absent, was not a ``bool``, or
+    #: the read raised — which refuses the **whole** carrier (§6).
+    committed: bool | None = None
+    #: The validated, detached figure, or ``None`` where the tool reported none,
+    #: where the round-trip refused it, or where reading it raised (ADR-0195 §4).
+    cost: ToolCost | None = None
+
+
+def _revalidated_failure(exc: ClassifiedToolError) -> ToolFailure | None:
+    """Round-trip the raised payload, or answer ``None`` (ADR-0032 §6).
+
+    **Revalidated rather than read**, because ``isinstance`` is not evidence that
+    a pydantic model was validated: ``ToolFailure.model_construct(kind=
+    "rate_limited", message=" ")`` bypasses every validator, satisfies
+    ``isinstance``, and carries a ``str`` where a ``ToolFailureKind`` belongs — so
+    a downstream ``result.failure.kind.retryable`` would be an ``AttributeError``
+    rather than a retry decision. ``model_validate`` on the instance does not
+    help: pydantic's default ``revalidate_instances="never"`` returns it
+    unchanged.
+
+    **The round-trip repairs what it can and refuses what it cannot, and the line
+    between them is pydantic's own.** ``"rate_limited"`` names a member, so
+    validation coerces it and the result is a correct ``ToolFailure``; a string
+    naming no member, a missing field, or a message that renders as nothing does
+    not survive. Requiring an exact runtime type instead would refuse a value
+    pydantic can make correct, for no gain — the obligation is that what reaches a
+    ``ToolResult`` is valid, not that the tool built it in the approved way.
+
+    **What crosses is the round-trip's result**, so a subclass overriding
+    ``model_dump()`` to return a different valid failure yields that one. Not a
+    hole: the tool authored both accounts and could have raised the dumped one,
+    and a seam arbitrating between two stories a tool tells about its own failure
+    would be settling a dispute neither side has an interest in. For any failure
+    built through ``ToolFailure(...)`` the round-trip is a pass-through.
+
+    **The whole read runs under one ``Exception`` guard**, and that is what makes
+    it safe rather than a refinement of it. ``isinstance`` admits a subclass, so
+    ``exc.failure`` is an access a tool may have made a property and
+    ``model_dump()`` is a dispatch to a method a tool may have overridden — and an
+    exception raised inside an ``except`` body is **not** caught by the sibling
+    ``except`` clauses of the same ``try``, so an unguarded read would leave
+    ``invoke`` uncaught where the rule requires a result. ``BaseException``
+    propagates unchanged, as ADR-0029 §3 requires everywhere else.
+
+    Nothing derived from the ``ValidationError`` a refusal produces enters a
+    message or a log (§5): it is raised *about* the payload and would render it.
+    """
+    try:
+        # Typed as `object` so every check below is over the **value**. The
+        # annotation is not the enforcement anywhere in this seam (ADR-0029 §4),
+        # and least of all here: an exception's attributes are ordinary
+        # attributes, an integration is not required to have been type-checked,
+        # and `del exc.failure` is as reachable as assigning `None` to it.
+        failure: object = exc.failure
+        if not isinstance(failure, ToolFailure):
+            return None
+        return ToolFailure.model_validate(failure.model_dump())
+    except Exception:
+        return None
+
+
+def _validated_fact(exc: ClassifiedToolError) -> bool | None:
+    """Read ``effect_may_have_committed``, or answer ``None`` (ADR-0032 §6).
+
+    ``None`` means the carrier is refused whole, not that the fact was ``False``:
+    a carrier missing a *required, keyword-only* argument never went through
+    ``__init__``, so nothing about it was checked, and reporting a confident
+    ``RATE_LIMITED`` off it would be the seam authorising a retry on the strength
+    of an object assembled around its own constructor.
+
+    Read under its own guard and judged on its own, so that a payload which
+    explodes cannot take it down — which is what lets a garbage payload raised
+    with a sound ``True`` still reach ``INDETERMINATE``.
+    """
+    try:
+        # `object` for `_revalidated_failure`'s reason: the check is over the
+        # value, not over what the annotation promises about it.
+        committed: object = exc.effect_may_have_committed
+    except Exception:
+        return None
+    return committed if isinstance(committed, bool) else None
+
+
+def _revalidated_incurred_cost(exc: ClassifiedToolError) -> ToolCost | None:
+    """Round-trip the reported figure, or answer ``None`` (ADR-0195 §3, §4).
+
+    The classified-failure exit's half of the rule :func:`_revalidated_cost`
+    applies at the success exit, in ADR-0032 §6's own idiom and under the same
+    single ``Exception`` guard, for the same reason: every step of it —
+    the attribute access, ``model_dump()``, the validation — is tool-authored
+    code, and this runs after ADR-0192 §1's claim has been appended.
+
+    A cost that does not survive is discarded **alone**: the outcome, the failure
+    and ``effect_may_have_committed`` all stand and the row records an ``UNKNOWN``
+    basis, which is §6's "each defect resolves in its own pessimistic direction"
+    applied to a field whose pessimistic direction ADR-0194 §2 already fixes.
+
+    The field is **defaulted** where the fact is not, so ``None`` is the ordinary
+    answer rather than a defect: silence about a price already means "no figure",
+    while silence about a side effect would assert one.
+    """
+    try:
+        # No type test, exactly as the success exit's `_revalidated_cost` makes
+        # none: what crosses is the round-trip's result (ADR-0032 §6), and an
+        # object whose `model_dump()` yields a valid figure reports a figure the
+        # tool could have reported directly. `None` is the field's own default
+        # and the ordinary answer, so it is answered before the dump rather than
+        # through the `AttributeError` one would raise.
+        cost = exc.incurred_cost
+        if cost is None:
+            return None
+        return ToolCost.model_validate(cost.model_dump())
+    except Exception:
+        return None
+
+
+def _classified_read(exc: ClassifiedToolError) -> _ClassifiedRead:
+    """Read the carrier's three attributes, each under its own guard (ADR-0032 §6).
+
+    Every tool-authored read this exit performs happens here and nowhere else, so
+    the caller can put ADR-0032 §4's re-read of the interruption state between
+    this and the result: reading the carrier is what opens the window — a
+    ``model_dump()`` that calls ``cancel()`` on the invoking task and then returns
+    valid data raises the delta *between* the handler's first check and the result
+    — so the re-read closes it where it is opened.
+    """
+    return _ClassifiedRead(
+        failure=_revalidated_failure(exc),
+        committed=_validated_fact(exc),
+        cost=_revalidated_incurred_cost(exc),
+    )
+
+
+def _reserved_kind_failure(definition: ToolDefinition) -> ToolFailure:
+    """The seam's own ``INTERNAL`` for a tool naming the reserved kind (ADR-0032 §3).
+
+    ``TIMED_OUT`` means **this** seam's deadline expired, which the seam must
+    establish rather than infer, so a raised failure naming it is refused: the
+    tool-authored ``ToolFailure`` is discarded whole and this is synthesised in its
+    place, naming the reserved kind and the tool's id and nothing else.
+
+    **Refused rather than remapped to a neighbour.** ``UNAVAILABLE`` is what the
+    tool should have raised and the seam must not choose it on the tool's behalf —
+    that is the seam interpreting a broken integration's meaning, one step from
+    interpolating its text. ``INTERNAL`` is what the vocabulary already means by
+    "the tool implementation is broken", and a tool naming a kind the contract
+    reserves *is* broken. It fails safe: ``INTERNAL`` is not retryable, so nothing
+    is retried on the strength of a claim the seam rejected. The cost is nil — an
+    honest ``UNAVAILABLE`` carries the same ``retryable=True``.
+
+    ``effect_may_have_committed`` is **not** discarded with the payload: a tool
+    that got the kind wrong may still be telling the truth about its side effect,
+    and dropping that would record a possible commit as certainly-nothing-happened.
+    """
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        # Guarded for `internal_failure`'s reason: this runs after the claim, and
+        # a processor that raised would leave this frame in place of the result.
+        # What is logged is the tool's id and a member of a closed enum — §5's
+        # whole permitted vocabulary for a log line about a translated failure.
+        _log.warning(
+            RESERVED_KIND,
+            tool_id=definition.id,
+            kind=ToolFailureKind.TIMED_OUT,
+        )
+    return ToolFailure(
+        kind=ToolFailureKind.INTERNAL,
+        message=(
+            f"tool {definition.id!r} reported {ToolFailureKind.TIMED_OUT.value!r}, "
+            f"a kind reserved to this seam's own deadline"
+        ),
+    )
+
+
+def _translated_failure(definition: ToolDefinition, failure: ToolFailure) -> ToolFailure:
+    """Pass the tool's own failure through by value, logging neither half of it (§5).
+
+    **The seam either passes the raised ``ToolFailure`` through by value or
+    discards it whole**, and there is no third behaviour: it never edits, wraps,
+    prefixes, truncates or re-authors a tool's message. "By value" is through §6's
+    revalidation, which applies ``ToolFailure``'s **own** validators and nothing
+    else, so a message is stripped exactly as ``ToolFailure(...)`` would have
+    stripped it at the raise site and is otherwise untouched.
+
+    **The log line carries the tool's id and the kind, and never the message** —
+    even though that message is Tier 2 and the tool's own. The natural log line
+    includes it, because it is the useful part, and that is precisely why the rule
+    is stated rather than assumed: the message lands in ``ToolResult.failure.
+    message`` and nowhere else *by the seam's hand*. Its onward destinations are
+    the executor's, and the seam declining to log it does not stop it being logged
+    one frame away — which is why ADR-0029 §3's Tier 2 obligation on the producer
+    is the only real defence.
+
+    And nothing derived from the exception object goes anywhere: not ``str(exc)``,
+    ``repr(exc)``, ``exc.args``, ``exc.__cause__``, ``exc.__context__`` or
+    ``exc.__notes__``. The cause chain is the specific hazard — ``raise
+    ClassifiedToolError(...) from upstream_exc`` is good practice and is exactly
+    where an upstream's error body lives — so keeping it out of everything the
+    seam renders is what makes ``from`` safe to write.
+    """
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        _log.warning(REPORTED_FAILURE, tool_id=definition.id, kind=failure.kind)
+    return failure
+
+
+def _classified(
+    exc: ClassifiedToolError,
+    *,
+    definition: ToolDefinition,
+    timeout: timedelta,
+    deadline: asyncio.Timeout,
+    entered_with: int,
+) -> ToolResult:
+    """Translate a raised carrier, bracketed by ADR-0032 §4's two checks.
+
+    **The senior signals are read first, and where either answers the carrier is
+    discarded whole — fact, figure and all — with no attribute of it touched.** A
+    cancellation of the invoking task is rank 1: the classified raise may itself
+    be a consequence of it, an SDK mapping its aborted request to ``UNAVAILABLE``
+    on the way out, and answering a cancellation with a value is what ADR-0029 §4
+    forbids everywhere. This seam's expired deadline is rank 2, and it is the same
+    "establish, don't infer" rule applied to a claim instead of to an exception
+    type: a tool that maps its aborted request to ``UNAVAILABLE`` while the
+    deadline actually fired would, on a side-effecting non-``NATURAL`` tool,
+    produce ``FAILED`` — certainly-nothing-happened for a call that outran its
+    budget. Discarding the fact there loses nothing: on that path the outcome is
+    ``interrupted_outcome`` alone, which is ``INDETERMINATE`` in every case where
+    the fact could have mattered.
+
+    **The second check is not the first one moved.** ADR-0031 §2(b)'s
+    postcondition names ``SUCCEEDED`` because a normal return was once the only
+    path that built a result from something the callable produced; ADR-0032 §4
+    states it for *any* result, because §6's revalidation is itself tool-supplied
+    code that runs between the two. A ``ToolFailure`` subclass whose
+    ``model_dump()`` calls ``cancel()`` on the invoking task and then answers
+    normally raises the delta in exactly that gap, and a seam checking only on
+    entry would return a ``FAILED`` result from a task carrying a pending
+    cancellation — rank 1 violated by the mechanism §6 introduced. It precedes the
+    refusal path too: a ``model_dump()`` that cancels and *then* raises leaves the
+    same delta, so an implementation re-reading only after a successful
+    translation still returns a result from a cancelled task.
+
+    Raises:
+        CancelledError: If a cancellation of the invoking task is pending — one
+            delivered by a read of the carrier included.
+    """
+    interrupted = _interruption(definition, timeout, deadline, entered_with)
+    if interrupted is not None:
+        return interrupted
+    read = _classified_read(exc)
+    interrupted = _interruption(definition, timeout, deadline, entered_with)
+    if interrupted is not None:
+        return interrupted
+    return _classified_result(definition, exc, read)
+
+
+def _classified_result(
+    definition: ToolDefinition, exc: ClassifiedToolError, read: _ClassifiedRead
+) -> ToolResult:
+    """Rule the outcome and choose the failure, over values already read (ADR-0032 §2).
+
+    **Kind is what the tool knows; outcome is what the seam rules.** The rule is
+    one line — ``INDETERMINATE`` when the tool reports its effect may have
+    committed **and** the registry's ``definition.interrupted_outcome`` is
+    ``INDETERMINATE``, ``FAILED`` otherwise — and ``definition`` is the registry's
+    own declaration, never ``call.request.tool``.
+
+    **The conjunction rather than the fact alone**, case by case: a *read-only*
+    tool reporting a possible commit is contradicting the declaration the policy
+    approved, so the fact is ignored and the outcome is ``FAILED``; a ``NATURAL``
+    tool is idempotent by nature, so ignorance costs nothing and ``FAILED`` is
+    correct; a ``NONE`` or ``KEYED`` side-effecting tool is ADR-0014 §4's case
+    exactly, reached through a transport failure rather than a crash, so
+    ``INDETERMINATE``. Conjoining rather than restating is deliberate: writing
+    ``not side_effecting or idempotency is NATURAL`` here would be the fourth copy
+    of a safety-critical ordering ADR-0031 §1 moved into ``core`` to have one of.
+
+    **The report is monotone.** No value of the fact produces ``SUCCEEDED`` — a
+    raise is never a success — and none overrides the seam's own expiry or
+    cancellation, which outrank it entirely (§4). The worst a lying or careless
+    integration achieves is ``INDETERMINATE`` for a call that definitely failed:
+    pessimistic, not auto-retried, resolved explicitly.
+
+    **The asymmetry between the two defects is the rule rather than an
+    inconsistency in it.** A bad payload costs the *kind*, because what a refused
+    kind costs is a ``retryable=True`` the seam has no reason to trust and
+    ``INTERNAL`` is the fail-closed answer. A bad fact costs the *carrier*,
+    because the lost value might be ``True`` and losing it would record a possible
+    commit as certainly-nothing-happened — ADR-0014 §4's forbidden guess. Both
+    point the same way, toward the outcome that retries less and knows less.
+
+    **A refused carrier takes its reported figure with it, and a refused payload
+    does not** (ADR-0195 §4). §6 refuses "the *whole* carrier" when the fact does
+    not validate, and a figure read off an object that never went through its own
+    constructor is a price stated by the same unchecked object whose kind is being
+    refused for that reason — so the row records ``UNKNOWN``, which is that
+    field's own pessimistic direction. Where only the payload is refused the
+    carrier itself went through ``__init__``, the figure is an ordinary attribute
+    revalidated on its own, and §6's independence rule keeps it: a malformed
+    payload costs the kind, a malformed cost costs the cost.
+    """
+    if read.committed is None:
+        return ToolResult(
+            outcome=ToolOutcome.FAILED, failure=_internal_failure_value(definition, exc)
+        )
+    if read.failure is None:
+        failure = _internal_failure_value(definition, exc)
+    elif read.failure.kind is ToolFailureKind.TIMED_OUT:
+        failure = _reserved_kind_failure(definition)
+    else:
+        failure = _translated_failure(definition, read.failure)
+    indeterminate = read.committed and definition.interrupted_outcome is ToolOutcome.INDETERMINATE
+    return ToolResult(
+        outcome=ToolOutcome.INDETERMINATE if indeterminate else ToolOutcome.FAILED,
+        failure=failure,
+        incurred_cost=read.cost,
+    )
+
+
 async def run_bound_call(
     implementation: BoundImplementation,
     *,
@@ -838,6 +1211,13 @@ async def run_prepared_call(
       travels no further, its figure revalidated onto
       ``ToolResult.incurred_cost``. The interruption check stays *before* any
       field of it is read, and a second one follows the reads (§4).
+    - **A raise may be a classified failure**, and it is the only branch that
+      takes the tool's own account of *why* — :class:`~ai_assistant.core.errors.
+      ClassifiedToolError` is caught here, revalidated (:func:`_classified_read`)
+      and ruled (:func:`_classified_result`). It is ranked **below** both senior
+      signals, so a cancellation or this seam's expired deadline discards it whole
+      before an attribute of it is touched, and the same two interruption checks
+      bracket the reads. The carrier never escapes ``invoke``.
 
     ``BaseException`` otherwise propagates unchanged, which is the boundary
     ADR-0026 §2 drew for ``checked_clock``: a guard whose own failure modes
@@ -885,6 +1265,22 @@ async def run_prepared_call(
         return _interruption(definition, named, deadline, entered_with) or indeterminate_failure(
             definition, exc
         )
+    except ClassifiedToolError as exc:
+        # ADR-0032 §4's third rank, and it sits exactly where the `except
+        # Exception` clause below sits — after the interruption check, never
+        # before it. `IndeterminateTransmissionError` above is a `ToolError` and
+        # this is deliberately not one (§1), so the two hierarchies are disjoint
+        # and the order between them decides nothing reachable.
+        #
+        # `_classified` owns the rest, including the two interruption checks that
+        # bracket every tool-authored read of the carrier (§4, ADR-0195 §4).
+        return _classified(
+            exc,
+            definition=definition,
+            timeout=named,
+            deadline=deadline,
+            entered_with=entered_with,
+        )
     except Exception as exc:
         # Python's own `TimeoutError` arrives here too, and is *not* special:
         # what makes an expiry an expiry is this deadline having fired, which
@@ -910,6 +1306,8 @@ async def run_prepared_call(
 
 
 __all__ = [
+    "REPORTED_FAILURE",
+    "RESERVED_KIND",
     "BoundImplementation",
     "EgressToolImplementation",
     "ResolvedImplementation",
