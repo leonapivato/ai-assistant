@@ -1,8 +1,12 @@
-"""Running an embedder's blocking work off the loop, and containing what it leaks.
+"""Running a blocking model's work off the loop, and containing what it leaks.
 
-The whole of ADR-0118 §7's containment lives here, so
-``fastembed_embedder.py`` stays about the *adapter* rather than about how it
-survived a backend that stopped returning:
+The whole of ADR-0118 §7's containment lives here, so ``fastembed_embedder.py``
+stays about the *adapter* rather than about how it survived a backend that
+stopped returning. ADR-0200 §5 puts the two speech seams under the same two-layer
+containment "taken whole", so ``moonshine_transcriber.py`` and
+``vits_synthesizer.py`` use this object too and for the same reasons — one
+instance each, never shared, because a slot bound to one engine's health must not
+refuse a call to another. What each of them gets is:
 
 * the work runs on a **daemon thread the embedder owns**, never on the event
   loop's default executor;
@@ -142,12 +146,19 @@ class OwnedWorkers:
     and what bounds it is the slot taken before the thread starts.
     """
 
-    def __init__(self, *, thread_name: str, max_workers: int = _MAX_WORKERS) -> None:
+    def __init__(
+        self, *, thread_name: str, subject: str = "embedding", max_workers: int = _MAX_WORKERS
+    ) -> None:
         """Create the dispatcher.
 
         Args:
             thread_name: What each daemon thread calls itself, for an operator
-                reading a stack dump. It names the embedder, never a document.
+                reading a stack dump. It names the engine, never a document and
+                never a recording.
+            subject: What kind of work these slots hold, for the refusal message
+                alone. An operator reading "all 8 transcription worker slots are
+                occupied" is told which seam has wedged, which matters now that
+                more than one uses this object.
             max_workers: How many workers may be alive at once. Injected so a test
                 can drive the bound without stranding real threads; production uses
                 :data:`_MAX_WORKERS`.
@@ -163,6 +174,7 @@ class OwnedWorkers:
             msg = f"max_workers must be >= {_MIN_MAX_WORKERS}, got {max_workers}"
             raise ValueError(msg)
         self._thread_name = thread_name
+        self._subject = subject
         self._max_workers = max_workers
         self._lock = threading.Lock()
         self._live = 0
@@ -220,7 +232,7 @@ class OwnedWorkers:
         with self._lock:
             if self._live >= self._max_workers:
                 msg = (
-                    f"all {self._max_workers} embedding worker slots are occupied "
+                    f"all {self._max_workers} {self._subject} worker slots are occupied "
                     f"({self._abandoned} by abandoned workers); this call is refused "
                     f"rather than stranding another thread"
                 )

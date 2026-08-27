@@ -1,0 +1,7 @@
+{
+  "cached_decode.int8.onnx": "2aff28bba6a03d8dcf5c9feac45462629bae37317442299f28115ad09da773f6",
+  "encode.int8.onnx": "8774dfba578de027ec6595c2c654a0836434489bc963a0db124a7f181f571acb",
+  "preprocess.onnx": "f33addce61a143460fe753b5ee5b7db255e5140b5b779c065b94f6c83ff0bf4e",
+  "tokens.txt": "1165c2aeb9f72f457a83be2d459a09054f27490acd9b41bd43794dfd25e296ea",
+  "uncached_decode.int8.onnx": "216737000dd5881a17aa043f6bbd286add33e4c3b0ae257153e2ec15438bdc41"
+}

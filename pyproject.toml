@@ -124,6 +124,68 @@ dependencies = [
     # alternatives, so `ai_assistant.secret_store` selects against an allow-list of
     # backends the operating system protects and raises where none is usable.
     "keyring>=25.7.0",
+    # The two containers ADR-0200 §9 admits — `audio/webm;codecs=opus` and
+    # `audio/mp4` — read and written in memory, and for nothing else. It is
+    # imported only by `ai_assistant/models/speech_container.py`, which a contract
+    # below confines it to, in the form the `keyring` and `icalendar` contracts
+    # already use. A browser records a container, not PCM, so a speech seam that
+    # cannot demux one cannot be handed a recording at all; the standard library
+    # decodes neither Opus nor AAC and parses neither Matroska nor ISO-BMFF, and
+    # hand-rolling either codec underneath the one modality the milestone turns on
+    # is not a trade worth taking.
+    #
+    # **Ranged, not exact-pinned.** ADR-0024 §3's exact-pinned set is closed to
+    # the four packages that decide an *embedding space*, and re-pinning this one
+    # invalidates no stored vector and no persisted value: a container is decoded
+    # to samples inside one call and the samples are thrown away.
+    #
+    # #664's Python 3.14 wheel filter is cleared: `av` publishes `cp314`
+    # manylinux x86_64/aarch64, macOS and Windows wheels with ffmpeg statically
+    # linked, so 3.14 needs no source build and no system ffmpeg; it declares no
+    # Python dependencies at all, so it perturbs neither `numpy` nor the audited
+    # embedding stack. It ships `py.typed`. Verified on this project's own
+    # interpreter that its bundled ffmpeg carries `libopus` and `aac` for both
+    # reading and writing and the `webm` and `mp4` muxers — which is the whole of
+    # what ADR-0200 §9 needs and is not true of every ffmpeg build.
+    "av>=18.1",
+    # The two on-device speech engines ADR-0200 §1 seams, and nothing else. It is
+    # imported only by `ai_assistant/models/moonshine_transcriber.py` and
+    # `ai_assistant/models/vits_synthesizer.py`, which a contract below confines
+    # it to.
+    #
+    # **One library for both seams, which is the point.** ADR-0200 §1 makes
+    # transcription and synthesis siblings, and this covers both — so the two
+    # adapters are the same shape, and neither hand-rolls a decoder loop or a
+    # grapheme-to-phoneme pass whose bugs would be silent (a wrong transcript and
+    # a wrong pronunciation both *look* like output).
+    #
+    # **It perturbs nothing.** It declares exactly one dependency, its own
+    # `sherpa-onnx-core` wheel, and in particular does **not** depend on the
+    # `onnxruntime` distribution: it links its own runtime statically. So it
+    # cannot move any member of ADR-0024 §3's audited set, and cannot therefore
+    # move `model_id` and force a re-embedding.
+    #
+    # #664's Python 3.14 wheel filter is cleared: `cp314` wheels for manylinux
+    # x86_64/aarch64, macOS and Windows, about 14 MiB installed. It ships no
+    # `py.typed`, so a narrow `ignore_missing_imports` override is declared for it
+    # below, in `sqlite_vec`'s shape.
+    #
+    # **Both halves are named, and exact-pinned, because the upstream wheels
+    # disagree with each other about the dependency.** `sherpa-onnx`'s shared
+    # library ships in a separate distribution, `sherpa-onnx-core`, and only
+    # *some* wheels of the pinned version declare it: the
+    # `cp314-manylinux_2_17_x86_64` wheel carries
+    # `Requires-Dist: sherpa-onnx-core==1.13.6` and the `cp314-linux_armv7l` wheel
+    # carries no `Requires-Dist` at all. A resolver records one wheel's metadata
+    # for the package, so resolving from the second leaves an environment that
+    # installs cleanly and then fails at `import sherpa_onnx` with a missing
+    # `libonnxruntime.so` — observed on this project's own `uv sync` before this
+    # line existed. Naming the core distribution directly makes the environment
+    # correct whichever wheel's metadata is read. The `==` is upstream's own
+    # constraint between the two, not a reproducibility pin under ADR-0024 §3; an
+    # upgrade moves both lines together. Filed as #1678.
+    "sherpa-onnx==1.13.6",
+    "sherpa-onnx-core==1.13.6",
     # The JSON Schema evaluator ADR-0145 §10 adopts, for `ToolDefinition`'s
     # `parameters_schema` and for nothing else. It is imported only by
     # `ai_assistant/core/`, which a contract below confines it to — §10's marked
@@ -363,6 +425,12 @@ pretty = true
 module = ["sqlite_vec"]
 ignore_missing_imports = true
 
+# sherpa-onnx ships no type stubs (no py.typed); it is used only by the two speech
+# implementations in models/, which annotate every value crossing out of it.
+[[tool.mypy.overrides]]
+module = ["sherpa_onnx"]
+ignore_missing_imports = true
+
 # `keyring` ships a `py.typed` but leaves its backend constructors unannotated, so
 # building one is a `no-untyped-call` under `strict`. Narrowed to the calls rather
 # than waived at the seam: `ai_assistant.secret_store` declares its own
@@ -542,6 +610,14 @@ forbidden_modules = [
     "huggingface_hub",
     "onnxruntime",
     "tokenizers",
+    # ADR-0200 §1's two speech seams are `models/`' business the way the model
+    # seam is: `av` demuxes and muxes the containers ADR-0200 §9 admits, and
+    # `sherpa_onnx` runs the two engines. Listed for the reason every name here is
+    # — golden rule 4 is meant to be mechanical — and for one of ADR-0200's own:
+    # §2 forbids any adapter in `interfaces/` from transcribing or synthesising,
+    # and reaching a speech library directly is how that would be done.
+    "av",
+    "sherpa_onnx",
 ]
 
 [[tool.importlinter.contracts]]
