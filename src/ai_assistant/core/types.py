@@ -14956,3 +14956,154 @@ class SpokenAudio(BaseModel):
             The decoded audio.
         """
         return base64.b64decode(self.content, validate=True)
+
+
+class SpeechFailure(StrEnum):
+    """Why a transcription failed, in this project's own vocabulary (ADR-0200 §4).
+
+    **One member per class of the** :class:`~ai_assistant.core.errors.SpeechError`
+    **taxonomy, and the bijection is the point.** ADR-0200 §1 fixes that taxonomy
+    at two classes — the base and ``SpeechTimeoutError`` — so this enum has exactly
+    two members, and a lane that adds a third ``SpeechError`` subclass adds its
+    member here in the same change. The two vocabularies do not drift apart, and
+    ``tests/core/test_speech_failure_bijection.py`` is what stops one landing
+    without the other.
+
+    **It is what crosses the promoted surface in place of the seam's exception.**
+    ADR-0200 §4 raises :class:`~ai_assistant.core.errors.TranscriptionFailedError`
+    ``from None``, so neither the seam's message, nor its class name, nor its
+    traceback reaches a caller — a speech implementation takes arbitrary text and
+    could have interpolated the recording into it, which is the one place ADR-0200
+    §8's retention rule cannot see. What a caller can act on travels here instead.
+
+    **The member is chosen by an identity-matched walk of the caught exception's
+    MRO** over a mapping frozen at import, never from the exception's ``__name__``,
+    its module or its message, each of which an implementation controls. That is
+    ``models/routing.py``'s ``_classify`` applied one boundary further out, and for
+    its reason: a speech implementation is a stranger, and a class it happens to
+    name ``SpeechTimeoutError`` is not the one this build declares.
+
+    Attributes:
+        UNCLASSIFIED: A bare :class:`~ai_assistant.core.errors.SpeechError`, or a
+            subclass this build's mapping does not name. Also what a **reduced**
+            delivery reconstructs (ADR-0085 §10a), where it is read beside
+            ``details_elided`` ``True`` rather than on its own.
+        TIMED_OUT: A :class:`~ai_assistant.core.errors.SpeechTimeoutError` — the
+            deadline decorator's, since no seam takes a timeout (ADR-0200 §1).
+    """
+
+    UNCLASSIFIED = "unclassified"
+    TIMED_OUT = "timed_out"
+
+
+class SpokenTurn(BaseModel):
+    """What one spoken turn produced (ADR-0200 §4).
+
+    Four members, and **two shapes a reader should be able to name from them
+    alone**: a recording that carried no words is ``heard`` ``None``; a turn whose
+    answer could not be spoken is ``spoken`` ``None`` with ``spoken_degraded``
+    ``True`` beside an ``outcome`` whose ``reply`` is present. Neither is reachable
+    from ``converse``, and both are legible without decoding a payload.
+
+    **``heard`` is ``None`` exactly when ``outcome`` is ``None``**, and that pair
+    is the recording that carried no words: nothing was asked, so nothing was
+    answered, no turn ran, no episode was captured and no conversation was created.
+    It is not an error and no exception is raised for it (ADR-0200 §4).
+
+    **``spoken`` is the rendering of ``outcome.reply`` and of nothing else** — what
+    :meth:`~ai_assistant.core.protocols.SpeechSynthesizer.synthesize` returned when
+    handed exactly that value. There is one answer on a spoken call and
+    ``outcome.reply`` is it, so nothing here carries a second copy of the spoken
+    words, and a caller that cannot play audio reads ``outcome.reply`` and holds
+    exactly what was said. That the audio is an *audible* rendering of that text is
+    the synthesizer's obligation, discharged in its conformance suite; no component
+    decodes or re-transcribes a rendering to check it.
+
+    **The answer was composed for a channel of unbounded audience** (ADR-0200 §3,
+    §7). Where a class was withheld under ADR-0199 §3, ``outcome.reply`` *is* the
+    deflection ADR-0199 §5 shapes — composed for this channel rather than filtered
+    after the fact — and nothing on this type carries what was withheld.
+
+    Frozen and ``extra="forbid"`` like every other value on the promoted surface,
+    so the four members are the whole of it.
+
+    Attributes:
+        heard: The transcript the recording carried, or ``None`` where it carried
+            no words. Disclosed on every call that produced one: a push-to-talk
+            surface that cannot show the user what it heard cannot be corrected by
+            them (ADR-0200 §4). Carried **byte for byte** — nothing on this path
+            strips, trims, case-folds or otherwise normalises it.
+        outcome: The turn that transcript drove, or ``None`` beside a ``heard`` of
+            ``None``. An ordinary :class:`TurnOutcome` under every clause ADR-0170
+            §4, ADR-0173 §6 and ADR-0197 §8 place on one; a spoken call composes a
+            turn rather than creating a second kind of one.
+        spoken: The rendering of ``outcome.reply``, or ``None`` where there was
+            nothing to say or saying it did not complete.
+        spoken_degraded: Whether an answer existed and speaking it did not
+            complete — synthesis raised, the format intersection was empty, the
+            rendering breached ADR-0200 §6's bound, or the whole result carrying it
+            would have breached ADR-0085 §8c. It is never ``True`` beside a
+            non-``None`` ``spoken``, because this call streams nothing and so has no
+            partial rendering to carry.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    heard: NonBlankEncodableText | None = Field(
+        default=None,
+        description="The transcript, byte for byte, or None where the recording carried no words.",
+    )
+    outcome: TurnOutcome | None = Field(
+        default=None,
+        description="The turn the transcript drove, or None where there was no transcript.",
+    )
+    spoken: SpokenAudio | None = Field(
+        default=None,
+        description="The rendering of the outcome's reply, or None where there is none.",
+    )
+    spoken_degraded: bool = Field(
+        default=False,
+        description="Whether an answer existed and speaking it did not complete.",
+    )
+
+    @model_validator(mode="after")
+    def _shapes_are_the_ones_adr_0200_admits(self) -> Self:
+        """Refuse every shape ADR-0200 §4 does not describe.
+
+        Stated **both ways**, because each direction rules out a different lie. A
+        transcript with no turn would say the engine heard words and answered
+        nothing; a turn with no transcript would say it answered a recording that
+        carried none. A rendering beside no answer would be audio of something this
+        type does not hold, and ``spoken_degraded`` beside a rendering would report
+        a partial delivery a call that streams nothing cannot make.
+
+        Raises:
+            ValueError: If the four members do not describe one of §4's shapes.
+        """
+        if (self.heard is None) != (self.outcome is None):
+            msg = (
+                "heard and outcome are present together or absent together: a transcript "
+                "with no turn and a turn with no transcript are both shapes ADR-0200 §4 "
+                "does not admit"
+            )
+            raise ValueError(msg)
+        answered = self.outcome is not None and self.outcome.reply is not None
+        if not answered and self.spoken is not None:
+            msg = (
+                "spoken is the rendering of the outcome's reply, so it is None wherever "
+                "there is no reply to render (ADR-0200 §4)"
+            )
+            raise ValueError(msg)
+        if not answered and self.spoken_degraded:
+            msg = (
+                "spoken_degraded says an answer existed and speaking it did not complete, "
+                "so it is False wherever there was no answer (ADR-0200 §4)"
+            )
+            raise ValueError(msg)
+        if self.spoken_degraded and self.spoken is not None:
+            msg = (
+                "spoken_degraded is never True beside a rendering: this call streams "
+                "nothing, so it has no partial rendering to carry (ADR-0200 §4)"
+            )
+            raise ValueError(msg)
+        return self

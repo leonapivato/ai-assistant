@@ -31,7 +31,9 @@ argument, so a test changes one thing without restating the rest.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
@@ -85,6 +87,9 @@ from ai_assistant.core.types import (
     SkipReason,
     SourceGrant,
     SpendTotal,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenTurn,
     StepExecution,
     StepOutcome,
     StepStatus,
@@ -287,6 +292,16 @@ class FakeAssistantEngine:
         #: :class:`~ai_assistant.core.types.ConversationDigest` is the deletion
         #: ceremony's shape and carries no activity stamp.
         self.activity: dict[str, datetime] = {}
+        #: What :meth:`converse_spoken` reports having heard (ADR-0200 §4). A
+        #: **blank** value — empty or whitespace only — is what makes that call take
+        #: §4's no-words shape, which is the one shape a consumer cannot reach by
+        #: scripting :attr:`turn_outcome`.
+        self.spoken_transcript: str = "What did I do last week?"
+        #: What this engine's synthesizer can produce (ADR-0200 §3). The call
+        #: renders in the **first** member of ``plays`` this set also names; an
+        #: empty intersection degrades the turn, which is how a consumer reaches
+        #: that shape without a seam of its own.
+        self.spoken_formats: frozenset[SpokenAudioFormat] = frozenset(SpokenAudioFormat)
         self._ticks = count(1)
         #: Where :meth:`answer` draws the id of the belief an accepted answer writes.
         #: A **counter rather than the store's size**, because the store shrinks: a
@@ -525,6 +540,86 @@ class FakeAssistantEngine:
         for piece in _pieces_of(checked.reply):
             yield self._checked(ReplyChunk(text=piece), "converse_streaming")
         yield checked
+
+    async def converse_spoken(
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+        conversation_id: Identifier | None = None,
+    ) -> SpokenTurn:
+        """Run one spoken turn, scripted by :attr:`spoken_transcript` (ADR-0200 §3).
+
+        **The transcript is the lever, and everything else follows from it**, which
+        keeps this double honest about the join ADR-0200 §4 makes load-bearing: a
+        blank transcript yields §4's no-words shape — four members, no turn, no
+        conversation and no exception — and a non-blank one reaches ``heard``
+        **byte for byte**, leading and trailing spaces included. A consumer that
+        wants the turn to say something else scripts :attr:`turn_outcome` as it
+        does for :meth:`converse`.
+
+        The rendering is the first member of ``plays`` that :attr:`spoken_formats`
+        also names, and its octets are a hash of the answer — deterministic,
+        opaque, and not to be decoded by anything. An empty intersection degrades
+        exactly as ADR-0200 §4 rules: ``spoken`` ``None``, ``spoken_degraded``
+        ``True``, and no rendering attempted.
+
+        Args:
+            utterance: The recording. Carried no further than this call — nothing
+                here writes it, logs it or keeps it (ADR-0200 §8), and the fake
+                never decodes it, because what it *says* is not something a
+                transcriber's caller may infer from its bytes.
+            plays: What the caller can render, in preference order.
+            timeout: The budget for the whole call.
+            conversation_id: The conversation to continue, or ``None``.
+
+        Returns:
+            The transcript, the turn it drove, and the rendering of the answer.
+
+        Raises:
+            ValueError: If ``plays`` is empty or ``conversation_id`` is blank —
+                refused locally, before anything else, and before there is any
+                transcript to be blank (ADR-0200 §4).
+            UnknownConversationError: If ``conversation_id`` names no conversation
+                this engine holds — and **only** where a turn actually ran, since a
+                recording with no words creates no conversation.
+        """
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        if not plays:
+            msg = "plays must name at least one format the caller can render (ADR-0200 §3)"
+            raise ValueError(msg)
+        check_arguments(
+            "converse_spoken",
+            max_bytes=self._max_payload_bytes,
+            utterance=utterance,
+            plays=plays,
+            timeout=timeout,
+            conversation_id=selected,
+        )
+        self.calls.append(("converse_spoken", {"plays": plays, "conversation_id": selected}))
+        heard = self.spoken_transcript
+        if not heard.strip():
+            return self._checked(SpokenTurn(), "converse_spoken")
+        held = self._resolve(selected)
+        outcome = self.turn_outcome or TurnOutcome(
+            turn=_turn(heard),
+            conversation_id=held,
+            reply=f"This fake engine composed no real answer to {heard.strip()!r}.",
+        )
+        chosen = next((member for member in plays if member in self.spoken_formats), None)
+        if outcome.reply is None:
+            return self._checked(SpokenTurn(heard=heard, outcome=outcome), "converse_spoken")
+        if chosen is None:
+            return self._checked(
+                SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True), "converse_spoken"
+            )
+        rendering = SpokenAudio(content=_pseudo_audio(outcome.reply, chosen), media_type=chosen)
+        return self._checked(
+            SpokenTurn(heard=heard, outcome=outcome, spoken=rendering), "converse_spoken"
+        )
 
     async def resume(
         self,
@@ -2034,6 +2129,22 @@ def _pieces_of(reply: str | None) -> tuple[str, ...]:
         pieces[1] = pieces[0] + pieces[1]
         del pieces[0]
     return () if not pieces[0].strip() else tuple(pieces)
+
+
+def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:
+    """Deterministic pseudo-audio for ``text``, as padded canonical base64.
+
+    The octets are a hash of the answer and the container, so one answer renders
+    one way and two answers render differently. **Nothing about them is audio**,
+    and nothing may decode them: ADR-0200 §4 makes "the rendering says the text"
+    the synthesizer's obligation, discharged in its own conformance suite, and
+    forbids any consumer from inspecting a rendering to check it. What this fake
+    guarantees is the property a consumer may lean on — that ``spoken`` is the
+    rendering of ``outcome.reply`` and of nothing else.
+    """
+    return b64encode(hashlib.sha256(f"{media_type.value}\0{text}".encode()).digest()).decode(
+        "ascii"
+    )
 
 
 def _turn(utterance: str) -> TurnResult:

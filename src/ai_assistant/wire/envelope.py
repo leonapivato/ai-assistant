@@ -461,7 +461,38 @@ from ai_assistant.wire.errors import (
 #: is a closed vocabulary this system owns and rows of types the surface already
 #: returns — no Tier 0 credential, no query, and no free text the router produced
 #: (ADR-0197 §6, §7).
-PROTOCOL_VERSION: Final[int] = 17
+#:
+#: **18 since ADR-0200 §3**, which adds ``converse_spoken`` to the promoted
+#: surface — one recording in, one :class:`~ai_assistant.core.types.SpokenTurn`
+#: back, with transcription, the turn and synthesis composed on the hub. It is the
+#: **first** limb of ADR-0124 §9, the one that reaches "any change to the promoted
+#: surface's method set", and ADR-0200 §3 puts the obligation on the lane that adds
+#: the member, in the same change. ``wire.surface``'s ``METHODS`` is derived from
+#: the Protocol, so a version 18 client sending the method to a version 17 hub is
+#: refused at the handshake rather than at the call.
+#:
+#: **The method set moves from thirty-nine to forty**, and ADR-0177 §1's browser
+#: enumeration moves **with** it, from thirty to thirty-one — the one place in this
+#: note's history where it does. ADR-0200 §12(a) partially supersedes that
+#: enumeration for exactly this member and no other, and §10's ``POST /ask/spoken``
+#: is the route a later lane builds against it.
+#:
+#: **Nothing under** ``wire/`` **changes for it but the client's one method**
+#: (ADR-0200 §9). ADR-0087 §2c's scalar table gains no row and ``wire/codec.py``'s
+#: ``project`` gains no branch: audio crosses as
+#: :data:`~ai_assistant.core.types.Base64Audio`, which is text, inside the ordinary
+#: envelope. The framing, the connect exchange and the frame kinds are untouched,
+#: no existing frame's encoding changes, and ``METHODS``, ``STREAMING_METHODS``,
+#: both adapters and the error mapping stay derived from the Protocol — so the
+#: method joins neither ``wire/server.py``'s ``CONNECTION_METHODS`` nor
+#: ``STREAMING_METHODS``, by the default those constants already produce.
+#:
+#: **The error registry gains one code and not a taxonomy** (ADR-0200 §4).
+#: ``TranscriptionFailedError`` is the only new failure this method declares; no
+#: :class:`~ai_assistant.core.errors.SpeechError` reaches the promoted surface, and
+#: ``wire/errors.py`` reads the new type's structured state off its constructor as
+#: it reads every other's.
+PROTOCOL_VERSION: Final[int] = 18
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

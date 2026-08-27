@@ -189,6 +189,7 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenAudioFormat,
+        SpokenTurn,
         StepTransition,
         ToolCall,
         ToolCost,
@@ -8293,6 +8294,164 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``conversation_id`` is present and blank, or the
                 utterance has no UTF-8 encoding — refused locally, before any I/O.
+            UnknownConversationError: If ``conversation_id`` names no conversation
+                this engine can operate on.
+            PlanningError: If the request could not be turned into an executable
+                plan, or a step transition was refused.
+            ContextError: If the situational context could not be assembled.
+            AuditError: If a permission decision could not be recorded.
+            ToolBindingError: If the selected tool could not be bound.
+        """
+        ...
+
+    async def converse_spoken(
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget for the whole call, threaded to each stage (ADR-0029 §4)
+        conversation_id: Identifier | None = None,
+    ) -> SpokenTurn:
+        """Run one turn from a recording and hand back the answer as speech (ADR-0200 §3).
+
+        **A third entry on this surface, not a change to either of the first two.**
+        ``converse`` and ``converse_streaming`` are untouched — same names, same
+        signatures, same clauses, same results — exactly as ADR-0173 §4 kept
+        ``converse`` untouched when it added the streamed entry. A caller that wants
+        no speech calls one of them and observes nothing this method adds.
+
+        **The whole composition is here, and no adapter performs any part of it**
+        (ADR-0200 §2). Transcription, the turn, ADR-0199's disclosure ruling and
+        synthesis are sequenced in ``orchestration``, behind this one call. No
+        adapter transcribes, synthesises or sequences those stages, and none calls a
+        :class:`SpeechTranscriber` or a :class:`SpeechSynthesizer` at all — golden
+        rule 3, ADR-0094 §7 through ADR-0168 §1, and the fact that a hub cannot rule
+        on a channel it cannot see, each landing on the same answer.
+
+        **This operation is the output channel, and its audience is unbounded**
+        (ADR-0200 §3, ADR-0199 §1). What a loudspeaker emits reaches whoever is
+        within range of the device with no act of theirs. That is declared by this
+        contract rather than computed anywhere: **no caller supplies the audience
+        and no value on this surface expresses it** — there is no audience argument,
+        no audience member on any type this method carries, and no setting, so a
+        caller cannot assert an audience, cannot narrow one, and cannot raise this
+        channel's from unbounded to bounded (ADR-0199 §8). A bounded spoken channel
+        is a later ADR's and arrives as its own declared channel, never as an
+        argument added here; no implementation reads a caller's playback capability,
+        its transport, its session or its device as a declaration of audience.
+
+        ``plays`` is **not** an audience in disguise: it says what the caller can
+        *render*, not who can *hear*, and is the same kind of fact as
+        :attr:`SpeechTranscriber.formats` on the other side of the pipeline.
+        ADR-0199 §1 is explicit that the posture "is not a function of the modality,
+        the transport, the device, the authority the request carried, the session
+        that admitted the request, or the identity of whoever asked", and a format
+        is further from audience than any item on that list. Nothing in the
+        disclosure ruling reads ``plays``, and no implementation may.
+
+        **The withholding happens at supply, inside the turn** (ADR-0200 §7,
+        ADR-0199 §5). Content withheld from this channel does not reach the
+        composing stage among the inputs the reply is composed from; no stage
+        composes a reply and then removes, masks, blanks or rewrites part of it, and
+        no component filters, redacts or post-processes the answer on any ground.
+        There is **one** answer and ``outcome.reply`` is it — where a class was
+        withheld it *is* the deflection ADR-0199 §5 shapes, and where none was it is
+        the ordinary answer. Nothing on this surface carries what was withheld.
+
+        **The format is the engine's pick, not the caller's demand.** It renders in
+        the **first** member of ``plays`` the synthesizer's own ``formats`` also
+        names, never asks for one outside that intersection, and never returns a
+        rendering in a format the caller did not name. An empty intersection is a
+        degradation rather than a failure, and costs no synthesizer call.
+
+        **A transcription failure fails the call; a synthesis failure degrades it**
+        (ADR-0200 §4). The line is whether an answer exists yet: a failure before
+        there is one leaves nothing worth returning, and a failure after there is
+        one would throw away an answer the user already has. The translation at this
+        boundary is **total and stated both ways** — a
+        :class:`~ai_assistant.core.errors.SpeechError` out of ``transcribe``, and
+        nothing else, becomes :class:`~ai_assistant.core.errors.TranscriptionFailedError`;
+        a ``SpeechError`` out of ``synthesize``, and nothing else, degrades; and
+        **every other exception propagates unchanged**, so an implementation catches
+        ``SpeechError`` at each stage and never ``Exception``.
+
+        **No audio is retained anywhere** (ADR-0200 §8). Neither the utterance nor
+        the rendering is written to any store, index, trace, audit trail, routing
+        trail, outbox or log, in either tier, by any component on this path; it
+        exists in memory for the duration of the call and nowhere else. No setting
+        enables retention and no configuration value can. The error path retains
+        nothing either: ``TranscriptionFailedError`` carries an operator-facing
+        message and never the recording, a fragment of it, or a length that would
+        let one be reconstructed, and it chains nothing that could. And **no
+        component on this path writes an exception message it did not author** — not
+        to either log tier, not to a store, trace or trail, and not into a surfaced
+        error; the defect path included, since ``RuntimeError(audio.content)`` is
+        constructible by the same implementation that could construct
+        ``SpeechError(audio.content)``.
+
+        **The turn is captured exactly as ADR-0074 §3 captures every turn**, at the
+        point its ``TurnOutcome`` is produced. Nothing records the channel it
+        arrived on: ADR-0074 §11 states that "nothing on a turn records where it came
+        from", and ADR-0200 §8 declines to change that here.
+
+        Every clause this Protocol's own docstring binds every method to binds this
+        one — the identifier validation before any I/O, the local refusal of a
+        malformed argument, ADR-0060's cancellation clause, ADR-0065's
+        input-observation clause, and ADR-0085 §8's size limit enforced in both
+        directions. A delivered cancellation is **neither** a transcription failure
+        nor a synthesis failure: it propagates after cancellation-safe cleanup,
+        exactly as it does on :meth:`converse`, and one landing inside ``transcribe``
+        or inside ``synthesize`` is such a delivery.
+
+        Args:
+            utterance: The recording. Refused before any I/O where its decoded
+                length exceeds ``hub_max_spoken_audio_bytes`` (ADR-0200 §6) or where
+                the transcriber's ``formats`` does not name its ``media_type``.
+            plays: The container-and-codec members the caller can render, in
+                **preference order** — required, with no default, and non-empty. A
+                tuple rather than a set because order is the preference and because
+                ``wire/codec.py``'s ``project`` has no branch for a set, so a
+                set-typed argument would fail closed at the first call.
+            timeout: The budget for the **whole call** — transcription, the turn and
+                synthesis together, not for the turn alone. It is **threaded** to
+                each stage (ADR-0029 §4), and the effective bound on a speech stage
+                is the **lesser** of the caller's remaining budget and the deadline
+                decorator's configured one, so a stage never outlives the call and a
+                generous deployment setting never overrides a tight caller. Every
+                expiry has a stated outcome and none is new machinery: inside
+                ``transcribe`` it is a ``SpeechTimeoutError`` translated to
+                ``TranscriptionFailedError`` carrying
+                :attr:`~ai_assistant.core.types.SpeechFailure.TIMED_OUT`; inside
+                ``synthesize`` it degrades; during the turn it behaves exactly as it
+                does on :meth:`converse`. A budget already exhausted when a stage is
+                reached is that stage's expiry and is not a separate case.
+            conversation_id: The conversation to continue, or ``None`` to run in a
+                fresh one — ADR-0173 §8's meaning unchanged.
+
+        Returns:
+            One :class:`~ai_assistant.core.types.SpokenTurn`. A recording that
+            carried **no words** is not an error and raises nothing: ``heard`` and
+            ``outcome`` are ``None``, ``spoken`` is ``None``,
+            ``spoken_degraded`` is ``False``, no turn ran, no episode was captured
+            and no conversation was created. A transcript that is not blank travels
+            **byte for byte** — nothing on this path strips, trims, case-folds or
+            otherwise normalises it.
+
+        Raises:
+            ValueError: If ``conversation_id`` is present and blank, if ``plays`` is
+                empty, or if the transcriber's ``formats`` does not name the
+                recording's ``media_type`` — each refused locally, before any I/O,
+                and before there is any transcript to be blank.
+            OversizedValueError: If the recording's decoded length exceeds
+                ``hub_max_spoken_audio_bytes`` (ADR-0200 §6), refused locally and
+                before any I/O; or where the result breaches ADR-0085 §8c's payload
+                limit even with no rendering in it, which is §8c's oversized result
+                and not a degradation.
+            TranscriptionFailedError: If transcription failed. It carries a
+                :class:`~ai_assistant.core.types.SpeechFailure` and is raised
+                ``from None``: the seam's exception is not chained across this
+                boundary, so neither its message, nor its class name, nor its
+                traceback reaches a caller.
             UnknownConversationError: If ``conversation_id`` names no conversation
                 this engine can operate on.
             PlanningError: If the request could not be turned into an executable

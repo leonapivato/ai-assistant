@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from ai_assistant.core.types import encodable_text
+from ai_assistant.core.types import SpeechFailure, encodable_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -312,6 +312,87 @@ class SpeechTimeoutError(SpeechError):
 
     retryable: ClassVar[bool] = True
     routable: ClassVar[bool] = True
+
+
+class TranscriptionFailedError(AssistantError):
+    """A spoken turn could not be transcribed (ADR-0200 §4).
+
+    Declared by :meth:`~ai_assistant.core.protocols.AssistantEngine.converse_spoken`
+    and by no other method. **A transcription failure fails the call**, where a
+    synthesis failure degrades it: the line is whether an answer exists yet, so a
+    failure before there is one leaves nothing worth returning, and a failure after
+    there is one would throw away an answer the user already has (ADR-0170 §8's
+    argument, on its own terms).
+
+    **Not a** :class:`SpeechError` **subclass, and the omission is the decision.**
+    It carries no ``retryable`` and no ``routable`` claim, because whether a second
+    attempt or a second engine would help is a property of the *seam's* failure and
+    not of the promoted surface's. No ``SpeechError`` reaches the promoted surface
+    through this call, which is why the wire's error registry gains one code rather
+    than a taxonomy.
+
+    **It is raised ``from None``.** The seam's exception is not chained across the
+    promoted boundary: neither its message, nor its class name, nor its traceback
+    reaches a caller, in process or across the wire (ADR-0200 §4, §8). That is not
+    a loss of diagnostics but the condition of the retention guarantee —
+    :class:`SpeechError` takes arbitrary text, so an implementation that
+    interpolated the clip it could not decode has put the recording inside the
+    exception, and ``raise ... from exc`` would keep that object reachable as
+    ``__cause__`` and render it in the traceback, where ADR-0200 §8 cannot see it
+    and nobody looks. The implementation's own detail belongs in the
+    implementation's own log; what a caller can act on is :attr:`failure`.
+
+    **The message is this project's own** and carries no fragment of the recording,
+    no length that would let one be reconstructed, and no text a component on this
+    path did not author (ADR-0200 §8).
+
+    **Its default has exactly one caller.** ``failure`` defaults to
+    :attr:`~ai_assistant.core.types.SpeechFailure.UNCLASSIFIED` for ADR-0085 §10a's
+    reduced payload and for nothing else: §10a sets ``details`` to ``null`` when an
+    error payload will not fit the frame, and ``raise_from_payload`` then calls the
+    declared type with the message alone. A *required* keyword there would make
+    that call raise ``ProtocolError`` instead of the declared failure — one
+    operation with a typed contract in process and an undeclared one across the
+    wire, which is the "two observable failure contracts for one call" ADR-0084
+    §4-§5 promote this surface to prevent. Every raise on the orchestration path
+    passes ``failure`` explicitly, computed from the caught exception's MRO.
+
+    **And the loss is marked rather than silent.** On a reduced delivery the
+    reconstructed error carries ``details_elided`` ``True``, which
+    ``wire/errors.py`` already sets from the frame's own ``reduced`` member:
+    ``UNCLASSIFIED`` beside ``details_elided`` ``True`` means the classification did
+    not survive the frame, and beside ``details_elided`` ``False`` means the seam
+    raised a bare ``SpeechError``. This is
+    :class:`UnresolvedEvidenceError`'s shape — a default plus the loss *marked* —
+    taken for that clause's own reason.
+
+    Attributes:
+        failure: This project's classification of why transcription failed, chosen
+            by an identity-matched walk of the caught exception's MRO over a
+            mapping frozen at import (ADR-0200 §4). Never derived from the
+            exception's ``__name__``, its module or its message, each of which an
+            implementation controls.
+    """
+
+    def __init__(
+        self, message: str, *, failure: SpeechFailure = SpeechFailure.UNCLASSIFIED
+    ) -> None:
+        """Carry one classification across the promoted boundary.
+
+        Args:
+            message: This project's own operator-facing text. Never the seam's, and
+                never carrying any part of the recording (ADR-0200 §8).
+            failure: The classification. Coerced to a
+                :class:`~ai_assistant.core.types.SpeechFailure` member, so a
+                reconstruction from ADR-0085 §10a's ``details`` object — where the
+                member arrived as its own string value — holds the same member the
+                hub raised rather than a bare ``str`` that merely compares equal.
+
+        Raises:
+            ValueError: If ``failure`` names no member of the vocabulary.
+        """
+        super().__init__(message)
+        self.failure: SpeechFailure = SpeechFailure(failure)
 
 
 class EmbeddingDeadlineExpiredError(AssistantError):

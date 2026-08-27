@@ -119,6 +119,9 @@ if TYPE_CHECKING:
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
+        SpokenAudio,
+        SpokenAudioFormat,
+        SpokenTurn,
         TurnOutcome,
     )
 
@@ -298,6 +301,44 @@ class HubClient:
         # step instead would be one a caller that never iterates never sees.
         project(payload)
         return self._stream_call("converse_streaming", payload)
+
+    async def converse_spoken(
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 - the caller's budget, relayed to the hub (ADR-0029 §4)
+        conversation_id: Identifier | None = None,
+    ) -> SpokenTurn:
+        """Run one spoken turn on the hub (ADR-0200 §3).
+
+        **One frame each way, and nothing under** ``wire/`` **carries audio
+        specially** (ADR-0200 §9). The recording travels as
+        :data:`~ai_assistant.core.types.Base64Audio` — text — inside the ordinary
+        request envelope, so ``codec``'s ``project`` needs no ``bytes`` branch and
+        the framing is untouched. This method exists because the client implements
+        :class:`~ai_assistant.core.protocols.AssistantEngine`, and that is the whole
+        of the client's change.
+
+        Args:
+            utterance: The recording.
+            plays: What the caller can render, in preference order. Non-empty.
+            timeout: The budget for the whole call.
+            conversation_id: The conversation to continue, or ``None``.
+
+        Returns:
+            The transcript, the turn it drove, and the rendering of its answer.
+        """
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        return await self._call(  # type: ignore[no-any-return]
+            "converse_spoken",
+            utterance=utterance,
+            plays=plays,
+            timeout=timeout,
+            conversation_id=selected,
+        )
 
     async def _stream_call(self, method: str, payload: dict[str, object]) -> AsyncIterator[Any]:
         """Read one streamed exchange: chunk frames, then one terminal frame.
