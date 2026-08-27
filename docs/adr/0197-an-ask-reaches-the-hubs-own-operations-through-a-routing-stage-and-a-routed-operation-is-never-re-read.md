@@ -11,8 +11,8 @@
   `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a change
   contract-surface "when it is the ADR deciding that surface", prose-only though
   this PR is. The surface is one field on `TurnOutcome` and five new
-  `core/types.py` names (§8), plus two more `core/types.py` names, one new Protocol
-  in `core/protocols.py` and one error class (§9). The implementation is separate
+  `core/types.py` names (§8), plus two more `core/types.py` names, two new
+  Protocols in `core/protocols.py` and one error class (§9). The implementation is separate
   lanes against this ADR once it is merged (golden rule 5, ADR-0015 §5).
 - **It partially supersedes ADR-0170 §4** — that section's second `None` shape and
   its two clauses stated in the `turn is None` direction, exactly as far as they
@@ -210,7 +210,8 @@ it.
 > **Normative.** The stage adds **no member to `ModelProvider`** and no Protocol for
 > itself. `ModelProvider.complete` is the whole of what it consumes at the model
 > seam, and no triad is owed for the stage (`CONTRIBUTING.md` → "Adding a
-> Protocol"). §9's trail Protocol is a separate surface and owes its own triad.
+> Protocol"). §9's two trail Protocols are a separate surface and owe their own
+> triads; the stage holds the write-only half of that pair and nothing more.
 
 > **Normative.** The stage performs the routed operation by calling the engine's own
 > implementation of the named operation. It does not reach into a store the engine
@@ -889,18 +890,39 @@ and a renderer.
 > its slot released and nothing done.
 
 > **Normative.** A `route_id` is minted when the route is taken — by **every**
-> route, read-only ones included — and **every** mint is checked against the **live
-> park table**, the engine's own in-memory registry of §7, never against the trail's
-> retained rows. A read-only route is checked too because its `NOT_OWED` row under a
-> live park's id would collide with that park's own answer just as a second park's
-> `OWED` row would. A mint colliding with the `route_id` of a park that is still
-> registered is retried from the factory, and a
-> small retry budget exhausting ends the pass in `RouteOutcome.UNRECORDED`: nothing
-> is parked, no row is written, no token is minted and the operation is never
-> called. That is the insert-if-absent-and-retry shape ADR-0074 §1 already gives a
-> conversation id, and it is here for ADR-0074 §1's own reason — the factory is
-> *injected*, so a repeating test double, a seeded factory or a future non-random
-> scheme makes a collision reachable in a way probability does not answer.
+> route, read-only ones included — and the mint is **reserved**, never merely
+> checked. The reservation is taken in the **same in-memory critical section** that
+> §7's ceiling slot is reserved in and that a park is registered in: under one lock
+> the engine tests the candidate against every `route_id` currently **reserved** —
+> those of registered parks and those of routes still in flight alike — and records
+> the reservation before the lock is released. A candidate that collides is retried
+> from the factory inside that same section; a small retry budget exhausting ends
+> the pass in `RouteOutcome.UNRECORDED`, with nothing reserved, nothing parked, no
+> row written, no token minted and the operation never called. A read-only route
+> reserves too, because its `NOT_OWED` row under a live park's id would collide
+> with that park's own answer exactly as a second park's `OWED` row would.
+
+> **Normative.** A route-id reservation is **released on every path** that does not
+> end in a live park, in the `finally` §7 already requires of the ceiling slot and
+> beside it: the row of §9 failing to write, the id factory raising, the resolution
+> raising, the pass being cancelled at any await, and any defect in the code
+> between. A read-only route releases its reservation when the pass ends, whatever
+> the pass ended as. A confirm-owed route holds its reservation for exactly as long
+> as the park is live, and releases it in the same critical section that claims or
+> evicts the park (§7). A reservation that could leak would exhaust the retry
+> budget for every later route, which is the ceiling's own failure mode arriving
+> through the identity instead of the slot.
+
+**A check that is not atomic with the registration is not a check, and the window
+here is wide rather than theoretical.** Between deciding an id is free and
+registering the park sit §9's row write and the prune it performs — two awaits on a
+durable store — so two routes can each find an empty table, each be handed the same
+id by a repeating factory, and each register. Worse, the prune performed by the
+second is what removes the first's evidence, so the store's retained-row rule
+cannot catch what the in-memory check just missed. Reserving under the lock that
+already guards §7's ceiling closes the window without adding a second lock, and it
+puts the two resources a route holds — a slot and an identity — under one
+acquisition and one `finally`.
 
 **Liveness is checked where liveness lives, which is the same lesson as the clause
 above read from the other side.** The store's `route_id` rule is a consistency
@@ -908,11 +930,11 @@ check over the rows it **retains**, and at a small `routing_trail_max_rows` thos
 rows are not a census of live routes — so it cannot be the guard against a
 repeating factory, and left as the only guard it fails in the direction that costs
 the user the operation. Concretely: a live `forget` park's `OWED` row is pruned, a
-second park mints the same id and is admitted because no row remains to conflict
-with, and the first park's approval then collides with the *second* park's retained
-row and is refused — after §7 has already claimed the token, so the user's yes is
-spent on nothing. The park table is the state and knows exactly which ids are live,
-so the mint is where a collision is caught: before anything is parked, before a
+second park takes the same id because no row remains to conflict with, and the
+first park's approval then collides with the *second* park's retained row and is
+refused — after §7 has already claimed the token, so the user's yes is spent on
+nothing. The park table is the state and knows exactly which ids are live, so the
+reservation is where a collision is caught: before anything is parked, before a
 token exists, and before a card is shown that could not be honoured.
 
 **What survives a prune is history, not a resolution.** Two routes can still end up
@@ -920,7 +942,10 @@ under one `route_id` in the trail, where a factory repeats across a prune and no
 park was live at the mint. That costs an operator a join that finds more than it
 expected and costs no user an operation, which is the trade §9 makes throughout: a
 bounded trail forgets, and what it must never do is forget something a live park
-depends on.
+depends on. Reserve-and-retry is the shape ADR-0074 §1 already gives a conversation
+id, and it is here for ADR-0074 §1's own reason: the factory is *injected*, so a
+repeating test double, a seeded factory or a future non-random scheme makes a
+collision reachable in a way probability does not answer.
 
 **The dropped check is the mistake, not the bound.** It is tempting to exempt a
 live park's `OWED` row from pruning instead, and that is the wrong half to move:
@@ -934,8 +959,16 @@ consistency that `record` can see without being the park's authority is kept. Th
 park is the **state**, held in memory under the engine's own lock (§7); the trail
 is the **record**, and a record that can refuse the thing it records is not one.
 
-> **Normative.** `core/protocols.py` gains `RoutingTrail`, the durable store, with
-> exactly four members on ADR-0185 §12's shape and no others:
+> **Normative.** `core/protocols.py` gains **two** Protocols on ADR-0185 §4's split,
+> and the seam divides by capability. `RoutingRecorder` **writes** and can answer
+> nothing:
+>
+> ```python
+> async def record(self, record: RoutedOperationRecord) -> None
+> ```
+>
+> `RoutingTrail` records and reads, with exactly four members on ADR-0185 §12's
+> shape and no others:
 >
 > ```python
 > async def record(self, record: RoutedOperationRecord) -> None
@@ -943,6 +976,9 @@ is the **record**, and a record that can refuse the thing it records is not one.
 > async def export(self) -> tuple[RoutedOperationRecord, ...]
 > async def clear(self) -> None
 > ```
+>
+> `record` is specified once and binds both, since one concrete store satisfies
+> them.
 >
 > `record` appends one row and returns nothing, taking the identity the caller
 > minted rather than producing one. Its checks and its append are **one critical
@@ -963,15 +999,40 @@ is the **record**, and a record that can refuse the thing it records is not one.
 > only by ADR-0085 §8c's payload limit. `clear` destroys every row, for ADR-0007's
 > deletion right.
 
+> **Normative.** The routing stage of §2 is injected with a **`RoutingRecorder`**
+> and holds no `RoutingTrail`. Nothing but a future hub-owned read surface (§11)
+> holds one. Structural typing means the one `permissions/` store satisfies both,
+> so the composition root passes one object to the stage and to that surface alike;
+> what the stage cannot do is *name* `recent`, `export` or `clear`.
+
+**The split is ADR-0185 §4's move, and here it forecloses something worse than a
+cursor.** There the capability removed from the driver was the ability to *read*
+the trail, because a queryable read trail is the cursor ADR-0093 §5 forbids. Here
+the stage must write, and the capability removed is the same one plus `clear` —
+which means a routing stage handed the whole trail could **erase the record of its
+own decisions**. `clear` exists for ADR-0007's deletion right and belongs to the
+surface that answers to the user; a stage whose acts the rows are *about* is the
+last thing that should be able to call it. Making that a `mypy --strict` failure
+rather than a review note is ADR-0185 §4's own standard on ADR-0097 §3's argument:
+"It holds no store handle, and that is the scope limit rather than a rule about it
+… Here it is a type."
+
+**It costs two triads and that is named rather than discovered.** Two suites, two
+fakes, two binding classes; the `RoutingRecorder` half is one member, and §12 binds
+its suite to **both** fakes, which turns part of the cost into evidence that the
+store really does satisfy the narrow seam — the arrangement ADR-0185 §12 already
+uses for its own pair.
+
 > **Normative.** `core/errors.py` gains `RoutingTrailError`, a direct subclass of
 > `AssistantError` — **one class rather than several**, as `ReadTrailError` is one
-> class rather than two — and it is what every `RoutingTrail` member raises on a
+> class rather than two — and it is what every member of both Protocols raises on a
 > durable failure. No member raises a bare `Exception`, and no member orphans a
 > resource it acquired when the call is cancelled (ADR-0060 §1).
 
-> **Normative.** `RoutingTrail` is a **new Protocol and owes the full triad** —
-> Protocol, shared conformance suite, and canonical fake in `ai_assistant.testing`
-> — in one change (`CONTRIBUTING.md` → "Adding a Protocol", ADR-0137 §3).
+> **Normative.** `RoutingRecorder` and `RoutingTrail` are **new Protocols and each
+> owes the full triad** — Protocol, shared conformance suite, and canonical fake in
+> `ai_assistant.testing` — in the change that adds them (`CONTRIBUTING.md` →
+> "Adding a Protocol", ADR-0137 §3). Neither is an internal seam of `permissions/`.
 
 > **Normative.** `core.config.Settings` gains `routing_trail_max_rows`, an
 > `_IntegerSetting` defaulting to `200_000`, `gt=0` and `lt=2**63`, validated at
@@ -1170,7 +1231,7 @@ that conversation.
 
 > **Normative.** Beyond §§1–10 and §13, this ADR decides nothing. It registers no
 > tool, designates no seam, changes no method **signature** on `AssistantEngine`,
-> and adds no `core` name other than §8's five, §9's two types, its one Protocol
+> and adds no `core` name other than §8's five, §9's two types, its two Protocols
 > and its one error class. It does move one method's **contract** — `resume`'s, in
 > the two sentences §7 names and §13 records — and that is not the same claim: a
 > signature is what a caller compiles against, a contract is what it may rely on,
@@ -1227,9 +1288,12 @@ This decision is larger than one lane. ADR-0137 §2 makes the contract triad and
 primary production implementation one unit of work, and ADR-0173's implementation
 across three PRs is the precedent for an ADR that lands in more than one.
 
-> **Normative.** §9's `RoutingTrail` triad — Protocol, shared conformance suite,
-> canonical fake — lands with its primary production implementation in one change
-> (ADR-0137 §2, §3). It is not split, and it is not deferred behind the router.
+> **Normative.** §9's **two** triads — `RoutingRecorder`'s and `RoutingTrail`'s,
+> each Protocol, shared conformance suite and canonical fake — land with their one
+> primary production implementation in `permissions/` in one change (ADR-0137 §2,
+> §3). They are not split from it, and they are not deferred behind the router. The
+> shared suite for `RoutingRecorder` binds to **both** fakes, as ADR-0185 §12's
+> pair does, so the narrow seam is evidenced rather than asserted.
 
 > **Normative.** §8's `core` surface lands with the routing stage and the engine
 > wiring that consumes it, in one change, with §8's `PROTOCOL_VERSION` bump in the
@@ -1335,16 +1399,27 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > asserted to append. A suite that only pins the refusals passes against a `record`
 > that requires an `OWED` row.
 
-> **Normative.** The same lane ships the mint's half of §9's `route_id` rule under
-> a **deliberately repeating** id factory, which is the case the store's half
-> cannot catch: at `routing_trail_max_rows=1` and a ceiling admitting two parks,
-> park a confirm-owed route under `r`; record a routed read so the `OWED` row is
-> pruned; park a second, different confirm-owed route while the factory still
-> yields `r`. Assert that the second park does **not** register under `r` — the
-> mint retried, or the pass ended `UNRECORDED` with nothing parked and no token —
-> and then that resuming the **first**, still-live token performs its operation and
-> appends its `GIVEN` row. A suite that pins only the store's conflict case passes
-> against an implementation with no mint-time check at all.
+> **Normative.** The same lane ships the reservation half of §9's `route_id` rule
+> under a **deliberately repeating** id factory, and ships it as a **concurrency**
+> test, because a sequential one passes against a check-then-register
+> implementation. At `routing_trail_max_rows=1` and a ceiling admitting two parks,
+> two confirm-owed routes are raced while the factory yields one id `r`: assert
+> that at most one park is registered under `r`, that the other either retried onto
+> a different id or ended `UNRECORDED` with nothing parked and no token minted, and
+> that resuming the first, still-live token then performs its operation and appends
+> its `GIVEN` row. The interleaving the test must be able to produce is the one §9
+> names: both routes observing an empty table, the first's `OWED` row written and
+> then pruned by the second's, and both registering. A suite pinning only the
+> store's retained-row conflict passes against an implementation with no
+> reservation at all.
+
+> **Normative.** The same lane ships the reservation's release paths beside §7's
+> slot-release cases and with the same assertion shape: a route whose §9 row write
+> raises, and a route cancelled at an await before registration, each followed by a
+> later route asserted to obtain an id from a factory yielding the **same** value —
+> which fails against an implementation that releases the identity only on
+> resolution. A read-only route's reservation is asserted released when its pass
+> ends, whatever it ended as.
 
 > **Normative.** The same lane ships the bounded-trail park→prune→resume path
 > end-to-end at `routing_trail_max_rows=1`: a confirm-owed route parks and records
@@ -1363,7 +1438,7 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > written against passes sequentially.
 
 > **Normative.** The lane landing §9 ships its ordering tests, and they are the
-> ones that fail on the plausible wrong implementation: a `RoutingTrail` double
+> ones that fail on the plausible wrong implementation: a `RoutingRecorder` double
 > whose `record` raises, asserted over a confirm-owed route the user approved
 > (nothing destroyed, no operation called, outcome `UNRECORDED`), over the routing
 > pass of a confirm-owed route (no park registered, no token minted, outcome
@@ -1492,8 +1567,10 @@ unknown, expired, already-claimed and cross-restart token each yield
 applied to a new kind of park rather than widened). ADR-0186 §10 (its
 partition is a rule about the relation between two named trails and is restated,
 not widened, by §9's fourth row kind; ADR-0192 already added a third without
-disturbing it). ADR-0185 §§2, 6 and 12 (§9 follows their shapes; it changes none of
-their clauses). ADR-0073 §5 (§7 binds it whole). ADR-0084 §8 (§8's `RouteOutcome`
+disturbing it). ADR-0185 §§2, 4, 6, 9 and 12 (§9 follows their shapes — the
+capability split, the record-carries-no-content ground, the bound with no unlimited
+spelling, the residency and ownership clauses, and the store's member shape; it
+changes none of their clauses). ADR-0073 §5 (§7 binds it whole). ADR-0084 §8 (§8's `RouteOutcome`
 is argued against it below rather than changing it). ADR-0085 §4 (its Group A table
 will read short against the tree, exactly as its Group F `Disposition` row has since
 ADR-0145 §4; ADR-0170 §3 settled that practice for `TurnOutcome` itself and this
