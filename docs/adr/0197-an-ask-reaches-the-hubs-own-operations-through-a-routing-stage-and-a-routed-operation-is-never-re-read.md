@@ -505,10 +505,22 @@ change what the listing beside the reply says.
 > **outstanding-confirmation ceiling** — `max_outstanding_confirmations`, the bound
 > that exists because "a client that requests confirmable actions and abandons every
 > token would grow the table without bound". A routed park is exactly that shape and
-> takes no exemption from it: the slot is reserved before the park is registered, is
-> released when the park resolves or is evicted, and a route that cannot reserve one
-> meets the same backpressure the engine already applies at that ceiling, in the same
-> form. The ceiling gets no second setting and no routed-only variant.
+> takes no exemption from it: the slot is reserved before the park is registered and
+> a route that cannot reserve one meets the same backpressure the engine already
+> applies at that ceiling, in the same form. The ceiling gets no second setting and
+> no routed-only variant.
+
+> **Normative.** A reservation that does not become a registered park is **released
+> on every path**, without exception: the row of §9 failing to write, the id factory
+> raising, the resolution raising, the pass being cancelled at any await between the
+> reservation and the registration, and any defect in the code between them. The
+> reservation is held across those awaits and released in a `finally`, which is what
+> `Engine._converse` already does with the handle it reserves before driving a step
+> — `self._reserved.discard(handle)` in a `finally`, so the slot is freed whether the
+> step parked or did not. A slot that can be reserved and never released is the
+> memory-exhaustion vector the ceiling exists to close, reintroduced through the
+> ceiling itself: repeated trail failures would otherwise reserve up to the ceiling
+> and block every later confirmation with no park to evict.
 
 > **Normative.** A routed park is **claimed once, atomically**, under the same lock
 > the engine's existing park resolution runs under, and the claim is what evicts it:
@@ -731,7 +743,14 @@ and a renderer.
 >   store mints nothing: a store that minted the id could not be handed a frozen
 >   record, and a retry could not name the row it was retrying.
 > - `route_id: Identifier` — the identity of the **route**, minted once when the
->   route is taken and carried by every row of that route. On a read-only route it
+>   route is taken and carried by every row of that route. It is **unique across
+>   every retained row that is not of the same route**: `record` refuses a row whose
+>   `route_id` is already held under a different route — a differing `operation`,
+>   `subject` or `conversation_id`, or an `approval` the route already holds — with
+>   `RoutingTrailError`, appending nothing, and the act that row precedes does not
+>   proceed. Without that rule a repeating id factory would file two destructive
+>   decisions as one route while the row-level `id` check passed, since the two rows'
+>   own ids differ. On a read-only route it
 >   names one row; on a confirm-owed route it is what joins the `OWED` row to the
 >   `GIVEN` or `REFUSED` row that answers it, and it is carried on the parked entry
 >   the continuation token names so the `resume` can write it.
@@ -901,8 +920,17 @@ seam would be rebuilt against a four-member one.
 > **Normative.** The exchange of a routed pass is **captured** (ADR-0074 §3), and
 > the captured content carries the user's utterance. A routed pass produces no
 > `TurnResult`, so the implementing lane threads the utterance to the capture point
-> rather than reading it off a turn that is not there. Whether the routed operation
-> itself joins the captured episode is #1314's ground and is not decided here.
+> rather than reading it off a turn that is not there.
+
+> **Normative.** The captured episode of a routed pass carries **no part of the
+> routed account**: not the listing, not the display subject, not the scalar
+> argument, and not the candidates. This is §6's second sentence made mechanical
+> rather than hoped for — a conversation's recent turns are retrieved into the next
+> turn's prompt (ADR-0074 §5, ADR-0158 §5), so a capture that folded a routed
+> listing into the episode would deliver the routed result to a model one turn
+> later, satisfying every same-pass clause of §6 while breaking §6. Whether the
+> composed **reply** joins the captured episode is #1314's ground and is untouched
+> either way.
 
 > **Normative.** A routed listing is bounded by the existing result-payload ceiling
 > and gets no setting of its own. `check_payload` already refuses an oversized
@@ -1022,6 +1050,13 @@ across three PRs is the precedent for an ADR that lands in more than one.
 > whose fields carry the composer's own container syntax, asserting that no part of
 > the listing appears in the assembled prompt. A test asserting only that the
 > composer was called does not satisfy this clause.
+
+> **Normative.** The same lane ships §6's **two-turn** test, which is the only one
+> that can fail on a capture that folds the routed account into the episode: a
+> routed `recent_reads` over a hostile listing, captured; then a second, ordinary
+> ask in the same conversation, asserting that no span of that listing appears in
+> the second turn's assembled prompt — the planner's and the composer's alike. A
+> one-turn test cannot see this failure and does not satisfy this clause.
 
 > **Normative.** The same lane ships §5's three resolution cases — none, one, more
 > than one — asserting that the many-candidate case performs **nothing**; §5's
