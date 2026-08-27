@@ -85,8 +85,16 @@ single-resolution rule means a concrete `(execution_id, step_id)` binding carrie
 at most one resolution, and `AuditTrail.resolution_of` exists precisely so that a
 binding whose ruling is durable but whose transition never committed "can be driven
 to the disposition already decided — **idempotently, authoring nothing new** —
-rather than re-authored". The engine already knows how to treat a second answer as
-a question about a settled fact rather than as an act.
+rather than re-authored". The vocabulary for treating a second answer as a
+question about a settled fact rather than as an act is therefore already in the
+contract.
+
+**What is in the contract is not what the engine does.** No `Engine` path consumes
+`resolution_of` today, and the state it was added for — a ruling recorded whose
+transition never committed — is **#257**, open, and outside this decision
+entirely. §3 below states that boundary as a clause rather than leaving a reader
+to infer it: this ADR settles what a **replayed** token gets, and changes nothing
+about a resolution that half committed.
 
 What is missing is one link: after eviction the handle names nothing, so the
 engine cannot tell a replay from an invented token, and it therefore reports the
@@ -259,7 +267,7 @@ is protecting — the binding is answered, and here is what it was decided.
 > a token for one, and its reconciliation neither evicts a settled record nor
 > treats one as a park. ADR-0052 §1 step 2 skips a binding the trail no longer
 > holds pending, and that skip is unchanged: a settled binding is exactly such a
-> binding, and re-presenting it would be the #257 hazard §1 closes.
+> binding, and re-presenting it would be the #257 hazard ADR-0044 §2b closes.
 
 > **Normative.** A handle naming a settled record is **not minted** for a new park,
 > a new routed park or a new reservation while the record is retained. The engine's
@@ -293,10 +301,18 @@ the bound narrows the improvement and regresses nothing.
 ### 5. `UnknownContinuationError` keeps every case it had, and loses exactly one
 
 > **Normative.** `UnknownContinuationError` covers, unchanged: an unknown handle, a
-> handle from a previous process life, a park evicted under
-> `max_outstanding_confirmations`, a routed park already claimed, an expired
-> **routed** park, and a settled record discarded under §4's bound. In every one of
-> them it is **never a denial** (ADR-0084 §7).
+> handle from a previous process life, a park `pending_confirmations`' own
+> reconciliation evicted because the trail no longer holds its binding pending
+> (ADR-0052 §2), a routed park already claimed, an expired **routed** park, and a
+> settled record discarded under §4's bound. In every one of them it is **never a
+> denial** (ADR-0084 §7).
+
+> **Normative.** The outstanding-confirmation ceiling **evicts nothing**, and no
+> case of `UnknownContinuationError` is created by it. At the ceiling the engine
+> refuses to drive another step rather than parking one and stranding it, so a
+> live continuation is never dropped for capacity — `Engine._admit_and_reserve`'s
+> own rule, on ADR-0042 §4's authority. This decision neither creates such an
+> eviction nor relies on one.
 
 > **Normative.** An ordinary parked step answered past its `expires_at` is **not**
 > among them and does not become one. It is refused by `StepRunner._check_fresh`
@@ -310,6 +326,20 @@ the bound narrows the improvement and regresses nothing.
 > **Normative.** No error class is added to `core/errors.py` by this decision, and
 > `resume`'s declared failure set (ADR-0085 §9) is unchanged: every class it
 > declares is still raised by some input.
+
+**The ceiling exclusion is a correction rather than a decision, and it is stated
+because this ADR nearly restated the error.** ADR-0084 §7 wrote that "one error
+covers both ways a handle can go missing — a hub restart, and eviction under
+`max_outstanding_confirmations`", and `UnknownContinuationError`'s docstring
+repeats it. The engine performs no such eviction: `_admit_and_reserve` keeps the
+table bounded "**without** ever dropping a live continuation … at the ceiling the
+engine refuses to drive another step rather than parking one and having to strand
+it", raising before a park exists. The **reasoning** of ADR-0084 §7 — one error
+where the remedy is one — is untouched and is what §5 applies; only its example is
+a state no input reaches. The ratified sentence stands as written, the living
+docstring that restates it is **#1641**'s to delete or re-point rather than
+refresh, and this list names the cases the tree produces instead of inheriting one
+it does not.
 
 **The expiry exclusion is ADR-0084 §7's own clause and it is restated rather than
 narrowed.** That section rules in terms that an unresolvable token "is not
@@ -403,6 +433,13 @@ third reason above is a cost to weigh rather than a prohibition.
 > forever, or discarded the newest instead of the oldest, passes every other case
 > in this section.
 
+> **Normative.** The suite gains a case that pins §2's re-read, over a subject
+> whose settled binding's execution the plan store **no longer holds**. Presenting
+> that token raises `PlanningError` and reaches no runner, policy, tool, composer
+> or capture. Without it an implementation that cached the `StepOutcome` at
+> settlement passes every other case in this section and answers with an
+> `ExecutionState` the store has stopped holding.
+
 > **Normative.** `FakeAssistantEngine` conforms in the same change. A fake that
 > raised where the real engine restates would let every consumer's tests pass
 > against behaviour no implementation has.
@@ -471,7 +508,10 @@ the client's remedy is identical in both cases" is the **test** §5 applies rath
 than a clause §5 contradicts, and its ruling that handles stay process-scoped and
 the table is not persisted is obeyed by §4's last clause. A reader checking the
 records above will look for one here, and ADR-0082 §1 forbids a record demanded on
-book-keeping grounds alone.
+book-keeping grounds alone. Its **example** is another matter and is not a record
+either: the "eviction under `max_outstanding_confirmations`" limb describes a state
+this engine never produces, which §5 states and **#1641** carries. A ratified
+sentence is not corrected in place (ADR-0001), and nothing here asks it to be.
 
 **ADR-0052 §§1–2 — no record is owed.** §1's four-step algorithm is unchanged and
 still skips a binding the trail no longer holds pending; §2's idempotence and
