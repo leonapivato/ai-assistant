@@ -1184,15 +1184,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # and §11 leaves "which model answers" undecided, so it takes the
             # deployment's configured route rather than naming one, and `complete` is
             # called with no `model=` override for ADR-0013 §4's reason.
-            routing=RoutingStage(model=model),
-            # The **write-only** half of §9's trail, and the asymmetry is the design:
-            # the stage writes and cannot read, exactly as the read trail's drivers do.
-            # Structural typing means this one object satisfies `RoutingTrail` too, so
-            # the read surface §11 defers takes this same instance rather than a second
-            # store — but what the engine can *name* is `record`, which is what makes
-            # "a stage cannot erase the record of its own decisions" a `mypy --strict`
-            # failure rather than a review note (ADR-0197 §9).
-            routing_recorder=routing_trail,
+            #
+            # The **write-only** half of §9's trail goes to the *stage*, and the
+            # asymmetry is the design: the stage writes and cannot read, exactly as the
+            # read trail's drivers do. Structural typing means this one object satisfies
+            # `RoutingTrail` too, so the read surface §11 defers takes this same instance
+            # rather than a second store — but what the stage can *name* is `record`,
+            # which is what makes "a stage cannot erase the record of its own decisions"
+            # a `mypy --strict` failure rather than a review note. The façade is handed
+            # no trail seam of any width, so this is the one position that names either.
+            routing=RoutingStage(model=model, recorder=routing_trail),
             # How long a routed park stays answerable (ADR-0197 §7). Straight off
             # `Settings`, positive and finite with no spelling for "never": a routed
             # park is invisible — `pending_confirmations` does not list it and no

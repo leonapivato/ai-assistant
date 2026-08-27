@@ -68,6 +68,7 @@ from ai_assistant.testing.streaming import StreamAttempt
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.protocols import RoutingRecorder
     from ai_assistant.core.types import RoutedOperationRecord, SourceReadRecord
 
 #: The belief every confirm-owed case is about, and the query that names it.
@@ -108,24 +109,55 @@ def _router(reply: str | Callable[[Sequence[Message]], str]) -> FakeModelProvide
     return FakeModelProvider(reply=reply)
 
 
-def _routes_to(operation: RoutableOperation, query: str | None = None) -> RoutingStage:
-    """A routing stage that names ``operation`` on every utterance."""
-    return RoutingStage(model=_router(_envelope(operation, query)))
+def _names(operation: RoutableOperation, query: str | None = None) -> FakeModelProvider:
+    """A router that names ``operation`` on every utterance."""
+    return _router(_envelope(operation, query))
 
 
-def _routed_harness(**knobs: Any) -> Harness:
+class _RoutedHarness(Harness):
+    """A harness whose routing stage's recorder is reachable to a case.
+
+    ADR-0197 §9 puts the ``RoutingRecorder`` on the **stage** rather than on the façade,
+    so there is nothing on ``Harness`` for a case to read the rows off. This keeps the
+    object the stage was built with, which is what every §9 case asserts against.
+    """
+
+    def __init__(self, *, recorder: RoutingRecorder, **knobs: Any) -> None:
+        """Build the ordinary harness, remembering the recorder its stage holds."""
+        super().__init__(**knobs)
+        self.recorder = recorder
+
+
+def _routed_harness(
+    *,
+    router: FakeModelProvider | None = None,
+    recorder: RoutingRecorder | None = None,
+    **knobs: Any,
+) -> _RoutedHarness:
     """A harness that routes a ``forget`` on :data:`_QUERY` unless told otherwise.
+
+    The stage is built **here** rather than passed in, because ADR-0197 §9 makes the
+    recorder part of the stage's own construction: a case that wants to read the rows or
+    script a write failure names the recorder, and this is what puts the same object
+    behind the stage and in front of the assertion.
 
     ``NoStepPlanner`` is the default because every *declined* case below has to show the
     ordinary pipeline running to its own answer, and a plan with no step is the cheapest
     shape that does: it produces a turn, persists its goal and plan, and composes.
     """
-    knobs.setdefault("routing", _routes_to(RoutableOperation.FORGET, _QUERY))
+    held: RoutingRecorder = FakeRoutingRecorder() if recorder is None else recorder
+    knobs.setdefault(
+        "routing",
+        RoutingStage(
+            model=_names(RoutableOperation.FORGET, _QUERY) if router is None else router,
+            recorder=held,
+        ),
+    )
     knobs.setdefault("planner", NoStepPlanner())
-    return Harness(**knobs)
+    return _RoutedHarness(recorder=held, **knobs)
 
 
-def _rows(harness: Harness) -> tuple[RoutedOperationRecord, ...]:
+def _rows(harness: _RoutedHarness) -> tuple[RoutedOperationRecord, ...]:
     """Every row the harness's recorder holds, oldest-recorded first.
 
     Read through the canonical fake's own test-only lever rather than through the
@@ -133,9 +165,7 @@ def _rows(harness: Harness) -> tuple[RoutedOperationRecord, ...]:
     a case that reached it through the contract would be asserting against a shape no
     routing stage may have.
     """
-    recorder = harness.routing_recorder
-    assert recorder is not None
-    written: object = getattr(recorder, "written", None)
+    written: object = getattr(harness.recorder, "written", None)
     assert isinstance(written, tuple), "the harness's recorder exposes no test-only lever"
     return written
 
@@ -379,7 +409,7 @@ async def test_an_unusable_router_reply_declines_and_the_ordinary_pipeline_answe
     A declined pass also writes **no row** (§9): the route decided nothing to do, so there
     is nothing for the trail to state.
     """
-    harness = _routed_harness(routing=RoutingStage(model=_router(reply)))
+    harness = _routed_harness(router=_router(reply))
 
     outcome = await harness.engine.converse("what is the weather", timeout=PATIENT)
 
@@ -405,7 +435,7 @@ async def test_a_router_call_that_raises_declines_rather_than_failing_the_ask() 
         msg = "the model is down"
         raise RuntimeError(msg)
 
-    harness = _routed_harness(routing=RoutingStage(model=_router(unavailable)))
+    harness = _routed_harness(router=_router(unavailable))
 
     outcome = await harness.engine.converse("what is the weather", timeout=PATIENT)
 
@@ -417,9 +447,7 @@ async def test_a_router_call_that_raises_declines_rather_than_failing_the_ask() 
 
 async def test_a_deliberate_decline_leaves_no_trace_of_the_stage_having_run() -> None:
     """§1: "the outcome it returns carries no trace of the routing stage having run"."""
-    harness = _routed_harness(
-        routing=RoutingStage(model=_router(json.dumps({"no_operation": True})))
-    )
+    harness = _routed_harness(router=_router(json.dumps({"no_operation": True})))
 
     outcome = await harness.engine.converse("what is the weather", timeout=PATIENT)
 
@@ -456,7 +484,7 @@ async def test_the_composer_is_handed_two_enum_values_and_no_part_of_the_listing
         ComposingStage(model=captured, streaming=FakeStreamingCompleter())
     )
     harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS),
+        router=_names(RoutableOperation.RECENT_READS),
         reads=_hostile_reads(),
         composing=stage,
     )
@@ -497,13 +525,11 @@ async def test_a_routed_listing_does_not_reach_the_next_turns_prompt() -> None:
     """
     captured = FakeModelProvider(reply="Nothing to report.")
     harness = _routed_harness(
-        routing=RoutingStage(
-            model=_router(
-                lambda messages: (
-                    _envelope(RoutableOperation.RECENT_READS)
-                    if "read" in messages[-1].content
-                    else json.dumps({"no_operation": True})
-                )
+        router=_router(
+            lambda messages: (
+                _envelope(RoutableOperation.RECENT_READS)
+                if "read" in messages[-1].content
+                else json.dumps({"no_operation": True})
             )
         ),
         reads=_hostile_reads(),
@@ -534,9 +560,7 @@ async def test_the_captured_episode_carries_the_utterance_and_none_of_the_accoun
     What the episode may **not** carry is the routed account: not the listing, not the
     display subject, not the scalar argument, and not the candidates.
     """
-    harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS), reads=_hostile_reads()
-    )
+    harness = _routed_harness(router=_names(RoutableOperation.RECENT_READS), reads=_hostile_reads())
 
     await harness.engine.converse("what have you read lately", timeout=PATIENT)
 
@@ -642,13 +666,61 @@ async def test_a_reservation_that_fails_before_registration_frees_its_slot() -> 
     reintroduced through the ceiling itself".
     """
     harness = _routed_harness(
-        max_outstanding_confirmations=1, routing_recorder=_ScriptedRecorder(failures=1)
+        max_outstanding_confirmations=1, recorder=_ScriptedRecorder(failures=1)
     )
     await _seed_belief(harness.memory)
 
     refused = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
     assert refused.routed is not None
     assert refused.routed.outcome is RouteOutcome.UNRECORDED
+
+    admitted = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+
+    assert admitted.routed is not None
+    assert admitted.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+
+
+def _raising_once(*, at: int) -> Callable[[], str]:
+    """An id factory that raises on its ``at``-th call and answers on every other.
+
+    A confirm-owed route draws two ids from the engine's one factory in one synchronous
+    section — the continuation handle first (which *is* the ceiling slot), then the
+    ``route_id`` — so raising on the second is how a test reaches the window between them.
+    """
+    calls = 0
+
+    def mint() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == at:
+            msg = "fake: the id factory is broken"
+            raise RuntimeError(msg)
+        return f"id-{calls}"
+
+    return mint
+
+
+async def test_an_id_factory_that_raises_mid_admission_frees_the_slot_it_reserved() -> None:
+    """§7: "the id factory raising" is one of the paths a reservation is released on.
+
+    The window is the one no ``try`` in the pass covers: the ceiling slot is reserved
+    **before** the ``route_id`` is minted, and both happen inside the engine's admission
+    step — before the driving code's own ``finally`` is entered. So a factory that hands
+    back a handle and then raises leaves nothing else to give it back, and at a ceiling of
+    one every later routed confirmation would meet backpressure with **no park to evict**:
+    the memory-exhaustion vector the ceiling exists to close, reintroduced through the
+    ceiling itself.
+
+    The raise propagates — a broken id factory is a defect rather than an operating
+    condition, and ADR-0197 §4's decline-everything rule is about the *router's* envelope
+    rather than about the engine's own machinery — so what this asserts is the release
+    beside it, which is the half that is silent.
+    """
+    harness = _routed_harness(max_outstanding_confirmations=1, id_factory=_raising_once(at=2))
+    await _seed_belief(harness.memory)
+
+    with pytest.raises(RuntimeError, match="id factory"):
+        await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
 
     admitted = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
 
@@ -768,9 +840,9 @@ async def test_a_read_only_route_whose_row_cannot_be_written_calls_nothing() -> 
     """
     reads = _hostile_reads()
     harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS),
+        router=_names(RoutableOperation.RECENT_READS),
         reads=reads,
-        routing_recorder=_ScriptedRecorder(failures=1),
+        recorder=_ScriptedRecorder(failures=1),
     )
 
     outcome = await harness.engine.converse("what have you read lately", timeout=PATIENT)
@@ -786,7 +858,7 @@ async def test_a_routing_pass_whose_row_cannot_be_written_parks_nothing() -> Non
     The pass ends ``UNRECORDED``, and the absence of a confirmation is what says the park
     was never registered — a client handed one would have a token naming nothing.
     """
-    harness = _routed_harness(routing_recorder=_ScriptedRecorder(failures=1))
+    harness = _routed_harness(recorder=_ScriptedRecorder(failures=1))
     await _seed_belief(harness.memory)
 
     outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
@@ -805,7 +877,7 @@ async def test_a_resume_whose_row_cannot_be_written_destroys_nothing() -> None:
     rather than resumed again." So the belief survives, and the token is gone.
     """
     recorder = _ScriptedRecorder(failures=0)
-    harness = _routed_harness(routing_recorder=recorder)
+    harness = _routed_harness(recorder=recorder)
     await _seed_belief(harness.memory)
     parked = await _parked(harness)
     recorder._failures = 1
@@ -829,7 +901,7 @@ async def test_the_store_is_untouched_at_the_moment_the_row_is_written() -> None
     """
     memory = FakeMemoryStore(now=lambda: AT)
     recorder = _WatchingRecorder(memory, _BELIEF)
-    harness = _routed_harness(memory=memory, routing_recorder=recorder)
+    harness = _routed_harness(memory=memory, recorder=recorder)
     await _seed_belief(memory)
     parked = await _parked(harness)
 
@@ -891,9 +963,7 @@ async def test_a_park_never_answered_leaves_exactly_its_first_row() -> None:
 
 async def test_a_read_only_route_leaves_exactly_one_not_owed_row() -> None:
     """§9: "``NOT_OWED`` on a read-only operation", and one row is the whole route."""
-    harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS), reads=_hostile_reads()
-    )
+    harness = _routed_harness(router=_names(RoutableOperation.RECENT_READS), reads=_hostile_reads())
 
     outcome = await harness.engine.converse("what have you read lately", timeout=PATIENT)
 
@@ -961,7 +1031,7 @@ async def test_unrecorded_and_failed_are_opposite_statements_about_the_same_forg
     twice — once where the row cannot be written and once where the store raises — and
     asserts the store was untouched on the first and called on the second.
     """
-    unrecorded = _routed_harness(routing_recorder=_ScriptedRecorder(failures=1))
+    unrecorded = _routed_harness(recorder=_ScriptedRecorder(failures=1))
     await _seed_belief(unrecorded.memory)
 
     refused = await unrecorded.engine.converse(_UTTERANCE, timeout=PATIENT)
@@ -994,16 +1064,14 @@ async def test_a_bounded_trail_that_prunes_an_owed_row_still_honours_its_answer(
     decide whether a user's approval of a live confirmation is honoured.
     """
     harness = _routed_harness(
-        routing=RoutingStage(
-            model=_router(
-                lambda messages: (
-                    _envelope(RoutableOperation.RECENT_READS)
-                    if "read" in messages[-1].content
-                    else _envelope(RoutableOperation.FORGET, _QUERY)
-                )
+        router=_router(
+            lambda messages: (
+                _envelope(RoutableOperation.RECENT_READS)
+                if "read" in messages[-1].content
+                else _envelope(RoutableOperation.FORGET, _QUERY)
             )
         ),
-        routing_recorder=FakeRoutingRecorder(max_rows=1),
+        recorder=FakeRoutingRecorder(max_rows=1),
         reads=_hostile_reads(),
     )
     await _seed_belief(harness.memory)
@@ -1066,7 +1134,7 @@ async def test_two_races_under_one_repeating_route_id_register_at_most_one_park(
     # other is still admitting meets backpressure — which is the ceiling's own clause
     # working, and would mask the identity collision this case is about.
     harness = _routed_harness(
-        max_outstanding_confirmations=4, routing_recorder=recorder, id_factory=_repeating(11)
+        max_outstanding_confirmations=4, recorder=recorder, id_factory=_repeating(11)
     )
     await _seed_belief(harness.memory)
 
@@ -1116,9 +1184,7 @@ async def test_a_failed_route_releases_the_identity_it_reserved() -> None:
     an implementation that releases the identity only on resolution": the second route can
     only obtain ``r`` if the first gave it back.
     """
-    harness = _routed_harness(
-        routing_recorder=_ScriptedRecorder(failures=1), id_factory=lambda: "r"
-    )
+    harness = _routed_harness(recorder=_ScriptedRecorder(failures=1), id_factory=lambda: "r")
     await _seed_belief(harness.memory)
 
     refused = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
@@ -1172,7 +1238,7 @@ async def test_a_pass_cancelled_before_registration_frees_its_slot() -> None:
     "forget that I …" would meet backpressure rather than a fresh card.
     """
     recorder = _BlockingRecorder()
-    harness = _routed_harness(max_outstanding_confirmations=1, routing_recorder=recorder)
+    harness = _routed_harness(max_outstanding_confirmations=1, recorder=recorder)
     await _seed_belief(harness.memory)
 
     await _cancel_a_pass_inside_the_row_write(harness, recorder)
@@ -1194,7 +1260,7 @@ async def test_a_pass_cancelled_before_registration_releases_its_identity() -> N
     the other.
     """
     recorder = _BlockingRecorder()
-    harness = _routed_harness(routing_recorder=recorder, id_factory=lambda: "r")
+    harness = _routed_harness(recorder=recorder, id_factory=lambda: "r")
     await _seed_belief(harness.memory)
 
     await _cancel_a_pass_inside_the_row_write(harness, recorder)
@@ -1246,9 +1312,9 @@ async def test_a_read_only_route_releases_its_identity_when_its_pass_ends() -> N
     row — which is a different clause and would mask this one.
     """
     harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS),
+        router=_names(RoutableOperation.RECENT_READS),
         reads=_hostile_reads(),
-        routing_recorder=_ScriptedRecorder(failures=1),
+        recorder=_ScriptedRecorder(failures=1),
         id_factory=lambda: "r",
     )
 
@@ -1280,7 +1346,7 @@ async def test_a_routed_composition_failure_degrades_the_pass_and_not_the_operat
         raise RuntimeError(msg)
 
     harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS),
+        router=_names(RoutableOperation.RECENT_READS),
         reads=_hostile_reads(),
         composing=ComposingStage(
             model=FakeModelProvider(reply=unavailable), streaming=FakeStreamingCompleter()
@@ -1326,7 +1392,7 @@ async def test_converse_streaming_routes_identically_and_carries_routed_on_the_t
     silent stream.
     """
     harness = _routed_harness(
-        routing=_routes_to(RoutableOperation.RECENT_READS),
+        router=_names(RoutableOperation.RECENT_READS),
         reads=_hostile_reads(),
         composing=ComposingStage(
             model=FakeModelProvider(),
