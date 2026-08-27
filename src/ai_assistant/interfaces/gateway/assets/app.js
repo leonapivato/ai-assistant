@@ -861,7 +861,7 @@ function renderOutcome(outcome, chosenAt) {
   // `resume` reached this page (#1404). `step` being present is the deterministic
   // account that a step was driven, which is exactly ADR-0170 §6's reason to trust it
   // over anything inferred.
-  if (outcome.steps.length === 0 && outcome.step === null) {
+  if (outcome.steps.length === 0 && outcome.step === null && outcome.routed === null) {
     line(body, "No action was needed.", "notice");
   }
   const list = document.createElement("ol");
@@ -872,6 +872,14 @@ function renderOutcome(outcome, chosenAt) {
   });
   body.appendChild(list);
   renderStep(body, outcome.step);
+  // ADR-0197 §8 makes `routed` and `step` mutually exclusive and gives a routed pass
+  // no turn, so nothing above this line rendered anything for one — no plan, no
+  // steps, no step account. The routed account is the whole of what a routed pass
+  // deterministically did, and it goes **below** the reply and never in place of it
+  // (§10). A page that read `steps.length === 0` as "no action was needed" would say
+  // exactly that over a turn that had just destroyed a belief, which is why the
+  // notice above is guarded on `step === null` **and** on there being no route.
+  renderRouted(body, outcome.routed);
   // `null` only where nothing could be resolved (a recovered park, a deleted
   // conversation), and the last known id is then kept rather than cleared: the
   // hub decides which conversation a turn ran under, and forgetting one on an
@@ -1139,6 +1147,299 @@ function disclosureWords(provenance) {
     return "this system selected it";
   }
   return provenance;
+}
+
+// --- the routed account (ADR-0197 §10) ---------------------------------------
+//
+// **Beside the reply, never instead of it, and never suppressed.** §10 is ADR-0170
+// §6's rule and it binds here for its reason, sharpened: on a routed pass the
+// composing stage was handed two enum values and nothing else (§6), so the worst
+// prose it can produce is prose about the wrong thing, while the account beside it
+// is typed data from the store that no prompt influenced. Where the two disagree the
+// account is correct by construction, and nothing on this page resolves that
+// disagreement in the reply's favour.
+//
+// **Everything below renders; nothing below derives** — `renderConfirmation`'s own
+// rule, and ADR-0197 §12's last Normative names it for this lane: the gateway "makes
+// no routing decision — the hub does". This file reads the arm off `operation` and
+// never off the shape of the records, chooses no candidate, orders nothing, counts
+// nothing and composes no argument.
+//
+// **Every value goes in through `line`, as a text node** (ADR-0168 §6, ADR-0042 §4).
+// A belief's content is the user's own words and a grant's source is the identity a
+// reader declared; neither may reach this page as markup.
+
+// What the ask was routed to, in words. One entry per member of ADR-0197 §3's
+// vocabulary — the whole of it, so a member added under §3's widening rule renders
+// as an empty sentence here rather than as a raw enum value somewhere.
+const ROUTED_ASKED = {
+  questions: "list what is waiting on your answer",
+  recent_reads: "list the attempts to read your sources",
+  recent_invocations: "list what I did on an authorisation",
+  recent_decisions: "list what the permission layer ruled",
+  standing_grants: "list the sources you allow me to read",
+  spend_totals: "report what the world has cost",
+  forget: "forget one belief",
+  revoke: "withdraw the grant on one source",
+  forget_question: "forget one deferred question",
+};
+
+// What did **not** happen, for every ending that performed nothing. Phrased per
+// operation because "nothing was done" is the sentence a reader cannot act on: what
+// they need to know is that the belief is still held.
+const ROUTED_UNDONE = {
+  questions: "nothing was listed",
+  recent_reads: "nothing was listed",
+  recent_invocations: "nothing was listed",
+  recent_decisions: "nothing was listed",
+  standing_grants: "nothing was listed",
+  spend_totals: "no total was reported",
+  forget: "the belief is still held",
+  revoke: "the grant still stands",
+  forget_question: "the question is still there",
+};
+
+// What a confirm-owed operation did, once it has run. Reached only from `performed`,
+// and only for the three members ADR-0197 §3 tags confirm-owed: a read-only
+// `performed` has a listing to show and shows it.
+const ROUTED_DONE = {
+  forget: "Done. That belief is destroyed.",
+  revoke: "Done. That grant is withdrawn — I may no longer read that source.",
+  forget_question: "Done. That question is destroyed.",
+};
+
+// Where a record this page does not render is read instead.
+//
+// **This is not a summary and it is not a count** (ADR-0197 §5's last clause). It is
+// the statement that a listing was carried and that this surface has no renderer for
+// it — which is true because ADR-0177 §1's enumeration of what a browser request may
+// resolve to has never admitted `recent_reads`, `recent_invocations`,
+// `recent_decisions` or `spend_totals`, so this page has no panel, no view and no
+// discharged rendering obligations for any of their records. Building them here
+// would be the browser's first trail surface decided inside a rendering lane, which
+// is what ADR-0197 §12's "with the renderer it already has for the operation" bounds
+// this consumer group against. Filed for its own lane.
+const ROUTED_ELSEWHERE = {
+  recent_reads: "I read that from my own record, but this page has no view for read " +
+    "attempts yet. 'assistant reads' is where they are shown.",
+  recent_invocations: "I read that from my own record, but this page has no view for " +
+    "acts on an authorisation yet. 'assistant invocations' is where they are shown.",
+  recent_decisions: "I read that from my own record, but this page has no view for " +
+    "the permission layer's rulings yet. 'assistant decisions' is where they are shown.",
+  spend_totals: "I worked that out from my own record, but this page has no view for " +
+    "spend totals yet. 'assistant spend' is where they are shown.",
+};
+
+// The sentences a routed confirm card carries around its subject.
+//
+// **Every word is this page's own, selected by the enum member** (ADR-0197 §7). No
+// free text the router produced reaches the card — the query included — which is
+// what lets a person trust it to describe the act rather than to describe how the
+// act was asked for.
+//
+// A `forget` card takes its band-appropriate warning from `forgetWarning` in
+// addition to these, because ADR-0073 §5's ceremony binds the routed `forget` whole
+// (ADR-0197 §7's last clause) and the warning is the half of it that changes with
+// the belief.
+const ROUTED_CARD_NOTES = {
+  forget: [
+    "This destroys the record: nothing of it is kept, not even in an export. To fix " +
+      "it instead, tell me it is wrong in a conversation.",
+    "You are forgetting whatever belief that id names when you answer, which may " +
+      "have changed since it was shown.",
+  ],
+  revoke: [
+    "This stops me reading that source from now on. It destroys nothing I have " +
+      "already learned from it, and you can grant it again.",
+  ],
+  forget_question: [
+    "This destroys the record of having been asked. Nothing I believe changes, and " +
+      "you can tell me the same thing again yourself.",
+  ],
+};
+
+// Which of ADR-0197 §8's arms each operation lists, read off `operation` and never
+// off the value's shape — §8 in terms, because "an empty tuple is a legal value of
+// every arm, so the shape decides nothing on exactly the case a listing is most
+// likely to take". The gateway sends records only for the three arms below; the four
+// it withholds arrive as `listing: null` with `listing_unrendered` true.
+const ROUTED_ARM = {
+  questions: "question",
+  forget_question: "question",
+  forget: "belief",
+  revoke: "grant",
+  standing_grants: "grant",
+};
+
+// What became of the routed operation, in this page's own words. Total over
+// ADR-0197 §8's eight members.
+//
+// **`unrecorded` and `failed` say opposite things and are worded to** (§8, and §12's
+// discrimination clause, which requires a surface rendering the two alike to fail a
+// test). `unrecorded` means the operation was never called and nothing was
+// destroyed; `failed` means it was called and raised, and whether it took effect is
+// not asserted.
+//
+// **`unrecorded` says to ask again and never to answer the card again** (§7): the
+// park is already claimed by the time that ending is reached, so offering a retry
+// would be offering a token that now raises.
+//
+// **`refused` is a ruling and not an error** (§7). No policy was consulted and no
+// decision recorded, so there is nothing here for a refusal to be except the answer
+// the owner gave, and it is worded as one.
+function routedHeadline(routed) {
+  const asked = ROUTED_ASKED[routed.operation] || routed.operation;
+  const undone = ROUTED_UNDONE[routed.operation] || "nothing was done";
+  if (routed.outcome === "performed") {
+    return ROUTED_DONE[routed.operation] || `I read my own record for that — you asked me to ${asked}.`;
+  }
+  if (routed.outcome === "refused") {
+    return `Not done. You said no, so ${undone}.`;
+  }
+  if (routed.outcome === "ambiguous") {
+    return (
+      `More than one thing matches that. I will not guess which you meant, so ` +
+      `${undone}. Here is everything that matched — say which one, or use the ` +
+      `command for it directly.`
+    );
+  }
+  if (routed.outcome === "ambiguous_truncated") {
+    return (
+      `More than one thing matches that, and more than I can show. I will not guess ` +
+      `which you meant, so ${undone}. Here are the matches I can show — narrow it ` +
+      `down, or use the command for it directly.`
+    );
+  }
+  if (routed.outcome === "not_found") {
+    return `Nothing matches that. I found nothing to act on, so ${undone}.`;
+  }
+  if (routed.outcome === "unrecorded") {
+    return (
+      `Not attempted. I could not write the record that has to exist before I act, ` +
+      `so I did not act: ${undone}. Nothing is waiting on you and there is nothing ` +
+      `to retry — ask me again.`
+    );
+  }
+  if (routed.outcome === "failed") {
+    return `Failed. I tried to ${asked} and it raised. Whether it took effect is not something I can tell you.`;
+  }
+  // `awaiting_confirmation` renders as the card and reaches here only if a park
+  // crossed with no confirmation, which `RoutedOperation`'s own validator forbids —
+  // and a ninth member of `RouteOutcome` would land here too. Neither is rendered as
+  // success: a sentence naming the value is the honest reading of "this page does not
+  // know what that means".
+  return `That request was routed to ${asked}, and this page cannot say what became of it.`;
+}
+
+// Which class the headline takes, so an ending that failed does not read like one
+// that succeeded. `notice` is the page's own "something to know" and `failed` its
+// "this did not work" — the two `renderStep` already uses one member over.
+function routedClass(outcome) {
+  if (outcome === "unrecorded" || outcome === "failed") {
+    return "failed";
+  }
+  if (outcome === "performed") {
+    return "reply";
+  }
+  return "notice";
+}
+
+function renderRouted(body, routed) {
+  if (routed === null) {
+    return;
+  }
+  // A park renders as the question and nothing else (ADR-0197 §10's third clause):
+  // the composing stage is not reached on one, "for its own reason: the confirmation
+  // is what the user must answer, and prose beside it competes with the question".
+  if (routed.confirmation !== null) {
+    renderOperationConfirmation(body, routed.confirmation);
+    return;
+  }
+  line(body, routedHeadline(routed), routedClass(routed.outcome));
+  if (routed.listing !== null) {
+    renderRoutedListing(body, routed.operation, routed.listing);
+    return;
+  }
+  if (routed.listing_unrendered) {
+    line(body, ROUTED_ELSEWHERE[routed.operation] || "", "notice");
+  }
+}
+
+// Every record the listing carries, in the order it carries them.
+//
+// **Never fewer, and never a summary of them** (ADR-0197 §5's last clause, which is
+// ADR-0186 §7's rule for a trail row applied to a candidate listing). A narrow
+// screen gets a longer page, not a shorter list.
+function renderRoutedListing(body, operation, listing) {
+  const list = document.createElement("div");
+  list.className = "routed-listing";
+  listing.forEach((record) => {
+    const item = document.createElement("div");
+    item.className = "routed-row";
+    renderRoutedRecord(item, operation, record);
+    list.appendChild(item);
+  });
+  body.appendChild(list);
+}
+
+// One record, rendered with the renderer this page already has for its arm — which
+// is ADR-0197 §12's last Normative and the whole of why this is a consumer group.
+function renderRoutedRecord(item, operation, record) {
+  const arm = ROUTED_ARM[operation];
+  if (arm === "belief") {
+    renderBeliefFields(item, record);
+    return;
+  }
+  if (arm === "question") {
+    renderQuestionFields(item, record);
+    return;
+  }
+  if (arm === "grant") {
+    renderGrantFields(item, record);
+  }
+}
+
+// The routed confirm card (ADR-0197 §7).
+//
+// **This is not a `Confirmation` and is not rendered as one.** A routed act has no
+// tool, no arguments and no policy ruling, so three of that type's four content
+// members would have to be filled with something invented — the
+// falsehood-in-durable-state failure ADR-0170 §3 refused, arriving in a value a
+// person reads. What is on screen is what §7 says the card carries: the operation,
+// and the resolved subject as a typed value.
+//
+// **The approval control is built last, after the whole card is on screen**, which
+// is `renderConfirmation`'s own rule read here: §7's "before it collects the user's
+// answer" is an ordering obligation on the renderer and not only a wording one.
+//
+// **The token is relayed and never rendered.** `offerApproval` takes it into a
+// closure, so it is in no text node, no attribute and no browser storage — and it
+// reaches the hub through the same `/confirmation/resume` request every other park
+// is answered with, because ADR-0197 §7 answers a routed park through
+// `AssistantEngine.resume` "and through no other method".
+//
+// **A routed park is not recoverable and this page does not offer to recover one**
+// (§7): it is never listed by `pending_confirmations`, and it does not survive a
+// restart. What a lost routed park costs is one repeated sentence — nothing has
+// happened yet — so the note says to ask again rather than pointing at the recovery
+// listing, which would point at something that will never hold it.
+function renderOperationConfirmation(parent, card) {
+  const item = document.createElement("div");
+  item.className = "confirmation-row";
+  line(item, `About to ${ROUTED_ASKED[card.operation] || card.operation}.`, "reply");
+  card.subject.forEach((record) => renderRoutedRecord(item, card.operation, record));
+  if (card.operation === "forget") {
+    card.subject.forEach((record) => line(item, forgetWarning(record.band), "notice"));
+  }
+  (ROUTED_CARD_NOTES[card.operation] || []).forEach((note) => line(item, note, "notice"));
+  line(
+    item,
+    "If this browser loses the answer, nothing will have happened — ask me again " +
+      "rather than looking for this in Confirmations, which does not hold it.",
+    "hint"
+  );
+  offerApproval(item, card.token);
+  parent.appendChild(item);
 }
 
 // The answer, offered only once everything above it is on screen.
@@ -3558,13 +3859,22 @@ async function listStanding() {
 function renderStanding(list, grant) {
   const item = document.createElement("div");
   item.className = "grant-row";
+  renderGrantFields(item, grant);
+  list.appendChild(item);
+}
+
+// What a live grant says, without the row it sits in — so a routed `standing_grants`
+// listing and a routed `revoke`'s candidates read exactly as this panel does
+// (ADR-0197 §12). **Exactly the uses the record names**, which is `renderStanding`'s
+// own rule: adding the members a grant leaves out would present the owner's decision
+// as a half-filled form (ADR-0139 §3's third clause).
+function renderGrantFields(item, grant) {
   const name = document.createElement("p");
   name.className = "source-name";
   name.textContent = grant.source;
   item.appendChild(name);
   line(item, `You authorise ${usePhrase(grant.scope)}.`, "reply");
   line(item, `Decided ${grant.decided_at}`, "hint");
-  list.appendChild(item);
 }
 
 // The history (ADR-0097 §4). **No row here is presented as live or as withdrawn on
@@ -4048,9 +4358,13 @@ async function readQuestions(path, more, run) {
 
 // One question, with everything ADR-0078 §8 requires it to convey — worded as the
 // conditional it is, because a pending question is not a belief of any band.
-function renderQuestion(list, question, path, offset) {
-  const item = document.createElement("div");
-  item.className = "question-row";
+// Everything ADR-0078 §8 requires a question to convey, without the controls the
+// panel puts beside it — so a routed `questions` listing and a routed
+// `forget_question`'s candidates read exactly as this panel does, and carry no
+// answer or destroy control of their own (ADR-0197 §12, ADR-0186 §8's last clause
+// read one record kind over). The interrupted notice is a **fact about the
+// question** and belongs here; answering it is a control and does not.
+function renderQuestionFields(item, question) {
   line(item, question.content, "reply");
   line(
     item,
@@ -4081,7 +4395,14 @@ function renderQuestion(list, question, path, offset) {
         "of it, then check what I believe.",
       "notice"
     );
-  } else {
+  }
+}
+
+function renderQuestion(list, question, path, offset) {
+  const item = document.createElement("div");
+  item.className = "question-row";
+  renderQuestionFields(item, question);
+  if (question.state !== "interrupted") {
     offerAnswer(item, question);
   }
   renderSuccessor(item, question.successor);

@@ -617,6 +617,7 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "rationale",
         "steps",
         "step",
+        "routed",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
 
@@ -823,19 +824,25 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     decides — in this file, beside the cases above — whether the page sees it.
     Deciding "no" is a passing answer; not deciding at all is what this catches.
 
-    **``routed`` is ADR-0197 §8's member, and the decision taken here is "not in this
-    change".** The lane that added it landed the routing stage, its two contracts, the
-    store and the engine wiring; ADR-0197 §12's last Normative makes §10's CLI and
-    gateway renderings a **consumer group** and a separate lane, "not a second
-    decision". So this adapter's ``_outcome_view`` is deliberately unchanged and the
-    page does not see the routed account yet.
+    **``routed`` is ADR-0197 §8's member, and the decision taken here is now
+    "rendered".** The lane that added it landed the routing stage, its two contracts,
+    the store and the engine wiring, and recorded here that this adapter's
+    ``_outcome_view`` was deliberately unchanged — ADR-0197 §12's last Normative makes
+    §10's CLI and gateway renderings a **consumer group** and a separate lane, "not a
+    second decision". This is that lane, so ``_routed_view`` carries the account and
+    ``renderRouted`` puts it on screen beside the reply.
 
-    That is a decision with a cost, and ADR-0197's own Consequences state it: "a client
-    that ignores ``routed`` renders a turn that did something as a turn that did
-    nothing". It is bounded rather than open — the consumer lane is briefed against
-    §10, which is normative that an adapter renders the routed account **in addition
-    to** any composed reply and never instead of it — and it is recorded here rather
-    than left to be discovered, which is the whole of what this guard asks for.
+    The cost that entry recorded — ADR-0197's own Consequences, "a client that ignores
+    ``routed`` renders a turn that did something as a turn that did nothing" — is
+    therefore paid rather than outstanding. What is *not* carried is four of
+    :data:`~ai_assistant.core.types.RoutedListing`'s seven arms: this page has no view
+    for a ``SourceReadRecord``, a ``RecordedInvocation``, a ``PermissionDecision`` or a
+    ``SpendTotal``, because ADR-0186 §6 and §10 rule that a browser view of either
+    trail "is a later consumer lane with its own ratified decision", and ADR-0177 §1's
+    enumeration has admitted none of the four operations. Those listings cross as an
+    absence that says so and the page states it — never a summary and never a count
+    (ADR-0197 §5's last clause). ``tests/interfaces/gateway/test_gateway_routed.py``
+    is where that boundary is pinned.
     """
     assert set(TurnOutcome.model_fields) == {
         "turn",

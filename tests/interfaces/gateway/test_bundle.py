@@ -2304,7 +2304,10 @@ def test_the_page_never_renders_the_uses_a_grant_leaves_out() -> None:
     # half of ADR-0139 §3 and where all three belong.
     assert "usePhrase(source.live.scope)" in rendering
     assert "USES" not in rendering
-    assert "usePhrase(grant.scope)" in _functions(script)["renderStanding"]
+    # `renderGrantFields` is where a live grant's uses are put on screen, and
+    # `renderStanding` and the routed account's grant rows both go through it
+    # (ADR-0197 §12) — so the clause is checked once, where it can be broken once.
+    assert "usePhrase(grant.scope)" in _functions(script)["renderGrantFields"]
     # And no strike-through exists for a member to wear. The stronger half of the
     # claim is the one above — a member the grant does not name is never put in the
     # document at all, so there is nothing for a style to negate — but a rendering
@@ -3108,7 +3111,10 @@ def test_the_browser_renders_an_attested_questions_source_and_its_clock() -> Non
     *is* held, because a pending question is not a belief of any band.
     """
     functions = _functions(_code("app.js"))
-    question, origin = functions["renderQuestion"], functions["proposalOrigin"]
+    # The fields are `renderQuestionFields`', which is what both the questions panel
+    # and a routed `questions` or `forget_question` listing render through (ADR-0197
+    # §12) — so §9's clause is checked where it holds for every surface at once.
+    question, origin = functions["renderQuestionFields"], functions["proposalOrigin"]
 
     assert "const origin = proposalOrigin(question);" in question
     assert 'line(item, `Where it came from: ${origin}`, "hint");' in question
@@ -3923,21 +3929,30 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
     """ADR-0177 §8: "The front end parses no part of it, derives nothing from it,
     renders it nowhere, and stores it in no browser storage."
 
-    The three functions below are the whole of what touches it — it reaches the answer
+    The four functions below are the whole of what touches it — it reaches the answer
     through a closure — and none of them puts it in a text node, in an attribute or in
     ``localStorage``.
+
+    **``renderOperationConfirmation`` is the fourth and it is a routed park's card**
+    (ADR-0197 §7). A routed confirmation carries a ``ContinuationToken`` exactly as a
+    tool confirmation does and is answered through the same ``resume``, so §8's rule
+    reaches it unchanged — it hands the handle straight to ``offerApproval`` and
+    renders nothing of it. The set is asserted rather than the members, so a fifth
+    function reaching for a token fails here rather than being noticed.
     """
     script = _code("app.js")
     functions = _functions(script)
 
-    assert {name for name, body in functions.items() if "token" in body} == {
+    touching = {
         "renderConfirmation",
+        "renderOperationConfirmation",
         "offerApproval",
         "answerConfirmation",
     }
+    assert {name for name, body in functions.items() if "token" in body} == touching
     assert not re.search(r"textContent\s*=[^;]*token", script)
     assert not re.search(r"\bline\([^)]*\btoken\b", script)
-    for name in ("renderConfirmation", "offerApproval", "answerConfirmation"):
+    for name in touching:
         assert "localStorage" not in functions[name], name
 
 
@@ -4049,10 +4064,20 @@ def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None
 
     ``step`` present is that account, which is why the condition reads both members
     rather than inferring one from the other.
+
+    **``routed`` is the third member and the same defect one decision over** (ADR-0197
+    §8, §10). A routed pass drives no plan and no step — §1 ends the pipeline at a
+    taken route — so ``steps`` is empty and ``step`` is ``null`` on a turn that may
+    have just destroyed a belief. Without the third conjunct the page would write "No
+    action was needed." directly above "Done. That belief is destroyed.", which is
+    #1404 reproduced against a surface #1404 could not reach.
     """
     body = _functions(_code("app.js"))["renderOutcome"]
 
-    assert "if (outcome.steps.length === 0 && outcome.step === null) {" in body
+    assert (
+        "if (outcome.steps.length === 0 && outcome.step === null && outcome.routed === null) {"
+        in body
+    )
 
 
 def test_a_slower_listing_read_cannot_put_an_answered_park_back_on_screen() -> None:
