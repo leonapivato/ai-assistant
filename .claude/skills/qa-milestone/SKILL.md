@@ -111,14 +111,15 @@ launches).
   which is Playwright's own injected screenshot stylesheet meeting the gateway's
   `style-src 'self'` (ADR-0168 §6).
 
-**Keep the real-device arm for what emulation cannot show.** An emulated iPhone
-viewport is a window size and a user-agent string; it is not iOS Safari. #1369 is
-the class: Safari's automatic HTTPS upgrade of a bare `host:port` put a TLS
-ClientHello at the gateway's plaintext port, which stalled until the read timeout
-while the phone showed a white screen — found on a phone in the milestone-14 QA,
-and invisible to every emulated run. The MCP arm replaces the tedium of driving
-the page by hand; it does not replace the pass on a real device over the tailnet,
-and a run that had no real device says so in its record.
+**Drive a real device when one is at hand.** An emulated iPhone viewport is a
+window size and a user-agent string; it is not iOS Safari, so a pass on a real
+phone over the tailnet is worth taking whenever one is available. What this rule
+does *not* rest on is a demonstrated defect class only a device can show. The
+finding once cited here as that class, #1369, does not evidence one: the owner's
+correction there records the white screen as a hand-typed `https://`, not a
+scheme upgrade Safari made on its own. So the MCP arm stands in for no known
+gap, and a run that had no real device records that plainly: an arm not driven,
+rather than a defect class left unexercised.
 
 ## 4. Triage findings exactly like review findings
 

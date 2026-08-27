@@ -131,9 +131,6 @@ exercise the capability, not when a test can.
 
 - The operator/admin read surface (status, uptime, jobs, store health, delivery
   slots, connection log), and the remote-safe vs hub-local split of admin acts.
-- **Hub-owned intent routing.** Design noted for when it comes: `ask` → typed
-  operation, one-directional — a typed operation is never re-read — with its own
-  confirm rule for non-read-only operations, distinct from the tool seam.
 - The hosted/billing plane: a separate service outside the hub's trust boundary,
   needing its own trust ADR. Hosting is currently ruled against for the owner
   (stance 6).
@@ -174,12 +171,12 @@ on, the shape ADR-0131 gave notifications ("an answer the device asked for").
 Where that wire is the hub's remote transport the return is ADR-0124 §1's third
 egress boundary, ratified there and traced against all three in ADR-0170. This
 track owns making the assistant *speak*: composing answers from plan + retrieved
-memory + context, streaming them, and eventually routing intents to typed
-operations. It is hub-side work with **no dependency on `track:web-client`'s
-gateway**; the CLI exercises every exit. `track:web-client` milestone 14
-(streaming chat in the browser) consumes this track's output. Milestones are
-ordered by **dependency only**, and each closes on a QA-driven exit ruling: a QA
-run (`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's
+memory + context, streaming them, and routing intents to typed operations. It
+is hub-side work with **no dependency on `track:web-client`'s gateway**; the
+CLI exercises every exit. `track:web-client` milestone 14 (streaming chat in
+the browser) consumes this track's output. Milestones are ordered by
+**dependency only**, and each closes on a QA-driven exit ruling: a QA run
+(`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's
 ruling recorded on #1312.
 
 - **17 — the assistant answers.** An ADR ruling that a reply is not a tool: the
