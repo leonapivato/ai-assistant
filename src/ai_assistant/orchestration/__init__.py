@@ -1,9 +1,22 @@
 """Orchestration: the engine that ties everything together.
 
 The heart of the product. For each request it runs the pipeline:
-intent understanding → context assembly → memory retrieval → planning →
-tool selection → permission checking → execution → **reply composition** →
+**operation routing** → intent understanding → context assembly → memory retrieval →
+planning → tool selection → permission checking → execution → **reply composition** →
 learning/memory updates.
+
+The routing stage is ADR-0197 §1's addition and it is the **first** stage, ahead of
+intent understanding; the list is amended rather than annotated for ADR-0170 §1's own
+reason, restated by §1 for this stage. Given the user's utterance and nothing else it
+either names one of the hub's own operations — ``forget``, ``revoke``,
+``forget_question`` and six listings — together with the one query that operation's
+argument is resolved from, or it **declines**, and a declined route is not a failure
+and is not reported as one. A route that is **taken ends the pipeline there**: no goal
+is minted, no context is assembled, no memories are retrieved, no plan is made and no
+step is driven, and the composing stage runs on two closed-vocabulary values alone.
+Running first is what makes a routed ask cheap — it skips the two most expensive
+stages and the planner's model call — and what makes it safe: a router that has not yet
+read the store cannot be steered by what is in it.
 
 The composing stage is ADR-0170 §1's addition, and the list is amended rather than
 annotated because a recitable pipeline that omits the stage producing the product
@@ -120,6 +133,17 @@ emitted for that field (ADR-0106 §3). The producer is module-private rather tha
 generic seam until a second exists; ADR-0114 decides two store operations and two
 types and no third contract.
 
+``RoutingStage`` is the **operation-routing stage** (ADR-0197 §1, §2): given one
+sentence it names one member of §3's closed vocabulary and the query its argument is
+resolved from, or declines. It reaches the model through the injected
+``ModelProvider`` and adds no member to it, holds the write-only ``RoutingRecorder``
+half of §9's trail and never the readable ``RoutingTrail``, and performs the operation
+it named by calling the engine's own implementation of it — never by reaching into a
+store the engine holds. Its result is rendered **beside** the reply and never fed back
+into a prompt: §6 makes "a typed operation is never re-read" an invariant of the turn,
+so the composing stage is given the ``RoutableOperation`` and the ``RouteOutcome`` and
+nothing else at all.
+
 ``ComposingStage`` is the **terminal composing stage** (ADR-0170 §1, §2): given the
 turn's goal, its assembled context, the memories retrieved for it, its plan and what
 became of the step the turn drove, it composes the one natural-language answer
@@ -195,6 +219,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import QuestionStage, question_state
 from ai_assistant.orchestration.recovery import RecoveryScan
+from ai_assistant.orchestration.routing import RoutedRoute, RoutingStage
 from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
@@ -223,6 +248,8 @@ __all__ = [
     "ObservationStage",
     "QuestionStage",
     "RecoveryScan",
+    "RoutedRoute",
+    "RoutingStage",
     "StepDisposition",
     "StepExecutor",
     "StepRunner",

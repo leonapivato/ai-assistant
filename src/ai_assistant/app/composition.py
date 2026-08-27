@@ -74,6 +74,7 @@ from ai_assistant.orchestration import (
     ObservationStage,
     QuestionStage,
     RecoveryScan,
+    RoutingStage,
     StepExecutor,
     StepRunner,
     UpcomingEventStage,
@@ -82,6 +83,7 @@ from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqliteRecipientGrantStore,
+    SqliteRoutingTrail,
     SqliteSourceGrantStore,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
@@ -787,6 +789,30 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "reads.db", max_rows=settings.source_read_trail_max_rows
         )
         opened.append(reads.close)
+        # The routing trail (ADR-0197 §9). A **fourth** row kind, joining neither of
+        # ADR-0186 §10's two partitions: a routed operation is never a
+        # `PermissionDecision` and never a `SourceReadRecord`. One row per decision,
+        # written *before* the act it precedes, so a routed `forget` — the one act that
+        # destroys the only other evidence of itself — leaves a record that a **model**
+        # chose it.
+        #
+        # **One object, two seams, and only one position names either today.** The
+        # engine is handed it as `RoutingRecorder`, the write-only half the routing
+        # stage holds, which is what stops a stage erasing the record of its own
+        # decisions with `clear` (§9). Nothing holds the readable `RoutingTrail`:
+        # ADR-0197 §9 mints no engine method for it and §11 leaves the read surface to
+        # its own decision, so an operator debugging a routed act reads the store
+        # directly until then. That is ADR-0185's own position for a day, and it is
+        # stated as a cost rather than discovered.
+        #
+        # **The cap is the user's configuration and reaches the constructor**, where it
+        # is validated once and read once — `source_read_trail_max_rows`' shape and its
+        # number, because a routing row is smaller than a read row and the two trails
+        # are read by the same kind of operator. There is no unlimited spelling.
+        routing_trail = SqliteRoutingTrail(
+            path=directory / "routing.db", max_rows=settings.routing_trail_max_rows
+        )
+        opened.append(routing_trail.close)
         # The held notifications (ADR-0130 §7, §9). The **eighth**
         # connection-owning store and the seventh that is Tier 1: a candidate
         # carries free text a producer wrote to be shown to a person, so it lives
@@ -1152,6 +1178,28 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # it is what makes `recent_reads` and `export_reads` answer about the
             # reads that actually happened rather than about an empty second store.
             reads=reads,
+            # ADR-0197's operation-routing stage, over the **same** model seam the
+            # planner and the composer reach through — `model`, the
+            # routing-over-retrying provider built above. §2 gives the stage no setting
+            # and §11 leaves "which model answers" undecided, so it takes the
+            # deployment's configured route rather than naming one, and `complete` is
+            # called with no `model=` override for ADR-0013 §4's reason.
+            routing=RoutingStage(model=model),
+            # The **write-only** half of §9's trail, and the asymmetry is the design:
+            # the stage writes and cannot read, exactly as the read trail's drivers do.
+            # Structural typing means this one object satisfies `RoutingTrail` too, so
+            # the read surface §11 defers takes this same instance rather than a second
+            # store — but what the engine can *name* is `record`, which is what makes
+            # "a stage cannot erase the record of its own decisions" a `mypy --strict`
+            # failure rather than a review note (ADR-0197 §9).
+            routing_recorder=routing_trail,
+            # How long a routed park stays answerable (ADR-0197 §7). Straight off
+            # `Settings`, positive and finite with no spelling for "never": a routed
+            # park is invisible — `pending_confirmations` does not list it and no
+            # durable store recovers it — so without a lifetime a client that
+            # disconnected between the park and its token would hold a slot at
+            # `max_outstanding_confirmations` that nothing could ever free.
+            routed_confirmation_ttl=settings.routed_confirmation_ttl,
             # The same store the loop retrieves from and the writer persists to, so
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).

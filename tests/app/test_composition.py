@@ -1555,13 +1555,16 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns **twelve** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
+    owns **thirteen** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
     that ruling by living inside the directory the instance lock already covers.
     ADR-0130 §9's notification store is the eighth and obeys it for the same
     reason: inside the directory the instance lock already covers, opened by the
     same process, closed in the same ordered shutdown. ADR-0185 §4's read trail is
-    the eleventh, on the same terms, and ADR-0193 §1's recipient-grant store is
-    the twelfth on the same terms again.
+    the eleventh, on the same terms; ADR-0193 §1's recipient-grant store is
+    the twelfth on the same terms again; and ADR-0197 §9's routing trail is the
+    thirteenth, whose §9 states the residency clause explicitly for the reason
+    ADR-0185 §9 gave — "a new store which omitted to would be a store nobody had
+    classified".
 
     **The count in this docstring said "eight" while the list below named ten**,
     which is exactly the hazard ADR-0123's Context records — "the count in the most
@@ -1606,6 +1609,13 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # in, the other sending out — and separately erasable because each
             # store's own wholesale erase is the user's to perform (§9).
             "recipient_grants.db",
+            # ADR-0197 §9's routing trail, the thirteenth and the twelfth that is
+            # Tier 1: a row carries the conversation an ask ran under and the
+            # subject of a **model-selected** operation against the owner's own
+            # memory. It carries no content — no query, no utterance, no belief
+            # text — which is what makes the row safe to keep after the belief it
+            # names is destroyed (ADR-0185 §2's ground).
+            "routing.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
@@ -1617,6 +1627,12 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # And the tenth (ADR-0149 §3, ADR-0004 §4): an account identity is the
         # user's own text, so the file mode is the one every Tier 1 store gets.
         assert stat.S_IMODE((tmp_path / "connections.db").stat().st_mode) == 0o600
+        # And the thirteenth (ADR-0197 §9, ADR-0004 §4): a row names what a model
+        # chose to do to the user's own memory, so it gets the mode every Tier 1
+        # store gets. ADR-0197 §9 makes this a test rather than prose because it
+        # "is the one clause of §9 that a working store can violate while every
+        # other test passes".
+        assert stat.S_IMODE((tmp_path / "routing.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
 

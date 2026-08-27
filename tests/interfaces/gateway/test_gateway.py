@@ -822,6 +822,20 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     dump. A member added to ``TurnOutcome`` fails this test, and whoever adds it
     decides — in this file, beside the cases above — whether the page sees it.
     Deciding "no" is a passing answer; not deciding at all is what this catches.
+
+    **``routed`` is ADR-0197 §8's member, and the decision taken here is "not in this
+    change".** The lane that added it landed the routing stage, its two contracts, the
+    store and the engine wiring; ADR-0197 §12's last Normative makes §10's CLI and
+    gateway renderings a **consumer group** and a separate lane, "not a second
+    decision". So this adapter's ``_outcome_view`` is deliberately unchanged and the
+    page does not see the routed account yet.
+
+    That is a decision with a cost, and ADR-0197's own Consequences state it: "a client
+    that ignores ``routed`` renders a turn that did something as a turn that did
+    nothing". It is bounded rather than open — the consumer lane is briefed against
+    §10, which is normative that an adapter renders the routed account **in addition
+    to** any composed reply and never instead of it — and it is recorded here rather
+    than left to be discovered, which is the whole of what this guard asks for.
     """
     assert set(TurnOutcome.model_fields) == {
         "turn",
@@ -830,6 +844,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "capture_degraded",
         "reply",
         "reply_degraded",
+        "routed",
     }
 
 
