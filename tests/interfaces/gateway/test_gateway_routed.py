@@ -491,9 +491,12 @@ async def test_a_ruling_that_answers_one_decision_and_rests_on_another_is_not_re
     choosing between the two pointers.
 
     This surface marks the **row** instead of raising, because a routed listing rides
-    a turn and raising would take the reply and the routed account with it. What is
-    asserted is the part that must not differ: the row says it is unreadable, and the
-    page's own renderer is what turns that into a refusal rather than a fourth state.
+    a turn and raising would take the reply and the routed account with it — and the
+    page then drops the row whole rather than rendering part of it, which is ADR-0186
+    §7's "renders fewer rows, not partial ones". ``test_bundle.py`` holds the page's
+    half; what is asserted here is that the mark crosses, and that the row's other
+    fields cross beside it unchanged, because the mark is a fact about the row rather
+    than a redaction of it.
     """
     async with _harness(FakeAssistantEngine()) as one:
         view = await _view(
@@ -505,7 +508,36 @@ async def test_a_ruling_that_answers_one_decision_and_rests_on_another_is_not_re
             ),
         )
 
-        assert view["listing"][0]["unreadable"] is True
+        row = view["listing"][0]
+        assert row["unreadable"] is True
+        assert row["resolves"] == "d-0"
+        assert row["authorised_by"] == "g-1"
+
+
+async def test_a_listing_holding_one_unreadable_ruling_still_carries_the_others() -> None:
+    """The row is dropped by the **page** and not by the view, and this is what pins
+    the difference.
+
+    ADR-0197 §5's last clause bars a *surface* from rendering fewer candidates than
+    the outcome carries; ADR-0186 §7 makes exactly one row unrenderable. The two meet
+    at one row and not at the listing, so the view carries every record the hub
+    returned — including the marked one — and the page renders every readable row
+    beside a statement that one was not.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(
+                    _decision(authorised_by="g-1", resolves="d-0"),
+                    _decision(),
+                ),
+            ),
+        )
+
+        assert [row["unreadable"] for row in view["listing"]] == [True, False]
 
 
 @pytest.mark.parametrize(

@@ -4159,19 +4159,23 @@ def test_a_ruling_whose_pointers_disagree_is_refused_rather_than_read() -> None:
     """ADR-0193 §11 names exactly **three** authorisation states, and a ruling that
     answers one decision while resting on another is none of them.
 
-    An earlier shape of this renderer described that pair in a fourth line, which
-    reads as a claim about authorisation. It is refused whole instead: the row says
-    it cannot be read, names neither pointer as the authorisation, and renders none
-    of its other fields — which is ``interfaces.cli._authorisation_line``'s refusal
-    to guess, scoped to the row because a routed listing rides a turn.
+    Two shapes were tried and both were blocked. A fourth authorisation line reads as
+    a claim about authorisation; a diagnostic row carrying the id is a **partial**
+    row, and ADR-0186 §7 is that "a surface that cannot render a row whole renders
+    fewer rows, not partial ones". So the row is dropped whole and the listing says
+    it was — which is the one thing a dropped row must not be, silent.
 
-    The second assertion is the one that fails on the fourth state coming back:
+    The last assertion is what fails on the fourth state coming back:
     ``authorisationWords`` must have exactly three returns, so there is no branch
     left for a pair that never reaches it.
     """
     functions = _functions(_code("app.js"))
+    listing, decision = functions["renderRoutedListing"], functions["renderDecisionFields"]
 
-    assert "if (decision.unreadable) {" in functions["renderDecisionFields"]
+    assert "if (unreadableRecord(record)) {" in listing
+    assert "dropped += 1" in listing
+    assert "UNREADABLE_RULINGS" in listing
+    assert "unreadable" not in decision, "the row is never reached, not branched inside"
     assert len(re.findall(r"\breturn\b", functions["authorisationWords"])) == 3
 
 
