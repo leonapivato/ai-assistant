@@ -3540,6 +3540,14 @@ const TALK_BITS_A_SECOND = 24000;
 // default with room for the head. Where an operator has set either lower, their refusal
 // still governs and is reported as itself.
 //
+// **It is asked before a chunk is kept, so what is held never exceeds it** — not by one
+// slice, not by a final chunk arriving after the release, and not by a browser that
+// hands over one very large block instead of the slices it was asked for. Adversarial
+// review found each of those three in turn, and asking about the *prospective* total
+// rather than the running one answers all three with one comparison. What it costs is
+// the chunk that would have crossed — a second of speech at the bitrate below — and that
+// is announced rather than dropped quietly.
+//
 // **And it is not a clock.** ADR-0182 §7 makes an owner's wait the owner's to end, and
 // this file keeps exactly one `setTimeout` for that reason — a page-side deadline over a
 // request would abandon a healthy turn and announce that its outcome was not known. This
@@ -3599,8 +3607,9 @@ const RECORDER_REFUSED =
 // said up to here is a real question, and throwing it away to enforce a bound this page
 // chose would cost them the whole press.
 const RECORDING_TOO_LONG =
-  "That press reached the longest recording this page holds, so it stopped there and " +
-  "sent what it had. If the question was longer than that, ask it in parts, or type it.";
+  "That press reached the longest recording this page holds, so recording stopped there " +
+  "and anything said after that point was not sent. If the question was longer than " +
+  "that, ask it in parts, or type it.";
 
 // A press that produced no bytes at all — a tap rather than a hold, or a recorder that
 // was stopped before it had written anything. Said rather than sent: an empty
@@ -3787,6 +3796,7 @@ async function startTalking() {
     stream: null,
     chunks: [],
     held: 0,
+    dropped: false,
     stopping: null,
   };
   press = mine;
@@ -3838,16 +3848,26 @@ async function startTalking() {
     if (event.data.size === 0) {
       return;
     }
+    // **The prospective total, before the chunk is kept.** Asking about the running
+    // total after appending bounds nothing: the chunk that crosses is already held, and
+    // a browser handing over one very large block crosses by as much as that block is.
+    // So the chunk that would cross is not kept, and the press ends.
+    //
+    // **The size check is unconditional and only the stopping is not.** A final chunk
+    // arrives *after* the release, when there is no recorder left to stop, and a check
+    // that skipped it would leave exactly the unbounded upload this bound exists to
+    // prevent. `stopTalking` is the same act the release performs, so it is one ending
+    // of the press rather than a second path through it.
+    if (mine.held + event.data.size > LONGEST_RECORDING_BYTES) {
+      mine.dropped = true;
+      fault(RECORDING_TOO_LONG, "console");
+      if (!mine.released) {
+        stopTalking();
+      }
+      return;
+    }
     mine.chunks.push(event.data);
     mine.held += event.data.size;
-    // The bound, taken where the bytes actually arrive. `stopTalking` is the same act
-    // the release performs, so this is one ending of the press rather than a second
-    // path through it — and the guard is what keeps it from speaking over a release
-    // that has already happened.
-    if (mine.held >= LONGEST_RECORDING_BYTES && !mine.released) {
-      fault(RECORDING_TOO_LONG, "console");
-      stopTalking();
-    }
   });
   // The upload is hung off `stop` rather than off the release, because the recorder
   // writes its last block as it stops: sending from the release would send a recording
@@ -3937,7 +3957,11 @@ async function sendRecording(mine) {
   try {
     const recording = new Blob(mine.chunks, { type: mine.format });
     if (recording.size === 0) {
-      saying(NOTHING_RECORDED);
+      // **"Too short" only where nothing was dropped.** A press whose every chunk was
+      // over the bound kept none of them, and telling that owner the press was too short
+      // would be the opposite of what happened; the bound has already said what did, in
+      // the fault slot.
+      saying(mine.dropped ? "" : NOTHING_RECORDED);
       return;
     }
     saying(SENDING);

@@ -1309,12 +1309,20 @@ def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() 
 
     assert "LONGEST_RECORDING_BYTES = 384 * 1024" in script
     assert "recorder.start(RECORDING_SLICE_MILLISECONDS)" in starting
-    assert "mine.held += event.data.size" in starting
-    assert "if (mine.held >= LONGEST_RECORDING_BYTES && !mine.released) {" in starting
+    # **The prospective total, before the chunk is kept**, which is what makes the bound
+    # exact rather than exceeded by whatever the crossing chunk happened to be — a final
+    # chunk arriving after the release, or one very large block from a browser that
+    # ignored the slice it was asked for. Round 4's major.
+    assert "if (mine.held + event.data.size > LONGEST_RECORDING_BYTES) {" in starting
+    assert starting.index("LONGEST_RECORDING_BYTES") < starting.index("mine.chunks.push")
     assert "fault(RECORDING_TOO_LONG," in starting
-    # Stopped and *sent*, not stopped and discarded: the ending is the one the release
-    # performs, so what was said up to here is asked rather than thrown away.
-    assert "stopTalking();" in starting
+    # **The size check is unconditional and only the stopping is not**: a final chunk
+    # arrives after the release, when there is no recorder left to stop, and a check
+    # skipped there is exactly the unbounded upload the bound exists to prevent.
+    assert "if (!mine.released) {\n        stopTalking();" in starting
+    # And a press whose every chunk was over the bound is not then told it was too short,
+    # which would be the opposite of what happened.
+    assert 'saying(mine.dropped ? "" : NOTHING_RECORDED)' in _functions(script)["sendRecording"]
     # No clock of its own reaches this control, and the file's one `setTimeout` is still
     # the delivery stream's.
     assert len(_timeouts(script)) == 1
