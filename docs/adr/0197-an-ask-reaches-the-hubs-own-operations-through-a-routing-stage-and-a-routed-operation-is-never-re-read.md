@@ -397,10 +397,20 @@ second, and both failures are visible.
 > record that exists.
 
 > **Normative.** A read-only operation of §3 takes no query and resolves no
-> argument. It is performed with the promoted surface's own declared defaults, and
-> its bound is `DEFAULT_PAGE_SIZE`. It gets no setting of its own, for ADR-0170
+> argument. It is performed **exactly as the promoted surface declares it**, with
+> that surface's own defaults and that surface's own bound, and routing changes
+> neither. For the paged members — `questions`, `recent_reads`,
+> `recent_invocations`, `recent_decisions` — that bound is the surface's own
+> `DEFAULT_PAGE_SIZE` default, and routing gets no setting of its own, for ADR-0170
 > §8's reason applied here: an existing ceiling that already bounds this listing
-> everywhere else is the ceiling.
+> everywhere else is the ceiling. `standing_grants` and `spend_totals` are **not
+> paged**, take no `limit` and no `offset`, and a routed call to either inherits its
+> declared behaviour whole — including `standing_grants`' "complete or refused,
+> never truncated" (ADR-0139 §2), whose `OversizedValueError` reaches a routed pass
+> as `RouteOutcome.FAILED` like any other raise. No clause of this ADR imposes a
+> page on a member the promoted surface declares unpaged, and none may: doing so
+> would make a routed answer differ from the same operation's typed-door answer,
+> which is the one thing §2's third clause exists to prevent.
 
 > **Normative.** The lookup's candidates are **typed records**, and the operation's
 > argument is a **scalar identity read off one of them** by a fixed per-operation
@@ -740,8 +750,12 @@ whole product is that it noticed.
 > `outcome` is `AMBIGUOUS`, `outcome` is `AMBIGUOUS_TRUNCATED`, or `outcome` is
 > `PERFORMED` on a read-only operation;
 > every element of `listing`, and of a confirmation's `subject`, is of the arm
-> `operation` names; and a present `confirmation`'s **own** `operation` equals the
-> outer `operation`. The last is the one an inner-model validator cannot reach: a
+> `operation` names; a present `confirmation`'s **own** `operation` equals the outer
+> `operation`; and the **tag decides the permitted outcomes**, so that
+> `AWAITING_CONFIRMATION` and `REFUSED` are reachable **only** on a confirm-owed
+> `operation` and `PERFORMED` beside a `listing` **only** on a read-only one. §3's
+> tag is a property of the operation and is therefore derivable from `operation`
+> alone, which is what lets a validator state this without a second field. The last is the one an inner-model validator cannot reach: a
 > card is valid on its own terms while describing a different operation from the
 > route that produced it, and a user reading "revoke this grant?" would be
 > approving a `forget`. One discriminator per value is §8's rule, and two values
@@ -1342,6 +1356,17 @@ first real consumer must then either bend around a shape that is already ratifie
 or reopen a settled decision." The store rides in the same lane because a stage
 wired to a fake is not a caller in anger either.
 
+**ADR-0185 §12 is the ratified precedent for exactly this shape, and it is one
+lane.** Two Protocols split by capability, one `permissions/` store satisfying
+both, and consumers in another subsystem: "The implementing lane ships both triads
+and the store in one change with its primary producer, under ADR-0137 §2's
+contract-seam exception; it wires the recorder into all three drivers." This
+decision follows it rather than opening a second way. ADR-0137 §1's bound is
+therefore not read as splitting the store off from the contracts it implements —
+that reading would put the two triads in a lane with no production implementation,
+and would land the contracts ahead of the consumer §2 pairs them with, which is
+the sequence §2 exists to forbid.
+
 `RoutingTrail`'s own first caller does not exist yet — §11 defers the read surface
 — and that is ADR-0185 §12's shape rather than a gap: it minted `SourceReadTrail`
 with `recent` and `export` and gave the user nothing to read them with, for the
@@ -1358,9 +1383,11 @@ one. What §10's renderings buy by staying separate is stated below: they are a
 consumer group and not a second decision.
 
 > **Normative.** That lane ships tests pinning: `RoutedOperation`'s
-> validator in **both** directions on each of the four invariants, the fourth
+> validator in **both** directions on each of the five invariants, the fourth
 > asserted with a `confirmation` whose `operation` differs from the outer one and
-> which is otherwise wholly valid; `OperationConfirmation`'s own validator against
+> which is otherwise wholly valid, and the fifth with a **read-only** `operation`
+> carrying `AWAITING_CONFIRMATION` beside a wholly valid one-element confirmation,
+> and with the same operation carrying `REFUSED`; `OperationConfirmation`'s own validator against
 > a **zero**-element subject, a **two**-element subject, and an element of the
 > wrong arm; the
 > `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape across
@@ -1376,6 +1403,17 @@ consumer group and not a second decision.
 > **not** the `no_operation` marker and the JSON boolean `true` is; and a test that
 > an `operation` value which is not a `RoutableOperation` member declines rather
 > than resolving onto a near match.
+
+> **Normative.** The same lane ships §4's **failure**-decline tests, one per class
+> and each deterministic: the provider raising `ModelError`; a blank completion; a
+> completion that is not JSON; a well-formed envelope missing a required `query` on
+> a member that needs one; and a well-formed envelope carrying a member outside
+> §3's enum. Each asserts the same two things — **no route is taken**, and the
+> ordinary pipeline runs to its own answer — so the pass is indistinguishable from
+> one the router declined outright. These are the cases that separate a decline
+> from an error: an implementation letting `ModelError` propagate fails an ordinary
+> ask that routing was never meant to touch, and it passes every marker-strictness
+> and unknown-operation test above.
 
 > **Normative.** The same lane ships a test that a routing prompt assembled for an
 > utterance is **byte-identical** whether the store holds a hostile record or none,
