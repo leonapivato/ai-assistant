@@ -1263,32 +1263,34 @@ class Gateway:
         re-read here and is not re-read while the process runs, so a renewal takes
         effect at the next start and nothing watches a file.
 
-        **Its validity is not re-checked here either, and adversarial review is why
-        that is written down.** Round 1 of this PR read §8's "the moment of binding
-        lies inside the certificate's validity period" as obliging a second check
-        against the clock immediately before the bind, since the overlay-agent query
-        above sits between the constructor's check and this line. The same sentence
-        of §8 places that check "at start, **before it binds or discloses a bootstrap
-        value**", which is where it is; and §4 settles what the extra check would be
-        worth. A gateway that binds a certificate expiring one second later serves it
-        until it is restarted — "a renewed certificate takes effect when the gateway
-        is **next started**", and an owner who never renews "discovers it at a restart
-        rather than at the moment of expiry". A running gateway holding an expired
-        certificate is therefore a state this ADR accepts in terms. Refusing in the
-        microseconds before the bind while accepting the same state microseconds after
-        it would buy nothing and would claim a guarantee the design does not make.
-        §5's disclosure is what covers the interval instead: the expiry is on the
-        owner's terminal at every start.
+        **Its validity is asked about again here, and that is one sentence of §8
+        read as written.** §8 puts the check "at start, **before it binds or discloses
+        a bootstrap value**" *and* states it about "the moment of binding", and those
+        are two instants: the constructor's, and this one, with the overlay agent's
+        query between them and however long a caller held a constructed gateway
+        before serving it. Adversarial review raised the gap on this PR's first two
+        rounds; the first answer here was that §4 has a running gateway serve a
+        certificate that expires under it until the next restart, which is true and
+        does not reach a gateway that has not bound anything yet. Asking twice reads
+        nothing but the bounds :mod:`.tls` already parsed, so §4's "does not re-read
+        them while it runs" is untouched — no file is opened, and a renewal that
+        landed in the interval is still not seen until the next start.
+
+        **What it deliberately does not become is a continuous check.** Once bound,
+        this gateway serves the certificate it has for as long as it runs, expiry
+        included; §4 says so and §5's disclosure is what makes it a date the owner
+        already knows rather than a surprise.
 
         Returns:
             The bound server, or ``None`` where the listener is off.
 
         Raises:
             ConfigurationError: If the overlay agent places no node at the configured
-                address or cannot be asked, or if the address is not one this machine
-                holds. Each is a stay-down deployment fault (ADR-0083 §5): restarting
-                unchanged never succeeds, and what has to change is the configuration
-                or the overlay.
+                address or cannot be asked, if the address is not one this machine
+                holds, or if the certificate's validity does not cover this moment.
+                Each is a stay-down deployment fault (ADR-0083 §5): restarting
+                unchanged never succeeds, and what has to change is the configuration,
+                the overlay, or the certificate.
             OSError: If the bind fails for any other reason. Left to propagate for
                 the reason :mod:`ai_assistant.service.remote` leaves it — "the raw
                 errno distinguishes a stay-down fault from a transient one" — and an
@@ -1300,6 +1302,7 @@ class Gateway:
             return None
         await self._confirm_the_address_is_on_the_overlay(address)
         _refuse_an_address_this_machine_does_not_hold(address)
+        tls.refuse_outside_its_validity(self._now())
         server = await asyncio.start_server(
             partial(self._handle, remote=True), host=address, port=self._settings.gateway_port
         )

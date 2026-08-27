@@ -83,12 +83,66 @@ class RemoteTls:
         not_after: The instant it ends. §5 discloses this one, because §4 puts
             renewal in the owner's hands and "what makes that workable rather than a
             trap is that every start tells the owner how long they have".
+        path: Where the certificate was read from, so a refusal about it names the
+            file without the caller carrying the path alongside.
     """
 
     context: ssl.SSLContext
     names: tuple[str, ...]
     not_before: datetime
     not_after: datetime
+    path: Path
+
+    def refuse_outside_its_validity(self, instant: datetime) -> None:
+        """Refuse unless ``instant`` lies inside both bounds (ADR-0202 §8).
+
+        > … that the moment of binding lies **inside the certificate's validity
+        > period at both bounds** — one not yet in force is refused exactly as an
+        > expired one is, and the refusal names the bound it failed.
+
+        **Both bounds, and the near one is not hypothetical** (§5). Adversarial
+        review on the ADR found that an earlier draft enumerated expiry alone, so "a
+        certificate whose validity had not begun passed every check and bound a
+        listener every browser rejects". A certificate issued against a clock this
+        machine disagrees with is the ordinary way to arrive there, "and it is the
+        one case where the gateway's refusal is more useful than the browser's,
+        because the gateway can say which bound failed and the browser cannot".
+
+        **Asked twice, from the two moments §8's sentence names.** §8 puts the check
+        "at start, before it binds or discloses a bootstrap value" *and* states it
+        about "the moment of binding", and those are two instants with the overlay
+        agent's query between them — plus however long a caller holds a constructed
+        gateway before serving it. Reading nothing but the parsed bounds is what
+        makes asking twice free and keeps §4 whole: the files are read once and never
+        re-read, so this says nothing about a renewal that landed in between.
+
+        Args:
+            instant: The reading of the gateway's own clock.
+
+        Raises:
+            ConfigurationError: If the certificate is not yet in force, or has
+                expired.
+        """
+        shown = displayable(self.path)
+        if instant < self.not_before:
+            msg = (
+                f"gateway_remote_tls_certificate={shown} is not valid until "
+                f"{self.not_before.isoformat()}, and it is now {instant.isoformat()}. "
+                f"Every browser would refuse it, so the gateway does not bind a listener "
+                f"with it (ADR-0202 §2, §8). Usually this machine's clock is behind the "
+                f"one the certificate was issued against"
+            )
+            raise ConfigurationError(msg)
+        if instant > self.not_after:
+            msg = (
+                f"gateway_remote_tls_certificate={shown} expired at "
+                f"{self.not_after.isoformat()}, and it is now {instant.isoformat()}. "
+                f"Renew it with your overlay and start the gateway again — a renewed "
+                f"certificate takes effect at the next start (ADR-0202 §4) — or unset "
+                f"ASSISTANT_GATEWAY_REMOTE_ADDRESS together with both paths to serve "
+                f"browsers over the loopback listener alone (ADR-0202 §2)"
+            )
+            raise ConfigurationError(msg)
 
 
 def remote_tls(settings: Settings, *, now: Callable[[], datetime]) -> RemoteTls | None:
@@ -139,16 +193,18 @@ def remote_tls(settings: Settings, *, now: Callable[[], datetime]) -> RemoteTls 
     )
     _refuse_material_another_user_controls(key_path, setting="gateway_remote_tls_key", secret=True)
     certificate = _read_the_certificate(certificate_path)
-    context = _build_the_context(certificate_path, key_path)
-    _refuse_a_certificate_outside_its_validity(certificate, certificate_path, now=now)
-    names = _presented_names(certificate)
-    _refuse_a_configured_name_the_certificate_does_not_carry(settings, names, certificate_path)
-    return RemoteTls(
-        context=context,
-        names=names,
+    material = RemoteTls(
+        context=_build_the_context(certificate_path, key_path),
+        names=_presented_names(certificate),
         not_before=certificate.not_valid_before_utc,
         not_after=certificate.not_valid_after_utc,
+        path=certificate_path,
     )
+    material.refuse_outside_its_validity(now())
+    _refuse_a_configured_name_the_certificate_does_not_carry(
+        settings, material.names, certificate_path
+    )
+    return material
 
 
 def _refuse_material_another_user_controls(path: Path, *, setting: str, secret: bool) -> None:
@@ -356,54 +412,6 @@ def _build_the_context(certificate_path: Path, key_path: Path) -> ssl.SSLContext
         )
         raise ConfigurationError(msg) from exc
     return context
-
-
-def _refuse_a_certificate_outside_its_validity(
-    certificate: x509.Certificate, path: Path, *, now: Callable[[], datetime]
-) -> None:
-    """Refuse a certificate the moment of binding is not inside (ADR-0202 §8).
-
-    > … that the moment of binding lies **inside the certificate's validity period
-    > at both bounds** — one not yet in force is refused exactly as an expired one
-    > is, and the refusal names the bound it failed.
-
-    **Both bounds, and the near one is not hypothetical** (§5). Adversarial review
-    on this ADR found that an earlier draft enumerated expiry alone, so "a
-    certificate whose validity had not begun passed every check and bound a listener
-    every browser rejects". A certificate issued against a clock this machine
-    disagrees with is the ordinary way to arrive there, "and it is the one case where
-    the gateway's refusal is more useful than the browser's, because the gateway can
-    say which bound failed and the browser cannot".
-
-    Args:
-        certificate: The leaf.
-        path: Its path, for a refusal that names the file.
-        now: The clock.
-
-    Raises:
-        ConfigurationError: If the certificate is not yet in force, or has expired.
-    """
-    instant = now()
-    shown = displayable(path)
-    if instant < certificate.not_valid_before_utc:
-        msg = (
-            f"gateway_remote_tls_certificate={shown} is not valid until "
-            f"{certificate.not_valid_before_utc.isoformat()}, and it is now "
-            f"{instant.isoformat()}. Every browser would refuse it, so the gateway does "
-            f"not bind a listener with it (ADR-0202 §2, §8). Usually this machine's "
-            f"clock is behind the one the certificate was issued against"
-        )
-        raise ConfigurationError(msg)
-    if instant > certificate.not_valid_after_utc:
-        msg = (
-            f"gateway_remote_tls_certificate={shown} expired at "
-            f"{certificate.not_valid_after_utc.isoformat()}, and it is now "
-            f"{instant.isoformat()}. Renew it with your overlay and start the gateway "
-            f"again — a renewed certificate takes effect at the next start (ADR-0202 §4) "
-            f"— or unset ASSISTANT_GATEWAY_REMOTE_ADDRESS together with both paths to "
-            f"serve browsers over the loopback listener alone (ADR-0202 §2)"
-        )
-        raise ConfigurationError(msg)
 
 
 def _presented_names(certificate: x509.Certificate) -> tuple[str, ...]:
