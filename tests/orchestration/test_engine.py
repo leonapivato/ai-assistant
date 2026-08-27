@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
     PlanningError,
     ReaderError,
     TraceStoreError,
+    UnknownContinuationError,
     UnknownConversationError,
 )
 from ai_assistant.core.protocols import (
@@ -1048,15 +1049,250 @@ async def test_resume_refused_denies_the_parked_step() -> None:
     assert resumed.step.disposition is Disposition.DENIED
 
 
-async def test_a_token_resolves_once_then_is_unknown() -> None:
-    """A resolved token is evicted; replaying it is a clean refusal (§4)."""
+async def test_a_token_resolves_once_and_then_restates_what_was_decided() -> None:
+    """A resolved token is **retained**, so replaying it says what was decided (ADR-0198 §1).
+
+    The behaviour this replaces was an eviction: the park was dropped and the replay
+    became a clean unknown token. What defeated it was the *remedy* rather than the
+    refusal — ADR-0084 §7 gives an unresolvable token one error because "the client's
+    remedy is identical in both cases", and the remedy is ``pending_confirmations()``,
+    which ADR-0052 §1 step 2 never lists a settled binding in. A client told to
+    enumerate found an empty listing and could not tell "my answer landed" from "the
+    park is gone".
+
+    The turn is dropped with the park even so, which is §2's own decision rather than a
+    leftover: retaining the ``TurnResult`` would keep a turn's assembled context and
+    retrieved memories alive for the life of the record, and would show a caller a turn
+    this call did not drive.
+    """
     harness = Harness(tools=(confirmable(),))
     parked = await harness.engine.converse("send it", timeout=PATIENT)
     token = parked.step.confirmation.token  # type: ignore[union-attr]
 
-    await harness.engine.resume(token, approved=True, timeout=PATIENT)
-    with pytest.raises(PlanningError, match="no step awaiting confirmation"):
+    resolved = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+    restated = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+
+    assert harness.engine._parked == {}  # the park is gone; the record is not
+    assert resolved.step is not None
+    assert restated.step is not None
+    assert restated.step.disposition is resolved.step.disposition
+    assert restated.step.step_id == resolved.step.step_id
+    assert restated.step.tool_id == resolved.step.tool_id
+    assert restated.turn is None
+    assert restated.reply is None
+    assert len(harness.invoker.invocations) == 1
+
+
+async def test_a_restatement_reads_the_execution_at_the_moment_it_restates() -> None:
+    """ADR-0198 §2: ``state`` is re-read from the plan store, never cached at settlement.
+
+    The only way to tell a re-read from a snapshot is to change what the store holds
+    between the settlement and the restatement, and that is what this does. It is here
+    rather than only in the shared suite because the shared suite reaches the store
+    through no member at all: what it can pin is the *absence* case — an execution the
+    store has stopped holding — and what it cannot see is a store that still holds one
+    whose content has moved on.
+
+    An implementation that cached the ``StepOutcome`` at settlement passes every shared
+    case and fails this one.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    token = parked.step.confirmation.token  # type: ignore[union-attr]
+    resolved = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+    assert resolved.step is not None
+
+    # Something else advances the execution after the answer landed. Written straight
+    # into the double because the store's own surface has no legal transition left to
+    # offer — the step is terminal — and what is under test is the engine's *read*, not
+    # how the state came to move. The engine holds no plan state of its own, so the only
+    # honest answer is the store's current one.
+    later = AT + timedelta(hours=1)
+    execution_id = resolved.step.state.id
+    held = harness.plans._executions[execution_id]
+    harness.plans._executions[execution_id] = held.model_copy(update={"updated_at": later})
+
+    restated = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+    assert restated.step is not None
+    assert restated.step.state.updated_at == later
+    assert restated.step.state.updated_at != resolved.step.state.updated_at
+
+
+async def test_a_second_resume_admitted_mid_resolution_restates_rather_than_raising() -> None:
+    """ADR-0198 §1: the eviction and the settled record are one critical section.
+
+    **The shared suite can observe only the outcome; this is what pins the ordering
+    that produces it.** A resolution is held between recording the answer and
+    installing the settled record — the gate suspends the runner's ``resume`` after it
+    has returned, which is inside ``_resolve_park``'s ``_recovery_lock`` and before the
+    park is replaced — and a second ``resume`` is admitted while it is held.
+
+    The second call is queued on the same lock, so it acquires it the instant the first
+    releases it and **before** anything the first does outside it. An implementation
+    that installed the record after releasing the lock — after composing, say, or after
+    capturing — would hand that call a handle naming neither a park nor a record, which
+    is exactly the ``UnknownContinuationError`` this decision exists to stop and exactly
+    the race #1621 describes: an abandoned answer still in transit, a listing that
+    reached the lock first, and a loser told its action was declined for an action that
+    ran.
+
+    The second answer is the **opposite** value, so the case also witnesses §1's rule
+    that a restatement is returned whatever the call's ``approved`` carries.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    token = parked.step.confirmation.token  # type: ignore[union-attr]
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateAfterRecording:
+        """Wraps the runner, suspending the first ``resume`` after it has recorded."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def resume(self, *args: object, **kwargs: object) -> object:
+            result = await self._inner.resume(*args, **kwargs)  # type: ignore[attr-defined]
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return result
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    harness.engine._runner = _GateAfterRecording(harness.engine._runner)  # type: ignore[assignment]  # test double
+
+    resolving = asyncio.ensure_future(harness.engine.resume(token, approved=True, timeout=PATIENT))
+    await entered.wait()  # the answer is recorded; the resolution has not completed
+    # **A resolution that does not complete installs no settled record** (§3). Mid-flight
+    # is not settled: the park is still registered and nothing is retained, so a
+    # resolution that raised here would leave the binding exactly where it was.
+    assert harness.engine._settled == {}
+    assert list(harness.engine._parked) == [token.handle]
+
+    replaying = asyncio.ensure_future(harness.engine.resume(token, approved=False, timeout=PATIENT))
+    # Give a lock-free second resume ample opportunity to run to completion over the
+    # fakes (all its awaits resolve immediately); behind the shared lock it stays put.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not replaying.done()
+
+    release.set()
+    resolved = await resolving
+    restated = await replaying
+
+    assert resolved.step is not None
+    assert restated.step is not None
+    assert restated.step.disposition is Disposition.EXECUTED
+    assert restated.step.disposition is resolved.step.disposition
+    assert restated.turn is None
+    assert restated.reply is None
+    # One execution attempt for the binding, however many times its token arrived.
+    assert len(harness.invoker.invocations) == 1
+    assert restated.step.state.step(restated.step.step_id).attempts == 1  # type: ignore[union-attr]
+
+
+async def test_the_settled_record_is_installed_before_the_resolution_awaits_anything_else() -> None:
+    """ADR-0198 §1: installed inside the critical section, not after it.
+
+    The companion to the case above, and the one that catches the *other* ordering.
+    Serialising the second call behind the lock cannot show *when* the record was
+    written, because releasing an ``asyncio.Lock`` schedules its waiter rather than
+    running it: the resolving call keeps the event loop until it suspends. So this
+    suspends it at the first place it can — composing, which ADR-0052 §3's reasoning
+    puts deliberately **outside** the lock, since holding an arbitrarily slow provider
+    between a second, unrelated ``resume`` and its own park is the cost that argument
+    refuses.
+
+    In that window the handle must already name a settled record. An implementation
+    that composed first and retained afterwards fails here deterministically, and it is
+    the shape a plausible refactor reaches for: the record is only wanted on the way
+    out, so writing it beside the outcome looks tidier than writing it beside the
+    eviction. Issue #1621's race is exactly this window over a slower provider.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    token = parked.step.confirmation.token  # type: ignore[union-attr]
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateComposing:
+        """Wraps the composing stage, suspending the first composition inside it."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def compose(self, **kwargs: object) -> object:
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return await self._inner.compose(**kwargs)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    harness.engine._composing = _GateComposing(harness.engine._composing)  # type: ignore[assignment]  # test double
+
+    resolving = asyncio.ensure_future(harness.engine.resume(token, approved=True, timeout=PATIENT))
+    await entered.wait()  # the park is evicted, the lock is released, the reply is pending
+
+    # The whole point: a second resume arriving *now* gets an answer, not a refusal.
+    restated = await harness.engine.resume(token, approved=False, timeout=PATIENT)
+    assert restated.step is not None
+    assert restated.step.disposition is Disposition.EXECUTED
+    assert restated.reply is None
+
+    release.set()
+    resolved = await resolving
+    assert resolved.step is not None
+    assert resolved.step.disposition is Disposition.EXECUTED
+    assert len(harness.invoker.invocations) == 1
+
+
+async def test_the_retained_set_is_bounded_and_discards_the_least_recently_settled() -> None:
+    """ADR-0198 §4: a count is the whole of the bound, and the oldest is what goes.
+
+    **At a ceiling of two rather than one, and that is the point of the case.** The
+    shared suite pins §4 over a subject built at a ceiling of one, which is where a
+    discard is reachable in two settlements — but at one, "discard the least recently
+    settled" and "discard the most recently settled" are the same instruction, because
+    the set never holds two candidates to choose between. Three settlements at a ceiling
+    of two is the smallest arrangement in which the two orders disagree, and this is the
+    binding that can build it: the ceiling is a construction-time property of a
+    deployment, so only a test that wires the engine can pick the number.
+
+    The second turn being admitted at all is §4's other half: a settled record holds no
+    slot at the ceiling, so a client that answered every confirmation does not meet
+    backpressure for having done so. And no clock is read anywhere in it — a count
+    bounds memory exactly, and nothing here makes a token's answerability depend on how
+    long a user stared at a page.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(
+        tools=(confirmable(),),
+        max_outstanding_confirmations=2,
+        loop_id_factory=lambda: next(goals),
+    )
+
+    settled: list[ContinuationToken] = []
+    for utterance in ("send one", "send two", "send three"):
+        parked = await harness.engine.converse(utterance, timeout=PATIENT)
+        token = parked.step.confirmation.token  # type: ignore[union-attr]
         await harness.engine.resume(token, approved=True, timeout=PATIENT)
+        settled.append(token)
+
+    oldest, middle, newest = settled
+    with pytest.raises(UnknownContinuationError):
+        await harness.engine.resume(oldest, approved=True, timeout=PATIENT)
+    assert (await harness.engine.resume(middle, approved=True, timeout=PATIENT)).step is not None
+    assert (await harness.engine.resume(newest, approved=True, timeout=PATIENT)).step is not None
 
 
 async def test_resume_with_an_unrecognised_token_is_refused() -> None:

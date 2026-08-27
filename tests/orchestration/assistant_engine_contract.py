@@ -79,6 +79,7 @@ from ai_assistant.core.errors import (
     IncompleteProvisioningError,
     InvalidGrantError,
     OversizedValueError,
+    PlanningError,
     ReadTrailError,
     UngrantableSourceError,
     UnknownConnectionError,
@@ -1019,6 +1020,58 @@ class RoutedParkSubject:
     belief_id: str
 
 
+#: The ceiling ADR-0198 §4's bound is built at, for the subject that observes it.
+#: **One**, because §4 reuses ``max_outstanding_confirmations`` as the size of the
+#: retained set and one is the smallest value at which a discard is reachable in two
+#: settlements rather than in a thousand. It is a construction-time property of a
+#: deployment, so it is a separate subject rather than a knob a case turns —
+#: :attr:`AssistantEngineContract.tiny_engine`'s reasoning, one setting over.
+SETTLED_SINGLE_SLOT: Final = 1
+
+
+@dataclass(frozen=True, slots=True)
+class SettledParkSubject:
+    """An engine whose park is **settled**, and the token that still names it (§1).
+
+    **A subject rather than a bare engine, because a settled binding is not
+    enumerable.** ADR-0052 §1 step 2 skips a binding the trail no longer holds
+    pending, and ADR-0198 §4 rules that ``pending_confirmations`` neither lists a
+    settled binding nor mints a token for one — that is the whole reason a
+    restatement had to become a `resume` and could not be a listing. So a case that
+    had to *ask* for the token could not exist, and the fixture hands it over.
+
+    Attributes:
+        engine: The subject under test, holding the settled record.
+        token: The continuation the settled binding is restated by.
+    """
+
+    engine: AssistantEngine
+    token: ContinuationToken
+
+
+@dataclass(frozen=True, slots=True)
+class SingleSlotParkSubject:
+    """A subject at :data:`SETTLED_SINGLE_SLOT` that has settled one park and holds one.
+
+    **Its existence is the first of §4's three facts.** At a ceiling of one, a second
+    park can only have been admitted beside :attr:`settled`'s record if that record
+    holds **no** ceiling slot — which is §4's rule, and the one an implementation
+    that counted retention with the parks would fail before a case ran. The fixture
+    settles the first park and parks the second, in that order, because that order is
+    the only one the ceiling admits.
+
+    Attributes:
+        engine: The subject under test.
+        settled: The token of the **older**, already-answered binding, retained at
+            the moment the fixture hands the subject over.
+        parked: The token of the **newer**, still-answerable park.
+    """
+
+    engine: AssistantEngine
+    settled: ContinuationToken
+    parked: ContinuationToken
+
+
 class AssistantEngineContract(ABC):
     """What every ``AssistantEngine`` implementation must do."""
 
@@ -1206,6 +1259,67 @@ class AssistantEngineContract(ABC):
         and still pass a suite. What the confirmation carries is otherwise
         unconstrained: which account, which arguments and how many occurrences are
         each implementation's own.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def settled_park(self) -> SettledParkSubject:
+        """A subject whose park is **settled**, and the token that still names it (§1).
+
+        The fixture answers the park; what the cases below do is present its token a
+        second time. It is a fixture rather than two lines in each case for the reason
+        :attr:`parked_engine` is one and one of its own: settling needs a park, which
+        parking is the policy's ruling reached inside a turn, and the answered token is
+        then unreachable — ADR-0198 §4 rules that ``pending_confirmations`` neither
+        lists a settled binding nor mints a token for one.
+
+        The subject must have settled **exactly one** park and must still retain it, so
+        the restatement under test is the record §1 installs rather than an accident of
+        a table too small or too large.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def settled_park_without_its_execution(self) -> SettledParkSubject:
+        """:attr:`settled_park`'s subject whose plan store **no longer holds** the execution.
+
+        ADR-0198 §2 rules that a restatement's ``StepOutcome.state`` is re-read from the
+        plan store at the moment of the restatement and is never a snapshot cached at
+        settlement — ``StepOutcome.state`` is "the durable execution state after the
+        last transition committed", and a cached value stops being that as soon as
+        anything advances the execution (ADR-0139 §2). Where the execution is no longer
+        held there is nothing to read, and §2's answer is a ``PlanningError`` rather than
+        an assertion about an outcome the engine cannot see.
+
+        **A fixture because no call on this surface removes an execution.** The
+        promoted surface reaches plan state through no member at all, so the state has
+        to be arranged behind the engine — which is how it arises in a deployment, when
+        a user erases their history under ADR-0119 or a store is rebuilt beneath a
+        process that is still running.
+
+        **Without it an implementation that cached the outcome passes every other case
+        in this section** and answers with an ``ExecutionState`` the store has stopped
+        holding.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def single_slot_parks(self) -> SingleSlotParkSubject:
+        """A subject at :data:`SETTLED_SINGLE_SLOT` holding one settled record and one park.
+
+        The shape the suite already uses for a zero-ceiling ledger
+        (:data:`SPEND_ZERO_CEILING` behind :attr:`spending`), one setting over: a
+        ceiling is a construction-time property of a deployment rather than something a
+        caller changes mid-flight, so the subject is built at it and handed over.
+
+        The fixture settles one park and then parks another, in that order — the only
+        order a ceiling of one admits, and the order that makes the subject's *existence*
+        evidence for ADR-0198 §4's first clause.
+
+        **Without it an implementation that retained every settled record forever, or
+        discarded the newest instead of the oldest, passes every other case in this
+        section**, because each of them presents one token to a table nothing has
+        crowded.
         """
 
     @pytest.fixture
@@ -2072,18 +2186,261 @@ class AssistantEngineContract(ABC):
         assert resumed.step is not None
         assert resumed.routed is None
 
-    async def test_a_token_is_answered_once(self, parked_engine: AssistantEngine) -> None:
-        """A resolved park is evicted, so a replay is a clean unknown token.
+    # --- ADR-0198 §§1-5: a settled park is restated, not refused -------------
 
-        A second answer would be refused by the trail's single-resolution index
-        anyway; turning the replay into
-        :class:`~ai_assistant.core.errors.UnknownContinuationError` is what keeps
-        the table bounded and gives the client the one refusal that has a remedy.
+    async def test_a_settled_token_restates_its_answer_rather_than_being_refused(
+        self, settled_park: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §§1-2: the replay is answered, and this is what it carries.
+
+        **This case replaces the one that pinned the opposite**, and the reason the
+        old ruling fell is the remedy rather than the refusal. ADR-0084 §7 gives a
+        token the server cannot resolve one typed error whose remedy is
+        ``pending_confirmations()`` — enumerate durable state and re-mint — and gives
+        it *because* "the client's remedy is identical in both cases". A replay fails
+        that test: ADR-0052 §1 step 2 skips a binding the trail no longer holds
+        pending, so a settled binding is never listed and never re-minted, and a
+        client told to enumerate finds an empty listing and cannot tell "my answer
+        landed" from "the park is gone". So where the remedies diverge the engine
+        answers instead of refusing.
+
+        The shape asserted here is ADR-0170 §4's second one exactly, which §2 obeys
+        rather than widens: ``turn`` ``None`` — even where the settled park was an
+        in-process one, because retaining a ``TurnResult`` would keep a turn's context
+        and memories alive for the life of the record and show a caller a turn this
+        call did not drive — ``routed`` ``None``, ``reply`` ``None`` because the answer
+        was composed once for the request that performed the act, and
+        ``reply_degraded`` ``False`` because no answer was owed. The ``step`` carries
+        the binding's immutable facts and a ``confirmation`` of ``None``, which the
+        type's own validator already requires of a disposition that is not
+        ``AWAITING_CONFIRMATION``.
         """
-        pending = await parked_engine.pending_confirmations()
-        await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+        restated = await settled_park.engine.resume(
+            settled_park.token, approved=True, timeout=_PATIENT
+        )
+
+        assert restated.step is not None
+        assert restated.step.disposition is Disposition.EXECUTED
+        assert restated.step.confirmation is None
+        assert restated.step.tool_id is not None
+        assert restated.turn is None
+        assert restated.routed is None
+        assert restated.reply is None
+        assert restated.reply_degraded is False
+
+    async def test_a_restatement_performs_nothing_however_often_it_is_asked(
+        self, settled_park: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §3: one settled binding, one ruling and one execution attempt.
+
+        The half of the pair that keeps the first case honest. Answering a replay is
+        worth nothing — worse than the refusal it replaced — if answering it *does*
+        anything: a second ``PermissionDecision`` would put two rulings under one
+        binding that ADR-0044 §2b makes unrepeatable, and a second invocation would
+        perform an act the user authorised once.
+
+        Both are read through the promoted surface, so the same case binds an
+        in-process engine, a fake and a client over a socket. The rows are compared
+        against what the trail held **after the first resolution** rather than against
+        a fixed count, because what §3 rules is that a restatement adds nothing — how
+        many rows a conforming implementation records for the resolution itself is its
+        own business, and a case asserting a number would be pinning one
+        implementation's book-keeping on all three.
+
+        The execution attempt is read off the restated ``state`` for the same reason:
+        the step the settled binding names ran once, and a second run would show as a
+        second attempt whatever else an implementation recorded.
+        """
+        rulings = await settled_park.engine.export_decisions()
+        invocations = await settled_park.engine.export_invocations()
+
+        first = await settled_park.engine.resume(
+            settled_park.token, approved=True, timeout=_PATIENT
+        )
+        second = await settled_park.engine.resume(
+            settled_park.token, approved=True, timeout=_PATIENT
+        )
+
+        assert await settled_park.engine.export_decisions() == rulings
+        assert await settled_park.engine.export_invocations() == invocations
+        assert first.step is not None
+        assert second.step is not None
+        assert second.step.disposition is first.step.disposition
+        assert second.step.state.step(second.step.step_id) is not None
+        assert second.step.state.step(second.step.step_id).attempts <= 1  # type: ignore[union-attr]
+
+    async def test_a_restatement_is_returned_whatever_the_replay_s_approved_carries(
+        self, settled_park: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §1: the second ``approved`` is not compared against the first.
+
+        The fixture answered the park with ``True``; this presents the **opposite**
+        value. A park is answered once (ADR-0044 §2b), so a second answer is never
+        honourable whatever it says, and the engine states what was decided rather
+        than refusing to say — the recorded answer stands unchanged, and nothing about
+        the contradicting call is recorded, performed or composed.
+
+        **This is the clause an implementation is likeliest to narrow** to "the same
+        answer twice", and every other case in this section passes under that
+        narrowing because each of them presents one value twice. Without it, an engine
+        that raised a second typed error on a disagreement would be conforming — and
+        that shape is refused in ADR-0198's own ``Alternatives considered``, on the
+        ground that an error tells a caller the binding was answered and never tells
+        it *how*, while the token is opaque and the listing will not carry it, so the
+        caller has no other way to ask.
+        """
+        rulings = await settled_park.engine.export_decisions()
+        invocations = await settled_park.engine.export_invocations()
+
+        restated = await settled_park.engine.resume(
+            settled_park.token, approved=False, timeout=_PATIENT
+        )
+
+        assert restated.step is not None
+        assert restated.step.disposition is Disposition.EXECUTED
+        assert restated.reply is None
+        assert restated.reply_degraded is False
+        assert await settled_park.engine.export_decisions() == rulings
+        assert await settled_park.engine.export_invocations() == invocations
+
+    async def test_two_concurrent_resumes_of_one_token_both_get_the_settled_answer(
+        self, settled_park: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §1, §7: the race this decision exists to close, pinned.
+
+        **The sequential cases cannot see it.** #1621's mechanism is a recovery
+        listing overtaking a resume: an abandoned answer is still in transit, a
+        listing that reaches the lock first legitimately returns the park as pending,
+        and a second ``resume`` then races the first — whichever reaches the
+        resolution first decides the park, and the loser used to raise. The gateway
+        renders every ``AssistantError`` as a decline, which a browser reads as "the
+        hub received the request and declined it": a denial announced for an action
+        that ran, which ADR-0084 §7 refuses in terms.
+
+        So both calls must come back with the one settled outcome and neither may
+        raise. An implementation that installs the settled record **after** releasing
+        the critical section — or evicts before installing — fails this
+        deterministically, because the second call reaches the table between the two
+        and finds nothing.
+
+        **No consumer is exempted** (§7). This suite offers no capability skip, and
+        the wire client opens one connection per call, so two concurrent ``resume``
+        calls engage ADR-0084 §3's serial-connection rule not at all.
+        """
+        rulings = await settled_park.engine.export_decisions()
+
+        first, second = await asyncio.gather(
+            settled_park.engine.resume(settled_park.token, approved=True, timeout=_PATIENT),
+            settled_park.engine.resume(settled_park.token, approved=False, timeout=_PATIENT),
+        )
+
+        assert first.step is not None
+        assert second.step is not None
+        assert first.step.disposition is Disposition.EXECUTED
+        assert second.step.disposition is Disposition.EXECUTED
+        assert first.step.step_id == second.step.step_id
+        assert await settled_park.engine.export_decisions() == rulings
+
+    async def test_a_restatement_reads_the_execution_and_refuses_to_state_what_it_cannot(
+        self, settled_park_without_its_execution: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §2: ``state`` is re-read, and an unreadable outcome is not stated.
+
+        The subject's settled binding names an execution the plan store no longer
+        holds. Presenting its token raises
+        :class:`~ai_assistant.core.errors.PlanningError` — the same failure a
+        *resolution* raises for the same condition — and the engine asserts nothing
+        about the outcome, which is ADR-0139 §4's third limb arriving at the engine
+        seam.
+
+        **Without this an implementation that cached the ``StepOutcome`` at settlement
+        passes every other case in this section** and answers with an
+        ``ExecutionState`` the store has stopped holding. ``StepOutcome.state`` is
+        defined as "the durable execution state after the last transition committed",
+        and a cached value stops being that the moment anything else advances the
+        execution; the ``Disposition`` beside it cannot go stale, because it is the
+        gate's verdict on a decision ADR-0044 §2b makes unrepeatable, which is why one
+        is read and the other retained.
+
+        It reaches no runner, policy, tool or composer either, and the trail is the
+        control that says so.
+        """
+        subject = settled_park_without_its_execution
+        rulings = await subject.engine.export_decisions()
+        invocations = await subject.engine.export_invocations()
+
+        with pytest.raises(PlanningError):
+            await subject.engine.resume(subject.token, approved=True, timeout=_PATIENT)
+
+        assert await subject.engine.export_decisions() == rulings
+        assert await subject.engine.export_invocations() == invocations
+
+    async def test_retention_holds_no_ceiling_slot_and_discards_the_least_recently_settled(
+        self, single_slot_parks: SingleSlotParkSubject
+    ) -> None:
+        """ADR-0198 §4: the bound is a count, it is the ceiling, and the oldest goes.
+
+        Three facts over one subject built at :data:`SETTLED_SINGLE_SLOT`.
+
+        **A settled record holds no slot at the ceiling.** That ceiling bounds
+        *unanswered* parks, and a settled record is the opposite of one — counting it
+        would let a client that answered every confirmation meet backpressure for
+        having done so. The evidence is that the subject exists: at a ceiling of one,
+        the second park could not have been admitted beside the first's retained
+        record if that record occupied the slot. The first assertion below reads the
+        other half of it, that the older record really is still retained at that
+        point.
+
+        **The retained set is bounded by the same number**, and **the discard is the
+        least recently settled**. Settling the second binding fills the one place the
+        set has, so the older token stops restating and meets
+        ``UnknownContinuationError`` again — which is the behaviour every replay had
+        before this decision, so the bound narrows the improvement and regresses
+        nothing — while the newer one restates. An implementation that retained every
+        record forever fails the third assertion; one that discarded the newest fails
+        the fourth.
+
+        Note what the first two calls establish before anything is crowded out: a
+        restatement is a **read**, and it does not re-settle the record it reads. Were
+        it to, the recency order these assertions depend on would be a different one.
+        """
+        engine = single_slot_parks.engine
+
+        retained = await engine.resume(single_slot_parks.settled, approved=True, timeout=_PATIENT)
+        assert retained.step is not None
+
+        answered = await engine.resume(single_slot_parks.parked, approved=True, timeout=_PATIENT)
+        assert answered.step is not None
+
         with pytest.raises(UnknownContinuationError):
-            await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+            await engine.resume(single_slot_parks.settled, approved=True, timeout=_PATIENT)
+
+        restated = await engine.resume(single_slot_parks.parked, approved=True, timeout=_PATIENT)
+        assert restated.step is not None
+        assert restated.step.step_id == answered.step.step_id
+
+    async def test_a_settled_binding_is_not_listed_among_pending_confirmations(
+        self, settled_park: SettledParkSubject
+    ) -> None:
+        """ADR-0198 §4: recovery neither lists a settled binding nor mints for one.
+
+        ADR-0052 §1 step 2 skips a binding the trail no longer holds pending and that
+        skip is unchanged, so a settled binding is never re-presented — which is the
+        #257 hazard ADR-0044 §2b closes. It is also the reason the restatement had to
+        be a ``resume`` rather than a listing: a listing that carried settled bindings
+        would put a resolved action back in front of a user in the type whose whole
+        purpose is "what you may still answer".
+
+        The token still restates afterwards, which is what separates "not listed" from
+        "reconciled away": an implementation whose recovery evicted the settled record
+        as though it were a park would pass the first assertion and fail the second.
+        """
+        assert await settled_park.engine.pending_confirmations() == ()
+
+        restated = await settled_park.engine.resume(
+            settled_park.token, approved=True, timeout=_PATIENT
+        )
+        assert restated.step is not None
 
     # --- ADR-0074 §2: the listing is ordered by activity ---------------------
 
