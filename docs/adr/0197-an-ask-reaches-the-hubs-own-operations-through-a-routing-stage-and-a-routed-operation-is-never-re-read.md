@@ -1,6 +1,6 @@
 # 197. An ask reaches the hub's own operations through a routing stage, and a routed operation is never re-read
 
-- Status: Accepted, §7 amended by ADR-0198
+- Status: Partially superseded by ADR-0201 (§5's first clause, that a routed operation's argument is resolved from that query by deterministic local code reading the store the operation itself reads — scoped to exactly one case: the kinds a routed `forget`'s lookup enumerates)
 - Date: 2026-08-27
 - Amended: 2026-08-27 (§7 — the ordinary parked step's refusal is described as
   raising, and the tree returns a ruling). §7's clause bounding the routed resume
@@ -67,6 +67,55 @@
   Recorded on the `Status` line as well as here, because this line carries no leading
   supersession token and ADR-0082 §2 permits the qualifier to accumulate on such a line in
   the established shape. Refs #1621, #1640, ADR-0198 §5, §6, §8.
+- **Partially superseded: 2026-08-27 by
+  [ADR-0201](0201-a-routed-forgets-lookup-names-beliefs-and-the-record-of-the-asking-is-not-one-of-them.md),
+  in the scope the `Status` line names.** §5's first clause rules that a confirm-owed
+  operation's argument "is resolved from that query by deterministic local code reading the
+  store the operation itself reads". ADR-0201 §1 replaces that in **one** case: a routed
+  `forget`'s lookup reads that store enumerating every `MemoryKind` **except** `EPISODIC`,
+  derived from the enum rather than written out. An episodic record is never that lookup's
+  candidate, never its display subject, never the record whose identity becomes the façade
+  call's argument, and never an entry in an `AMBIGUOUS` or `AMBIGUOUS_TRUNCATED` listing.
+
+  **A supersession rather than an amendment, on ADR-0070 §1's test** (ADR-0082 §1). A
+  reader holding only this ADR implements the lookup over an unfiltered `list_beliefs` and
+  gets #1637's loop: ADR-0074 §3 captures each exchange as an episode quoting the user's
+  own utterance, so the record of *asking* matches the words that asked, the route ends in
+  `AMBIGUOUS` over the belief and every earlier ask's episode, and §5's own remedy — say
+  which one you meant — captures one more. After ADR-0201 that reader writes different
+  code, which is acting differently and not a clause read too widely.
+
+  **Narrow, and the rest of §5 binds this lookup exactly as it bound the last one.** The
+  clause fails only for `forget` and only on the kind axis. That the resolution is a lookup
+  and never a generation is strengthened rather than preserved — the candidates are a
+  strict subset of records that already existed; the display-subject/scalar-argument split,
+  the three arms, the refusal to choose among candidates by rank, recency, score, best
+  match or a second model call, the `DEFAULT_PAGE_SIZE` bound and its disclosure are
+  untouched; and `revoke` and `forget_question` resolve exactly as §5 ruled, over
+  `standing_grants` and `questions`, neither of which holds a memory record. A query naming
+  only episodes reaches §5's existing `NOT_FOUND` arm, and no new outcome member and no new
+  composing input is added for it (ADR-0201 §5).
+
+  **§2's third clause is untouched, and ADR-0201 §9 records why rather than leaving it to
+  inference.** The stage still performs the operation by calling the engine's own
+  implementation, there is still exactly one `MemoryStore.delete` call site, and nothing is
+  composed out of two operations. The exclusion sits **upstream** of the façade call, in
+  the resolution step the typed door does not have because it is handed an id: §2 governs
+  *performing* and this governs *naming*, which is §5's own step. Nothing about what
+  `forget` destroys moves — an episodic record whose id reaches the typed door is still
+  destroyed, no store gains a kind-conditional refusal, and ADR-0074 §8 and ADR-0004 §6
+  stand (ADR-0201 §2). §§1, 3, 4, 6, 7, 8, 9, 10 and 11 are likewise untouched, §11's two
+  `track:memory` deferrals included.
+
+  **§7's `ADR-0198` amendment qualifier comes off the `Status` line in this same change**,
+  because that line now carries the leading `Partially superseded by` token and ADR-0082 §2
+  excludes an amendment qualifier from such a line. The record stays whole in the dated
+  note directly above, which is ADR-0080 §8's operation on ADR-0045 performed again;
+  nothing is lost, because ADR-0070 §1 requires an amendment to carry a dated note anyway
+  and that note carries the substance in full. Its closing paragraph describes the `Status`
+  line as it stood on the day it was written, and is left as written (ADR-0001,
+  append-only). ADR-0201 §§1–6 is the operative text; this note records the supersession
+  and does not restate its terms. Refs #1637, ADR-0201 §1, §2, §5, §8, §9.
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
   *`ask` → typed operation, one-directional — a typed operation is never re-read —
