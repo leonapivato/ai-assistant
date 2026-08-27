@@ -1965,11 +1965,16 @@ class Engine:
                 belong.
 
         Raises:
-            TypeError: If ``max_outstanding_confirmations`` is not an integer. A
-                ``bool`` is excluded (it is an ``int`` subclass and a flag is not a
-                count), and a ``float`` like ``1.5`` is refused rather than compared
-                — the same guard shape ``LearningLoop`` uses for its own count.
-            ValueError: If it is not positive.
+            TypeError: If ``max_outstanding_confirmations`` or
+                ``max_spoken_audio_bytes`` is not an integer. A ``bool`` is excluded
+                (it is an ``int`` subclass and a flag is not a count), and a
+                ``float`` like ``1.5`` is refused rather than compared — the same
+                guard shape ``LearningLoop`` uses for its own count. On the audio
+                bound the refusal is what keeps ADR-0200 §6's ceiling able to bind at
+                all: ``float("nan")`` compares ``False`` against every ``>``, so an
+                engine built with one would admit a recording of any length and
+                return a rendering of any length while reporting health.
+            ValueError: If either is not positive.
         """
         if isinstance(max_outstanding_confirmations, bool) or not isinstance(
             max_outstanding_confirmations, int
@@ -1984,6 +1989,19 @@ class Engine:
                 "max_outstanding_confirmations must be positive, got "
                 f"{max_outstanding_confirmations}"
             )
+            raise ValueError(msg)
+        # ADR-0200 §6's ceiling, guarded in the shape above and for a sharper reason.
+        # ``Settings`` refuses a non-integer or a non-positive value at load, but this
+        # is a *constructor* argument and a composition root is not the only caller —
+        # and the failure mode here is silent rather than loud: ``nan`` compares
+        # ``False`` against every ``>``, so an engine built with one would admit a
+        # recording of any length and return a rendering of any length while reporting
+        # health. A bound that cannot bind is not a weaker bound but an absent one.
+        if isinstance(max_spoken_audio_bytes, bool) or not isinstance(max_spoken_audio_bytes, int):
+            msg = f"max_spoken_audio_bytes must be an integer, got {max_spoken_audio_bytes!r}"
+            raise TypeError(msg)
+        if max_spoken_audio_bytes < 1:
+            msg = f"max_spoken_audio_bytes must be positive, got {max_spoken_audio_bytes}"
             raise ValueError(msg)
         self._loop = loop
         self._runner = runner
