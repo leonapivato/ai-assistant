@@ -70,6 +70,17 @@ _REMOTE_BROWSER_FIELDS = (
     "gateway_remote_host_names",
 )
 
+#: ADR-0202 §8's table, which is two paths and no figure either. Held apart from both
+#: tuples above for ADR-0174 §8's reason and for one of its own: §8 says in terms that
+#: "no third field is added and none is owed" — ``gateway_remote_address`` remains the
+#: switch, a field by which this listener could serve plain HTTP is what §2 refuses,
+#: and a renewal interval is not this system's to hold because §4 makes renewal an
+#: owner act.
+_REMOTE_TLS_FIELDS = (
+    "gateway_remote_tls_certificate",
+    "gateway_remote_tls_key",
+)
+
 
 def test_the_figures_are_all_present_with_their_adrs_defaults() -> None:
     """§8's table, transcribed. A default that drifts is two gateways disagreeing."""
@@ -94,12 +105,13 @@ def test_the_figures_are_exactly_the_ones_an_adr_names() -> None:
     underdetermination ADR-0168 §8 opens by refusing.
 
     Ten figures from ADR-0168 §8, none from ADR-0172 ("adds no eleventh"), the
-    eleventh from ADR-0175 §8, the twelfth from ADR-0182 §3, and ADR-0174 §8's
-    three non-figures. Discovering a sixteenth here is cheaper than in review.
+    eleventh from ADR-0175 §8, the twelfth from ADR-0182 §3, ADR-0174 §8's three
+    non-figures and ADR-0202 §8's two. Discovering an eighteenth here is cheaper
+    than in review.
     """
     named = {name for name in Settings.model_fields if name.startswith("gateway_")}
 
-    assert named == set(_GATEWAY_FIELDS) | set(_REMOTE_BROWSER_FIELDS)
+    assert named == set(_GATEWAY_FIELDS) | set(_REMOTE_BROWSER_FIELDS) | set(_REMOTE_TLS_FIELDS)
 
 
 def test_the_notification_budget_is_far_below_the_hubs_own_ceiling() -> None:
@@ -254,6 +266,28 @@ def test_the_gateway_figures_parse_from_the_environment(monkeypatch: pytest.Monk
 _OVERLAY = "100.64.0.9"
 _PHONE = "nPHONE01CNTRL"
 
+#: The pair ADR-0202 §8 requires beside a configured listener. Neither names a real
+#: file and neither has to: §8 splits the check, and ``Settings`` "refuses at load
+#: what it can decide without touching the filesystem or importing a subsystem".
+#: Existence, custody, permissions, the key matching the certificate, both validity
+#: bounds and §6's name check are the gateway's, at start, and are pinned in
+#: ``tests/interfaces/gateway/test_gateway_tls.py``.
+_CERTIFICATE = "/etc/assistant/laptop.tail2e4542.ts.net.crt"
+_KEY = "/etc/assistant/laptop.tail2e4542.ts.net.key"
+
+
+def _configured_on(**overrides: object) -> Settings:
+    """Settings with the remote browser listener on, and the pair that comes with it.
+
+    ADR-0202 §8 refuses ``gateway_remote_address`` set with either path unset, so the
+    address alone is no longer a loadable configuration and every case about the
+    *other* remote fields goes through here rather than restating two paths.
+    """
+    overrides.setdefault("gateway_remote_address", _OVERLAY)
+    overrides.setdefault("gateway_remote_tls_certificate", _CERTIFICATE)
+    overrides.setdefault("gateway_remote_tls_key", _KEY)
+    return Settings(**overrides)  # type: ignore[arg-type] # each key is a field of the model
+
 
 def test_the_remote_browser_listener_is_off_unless_it_is_configured_on() -> None:
     """ADR-0174 §2: "The remote browser listener is **off unless it is configured
@@ -286,6 +320,21 @@ def test_the_switch_is_the_one_gateway_field_that_is_nullable() -> None:
     }
 
     assert nullable == {"gateway_remote_address"}
+
+
+def test_both_tls_paths_are_unset_by_default() -> None:
+    """ADR-0202 §8: both are "unset by default", and they are the only other nullable
+    fields in this block.
+
+    They are nullable for the switch's own reason one field over — a boundary that is
+    off unless configured on needs a value meaning off — and ADR-0168 §8's no-nullable
+    rule is still stated over the ten fields in that ADR's own table alone.
+    """
+    settings = Settings()
+
+    assert settings.gateway_remote_tls_certificate is None
+    assert settings.gateway_remote_tls_key is None
+    assert all(Settings.model_fields[name].default is None for name in _REMOTE_TLS_FIELDS)
 
 
 @pytest.mark.parametrize(
@@ -328,7 +377,7 @@ def test_an_overlay_address_is_admitted_for_the_browser_listener(value: str) -> 
     ADR-0124 §2's own split, and is pinned in
     ``tests/interfaces/gateway/test_remote_listener.py``.
     """
-    assert Settings(gateway_remote_address=value).gateway_remote_address == value
+    assert _configured_on(gateway_remote_address=value).gateway_remote_address == value
 
 
 def test_the_two_lists_parse_as_comma_separated_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -341,6 +390,8 @@ def test_the_two_lists_parse_as_comma_separated_values(monkeypatch: pytest.Monke
     monkeypatch.setenv("ASSISTANT_GATEWAY_REMOTE_ADDRESS", _OVERLAY)
     monkeypatch.setenv("ASSISTANT_GATEWAY_REMOTE_BROWSER_DEVICES", f"{_PHONE}, nLAPTOP1CNTRL ,")
     monkeypatch.setenv("ASSISTANT_GATEWAY_REMOTE_HOST_NAMES", "phone.example.ts.net")
+    monkeypatch.setenv("ASSISTANT_GATEWAY_REMOTE_TLS_CERTIFICATE", _CERTIFICATE)
+    monkeypatch.setenv("ASSISTANT_GATEWAY_REMOTE_TLS_KEY", _KEY)
 
     settings = Settings()
 
@@ -366,7 +417,7 @@ def test_both_lists_may_be_empty_while_the_listener_is_on() -> None:
     """The default a gateway configured on gets, and §8 states what it means: "a
     gateway configured on serves its assets and mints no remote session until the
     owner names a device", and "serves the address it bound and nothing else"."""
-    settings = Settings(gateway_remote_address=_OVERLAY)
+    settings = _configured_on()
 
     assert settings.gateway_remote_browser_devices == ()
     assert settings.gateway_remote_host_names == ()
@@ -382,7 +433,7 @@ def test_a_listed_device_settings_can_decide_is_unsatisfiable_is_refused(element
     why: the configuration would be silently unsatisfiable".
     """
     with pytest.raises(ValidationError, match="gateway_remote_browser_devices"):
-        Settings(gateway_remote_address=_OVERLAY, gateway_remote_browser_devices=(element,))
+        _configured_on(gateway_remote_browser_devices=(element,))
 
 
 def test_the_byte_bound_is_not_restated_in_core() -> None:
@@ -396,7 +447,7 @@ def test_the_byte_bound_is_not_restated_in_core() -> None:
     """
     listed = "n" * 400
 
-    settings = Settings(gateway_remote_address=_OVERLAY, gateway_remote_browser_devices=(listed,))
+    settings = _configured_on(gateway_remote_browser_devices=(listed,))
 
     assert settings.gateway_remote_browser_devices == (listed,)
 
@@ -404,9 +455,7 @@ def test_the_byte_bound_is_not_restated_in_core() -> None:
 def test_a_repeated_device_is_not_refused() -> None:
     """§8: "A repeated element changes nothing and is not refused; order carries no
     meaning"."""
-    settings = Settings(
-        gateway_remote_address=_OVERLAY, gateway_remote_browser_devices=(_PHONE, _PHONE)
-    )
+    settings = _configured_on(gateway_remote_browser_devices=(_PHONE, _PHONE))
 
     assert frozenset(settings.gateway_remote_browser_devices) == {_PHONE}
 
@@ -421,6 +470,119 @@ def test_no_figure_bounds_how_many_devices_may_be_listed() -> None:
     """
     many = tuple(f"nDEVICE{index:05d}" for index in range(500))
 
-    settings = Settings(gateway_remote_address=_OVERLAY, gateway_remote_browser_devices=many)
+    settings = _configured_on(gateway_remote_browser_devices=many)
 
     assert len(settings.gateway_remote_browser_devices) == 500
+
+
+# --- ADR-0202 §8: the two TLS paths, and the three combinations refused -------
+
+
+@pytest.mark.parametrize("field", _REMOTE_TLS_FIELDS)
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_blank_tls_path_is_refused_at_load(field: str, value: str) -> None:
+    """§8: ``Settings`` "refuses at load what it can decide without touching the
+    filesystem or importing a subsystem: a value that is blank or has no UTF-8
+    form".
+
+    A blank path names no file on any machine, so it is decidable here — and an owner
+    who wrote one and got silence would have "a configuration that says something the
+    running process does not do", which is the failure ADR-0174 §8 refused by name one
+    field over.
+    """
+    other = next(name for name in _REMOTE_TLS_FIELDS if name != field)
+
+    with pytest.raises(ValidationError, match=field):
+        Settings(**{"gateway_remote_address": _OVERLAY, field: value, other: _KEY})  # type: ignore[arg-type] # the point of the case
+
+
+@pytest.mark.parametrize("field", _REMOTE_TLS_FIELDS)
+def test_a_tls_path_with_no_utf_8_form_is_refused_at_load(field: str) -> None:
+    """§8's other decidable-here condition.
+
+    A lone surrogate is a ``str`` Python holds and UTF-8 cannot express, so a refusal
+    naming the path could not itself be written — which is the fault
+    ``wire.custody.displayable`` exists to keep out of a refusal's own text, arriving
+    from the configuration instead.
+    """
+    other = next(name for name in _REMOTE_TLS_FIELDS if name != field)
+
+    with pytest.raises(ValidationError, match="no UTF-8 form"):
+        Settings(**{"gateway_remote_address": _OVERLAY, field: "/etc/\ud800", other: _KEY})  # type: ignore[arg-type] # the point of the case
+
+
+@pytest.mark.parametrize("field", _REMOTE_TLS_FIELDS)
+def test_half_a_pair_is_refused_as_half_a_pair(field: str) -> None:
+    """§8's third refused configuration: "one set while the other is unset".
+
+    Reported as a split pair rather than as one of the other two conditions, because
+    telling an owner who wrote one path that the listener is off would name the
+    setting they got right. A certificate with no key serves nothing and a key with no
+    certificate proves nothing, whichever way round the address is.
+    """
+    with pytest.raises(ValidationError, match="is set while"):
+        Settings(**{"gateway_remote_address": _OVERLAY, field: _CERTIFICATE})  # type: ignore[arg-type] # the point of the case
+
+
+def test_a_pair_written_about_a_listener_that_is_off_is_refused() -> None:
+    """§8's first refused configuration: "either field set while
+    ``gateway_remote_address`` is unset".
+
+    The rule ADR-0174 §8 applies to its two lists, for the reason it gives: a
+    configuration no reading makes true is refused rather than ignored silently.
+    """
+    with pytest.raises(ValidationError, match="the listener they would serve is off"):
+        Settings(gateway_remote_tls_certificate=_CERTIFICATE, gateway_remote_tls_key=_KEY)
+
+
+def test_a_listener_configured_on_without_a_pair_is_refused() -> None:
+    """§8's second: "either field unset while ``gateway_remote_address`` is set".
+
+    §2 is why there is no third outcome: "A configured remote browser listener serves
+    HTTPS and nothing else. No setting makes it serve plain HTTP, and the gateway may
+    not fall back to plain HTTP on any condition." So a listener switched on with no
+    certificate is not a plain-HTTP listener — it is a configuration with no meaning,
+    and the message says which two settings to write.
+    """
+    with pytest.raises(ValidationError, match="serves HTTPS and nothing else"):
+        Settings(gateway_remote_address=_OVERLAY)
+
+
+def test_neither_path_is_owed_by_a_gateway_with_no_remote_listener() -> None:
+    """The default deployment, unchanged: no address, no pair, and nothing refused.
+
+    ADR-0202 §2 leaves ADR-0168 §2's loopback listener untouched — "it speaks plain
+    HTTP, it is bound whether or not the remote listener is, and no clause of this ADR
+    adds a certificate, a key or a scheme requirement to it".
+    """
+    settings = Settings()
+
+    assert settings.gateway_remote_address is None
+    assert settings.gateway_remote_tls_certificate is None
+    assert settings.gateway_remote_tls_key is None
+
+
+def test_a_tls_path_is_stripped_of_surrounding_space() -> None:
+    """The convention every other configured path and element in this block follows:
+    an owner who left a space after a comma or before a value wrote the same path."""
+    settings = _configured_on(gateway_remote_tls_certificate=f"  {_CERTIFICATE}  ")
+
+    assert settings.gateway_remote_tls_certificate == _CERTIFICATE
+
+
+def test_settings_does_not_look_at_the_filesystem() -> None:
+    """§8: the split is "one check, two places, each where the fact it needs already
+    lives", and the reason is golden rule 2 rather than taste — the custody predicate
+    is ``wire/custody.py``'s, and a ``Settings`` validator performing the walk would
+    be the boundary violation ``lint-imports`` fails on.
+
+    So a path to a file that does not exist **loads**, and the gateway refuses it at
+    start. Pinning that here is what stops a later lane moving the check and quietly
+    making ``core`` import a subsystem.
+    """
+    settings = _configured_on(
+        gateway_remote_tls_certificate="/nowhere/at/all.crt",
+        gateway_remote_tls_key="/nowhere/at/all.key",
+    )
+
+    assert settings.gateway_remote_tls_certificate == "/nowhere/at/all.crt"

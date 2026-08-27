@@ -3,8 +3,8 @@
 You end this page with the assistant open in your phone's browser, reaching the
 gateway on your laptop across your own private network.
 
-Do [`first-run.md`](first-run.md) first. This page changes three settings and
-restarts the gateway; everything else stays as it was.
+Do [`first-run.md`](first-run.md) first. This page obtains one certificate,
+changes five settings and restarts the gateway; everything else stays as it was.
 
 ## What this is, and what it is not
 
@@ -21,12 +21,32 @@ is not a supported route to the same place either, and is refused for a
 mechanical reason as well as a policy one: a terminating proxy destroys the fact
 the gateway uses to tell your phone from anything else.
 
-Two user-visible things are unavailable over this listener, because a page
-served over plain `http://` from an address that is not loopback is not a
-"secure context" as browsers define it: **operating-system notifications** (the
-page's own in-page notices are unaffected) and **microphone capture**. That is a
-known and decided cost, with its own trigger for reopening, rather than a bug
-(ADR-0174 §7).
+The second listener serves **HTTPS**, and that is a property of the listener
+rather than a setting: nothing configures it to speak plain HTTP, it does not
+fall back to one, and it serves no redirect from one. It terminates TLS itself,
+in the gateway's own process, on a certificate your overlay obtains for this
+machine's own overlay name and a private key that never leaves the machine —
+step 3 (ADR-0202 §1, §2).
+
+**A gateway that cannot do that does not start**, and says why. A missing,
+unreadable, mismatched or expired certificate takes the whole gateway down,
+loopback listener included. That is chosen rather than an accident: the
+alternative is a gateway that starts, serves the local browser, and leaves your
+phone with a page that will not load and nothing anywhere saying why (ADR-0202
+§2). Step 5 is where you read how long the certificate has left, so the day it
+runs out is a date rather than a surprise.
+
+What the certificate buys is a **secure context**, and nothing about the wire
+changes to get it. The overlay already encrypted every byte end to end between
+the two devices and it still does; what was missing was that the browser had no
+way to *know* it, so it withheld the capabilities it reserves for trustworthy
+origins — microphone capture among them. With the classification in hand it
+stops withholding them.
+
+That is a precondition and not a feature: the page does not capture a microphone
+today, and this decision does not decide that it ever will (ADR-0202 §9).
+Entering a credential is still a loopback-only act, on a separate rule of its own
+(ADR-0177 §3).
 
 ## 1. Put both devices on one overlay network
 
@@ -91,7 +111,64 @@ its `HostName` as `localhost`, which is unhelpful and looks alarming; the table
 While you are here, note the laptop's own `DNSName` — `laptop.tail2e4542.ts.net`
 in this example. You will want it in step 3.
 
-## 3. Add three settings
+## 3. Get a certificate for the laptop's own name
+
+The overlay obtains it, on the laptop, for the laptop's own overlay name — the
+`DNSName` you noted in step 2. With Tailscale that is one command, run in a
+directory you are happy to keep the files in:
+
+```bash
+tailscale cert laptop.tail2e4542.ts.net
+```
+
+```text
+Wrote public cert to laptop.tail2e4542.ts.net.crt
+Wrote private key to laptop.tail2e4542.ts.net.key
+```
+
+It needs HTTPS enabled for your tailnet, which is a switch in the admin console;
+if the command tells you so, that is where to go. The certificate comes from a
+**public** certificate authority — one your phone already trusts, with nothing
+to install on the phone and nothing for you to click past. That is what makes
+this worth doing at all: a certificate you signed yourself would train you to
+overrule the browser's own trust decision, which is the mechanism you are here
+to buy (ADR-0202 §1).
+
+As in step 1, the requirement is a property rather than a vendor: an overlay
+that obtains, for a name it assigns, a certificate from an authority the
+browsing device already trusts out of the box. One that runs its own private
+authority does not satisfy it — you would get the same warning and the same
+withheld microphone, which is the self-signed route by a longer road (ADR-0202
+§1).
+
+**The key is a secret, and the certificate's integrity matters too.** The key is
+of the same class as the memory database, so it lives owner-only:
+
+```bash
+chmod 0600 laptop.tail2e4542.ts.net.key
+```
+
+The gateway refuses to start on a key any other user may read or write, and on a
+certificate any other user may **write** — a certificate you cannot vouch for is
+one somebody else chose your browser's chain with. World-*readable* is fine for
+the certificate; it is public by construction (ADR-0202 §3). Keep both somewhere
+only you can write to.
+
+**Nothing renews them for you.** Renewal is your act — run `tailscale cert`
+again — and a renewed certificate takes effect the next time the gateway starts.
+Nothing in this system watches the files, requests a certificate or talks to
+your overlay's control plane (ADR-0202 §4).
+
+**Two things become known, and both are accepted rather than hidden.** Your
+overlay's operator learns that a certificate was obtained for this machine and
+when; and, because the authority is a public one, the machine's overlay name
+goes into a public certificate-transparency log. A reader of that log learns that
+a machine by that name exists — no address anyone can route to, nothing about
+what it does, and no door that was not already exactly where it was. If the name
+itself says something about you that you would rather it did not, the tailnet
+name is yours to choose (ADR-0202 §4).
+
+## 4. Add five settings
 
 In the same `.env` you wrote in `first-run.md`:
 
@@ -99,6 +176,8 @@ In the same `.env` you wrote in `first-run.md`:
 ASSISTANT_GATEWAY_REMOTE_ADDRESS=100.86.154.22
 ASSISTANT_GATEWAY_REMOTE_BROWSER_DEVICES=nPc1nAnbd411CNTRL
 ASSISTANT_GATEWAY_REMOTE_HOST_NAMES=laptop.tail2e4542.ts.net
+ASSISTANT_GATEWAY_REMOTE_TLS_CERTIFICATE=/home/you/laptop.tail2e4542.ts.net.crt
+ASSISTANT_GATEWAY_REMOTE_TLS_KEY=/home/you/laptop.tail2e4542.ts.net.key
 ```
 
 - **`ASSISTANT_GATEWAY_REMOTE_ADDRESS`** is the switch. Unset, there is no
@@ -111,13 +190,38 @@ ASSISTANT_GATEWAY_REMOTE_HOST_NAMES=laptop.tail2e4542.ts.net
   admits nobody. Listing a device is not an enrolment and grants nothing else:
   it is read as a set, order and repeats mean nothing, and no element is matched
   by prefix or pattern.
-- **`ASSISTANT_GATEWAY_REMOTE_HOST_NAMES`** is optional and is a convenience.
-  It lets you type the MagicDNS name into the phone instead of the numeric
-  address. The gateway resolves nothing — a name here is accepted as a `Host`
-  header value and is never used as a destination.
+- **`ASSISTANT_GATEWAY_REMOTE_HOST_NAMES`** is the name you type on the phone.
+  It used to be a convenience and is not one any more: the gateway will not
+  start unless it is set and **every** name in it is one the certificate
+  carries. An uncovered name is one the gateway would answer to and no browser
+  could ever reach, so it is refused at start naming the element rather than
+  discovered as a warning on the phone (ADR-0202 §6). The gateway still resolves
+  nothing — a name here is accepted as a `Host` header value and is never used
+  as a destination.
+- **`ASSISTANT_GATEWAY_REMOTE_TLS_CERTIFICATE`** and
+  **`ASSISTANT_GATEWAY_REMOTE_TLS_KEY`** are the two files step 3 wrote,
+  absolute paths. They are set together with the address and unset together with
+  it: a certificate with no key, a key with no certificate, a pair with the
+  listener off, or the listener on with no pair are each refused when the
+  settings load. There is no third setting — no port of its own, no switch for
+  plain HTTP, and no renewal interval, because renewal is your act (ADR-0202
+  §8).
 
-The two lists are **refused at load while the address is unset**, rather than
-being ignored:
+Set the address without the pair and the load says so, which is the mistake an
+owner upgrading from an older deployment makes first:
+
+```text
+Error: invalid configuration: 1 validation error for Settings
+  Value error, gateway_remote_address='100.86.154.22' is set, so the remote
+  browser listener serves HTTPS and nothing else — there is no setting that
+  makes it serve plain HTTP and no fallback to it (ADR-0202 §2). Set
+  gateway_remote_tls_certificate and gateway_remote_tls_key to the pair your
+  overlay obtained for this machine's own overlay name, or unset
+  gateway_remote_address to serve browsers over the loopback listener alone
+```
+
+The two lists are likewise **refused at load while the address is unset**, rather
+than being ignored:
 
 ```text
 Error: invalid configuration: 1 validation error for Settings
@@ -128,48 +232,69 @@ Error: invalid configuration: 1 validation error for Settings
   browsers on, or unset gateway_remote_browser_devices
 ```
 
-## 4. Restart the gateway, and read what it prints
+## 5. Restart the gateway, and read what it prints
 
 Stop the gateway with `Ctrl-C` and start it again. It now discloses **every**
 origin it can be reached at:
 
 ```text
 Assistant gateway listening on http://127.0.0.1:8422,
-http://100.86.154.22:8422, http://laptop.tail2e4542.ts.net:8422
+https://100.86.154.22:8422, https://laptop.tail2e4542.ts.net:8422
 Bootstrap value (good once, and only for this gateway process):
 pDSYe-a4xKAcwzG_nJMU0vvgpQ1fN0cTHfQCqNwDOGc
 Live sessions: 0 of 8. For another value: kill -SIGUSR1 3941204
 ```
 
-Copy one of those origins. That is the address you type on the phone, and it is
-the whole reason this line exists — you should not have to reassemble it from
-two settings.
+Copy the `https://` origin with the **name** in it. That is what you type on the
+phone, and it is the whole reason this line exists — you should not have to
+reassemble it from two settings.
 
-## 5. Open it on the phone — and type the `http://`
+Just below it, the gateway says what it bound the second listener with:
+
+```text
+2026-08-27T09:14:22Z [info    ] gateway.remote_listening
+certificate_expires=2026-11-25T09:14:22+00:00
+certificate_names=['laptop.tail2e4542.ts.net'] listed_devices=1
+origins=['https://100.86.154.22:8422', 'https://laptop.tail2e4542.ts.net:8422']
+scheme=https
+```
+
+Three facts and no more: the scheme, the name the certificate carries, and when
+it stops being valid. **The expiry is the whole of the renewal story.** Nothing
+watches the files and nothing warns you later, so this line at every start is
+where you find out how long you have — and `tailscale cert` again, then a
+restart, is the fix. Let it lapse and the gateway will not start at all, which is
+the cost §2 accepted on purpose (ADR-0202 §4, §5).
+
+If it does not start, the reason is on that same stream, in a sentence naming the
+setting and the condition — the file is missing, another user can write to it,
+the key does not match the certificate, the certificate is out of date, or it
+does not carry a name you listed.
+
+## 6. Open it on the phone — and type the `https://`
 
 Type the origin into the phone's browser **including the scheme**:
 
 ```text
-http://100.86.154.22:8422
+https://laptop.tail2e4542.ts.net:8422
 ```
 
-Two reasons the scheme is worth typing rather than leaving to the browser. A
-bare `100.86.154.22:8422` in a phone address bar is as likely to be treated as a
-search as an address. And `https://` does not work here and is not meant to:
-this listener speaks plain HTTP, and a browser given `https://` gets an
-immediate failure rather than a page. (It is an immediate one — the gateway
-answers a TLS handshake with `400 Bad Request` in a fraction of a second rather
-than leaving the browser to time out.)
+Two reasons the scheme is worth typing rather than leaving to the browser. A bare
+`laptop.tail2e4542.ts.net:8422` in a phone address bar is as likely to be treated
+as a search as an address. And `http://` gets nothing at all: this listener
+speaks HTTPS and nothing else, it does not fall back, and it serves no redirect
+from `http://` either — a redirect would need the plain-HTTP listener the
+decision refuses (ADR-0202 §2).
 
-If you configured `ASSISTANT_GATEWAY_REMOTE_HOST_NAMES`, the MagicDNS origin
-works identically and is much easier to type.
+**Use the name, not the address.** The numeric origin is still one the gateway
+answers to, and in practice you can no longer reach it: your certificate names
+the machine, the address is not that name, and the browser refuses the mismatch
+before a request is ever made. That is not a rule the gateway enforces — it never
+sees the request — and it is the same instruction the page gave before for a
+different reason: pick one authority and stay on it. A session belongs to the
+origin it was minted at, so a session started at one does not admit at the other.
 
-**Pick one of the two and stay on it.** A session belongs to the origin it was
-minted at, so a session started at the numeric address does not admit at the
-MagicDNS name — the phone would need a second value and would then hold a second
-session. Nothing stops you; it is just two of everything for no gain.
-
-## 6. Mint a value for the phone, and paste it
+## 7. Mint a value for the phone, and paste it
 
 Same panel, same field, same rule: good once, and good for ten minutes.
 
@@ -192,7 +317,7 @@ A fresh value appears on the gateway's own terminal:
 
 ```text
 Assistant gateway listening on http://127.0.0.1:8422,
-http://100.86.154.22:8422, http://laptop.tail2e4542.ts.net:8422
+https://100.86.154.22:8422, https://laptop.tail2e4542.ts.net:8422
 Bootstrap value (good once, and only for this gateway process):
 IznwmhTUYUKp04I8Z_BfM8_tMFKYaCrDZqcFm_wCNGQ
 Live sessions: 1 of 8. For another value: kill -SIGUSR1 3941204
@@ -256,3 +381,27 @@ gateway. `tailscale status` on the phone, and check the laptop is not asleep.
 **The gateway prints only the loopback origin.** `ASSISTANT_GATEWAY_REMOTE_ADDRESS`
 did not load. Check you edited the `.env` in the directory you start the gateway
 from, and that no environment variable of the same name is overriding it.
+
+**The gateway does not start at all, and names a file.** That is ADR-0202 §2
+working: a remote listener configured on serves HTTPS or the gateway stays down.
+The sentence says which condition failed and on which path — the file is missing
+or unreadable; it is owned by another user; its mode lets group or other read the
+key or write the certificate; it sits under a directory anyone can replace it
+through; it is not a certificate this system can parse; the key does not belong
+to the certificate; the certificate is expired or not yet valid; or it does not
+carry every name in `ASSISTANT_GATEWAY_REMOTE_HOST_NAMES`. The last two are the
+ones you will meet: run `tailscale cert` again, `chmod 0600` the key, and
+restart.
+
+**The phone shows a certificate warning.** You are at an authority the
+certificate does not name — almost always the numeric address rather than the
+name. Type the `https://` origin with the name in it, from step 5's line. Do not
+click through the warning: the browser's refusal is the mechanism this whole page
+exists to obtain, and overruling it gives back exactly what the certificate
+bought.
+
+**You want the local browser back and the certificate has lapsed.** Unset
+`ASSISTANT_GATEWAY_REMOTE_ADDRESS` together with both TLS paths and restart. The
+gateway then binds the loopback listener alone, exactly as it did before this
+page. It is a deliberate act rather than something that happens quietly, which is
+the point (ADR-0202 §2).

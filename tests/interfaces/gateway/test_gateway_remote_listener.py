@@ -19,6 +19,15 @@ authorities and §8's shared ceilings.
 one ``gateway_port``, which is what §8's "totals across both listeners" needs a
 test to be able to say.
 
+**Every connection to that listener is TLS, because ADR-0202 §2 leaves no other
+kind.** The harness issues a self-signed pair per gateway (``gateway_tls``) and
+connects with a client that trusts exactly it and checks the name — a browser's own
+behaviour, minus the public authority §1 requires of a deployment and explicitly
+does not require of a start-time check. What §1 refuses is the *provisioning act*;
+what the gateway checks is §8's enumeration, and this pair meets all of it.
+:mod:`test_gateway_tls` drives the refusals, which need no socket at all; this
+module drives what only a connection shows.
+
 **Named ``test_gateway_remote_listener``, not ``test_remote_listener``**, because
 the test tree carries no packages and the hub's own remote listener already holds
 the shorter name — two modules of one name is a `mypy` refusal rather than a
@@ -34,14 +43,17 @@ import asyncio
 import contextlib
 import json
 import socket
+import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 import structlog
 from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
+from gateway_tls import browser_context, issue_pair
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
@@ -70,6 +82,12 @@ _STRANGER = "nSTRANGRCNTRL"
 #: A name the owner may configure as an additional authority (ADR-0174 §6). It is
 #: never resolved and never dialled; it only ever appears in a `Host` header.
 _NAME = "phone.example.ts.net"
+
+#: What every clock in this module reads unless a case moves it. The certificate a
+#: gateway is built with is issued against *this* rather than against the wall clock,
+#: because ADR-0202 §8 measures validity from the injected clock and the two are years
+#: apart — a pair issued at the wall clock would fail §8's near bound every time.
+_NOW: Final = Clock().reading
 
 #: An address ``Settings`` admits — RFC 5737's TEST-NET-1 is private in
 #: ``ipaddress``'s sense, so it passes all five refusals — and which no machine
@@ -220,6 +238,8 @@ class Remote:
     engine: FakeAssistantEngine
     clock: Clock
     timers: Timers
+    certificate: Path
+    key: Path
 
     @property
     def authority(self) -> str:
@@ -227,12 +247,36 @@ class Remote:
         return f"{_OVERLAY}:{self.settings.gateway_port}"
 
     @property
+    def origin(self) -> str:
+        """The origin a page on the remote listener has (ADR-0202 §2): `https://`."""
+        return f"https://{self.authority}"
+
+    @property
     def loopback_authority(self) -> str:
         """The `Host` the loopback listener admits, unchanged by any of this."""
         return f"127.0.0.1:{self.settings.gateway_port}"
 
+    @property
+    def loopback_origin(self) -> str:
+        """The loopback listener's origin, still plain HTTP (ADR-0202 §2)."""
+        return f"http://{self.loopback_authority}"
+
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one connection to the remote listener."""
+        """Open one TLS connection to the remote listener, as a browser would.
+
+        The certificate names ``_NAME``, so that is the name offered in SNI and
+        checked against what the gateway presents; the ``Host`` a case then sends is
+        its own business, and ADR-0174 §6 admits both authorities.
+        """
+        return await asyncio.open_connection(
+            _OVERLAY,
+            self.settings.gateway_port,
+            ssl=browser_context(self.certificate),
+            server_hostname=_NAME,
+        )
+
+    async def connect_in_the_clear(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Open one connection to the remote listener speaking no TLS at all."""
         return await asyncio.open_connection(_OVERLAY, self.settings.gateway_port)
 
     async def connect_loopback(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
@@ -273,15 +317,37 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _settings(**overrides: Any) -> Settings:
+def _settings(home: Path, *, names: tuple[str, ...] = (_NAME,), **overrides: Any) -> Settings:
     """Settings with the remote browser listener on, past the validator.
 
     Built with a *real* overlay address so every clause of ADR-0174 §8 that judges
     the configuration as a whole actually runs — the stranded-list refusal included —
     and only then swapped for the bindable stand-in. Constructing it at ``127.0.0.2``
     directly would skip the model's own validation of everything beside it.
+
+    **A certificate comes with the switch now** (ADR-0202 §8): a listener configured
+    on with no pair is refused at load, and one whose ``gateway_remote_host_names``
+    is empty or names something the certificate does not carry is refused at start
+    (§6). So the pair is issued here, over ``names``, and the host-name list defaults
+    to the same set — a case that wants them to disagree says so.
+
+    Args:
+        home: A directory this test owns, for the pair.
+        names: The DNS names the certificate presents.
+        **overrides: Anything else to set on the model.
+
+    Returns:
+        The loaded settings, bindable.
     """
-    settings = Settings(gateway_port=_free_port(), gateway_remote_address="100.64.0.9", **overrides)
+    certificate, key = issue_pair(home, names=names, issued_at=_NOW)
+    overrides.setdefault("gateway_remote_host_names", names)
+    settings = Settings(
+        gateway_port=_free_port(),
+        gateway_remote_address="100.64.0.9",
+        gateway_remote_tls_certificate=str(certificate),
+        gateway_remote_tls_key=str(key),
+        **overrides,
+    )
     return settings.model_copy(update={"gateway_remote_address": _OVERLAY})
 
 
@@ -318,32 +384,41 @@ async def _remote(
     devices: tuple[str, ...] = (_PHONE,),
     **overrides: Any,
 ) -> AsyncIterator[Remote]:
-    """Bind both listeners on one free port and tear them down afterwards."""
-    settings = _settings(gateway_remote_browser_devices=devices, **overrides)
-    clock, timers = Clock(), Timers()
-    the_agent = agent if agent is not None else _FakeAgent()
-    behind = engine or FakeAssistantEngine()
-    gateway = _gateway(settings, agent=the_agent, engine=behind, clock=clock, timers=timers)
-    loopback = await gateway.start()
-    remote = await gateway.start_remote()
-    assert remote is not None
-    try:
-        yield Remote(
-            gateway=gateway,
-            loopback=loopback,
-            remote=remote,
-            settings=settings,
-            agent=the_agent,
-            engine=behind,
-            clock=clock,
-            timers=timers,
-        )
-    finally:
-        gateway.close()
-        for server in (loopback, remote):
-            server.close()
-            with contextlib.suppress(Exception):
-                await server.wait_closed()
+    """Bind both listeners on one free port and tear them down afterwards.
+
+    The certificate and key live in a directory this context manager owns, so their
+    lifetime is the gateway's and nothing is left in the temporary directory
+    afterwards — which matters more than usual here, because one of the two files is
+    a private key.
+    """
+    with tempfile.TemporaryDirectory() as home:
+        settings = _settings(Path(home), gateway_remote_browser_devices=devices, **overrides)
+        clock, timers = Clock(), Timers()
+        the_agent = agent if agent is not None else _FakeAgent()
+        behind = engine or FakeAssistantEngine()
+        gateway = _gateway(settings, agent=the_agent, engine=behind, clock=clock, timers=timers)
+        loopback = await gateway.start()
+        remote = await gateway.start_remote()
+        assert remote is not None
+        try:
+            yield Remote(
+                gateway=gateway,
+                loopback=loopback,
+                remote=remote,
+                settings=settings,
+                agent=the_agent,
+                engine=behind,
+                clock=clock,
+                timers=timers,
+                certificate=Path(str(settings.gateway_remote_tls_certificate)),
+                key=Path(str(settings.gateway_remote_tls_key)),
+            )
+        finally:
+            gateway.close()
+            for server in (loopback, remote):
+                server.close()
+                with contextlib.suppress(Exception):
+                    await server.wait_closed()
 
 
 @pytest.fixture
@@ -374,7 +449,7 @@ def _ask(one: Remote, *, header_half: str | None, cookie_half: str | None) -> tu
     lines = [
         "POST /ask HTTP/1.1",
         "Host: {host}",
-        f"Origin: http://{one.authority}",
+        f"Origin: {one.origin}",
         "Content-Type: application/json",
         f"Content-Length: {len(body)}",
     ]
@@ -456,23 +531,46 @@ async def test_every_origin_is_disclosed_so_the_owner_can_reach_the_second_door(
 ) -> None:
     """Milestone 14's exit test is a phone, and the address to type into it is the
     overlay one — a disclosure naming only the loopback origin would hand the owner a
-    bootstrap value and no door to spend it at."""
+    bootstrap value and no door to spend it at.
+
+    **Two schemes, and the split is ADR-0202 §2's** — the remote listener "serves
+    HTTPS and nothing else" and the loopback one is untouched. The list is sorted
+    within the remote authorities, so the configured name precedes the address.
+    """
     assert remote.gateway.origins == (
         f"http://{remote.loopback_authority}",
-        f"http://{remote.authority}",
+        f"https://{remote.authority}",
+        f"https://{_NAME}:{remote.settings.gateway_port}",
     )
 
 
-async def test_a_configured_name_is_disclosed_as_an_origin_too() -> None:
+async def test_a_configured_name_is_disclosed_as_an_origin_too(remote: Remote) -> None:
     """§6 admits a configured name as an authority, so it is one an owner can open."""
-    async with _remote(gateway_remote_host_names=(_NAME,)) as one:
-        assert f"http://{_NAME}:{one.settings.gateway_port}" in one.gateway.origins
+    assert f"https://{_NAME}:{remote.settings.gateway_port}" in remote.gateway.origins
+
+
+async def test_no_origin_of_the_remote_listener_is_offered_in_plain_http(
+    remote: Remote,
+) -> None:
+    """ADR-0202 §2: there is no setting that makes this listener serve plain HTTP, so
+    there is no `http://` origin for it to be reached at either.
+
+    Worth its own case rather than left to the assertion above, because an origin is
+    scheme, host and port: an owner handed `http://` here would type it, get nothing,
+    and have no way to tell that from the gateway being down.
+    """
+    remote_origins = [one for one in remote.gateway.origins if one != remote.loopback_origin]
+
+    assert remote_origins
+    assert all(one.startswith("https://") for one in remote_origins)
 
 
 # --- ADR-0174 §2 and §8: what a gateway refuses to start with -----------------
 
 
-async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place() -> None:
+async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place(
+    tmp_path: Path,
+) -> None:
     """§2's check 2 — the physical-interface limb, which no string can decide.
 
     ``Settings`` admits ``192.168.1.5``, because nothing about the value says whether
@@ -484,7 +582,7 @@ async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place()
     it: this is check 2 refusing on its own ground, which is what makes the two
     independent rather than one dressed as two.
     """
-    settings = _settings()
+    settings = _settings(tmp_path)
     agent = _FakeAgent(bound=None)
     gateway = _gateway(
         settings, agent=agent, engine=FakeAssistantEngine(), clock=Clock(), timers=Timers()
@@ -494,7 +592,9 @@ async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place()
         await gateway.start_remote()
 
 
-async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own() -> None:
+async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
+    tmp_path: Path,
+) -> None:
     """§2's check 3, and the gap adversarial review found on this PR's first round.
 
     The agent's answer is *the overlay places a node at this address*; it is not *and
@@ -508,8 +608,7 @@ async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
     about the machine's state — and the mistake it catches is a real one an owner will
     make: typing the address of the device they want to *browse from*.
     """
-    settings = Settings(gateway_port=_free_port(), gateway_remote_address="100.64.0.9")
-    elsewhere = settings.model_copy(update={"gateway_remote_address": _NOT_THIS_MACHINE})
+    elsewhere = _settings(tmp_path).model_copy(update={"gateway_remote_address": _NOT_THIS_MACHINE})
     gateway = _gateway(
         elsewhere,
         agent=_FakeAgent(),
@@ -522,7 +621,9 @@ async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
         await gateway.start_remote()
 
 
-async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering() -> None:
+async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering(
+    tmp_path: Path,
+) -> None:
     """The same refusal for the same reason, arriving as an absent daemon.
 
     Every connection on this listener needs §3's identity and one whose identity
@@ -530,7 +631,7 @@ async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering() -> No
     cannot reach would present an open port that refuses everything, which is exactly
     the pair of failures ADR-0168 §9 refuses to present identically.
     """
-    settings = _settings()
+    settings = _settings(tmp_path)
     gateway = _gateway(
         settings,
         agent=_SilentAgent(),
@@ -543,7 +644,7 @@ async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering() -> No
         await gateway.start_remote()
 
 
-def test_a_gateway_configured_on_with_no_agent_does_not_get_built() -> None:
+def test_a_gateway_configured_on_with_no_agent_does_not_get_built(tmp_path: Path) -> None:
     """§3 makes the agent the sole source of a browsing device's identity, so a
     gateway configured on without one could admit nothing at all.
 
@@ -551,13 +652,13 @@ def test_a_gateway_configured_on_with_no_agent_does_not_get_built() -> None:
     two things §8's second refusal names — nothing bound, and no bootstrap value
     minted, let alone disclosed.
     """
-    settings = _settings()
+    settings = _settings(tmp_path)
 
     with pytest.raises(ConfigurationError, match="no agent was supplied"):
         _gateway(settings, agent=None, engine=FakeAssistantEngine(), clock=Clock(), timers=Timers())
 
 
-def test_a_listed_device_over_the_byte_bound_is_refused_at_start() -> None:
+def test_a_listed_device_over_the_byte_bound_is_refused_at_start(tmp_path: Path) -> None:
     """§8's half of the split identity check, "reading the constant the wire seam
     owns" rather than restating it in ``core``.
 
@@ -565,7 +666,9 @@ def test_a_listed_device_over_the_byte_bound_is_refused_at_start() -> None:
     could never equal an identity the agent reports — and without this the owner's
     named device would be refused at every exchange with nothing saying why.
     """
-    settings = _settings(gateway_remote_browser_devices=("n" * (MAX_OVERLAY_IDENTITY_BYTES + 1),))
+    settings = _settings(
+        tmp_path, gateway_remote_browser_devices=("n" * (MAX_OVERLAY_IDENTITY_BYTES + 1),)
+    )
 
     with pytest.raises(ConfigurationError, match="over the 128"):
         _gateway(
@@ -577,12 +680,12 @@ def test_a_listed_device_over_the_byte_bound_is_refused_at_start() -> None:
         )
 
 
-def test_an_identity_at_the_byte_bound_is_admitted() -> None:
+def test_an_identity_at_the_byte_bound_is_admitted(tmp_path: Path) -> None:
     """The refusal narrows nothing legitimate: the bound is "at most", not "under"."""
     listed = "n" * MAX_OVERLAY_IDENTITY_BYTES
 
     gateway = _gateway(
-        _settings(gateway_remote_browser_devices=(listed,)),
+        _settings(tmp_path, gateway_remote_browser_devices=(listed,)),
         agent=_FakeAgent(),
         engine=FakeAssistantEngine(),
         clock=Clock(),
@@ -636,9 +739,16 @@ async def test_a_connection_whose_identity_cannot_be_obtained_is_closed_unread()
     Nothing is written back, because the gateway has not read a request and so has
     nothing to answer — a status line here would be a response to a request that does
     not exist.
+
+    **The peer here speaks no TLS at all, and that is the case rather than a
+    convenience** (ADR-0202 §5): "ADR-0174 §3's overlay-identity check runs on the
+    connection **before** the TLS handshake, so a connection whose overlay identity
+    cannot be obtained is closed without the certificate being presented." A client
+    that offered a `ClientHello` would be testing the same refusal one step later and
+    would say nothing about the ordering.
     """
     async with _remote(agent=_FakeAgent(default_peer=None)) as one:
-        reader, writer = await one.connect()
+        reader, writer = await one.connect_in_the_clear()
 
         assert await asyncio.wait_for(reader.read(), timeout=5) == b""
         writer.close()
@@ -653,7 +763,7 @@ async def test_a_refusal_on_the_identity_records_nothing() -> None:
     """
     async with _remote(agent=_FakeAgent(default_peer=None)) as one:
         with structlog.testing.capture_logs() as records:
-            reader, writer = await one.connect()
+            reader, writer = await one.connect_in_the_clear()
             assert await asyncio.wait_for(reader.read(), timeout=5) == b""
             writer.close()
             one.gateway.close()
@@ -685,6 +795,12 @@ async def test_a_connection_refused_at_a_ceiling_never_reaches_the_agent() -> No
     A ceiling refusal *serves* nothing — "it refuses to accept a further connection
     rather than queueing it" — so asking the agent about a connection the gateway is
     closing unread would put a local query on the one path a flood can drive.
+
+    **The held connection completes a handshake and the refused one offers none.**
+    The first has to, or it would be discarded at ADR-0202 §5's ordering and give its
+    slot straight back; the second must not, because a peer refused at the ceiling is
+    closed before the certificate is ever presented — one step earlier again than the
+    identity check.
     """
     async with _remote(
         gateway_max_browser_connections=1,
@@ -698,7 +814,7 @@ async def test_a_connection_refused_at_a_ceiling_never_reaches_the_agent() -> No
         await asyncio.sleep(0.05)
         asked_before = len(one.agent.asked)
 
-        reader, writer = await one.connect()
+        reader, writer = await one.connect_in_the_clear()
 
         assert await asyncio.wait_for(reader.read(), timeout=5) == b""
         assert len(one.agent.asked) == asked_before
@@ -911,7 +1027,7 @@ async def test_an_origin_that_is_not_this_requests_own_authority_is_refused() ->
     """
     async with _remote(gateway_remote_host_names=(_NAME,)) as one:
         answer = await one.send(
-            f"GET / HTTP/1.1\nHost: {{host}}\nOrigin: http://{_NAME}:{one.settings.gateway_port}"
+            f"GET / HTTP/1.1\nHost: {{host}}\nOrigin: https://{_NAME}:{one.settings.gateway_port}"
         )
 
         assert answer.status == 403
@@ -920,7 +1036,7 @@ async def test_an_origin_that_is_not_this_requests_own_authority_is_refused() ->
 
 async def test_the_requests_own_origin_is_admitted(remote: Remote) -> None:
     """The discriminating half, and the ordinary case a front end produces."""
-    answer = await remote.send(f"GET / HTTP/1.1\nHost: {{host}}\nOrigin: http://{remote.authority}")
+    answer = await remote.send(f"GET / HTTP/1.1\nHost: {{host}}\nOrigin: {remote.origin}")
 
     assert answer.status == 200
 
@@ -968,7 +1084,7 @@ async def test_one_connection_ceiling_spans_both_listeners() -> None:
         # dial has to come after that rather than merely after the TCP handshake.
         await asyncio.sleep(0.05)
 
-        reader, writer = await one.connect()
+        reader, writer = await one.connect_in_the_clear()
 
         assert await asyncio.wait_for(reader.read(), timeout=5) == b""
         assert held_reader is not None
@@ -1180,3 +1296,195 @@ async def test_no_record_ever_carries_the_device_the_peer_claimed(remote: Remote
     for record in emitted:
         assert "whoever" not in json.dumps(record)
         assert "/nowhere" not in json.dumps(record)
+
+
+# --- ADR-0202: the second listener speaks HTTPS and nothing else --------------
+
+
+async def test_a_peer_that_speaks_plain_http_gets_no_answer_and_no_redirect(
+    remote: Remote,
+) -> None:
+    """§2: "No plain-HTTP redirect is served on the remote listener's address or
+    port. The clause above admits no exception for one, because serving a redirect
+    would require the plain-HTTP listener it refuses."
+
+    An owner who types `http://` at this door gets a connection that closes, which is
+    what a browser turns into "this site can't provide a secure connection". The
+    alternative — a redirect, or the `400 Bad Request` this listener used to answer a
+    handshake with — is a plain-HTTP listener on the port by another name, and one a
+    later lane could grow.
+    """
+    reader, writer = await remote.connect_in_the_clear()
+    writer.write(f"GET / HTTP/1.1\r\nHost: {remote.authority}\r\n\r\n".encode())
+    await writer.drain()
+
+    assert await asyncio.wait_for(reader.read(), timeout=5) == b""
+    writer.close()
+
+
+async def test_a_failed_handshake_records_nothing(remote: Remote) -> None:
+    """§5: "A **failed TLS handshake** produces no ADR-0168 §6 record either. A
+    connection that yields no request is not a request refused, and no lane may add a
+    record class, a condition or a counter for it under that section."
+
+    §5 applies ADR-0168 §6 rather than excepting it: "every request the gateway
+    receives is of exactly one class, out of four", and a connection that never
+    yielded a request has no class to be of. A TLS listener is the first thing this
+    gateway has that can fail *before* a request exists, which is the only reason the
+    clause needed saying at all.
+    """
+    with structlog.testing.capture_logs() as records:
+        reader, writer = await remote.connect_in_the_clear()
+        writer.write(b"GET / HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), timeout=5) == b""
+        writer.close()
+        remote.timers.fire_all()
+
+    assert [record for record in records if record["event"] == "gateway.admission"] == []
+
+
+async def test_the_loopback_listener_still_speaks_plain_http(remote: Remote) -> None:
+    """§2: "ADR-0168 §2's **loopback** listener is untouched. It speaks plain HTTP, it
+    is bound whether or not the remote listener is, and no clause of this ADR adds a
+    certificate, a key or a scheme requirement to it."
+
+    The same gateway, the same process, the same certificate — and the first door
+    answers a request nobody wrapped in anything, exactly as it did before.
+    """
+    reader, writer = await remote.connect_loopback()
+    writer.write(f"GET / HTTP/1.1\r\nHost: {remote.loopback_authority}\r\n\r\n".encode())
+    await writer.drain()
+
+    assert (await _read_answer(reader)).status == 200
+    writer.close()
+
+
+async def test_the_bind_discloses_the_scheme_the_name_and_the_expiry() -> None:
+    """§5: "When the remote browser listener binds, the gateway discloses on its own
+    standard output, beside the address it bound: that the listener speaks HTTPS, the
+    name the certificate carries, and the instant the certificate's validity ends. It
+    discloses nothing of the private key."
+
+    Three Tier 2 facts — "a name of the gateway's own machine, an instant, and a
+    scheme" — and the expiry is the renewal story's whole mechanism: §4 puts renewal
+    in the owner's hands and has the gateway watch nothing, so "what makes that
+    workable rather than a trap is that every start tells the owner how long they
+    have".
+    """
+    with structlog.testing.capture_logs() as records:
+        async with _remote() as one:
+            disclosed = [
+                record for record in records if record["event"] == "gateway.remote_listening"
+            ]
+
+            assert len(disclosed) == 1
+            assert disclosed[0]["scheme"] == "https"
+            assert disclosed[0]["certificate_names"] == [_NAME]
+            assert disclosed[0]["certificate_expires"].startswith("2026-09-20T09:00")
+            assert f"https://{one.authority}" in disclosed[0]["origins"]
+
+
+async def test_the_disclosure_carries_nothing_of_the_key(remote: Remote) -> None:
+    """§3: the gateway "never places either — or any part of the key — in a log
+    record, in an error, in a response body, or in any disclosure §5 makes".
+
+    Driven against the key's own bytes rather than against the word "key", because
+    what §3 forbids is the material and not the noun.
+    """
+    with structlog.testing.capture_logs() as records:
+        async with _remote() as one:
+            secret = one.key.read_bytes().decode()
+
+    assert secret not in json.dumps(records)
+
+
+async def test_the_cookie_half_is_marked_secure_on_the_remote_listener(
+    remote: Remote,
+) -> None:
+    """§7: "On the remote browser listener the cookie half ADR-0168 §6 defines is
+    additionally marked `Secure`. Every other attribute §6 requires — `HttpOnly`,
+    `SameSite=Strict`, a path of `/`, no `Domain`, no persistent expiry — is
+    unchanged."
+
+    A stacked addition rather than a change to §6, and a clause rather than a lane's
+    choice "because it changes a `may` into a `must`": once the listener is HTTPS-only
+    the attribute's absence would look deliberate.
+    """
+    value = bootstrap_value(remote.gateway)
+    body = json.dumps({"bootstrap_value": value}).encode()
+    answer = await remote.send(
+        f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}\n"
+        f"Content-Type: application/json",
+        body,
+    )
+
+    cookie = answer.header("set-cookie")
+    assert cookie is not None
+    assert "; Secure" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=Strict" in cookie
+    assert "Path=/" in cookie
+    assert "Domain" not in cookie
+    assert "Expires" not in cookie
+    assert "Max-Age" not in cookie
+
+
+async def test_the_cookie_half_is_not_marked_secure_on_the_loopback_listener(
+    remote: Remote,
+) -> None:
+    """§7: "the loopback listener is untouched".
+
+    The discriminating half, on the same gateway and the same process: `Secure` is a
+    property of the door the exchange arrived at, not of the gateway. A cookie marked
+    `Secure` on a plain-HTTP origin is one the browser discards, so getting this
+    backwards would break the loopback session ADR-0168 §5 has always minted.
+    """
+    value = bootstrap_value(remote.gateway)
+    body = json.dumps({"bootstrap_value": value}).encode()
+    reader, writer = await remote.connect_loopback()
+    writer.write(
+        (
+            f"POST /session HTTP/1.1\r\nHost: {remote.loopback_authority}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+        ).encode()
+        + body
+    )
+    await writer.drain()
+
+    answer = await _read_answer(reader)
+
+    assert answer.status == 200
+    cookie = answer.header("set-cookie")
+    assert cookie is not None
+    assert "Secure" not in cookie
+    writer.close()
+
+
+async def test_the_pair_is_read_once_and_never_re_read(remote: Remote, tmp_path: Path) -> None:
+    """§4: "The gateway reads the certificate and the key when it binds and does not
+    re-read them while it runs; no clause of this ADR obliges a reload, and no lane
+    may present the gateway as renewing, watching or reloading anything."
+
+    Driven by taking both files away from a gateway that is already serving. A
+    listener that re-read them per connection would fail here; one that watched them
+    would have something to say about their disappearance. Neither happens, which is
+    also what makes §4's renewal story true in the other direction — a *renewed* pair
+    takes effect at the next start and not before.
+    """
+    trusted = tmp_path / "what-the-browser-still-trusts.pem"
+    trusted.write_bytes(remote.certificate.read_bytes())
+    remote.certificate.unlink()
+    remote.key.unlink()
+
+    reader, writer = await asyncio.open_connection(
+        _OVERLAY,
+        remote.settings.gateway_port,
+        ssl=browser_context(trusted),
+        server_hostname=_NAME,
+    )
+    writer.write(f"GET / HTTP/1.1\r\nHost: {remote.authority}\r\n\r\n".encode())
+    await writer.drain()
+
+    assert (await _read_answer(reader)).status == 200
+    writer.close()
