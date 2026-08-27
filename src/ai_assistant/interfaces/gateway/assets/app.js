@@ -3879,13 +3879,6 @@ async function sendRecording(mine) {
     }
     saying(SENDING);
     el("talk-button").disabled = true;
-    // **The way out, armed before the request goes out and offered while it is out.**
-    // `fetch` carries no deadline of its own, so a socket that dies without settling
-    // leaves the `await` below pending for ever and the `finally` never runs: without
-    // this the owner's one way into the assistant by voice stays greyed out until the
-    // page is reloaded, which is #1500 exactly.
-    mine.stopping = new AbortController();
-    el("stop-talking").hidden = false;
     // Read before the request goes out, so what is compared on the way back is the
     // selection this turn was sent under and not the one it is landing into — `ask`'s
     // own rule, and the reason is the same on either entry.
@@ -3895,6 +3888,20 @@ async function sendRecording(mine) {
     if (conversationId !== null) {
       asked.conversation_id = conversationId;
     }
+    // **The way out, armed with nothing awaited between here and the request.**
+    // `fetch` carries no deadline of its own, so a socket that dies without settling
+    // leaves the `await` below pending for ever and the `finally` never runs: without
+    // this the owner's one way into the assistant by voice stays greyed out until the
+    // page is reloaded, which is #1500 exactly.
+    //
+    // **After the encoding rather than before it**, which adversarial review found the
+    // second round: `SPOKEN_ABANDONED` says the recording was sent and that the turn may
+    // have run, and offering it while the base64 was still being made would have said
+    // that of a press no request had yet gone out for. The window is closed rather than
+    // given a second sentence, because there is nothing there worth a control — encoding
+    // half a megabyte is arithmetic, and it cannot stall the way a socket can.
+    mine.stopping = new AbortController();
+    el("stop-talking").hidden = false;
     const response = await fetch("/ask/spoken", {
       method: "POST",
       headers: admitted(half, true),
@@ -3958,7 +3965,16 @@ function renderSpokenTurn(turn, chosenAt) {
   heardWas(turn.heard);
   renderOutcome(turn.outcome, chosenAt);
   if (turn.spoken !== null) {
-    void playSpoken(turn.spoken);
+    // **A place kept by this turn for a notice this turn's playback may owe.**
+    // `playSpoken` awaits the decoder, and while it is pending the owner can ask
+    // again — `renderOutcome` clears `#answer-body`, so a rejection landing after that
+    // would append "could not play" under an answer whose audio played perfectly.
+    // Adversarial review found it the second round. The node is detached by the next
+    // render, so `isConnected` is the whole test, which is `abandonAsk`'s own device for
+    // the same question about the same panel.
+    const slot = line(el("answer-body"), "", "notice");
+    slot.hidden = true;
+    void playSpoken(turn.spoken, slot);
     return;
   }
   // Carried rather than inferred from the `null` above it: §4 gives `spoken` two `null`
@@ -3985,10 +4001,10 @@ function renderSpokenTurn(turn, chosenAt) {
 // **The context is `readyToPlay`'s and is never built here**, because here is after the
 // upload and outside the gesture that led to it — see that function for the defect this
 // arrangement exists to avoid.
-async function playSpoken(spoken) {
+async function playSpoken(spoken, slot) {
   const context = listeningContext;
   if (context === null) {
-    line(el("answer-body"), COULD_NOT_PLAY, "notice");
+    couldNotPlay(slot);
     return;
   }
   try {
@@ -3998,8 +4014,19 @@ async function playSpoken(spoken) {
     source.connect(context.destination);
     source.start();
   } catch (_) {
-    line(el("answer-body"), COULD_NOT_PLAY, "notice");
+    couldNotPlay(slot);
   }
+}
+
+// The notice, written into the turn that owed it **or nowhere**. A slot the next render
+// detached belongs to an answer that is no longer on screen, and saying its audio failed
+// under the answer that replaced it would attribute one turn's silence to another.
+function couldNotPlay(slot) {
+  if (!slot.isConnected) {
+    return;
+  }
+  slot.textContent = COULD_NOT_PLAY;
+  slot.hidden = false;
 }
 
 // The recording as `SpokenAudio.content` wants it: standard RFC 4648 §4 base64, padded
