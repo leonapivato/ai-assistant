@@ -586,3 +586,27 @@ def test_settings_does_not_look_at_the_filesystem() -> None:
     )
 
     assert settings.gateway_remote_tls_certificate == "/nowhere/at/all.crt"
+
+
+@pytest.mark.parametrize("field", _REMOTE_TLS_FIELDS)
+def test_a_tls_path_carrying_a_nul_is_refused_at_load(field: str) -> None:
+    """The third condition decidable from the value alone (ADR-0202 §8).
+
+    Adversarial review found it: a NUL passes the blank and UTF-8 checks and then
+    reaches ``Path.stat``, which raises ``ValueError`` rather than ``OSError``,
+    because no system call is ever attempted with such a name. The gateway's own
+    refusals are phrased around a file it could not read and catch ``OSError``, so
+    the operator got a bare traceback where a sentence was owed. No pathname on any
+    system may carry one, which is what puts the refusal in this class rather than in
+    a second ``except`` at the gateway.
+    """
+    other = next(name for name in _REMOTE_TLS_FIELDS if name != field)
+
+    with pytest.raises(ValidationError, match="NUL character"):
+        Settings(
+            **{  # type: ignore[arg-type] # the point of the case
+                "gateway_remote_address": _OVERLAY,
+                field: "/etc/assistant/cert\x00.pem",
+                other: _KEY,
+            }
+        )
