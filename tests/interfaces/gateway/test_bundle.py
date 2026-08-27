@@ -1287,6 +1287,102 @@ def test_a_late_playback_failure_cannot_land_under_a_later_answer() -> None:
     assert script.count("COULD_NOT_PLAY") == 2
 
 
+def test_a_press_ends_the_answer_that_is_still_being_spoken() -> None:
+    """Issue #1696, the owner's ruling of 2026-08-28 from a real iPhone: push-to-talk
+    **is an interrupt**.
+
+    A buffer the page had already started kept playing well after the owner had read the
+    answer, and pressing to talk did not stop it — while the recording that press began
+    was hearing the assistant's own loudspeaker, which is #1318 design note 1 §3(c)'s
+    self-hearing case arriving at the page before it arrives at the hub.
+
+    **Ahead of every one of ``startTalking``'s guards**, because what the owner asked for
+    by pressing is the silence: a page that stopped the sound only on the presses that
+    went on to record something would be answering a different act.
+
+    **A statement and not a fault**, for ``NOT_SPOKEN``'s reason — the interruption is the
+    owner's own doing and the answer above it is complete, so what is said is where the
+    sound stopped and nothing more.
+    """
+    script = _code("app.js")
+    starting = _functions(script)["startTalking"]
+    interrupting = _functions(script)["interruptPlayback"]
+
+    assert starting.index("interruptPlayback()") < starting.index("if (press !== null")
+    assert starting.index("interruptPlayback()") < starting.index("readyToPlay()")
+    assert "mine.source.stop()" in interrupting
+    assert "playbackInterrupted(mine.slot)" in interrupting
+    assert "fault(" not in interrupting
+    # Written through that one function and nowhere else, which is `couldNotPlay`'s rule
+    # for the other notice this panel takes: a slot the next render detached belongs to an
+    # answer that is no longer on screen.
+    assert "if (!slot.isConnected) {" in _functions(script)["playbackInterrupted"]
+    assert script.count("PLAYBACK_INTERRUPTED") == 2
+
+
+def test_a_decode_the_press_overtook_starts_no_source() -> None:
+    """The half of #1696 that stopping a live ``AudioBufferSourceNode`` does not reach.
+
+    ``playSpoken`` awaits a resume and then a decoder before it has any source to stop, so
+    a press landing in that window has nothing to call ``stop`` on. Without the check the
+    rendering the owner interrupted would begin speaking a moment *after* they had begun
+    — the same defect one beat later, and the harder one to see.
+
+    The record is the identity: ``interruptPlayback`` clears it **before** it stops
+    anything, and the comparison after the decoder is what reads that. The source is put
+    into the record only once it has started, because a source that has not started cannot
+    be stopped and a record naming one would have the interrupt throw rather than
+    interrupt.
+    """
+    script = _code("app.js")
+    playing = _functions(script)["playSpoken"]
+    interrupting = _functions(script)["interruptPlayback"]
+
+    assert "playing = mine" in playing
+    assert interrupting.index("playing = null") < interrupting.index("mine.source.stop()")
+    assert playing.index("await context.decodeAudioData(") < playing.index("if (playing !== mine)")
+    assert playing.index("if (playing !== mine)") < playing.index("source.start()")
+    assert playing.index("source.start()") < playing.index("mine.source = source")
+
+
+def test_the_audio_context_is_resumed_from_every_state_that_is_not_running() -> None:
+    """Issue #1690, deferred from PR #1687's adversarial review as a ``minor``.
+
+    ``AudioContextState`` has a third member some browsers use — ``"interrupted"``, where
+    WebKit puts a context when a call arrives or another application takes the audio
+    session. A branch naming ``"suspended"`` alone leaves a context in it unresumed, and
+    the failure is silent in **both** directions: ``decodeAudioData`` still succeeds,
+    ``start()`` produces no sound, and nothing throws, so the "could not play" notice is
+    never reached either. The owner is left with an answer the page believes it spoke,
+    which is the worst of the three outcomes.
+
+    So the resume is fired on every state that is not ``"running"``; its promise is
+    awaited in ``playSpoken`` rather than dropped, since ``readyToPlay`` runs inside the
+    press and cannot know from there whether it worked; the state is asked again after
+    that, because a context can leave ``"running"`` after the press that built it; and a
+    context that will not run reaches the notice rather than the silence.
+    """
+    script = _code("app.js")
+    ready = _functions(script)["readyToPlay"]
+    playing = _functions(script)["playSpoken"]
+
+    assert 'listeningContext.state !== "running"' in ready
+    assert '=== "suspended"' not in ready
+    assert "resuming = Promise.resolve(listeningContext.resume())" in ready
+    # The rejection is observed where it is started as well as where it is awaited: a
+    # press need not produce a spoken answer at all, and a rejection nothing is waiting on
+    # is an unhandled rejection in the console — noise this page does not make. Attaching
+    # a handler does not consume it, so the `await` below still says so.
+    assert "void resuming.catch(() => {});" in ready
+    assert playing.index("await resuming") < playing.index("await context.decodeAudioData(")
+    assert playing.index("await context.resume()") < playing.index("await context.decodeAudioData(")
+    refusing = playing[
+        playing.index("await context.resume()") : playing.index("await context.decodeAudioData(")
+    ]
+    assert 'if (context.state !== "running") {' in refusing
+    assert "couldNotPlay(slot)" in refusing
+
+
 def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() -> None:
     """Adversarial review, round 3, major. A press with no bound accumulates for as long
     as a finger is down, and nothing discovers it until the upload — where the answer is a

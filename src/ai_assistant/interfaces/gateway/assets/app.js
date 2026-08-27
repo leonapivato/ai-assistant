@@ -3649,6 +3649,18 @@ const COULD_NOT_PLAY =
   "That answer was spoken and this browser could not play the audio. The answer above " +
   "is the same words, complete.";
 
+// The press that ended an answer's playback (#1696). Said rather than silent, because an
+// answer that stopped sounding part-way through is otherwise indistinguishable from one
+// that finished: the words stay on screen either way, so an owner who is not told will
+// read the truncation as the whole of what was spoken aloud.
+//
+// **A statement and not a fault**, for `NOT_SPOKEN`'s reason — the interruption is the
+// owner's own act and the answer above it is complete, so what it reports is where the
+// sound stopped and nothing more.
+const PLAYBACK_INTERRUPTED =
+  "You pressed to talk, so this answer stopped being spoken. Nothing of the answer is " +
+  "missing — what is above is all of it.";
+
 // What stopping a spoken wait says. #1500's condition on the third entry, and the
 // wording is `ASK_ABANDONED`'s because the state is the same one: the request went out
 // and no response was read, so the turn may have run and was certainly never called
@@ -3677,19 +3689,80 @@ const SPOKEN_ABANDONED =
 // closing it would put the next playback back outside a gesture — which is the defect.
 let listeningContext = null;
 
+// The resume the press started, or `null` where no resume was owed. **Held rather than
+// dropped** (#1690): a `resume()` whose promise nobody observes is a failure nobody hears
+// about, and the caller that needs the answer is `playSpoken`, one `await` later.
+let resuming = null;
+
 function readyToPlay() {
   try {
     if (listeningContext === null) {
       listeningContext = new AudioContext();
     }
-    if (listeningContext.state === "suspended") {
-      void listeningContext.resume();
+    // **Every state that is not `"running"`, rather than `"suspended"` alone** (#1690).
+    // `AudioContextState` has a third member some browsers use — `"interrupted"`, which
+    // is where WebKit puts a context when a call arrives or another application takes
+    // the audio session — and a context left in it fails silently in *both* directions:
+    // `decodeAudioData` still succeeds, `start()` produces no sound, and nothing throws,
+    // so the notice saying the audio was lost is never reached either. Which is the
+    // worst of the three outcomes: an answer the page believes it spoke.
+    if (listeningContext.state !== "running") {
+      resuming = Promise.resolve(listeningContext.resume());
+      // Observed here as well as awaited there, because a press need not produce a
+      // spoken answer at all — a rejection nothing is waiting on is an unhandled
+      // rejection in the console, which is noise this page does not make. Attaching a
+      // handler does not consume the rejection: the `await` in `playSpoken` still sees
+      // it, and still says so.
+      void resuming.catch(() => {});
     }
   } catch (_) {
     // A browser with no Web Audio at all. The recording still goes up and the answer is
     // still shown and read; what is lost is hearing it, which `playSpoken` says.
     listeningContext = null;
+    resuming = null;
   }
+}
+
+// **The playback this page has in the air**, or `null` when nothing is sounding and
+// nothing is on its way to sounding. A record rather than the source itself, because the
+// interrupt has to reach a playback that has no source yet: `playSpoken` awaits a resume
+// and a decoder before it has anything to stop, and a press landing in that window must
+// leave nothing behind that will start afterwards.
+let playing = null;
+
+// **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
+// iPhone). Pressing to talk over an answer that is still being spoken is the same act as
+// speaking over a person: it ends what was being said. Two things made it necessary, and
+// either alone would have — the page opens the microphone into a room its own
+// loudspeaker is filling, so the recording hears the assistant's own voice; and an owner
+// who had read the answer had no way to stop it short of leaving the page.
+//
+// **It reaches the decode as well as the source.** Stopping only a live
+// `AudioBufferSourceNode` would leave a rendering whose decode was still pending to
+// start a moment later — the same defect one beat on, and the harder one to see.
+//
+// **And it is the activation's, not the recording's.** It runs before every one of
+// `startTalking`'s guards, so a press that goes on to record nothing still stops the
+// sound: what the owner asked for by pressing is the silence, and a page that gave it to
+// them only on the presses that happened to record would be answering a different act.
+function interruptPlayback() {
+  const mine = playing;
+  if (mine === null) {
+    return;
+  }
+  // Cleared first, so the decode this press overtook finds the record already gone and
+  // starts nothing — see `playSpoken`, where that comparison is made.
+  playing = null;
+  if (mine.source !== null) {
+    try {
+      mine.source.stop();
+    } catch (_) {
+      // A source that has already finished. Stopping one is not a failure worth
+      // reporting to anybody: what this asked for is what is already true.
+    }
+    mine.source = null;
+  }
+  playbackInterrupted(mine.slot);
 }
 
 // The press being served, or `null` between presses.
@@ -3785,6 +3858,10 @@ function releaseMicrophone(stream) {
 }
 
 async function startTalking() {
+  // **First of all, and before the guards**: the owner's press ends the answer that is
+  // still being spoken (#1696). See `interruptPlayback` for why it is the activation
+  // that carries this rather than the recording that may follow it.
+  interruptPlayback();
   const button = el("talk-button");
   if (press !== null || button.disabled) {
     return;
@@ -4118,14 +4195,67 @@ async function playSpoken(spoken, slot) {
     couldNotPlay(slot);
     return;
   }
+  const mine = { source: null, slot };
+  playing = mine;
   try {
+    // **The press's resume, awaited rather than assumed** (#1690). `readyToPlay` starts
+    // it where the activation is, which is the only place it can be started; what it
+    // cannot do from there is know whether it worked.
+    if (resuming !== null) {
+      await resuming;
+    }
+    // **And a state entered after that press** — the call that arrives while the turn is
+    // out, the other application that takes the audio session. One more resume, awaited
+    // like the first, because a context this page has not looked at since the press is a
+    // context it knows nothing about.
+    if (context.state !== "running") {
+      await context.resume();
+    }
+    if (context.state !== "running") {
+      // A context that will not run decodes perfectly and sounds nothing, so this is the
+      // one place the silence can be caught: after here, nothing throws and nothing is
+      // heard. Said as what it is — a rendering this browser could not play.
+      forgetPlaying(mine);
+      couldNotPlay(slot);
+      return;
+    }
     const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
+    // **The press that landed while this was decoding** (#1696). `interruptPlayback`
+    // cleared the record, and starting a source now would be the answer the owner
+    // interrupted beginning to speak *after* they had begun — which is the failure the
+    // interrupt exists to remove, arriving a moment late.
+    if (playing !== mine) {
+      return;
+    }
     const source = context.createBufferSource();
     source.buffer = decoded;
     source.connect(context.destination);
+    // Cleared where the playback ends of its own accord, so the next press does not
+    // report an answer that finished as one it interrupted. `ended` fires on `stop()`
+    // too, where the record has already moved on and the identity check is what says so.
+    source.addEventListener("ended", () => {
+      forgetPlaying(mine);
+    });
     source.start();
+    // After `start`, because a source that has not started cannot be stopped and a
+    // record naming one would have `interruptPlayback` throw rather than interrupt.
+    mine.source = source;
   } catch (_) {
-    couldNotPlay(slot);
+    // **Only while this is still the playback in the air.** An interrupt has already
+    // said what happened, in the one place that knows it was an act rather than a
+    // failure — `sendRecording` draws the same line one entry over.
+    if (playing === mine) {
+      forgetPlaying(mine);
+      couldNotPlay(slot);
+    }
+  }
+}
+
+// Let go of a playback that is over, and only where it is still the one being held: a
+// record the next press or the next answer has already replaced belongs to neither.
+function forgetPlaying(mine) {
+  if (playing === mine) {
+    playing = null;
   }
 }
 
@@ -4137,6 +4267,20 @@ function couldNotPlay(slot) {
     return;
   }
   slot.textContent = COULD_NOT_PLAY;
+  slot.hidden = false;
+}
+
+// The interruption, under the same rule and for the same reason: a slot the next render
+// detached belongs to an answer that is no longer on screen, and saying *that* one was
+// interrupted under the answer that replaced it would attribute one turn's silence to
+// another. Its own function rather than a shared writer taking the sentence as an
+// argument, so each notice reaches the panel through exactly one place and a check can
+// say so of each.
+function playbackInterrupted(slot) {
+  if (!slot.isConnected) {
+    return;
+  }
+  slot.textContent = PLAYBACK_INTERRUPTED;
   slot.hidden = false;
 }
 
