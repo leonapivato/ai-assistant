@@ -653,7 +653,7 @@ async def _framed(
         [
             f"POST {path} HTTP/1.1",
             "Host: {host}",
-            f"Origin: http://{one.authority}",
+            f"Origin: {one.origin}",
             "Content-Type: application/json",
             f"Content-Length: {len(body)}",
             f"X-Assistant-Session: {header_half}",
