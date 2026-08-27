@@ -14,7 +14,10 @@ Contracts: :class:`~ai_assistant.core.protocols.ActionPolicy` and
 by the one :class:`~ai_assistant.permissions.grants.SqliteSourceGrantStore`; and
 :class:`~ai_assistant.core.protocols.SourceReadRecorder` and
 :class:`~ai_assistant.core.protocols.SourceReadTrail` (ADR-0185), both satisfied
-by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`.
+by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`; and
+:class:`~ai_assistant.core.protocols.RoutingRecorder` and
+:class:`~ai_assistant.core.protocols.RoutingTrail` (ADR-0197 §9), both satisfied by
+the one :class:`~ai_assistant.permissions.routing.SqliteRoutingTrail`.
 
 **ADR-0004 §7's other half, for source access.** ADR-0097 built the *gate* — "is
 this source granted for this use" — and ADR-0185 builds the *record of the access
@@ -39,6 +42,19 @@ ADR-0097 §7 rules that a ``SourceGrant`` may never be cited as
 may consult a grant seam, so ADR-0021 §5's disclosure floor is neither relaxed
 nor satisfied by anything here. Issue #74's model-provider-credential question is
 untouched (ADR-0097 §12).
+
+**A fourth row kind, and it is about neither a tool nor a source.** ADR-0197 §9 puts
+the routing trail here for the reason ADR-0097 §3 put the read trail here: a routed
+operation is a decision a **model** took about the user's own stores, and every other
+place a model's choice reaches an effect already leaves a durable record. It joins
+neither of ADR-0186 §10's two partitions — a routed operation is never a
+``PermissionDecision`` and never a ``SourceReadRecord`` — and being a fourth row kind is
+a statement about what a row *is* rather than about which package the store is built in;
+the two questions are answered separately. The row is written **before** the act it
+precedes, so it states what was decided and never what happened, and a row that cannot
+be written stops the act. Nothing can read it yet: §9 mints the store and no engine
+method, and §11 leaves the read surface to its own decision on ADR-0185 → ADR-0186's
+sequence.
 
 **A third subject, and it is the one ADR-0021 §6 deferred.** A
 :class:`~ai_assistant.core.types.RecipientGrant` is about *sending* — one
@@ -70,10 +86,12 @@ from ai_assistant.permissions.grants import SqliteSourceGrantStore
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.permissions.reads import SqliteSourceReadTrail
 from ai_assistant.permissions.recipient_grants import SqliteRecipientGrantStore
+from ai_assistant.permissions.routing import SqliteRoutingTrail
 
 __all__ = [
     "SqliteAuditTrail",
     "SqliteRecipientGrantStore",
+    "SqliteRoutingTrail",
     "SqliteSourceGrantStore",
     "SqliteSourceReadTrail",
     "ThresholdActionPolicy",
