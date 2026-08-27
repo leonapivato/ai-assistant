@@ -5376,11 +5376,14 @@ class Engine:
             return await self._finish_route(conversation, utterance, outcome, compose=compose)
         finally:
             # Held across every await above and released here on every path, which is
-            # what `Engine._converse` already does with the handle it reserves before
-            # driving a step. A live park keeps both: it is holding the slot the ceiling
-            # counts and the identity its answer will be written under.
-            if not registered:
-                self._release_route(reservation)
+            # what `_run_turn` already does with the handle it reserves before driving a
+            # step — and released the same way round. The **slot reservation always
+            # goes**: a registered park is in `_routed_parks`, which `_admit_and_reserve`
+            # counts, so leaving the handle in `_reserved` too would spend one ceiling
+            # slot twice and never give either back. The **identity** is the one a live
+            # park keeps, because its answer will be written under it and no second route
+            # may take it while it can still be claimed.
+            self._release_route(reservation, identity=not registered)
 
     async def _drive_route(
         self,
@@ -5591,15 +5594,31 @@ class Engine:
             self._reserved.discard(handle)
         return None
 
-    def _release_route(self, reservation: _RouteReservation) -> None:
-        """Release both of a route's reservations (ADR-0197 §7, §9).
+    def _release_route(self, reservation: _RouteReservation, *, identity: bool) -> None:
+        """Release a route's reservations (ADR-0197 §7, §9).
 
-        Called from a ``finally`` on every path that does not end in a live park. "A
-        reservation that could leak would exhaust the retry budget for every later route,
-        which is the ceiling's own failure mode arriving through the identity instead of
-        the slot."
+        Called from a ``finally`` on **every** path, and the two halves come apart on
+        exactly one of them. The **slot** reservation always goes: once the park is
+        registered the ceiling counts the park itself, so a handle left in ``_reserved``
+        beside it would spend one slot twice and never give either back — the shape
+        :meth:`_run_turn` already avoids by discarding unconditionally once the step has
+        either parked or not. The **identity** is released only where the route did not
+        become a live park, because a live park's answer will be written under it and no
+        second route may take it while it can still be claimed; the park's own claim or
+        eviction is what releases it (:meth:`_claim_routed_park`,
+        :meth:`_evict_expired_routes`).
+
+        "A reservation that could leak would exhaust the retry budget for every later
+        route, which is the ceiling's own failure mode arriving through the identity
+        instead of the slot."
+
+        Args:
+            reservation: What this route reserved.
+            identity: Whether to release the ``route_id`` as well — ``False`` on the one
+                path that ends in a live park.
         """
-        self._reserved_routes.discard(reservation.route_id)
+        if identity:
+            self._reserved_routes.discard(reservation.route_id)
         if reservation.handle is not None:
             self._reserved.discard(reservation.handle)
 
