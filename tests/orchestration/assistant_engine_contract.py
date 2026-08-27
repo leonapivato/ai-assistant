@@ -2043,32 +2043,28 @@ class AssistantEngineContract(ABC):
         carries its ``step``, still carries no ``routed``, and is ruled exactly as ADR-0052
         §3 and ADR-0042 §4 ruled it.
 
-        **ADR-0197 §12 writes this case as "still raises ``PermissionDeniedError``", and
-        the tree says otherwise.** ADR-0042 §4's own rule is that a denial is a *ruling* —
-        "the adapter conveys consent; the policy rules on it; the engine records and
-        executes" — and this suite has pinned the consequence since ADR-0084:
-        :meth:`test_a_refusal_is_a_result_and_not_an_exception` asserts that a refused
-        resume returns a ``DENIED`` disposition and raises nothing, and every
-        implementation obeys it. The sentence §12 was read off was
-        ``core/protocols.py``'s own ``resume`` docstring — ``PermissionDeniedError: If
-        the human refused`` — which described no implementation this repository has ever
-        had; the lane that landed ADR-0197 **deleted** it rather than qualifying it,
-        because a qualifier would have left the false half standing beside ADR-0042's new
-        amendment note one file away. (``Engine.resume``'s own docstring was always
-        right, which is what made the Protocol's the outlier rather than the rule.)
+        **What this case asserts is the scope, and deliberately not the ruling.** ADR-0197
+        §12 writes it as "still raises ``PermissionDeniedError``", and that is in dispute
+        rather than merely stale: ADR-0042 §4 makes a denial a *ruling* — "the adapter
+        conveys consent; the policy rules on it; the engine records and executes" — and
+        :meth:`test_a_refusal_is_a_result_and_not_an_exception` has pinned the consequence
+        against every implementation since ADR-0084, while ADR-0197 §7 describes the same
+        refusal as raising. Settling that is an amendment to a ratified decision, and
+        issue **#1636** carries it.
 
-        So the clause is discharged in the direction the tree actually goes: the ordinary
-        refusal is **unchanged**, which is the property §12 is asking to see. Issue #1636
-        carries what a deletion cannot settle — whether ADR-0085 §9's per-method failure
-        table wants a record for it, which ADR-0197 §13's own reasoning says it does not,
-        since §9 declares a failure *set* rather than which input produces one.
+        So this case asserts only the two facts no reading disputes and that §12 is
+        actually asking to see: the outcome still carries a ``step``, and it carries no
+        ``routed`` member. Whatever the refusal *produces* is the older case's to pin, and
+        it is unchanged either way — which is the whole of what "the supersession is
+        narrow" means here. Without this case the suite would pin the new behaviour and
+        not its scope, and an implementation that stopped carrying a step on **every**
+        refusal would pass.
         """
         pending = await parked_engine.pending_confirmations()
 
         resumed = await parked_engine.resume(pending[0].token, approved=False, timeout=_PATIENT)
 
         assert resumed.step is not None
-        assert resumed.step.disposition is Disposition.DENIED
         assert resumed.routed is None
 
     async def test_a_token_is_answered_once(self, parked_engine: AssistantEngine) -> None:
