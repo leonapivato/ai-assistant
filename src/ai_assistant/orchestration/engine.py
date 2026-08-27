@@ -1214,15 +1214,20 @@ def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
     return "\n".join(lines)
 
 
-#: How a routed pass composes its answer: the operation, the outcome and the
-#: conversation the room is measured against. Two shapes satisfy it —
+#: How a routed pass composes its answer: the whole routed account, and the
+#: conversation the room is measured against.
+#:
+#: **The account rather than its two enum values**, and the difference is the streaming
+#: ceiling. ADR-0197 §6 constrains what the *composing stage* is handed — two closed
+#: vocabularies and nothing else — and the stage's own signature is where that is
+#: enforced; what the engine needs one level up is the outcome it is about to **build**,
+#: because ADR-0173 §3 measures the reply's room against exactly that value and a probe
+#: omitting the listing would over-state it. Nothing here reaches a prompt. Two shapes satisfy it —
 #: :meth:`Engine._composed_routed_whole` and a closure over
 #: :meth:`Engine._compose_routed_streaming` — and it is a parameter rather than a flag
 #: for :meth:`Engine._run_turn`'s own reason: a second copy of the routing driver would
 #: be two places for the reservation's release and the capture point to drift apart.
-type _RoutedComposer = Callable[
-    [RoutableOperation, RouteOutcome, str], Awaitable["ComposedReply | None"]
-]
+type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply | None"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -5187,9 +5192,9 @@ class Engine:
             return await self._compose_streaming(turn, step, conversation, chunks)
 
         async def compose_routed(
-            operation: RoutableOperation, outcome: RouteOutcome, conversation: str
+            routed: RoutedOperation, conversation: str
         ) -> ComposedReply | None:
-            return await self._compose_routed_streaming(operation, outcome, conversation, chunks)
+            return await self._compose_routed_streaming(routed, conversation, chunks)
 
         return await self._run_turn(
             utterance,
@@ -5739,11 +5744,7 @@ class Engine:
         ``compose`` is ``None`` on a routed park, which owes no answer: the composing stage
         is not reached, originates no model call, and ``reply_degraded`` stays ``False``.
         """
-        composed = (
-            None
-            if compose is None
-            else await compose(routed.operation, routed.outcome, conversation)
-        )
+        composed = None if compose is None else await compose(routed, conversation)
         return await self._capture(
             conversation,
             turn=None,
@@ -5755,16 +5756,27 @@ class Engine:
         )
 
     async def _composed_routed_whole(
-        self, operation: RoutableOperation, outcome: RouteOutcome, conversation: str
+        self, routed: RoutedOperation, conversation: str
     ) -> ComposedReply | None:
-        """Compose a routed answer atomically, ignoring the room its streaming twin needs."""
+        """Compose a routed answer atomically, ignoring the room its streaming twin needs.
+
+        ``conversation`` is what :meth:`_compose_routed_streaming` measures its ceiling
+        against; the whole-answer path has no ceiling of its own — ADR-0170 §8 makes an
+        over-ceiling answer a refusal, because nothing has been published — so it is
+        accepted and dropped, exactly as :meth:`_composed_whole` does.
+
+        **Only the two enum values reach the stage** (ADR-0197 §6): the listing this
+        method is handed is what the *outcome* will carry, and it goes no further than
+        here.
+        """
         del conversation
-        return await self._composing.compose_routed(operation=operation, outcome=outcome)
+        return await self._composing.compose_routed(
+            operation=routed.operation, outcome=routed.outcome
+        )
 
     async def _compose_routed_streaming(
         self,
-        operation: RoutableOperation,
-        outcome: RouteOutcome,
+        routed: RoutedOperation,
         conversation: str,
         chunks: asyncio.Queue[ReplyChunk],
     ) -> ComposedReply | None:
@@ -5774,15 +5786,19 @@ class Engine:
         outcome this pass will actually build — which carries ``routed`` and no ``turn``,
         so the room is genuinely different from a step-driving turn's.
 
+        **The stage is still handed two enum values and nothing else** (ADR-0197 §6). The
+        whole account arrives here because ADR-0173 §3's ceiling is measured against the
+        terminal outcome, listing included; it reaches the room calculation and stops.
+
         Raises:
             RuntimeError: If the stage ended without reporting, which is a defect in it
                 rather than a composition failure (ADR-0170 §8).
         """
         composed: ComposedReply | None = None
         stream = self._composing.compose_routed_streaming(
-            operation=operation,
-            outcome=outcome,
-            room=self._routed_reply_room(operation, outcome, conversation_id=conversation),
+            operation=routed.operation,
+            outcome=routed.outcome,
+            room=self._routed_reply_room(routed, conversation_id=conversation),
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -5800,23 +5816,25 @@ class Engine:
             raise RuntimeError(msg)
         return composed
 
-    def _routed_reply_room(
-        self, operation: RoutableOperation, outcome: RouteOutcome, *, conversation_id: str
-    ) -> int:
+    def _routed_reply_room(self, routed: RoutedOperation, *, conversation_id: str) -> int:
         """How many escaped bytes a routed outcome has left for its reply (ADR-0173 §3).
 
-        :meth:`_reply_room`'s routed twin, and it is measured rather than reused because
-        the two outcomes differ in what they carry: this one has no ``turn`` at all and a
+        :meth:`_reply_room`'s routed twin, measured rather than reused because the two
+        outcomes differ in what they carry: this one has no ``turn`` at all and a
         ``routed`` member whose listing may be a page of the user's own records.
 
-        **The probe carries no listing, and that under-states the room in the safe
-        direction.** A listing is measured by ``check_payload`` on the way out (ADR-0085
-        §8, §8c) and is refused rather than truncated if it breaches; measuring it here as
-        well would double-count nothing but would make this method's probe depend on a
-        value the caller already holds. What matters is that the room can only be
-        over-stated by a member this probe omits — so the probe carries the listing where
-        the pass has one, which is why the caller passes the whole outcome's shape rather
-        than two enum values alone.
+        **The probe carries the whole routed account, listing included**, and that is
+        load-bearing rather than tidiness. ADR-0173 §3's reserve is computable only
+        because the outcome's non-reply content is *settled* before composition begins,
+        and on a routed pass it is: the operation has already run. A probe that omitted
+        the listing would subtract less than the terminal frame will and so report **more**
+        room than there is — the one direction that publishes a chunk the terminal frame
+        then refuses, which is what §3's arithmetic exists to prevent.
+
+        Both booleans are probed at their longer spelling, ``false`` being five bytes
+        against ``true``'s four, for :meth:`_reply_room`'s reason exactly: capture has not
+        run and the answer has not finished, and taking the longer one can only
+        under-state the room.
         """
         probe = TurnOutcome(
             turn=None,
@@ -5824,7 +5842,7 @@ class Engine:
             capture_degraded=False,
             reply=_ROOM_PROBE,
             reply_degraded=False,
-            routed=RoutedOperation(operation=operation, outcome=outcome),
+            routed=routed,
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
