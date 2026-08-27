@@ -1026,6 +1026,53 @@ def test_a_confirm_owed_row_is_never_not_owed(value: str) -> None:
         )
 
 
+@pytest.mark.parametrize("value", _CONFIRM_OWED)
+def test_a_confirm_owed_row_names_the_subject_the_lookup_resolved(value: str) -> None:
+    """§5 and §9: the scalar identity is what the row is kept for.
+
+    "It is the identity the façade was called with — a ``Belief.id``, a ``Question.id``,
+    a ``SourceGrant.source``." A confirm-owed row with no subject is a record of a
+    destruction that cannot say **what** was destroyed, which is precisely what the row
+    survives the belief to answer: §9 makes the record carry no content so that it is
+    "safe to keep after the belief it names is destroyed", and an unnamed subject empties
+    it of the one fact that survives.
+    """
+    with pytest.raises(ValidationError, match="takes the one identity the lookup resolved"):
+        RoutedOperationRecord(
+            id="row-1",
+            route_id="route-1",
+            decided_at=AT,
+            operation=RoutableOperation(value),
+            approval=RouteApproval.OWED,
+            subject=None,
+        )
+
+
+@pytest.mark.parametrize("value", _READ_ONLY)
+def test_a_read_only_row_names_no_subject(value: str) -> None:
+    """The other direction, and it is the one an over-eager producer reaches.
+
+    §3 rules that "a read-only member takes none and is called with the promoted
+    surface's own declared defaults", and §5 that such an operation "takes no query and
+    resolves no argument". So a read-only row carrying a subject names an argument no
+    such call was made with — a row asserting a selection that never happened, which is
+    the falsehood-in-durable-state ADR-0170 §3 refused one type over.
+
+    Stated as its own case rather than folded into the approval one, because the two
+    invariants fail independently: a producer can get the tag right and the subject
+    wrong, and a validator written for only one direction of either passes here.
+    """
+    with pytest.raises(ValidationError, match="is read-only and takes no argument"):
+        RoutedOperationRecord(
+            id="row-1",
+            route_id="route-1",
+            decided_at=AT,
+            operation=RoutableOperation(value),
+            approval=RouteApproval.NOT_OWED,
+            subject="belief-1",
+        )
+
+
 def test_the_route_approval_vocabulary_is_exactly_section_nine_s_four_members() -> None:
     """§9 fixes four, and ``OWED`` is the one whose meaning is easiest to overstate.
 

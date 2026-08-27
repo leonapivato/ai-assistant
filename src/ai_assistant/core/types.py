@@ -12025,28 +12025,57 @@ class RoutedOperationRecord(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _approval_matches_the_tag(self) -> RoutedOperationRecord:
-        """A confirm-owed row is never ``NOT_OWED`` and a read-only row always is (§9).
+    def _matches_the_operations_tag(self) -> RoutedOperationRecord:
+        """The approval **and** the subject follow from §3's tag, both ways (§5, §9).
 
-        Stated in **both** directions, as §9 requires in as many words. One direction
-        alone would admit a routed ``forget`` filed as though no confirmation had been
-        owed for it, which is the row an operator would read as evidence that the
-        destruction needed no approval.
+        **The approval**, stated in both directions as §9 requires in as many words. One
+        direction alone would admit a routed ``forget`` filed as though no confirmation
+        had been owed for it, which is the row an operator would read as evidence that
+        the destruction needed no approval.
+
+        **The subject**, on the same authority and for a sharper reason. §3 rules that "a
+        confirm-owed member takes the one identity §5's lookup resolves, and a read-only
+        member takes none", and §9 declares this field as "the scalar argument §5's
+        mapping read off the resolved candidate, or ``None`` where the operation takes
+        none" — so the two are one fact with the tag deciding it. A confirm-owed row with
+        no subject is a record of a destruction that cannot say **what** was destroyed,
+        which is the one thing the row exists to carry after the belief it names is gone;
+        a read-only row *with* one names a subject no such operation has, since §5
+        performs those "exactly as the promoted surface declares" and resolves no
+        argument at all.
+
+        Derivable from ``operation`` alone, which is what lets both clauses be stated
+        here rather than needing a second field that could disagree — §8's own reasoning
+        for :meth:`RoutedOperation._describes_one_route`, one type over.
 
         Raises:
-            ValueError: If the approval and the operation's tag disagree.
+            ValueError: If the approval or the subject disagrees with the operation's tag.
         """
-        not_owed = self.approval is RouteApproval.NOT_OWED
-        if self.operation.confirm_owed and not_owed:
+        confirm_owed = self.operation.confirm_owed
+        if confirm_owed and self.approval is RouteApproval.NOT_OWED:
             msg = (
                 f"{self.operation.value} is confirm-owed, so its row is never NOT_OWED: "
                 "a confirmation was owed whether or not one was answered (ADR-0197 §9)"
             )
             raise ValueError(msg)
-        if not self.operation.confirm_owed and not not_owed:
+        if not confirm_owed and self.approval is not RouteApproval.NOT_OWED:
             msg = (
                 f"{self.operation.value} is read-only, so its row is always NOT_OWED, got "
                 f"{self.approval.value}: no confirmation is ever offered for it (ADR-0197 §9)"
+            )
+            raise ValueError(msg)
+        if confirm_owed and self.subject is None:
+            msg = (
+                f"{self.operation.value} takes the one identity the lookup resolved, so its "
+                "row names it: a row with no subject cannot say what was destroyed, which "
+                "is what it is kept after the record for (ADR-0197 §5, §9)"
+            )
+            raise ValueError(msg)
+        if not confirm_owed and self.subject is not None:
+            msg = (
+                f"{self.operation.value} is read-only and takes no argument, so its row "
+                f"names no subject, got {self.subject!r}: it is performed exactly as the "
+                "promoted surface declares it (ADR-0197 §5, §9)"
             )
             raise ValueError(msg)
         return self

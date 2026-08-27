@@ -8191,9 +8191,31 @@ class AssistantEngine(Protocol):
                 is claimed once and atomically, so a second presentation of its token
                 — concurrent or later, and whatever its ``approved`` value — resolves
                 nothing and raises this.
-            PermissionDeniedError: If the human refused, or the recorded ruling
-                does not authorise the call. **Not raised on a resume answering a
-                routed park**, whose refusal is returned as
+            PermissionDeniedError: If the recorded ruling does not authorise the
+                call — a recorded decision that is not a ``CONFIRM`` about this
+                parked step, a ruling the trail no longer holds on the restart path,
+                or a step absent from the stored execution.
+
+                **A human's refusal is not one of them, and the clause naming it is
+                deleted rather than qualified.** ADR-0042 §4 rules that "the adapter
+                conveys consent; the policy rules on it; the engine records and
+                executes", so ``approved=False`` becomes a ``DENY`` *ruling* and the
+                outcome carries a
+                :attr:`~ai_assistant.core.types.Disposition.DENIED` step — never an
+                exception. Every implementation of this surface behaves that way and
+                the shared conformance suite has pinned it since ADR-0084
+                (``test_a_refusal_is_a_result_and_not_an_exception``); the sentence
+                that said otherwise described no implementation this repository has
+                ever had, so it is removed rather than refreshed in place
+                (`CONTRIBUTING.md` → "No state claims in living documents"). ADR-0085
+                §9 declares a method's failure **set** rather than which input
+                produces one, and this class stays in ``resume``'s set on the clauses
+                above, so no record is owed on it — ADR-0197 §13's own reasoning for
+                that section. Issue #1636 carries what remains open.
+
+                A resume answering a **routed** park raises it on none of the clauses
+                above either: no ``ActionPolicy`` is consulted and no
+                ``PermissionDecision`` recorded, so a refusal is returned as
                 ``RouteOutcome.REFUSED`` (ADR-0197 §7, §13).
             AuditError: If the resolution could not be recorded.
             ToolBindingError: If the selected tool could not be bound.
