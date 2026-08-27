@@ -1099,6 +1099,24 @@ async def test_a_name_does_not_name_what_that_name_possesses() -> None:
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+async def test_a_long_run_of_framing_is_walked_rather_than_recursed_into() -> None:
+    """The lookup is **total**, and a model-authored query is not a bounded input.
+
+    The query is the one thing in this pass a model wrote, so nothing in the resolution
+    may have a depth or a cost that a long one can push over: a look-ahead that recursed
+    once per leading word would raise ``RecursionError`` here — not a route outcome, not
+    a decline, and raised before the store was read — and one that re-scanned the run
+    from each position would go quadratic on the same input. The run is settled in one
+    pass, so this resolves like any other query.
+    """
+    held = belief("b-1", "the user likes jazz")
+    operations = Operations(beliefs_held=(held,))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that " * 1000 + "I like jazz")
+
+    assert resolution == Resolved(subject=(held,), argument="b-1")
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 
