@@ -1837,7 +1837,21 @@ class Engine:
             id_factory: Supplies opaque continuation-token handles; injectable so
                 a test can assert a stable handle.
             epoch_factory: Supplies this engine's handle epoch, read **once** at
-                construction (#1644). Separate from ``id_factory`` rather than reusing
+                construction (#1644). **Its contract: return a value no other engine
+                over the same durable stores has used** — fresh per engine and so per
+                process life — which is what makes ADR-0198 §4's "a token from a
+                previous process life yields ``UnknownContinuationError``" true, and
+                what :meth:`_mint_handle` composes every handle with. Defaulted to a
+                UUID, so a composition root that says nothing honours it; and
+                **trusted**, exactly as ``now`` below is trusted to return the instant
+                it was asked for. :func:`~ai_assistant.core.clock.checked_clock`
+                guards *conformance* at that seam — aware, UTC, localizable — and
+                never *honesty*, and an epoch has no counterpart guard because the
+                only thing an engine could check a fresh epoch against is durable
+                state, which ADR-0198 §4 rules out ("process-scoped and never
+                persisted"). A factory that repeats a value across two engines breaks
+                the seam and gets what it asked for: two engines minting one handle.
+                Separate from ``id_factory`` rather than reusing
                 it, because the epoch's whole job is to differ between two engines
                 that share one factory — which is exactly what a repeating
                 ``id_factory`` produces and exactly the case the epoch exists for, so
@@ -5240,12 +5254,21 @@ class Engine:
         **The epoch is what makes the process scope a fact rather than an assertion**
         (ADR-0084 §7, ADR-0198 §4). The serial restarts with the engine, exactly as
         the parked, routed and settled tables do — so on a serial alone a restarted
-        hub with a repeating factory would mint a *previous* process's handle for a
-        new park, and that process's token would resolve it: the very aliasing this
-        method exists to refuse, moved one lifetime over. A fresh epoch per engine closes
-        it, which is what ADR-0198 §4's "a token from a previous process life yields
-        ``UnknownContinuationError``" needs in order to be true of every factory
-        rather than only of a random one.
+        hub with a repeating ``id_factory`` would mint a *previous* process's handle
+        for a new park, and that process's token would resolve it: the very aliasing
+        this method exists to refuse, moved one lifetime over. A fresh epoch per engine
+        closes it, which is what ADR-0198 §4's "a token from a previous process life
+        yields ``UnknownContinuationError``" needs in order to be true of every
+        ``id_factory`` rather than only of a random one.
+
+        **That is the whole of the claim, stated at its real width: the epoch bounds
+        what ``id_factory`` can do, and nothing bounds the epoch but its own seam's
+        contract.** Two engines handed an ``epoch_factory`` that repeats a value share
+        an epoch, and one's token can then name the other's park — just as an engine
+        handed a ``now`` that lies about the instant sweeps against the wrong horizon.
+        Both are injected seams whose contract the composition root honours rather
+        than ones this class polices; :meth:`__init__` states this one, and its
+        default is a UUID precisely so that honouring it takes no act.
 
         The epoch comes from its **own** injected factory, defaulting to a UUID.
         Randomness lives behind a seam (``CONTRIBUTING`` → "Determinism"), and it is a
