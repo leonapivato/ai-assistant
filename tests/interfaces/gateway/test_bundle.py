@@ -4052,6 +4052,70 @@ def test_the_arguments_are_not_presented_as_the_canonical_destination_set() -> N
     assert "It would reach:" in functions["renderEgress"]
 
 
+def test_the_routed_account_is_rendered_below_the_answer_and_never_instead_of_it() -> None:
+    """ADR-0197 §10's first Normative, which is ADR-0170 §6's rule and binds for its
+    reason — sharpened, because on a routed pass the composing stage was handed two
+    enum values and nothing else (§6), so the worst prose it can produce is prose
+    about the wrong thing while the account beside it is typed data no prompt
+    influenced.
+
+    Read off ``renderOutcome``, which is where a renderer that returned early on a
+    routed pass would have dropped the reply, and where one that rendered the account
+    above it would have put the guarantee where the answer goes.
+    """
+    body = _functions(_code("app.js"))["renderOutcome"]
+
+    assert "renderReply(body, outcome);" in body
+    assert "renderRouted(body, outcome.routed);" in body
+    assert body.index("renderReply(body, outcome);") < body.index(
+        "renderRouted(body, outcome.routed);"
+    )
+
+
+def test_the_page_says_where_a_routed_record_it_cannot_render_is_read() -> None:
+    """The boundary this consumer group stops at, stated on the page.
+
+    ADR-0186 §6 and §10 rule that a browser view of the decision or read trail "is a
+    later consumer lane with its own ratified decision", and ADR-0177 §1's
+    enumeration has admitted none of the four operations below — so this page has no
+    view for their records and says so, naming the surface that shows them.
+
+    **It is a sentence and not a summary** (ADR-0197 §5's last clause): the assertion
+    below is that each operation has one, and ``test_gateway_routed.py`` is where the
+    matching half is pinned — that no part of the withheld records crosses at all.
+    """
+    script = _code("app.js")
+
+    for operation, surface in (
+        ("recent_reads", "assistant reads"),
+        ("recent_invocations", "assistant invocations"),
+        ("recent_decisions", "assistant decisions"),
+        ("spend_totals", "assistant spend"),
+    ):
+        assert f"{operation}:" in script, operation
+        assert f"'{surface}' is where" in script, operation
+
+
+def test_the_routed_listing_renders_every_record_and_summarises_none() -> None:
+    """ADR-0197 §5's last clause: "No surface renders fewer candidates than the
+    outcome carries or summarises in place of them" — ADR-0186 §7's rule for a trail
+    row, applied to a candidate listing.
+
+    The renderer walks the listing whole, and the stylesheet has no rule that could
+    hide part of it: a page that rendered them all can still show a few if a fixed
+    box scrolls the rest out of sight, which is what the second half checks.
+    """
+    body = _functions(_code("app.js"))["renderRoutedListing"]
+
+    assert "listing.forEach((record) =>" in body
+    assert "slice(" not in body
+    assert "length" not in body, "no count stands in for the records"
+    listing_rule = re.search(r"\.routed-listing\s*\{[^}]*\}", _style("app.css"))
+    assert listing_rule is not None
+    assert "max-height" not in listing_rule.group(0)
+    assert "overflow" not in listing_rule.group(0)
+
+
 def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None:
     """A defect the browser found once ``resume`` reached this page (#1404).
 
