@@ -73,15 +73,17 @@ becomes binding only when an ADR ratifies the slice that implements it.
    mid-#829-window**, because the consolidation arming is a one-shot natural
    experiment a migration inside the window would confound. #879 tracks it until
    the hub runs supervised on that machine with the store carried over.
-7. **Voice is parked, and its slot follows `track:web-client`** (#879). The
-   design is not what is missing: ADR-0094 already unifies client, sensor and
-   actuator as capability profiles of one spoke, with the band ceiling and the
-   release gate an always-listening edge needs. What opening the slot costs is
-   named now rather than discovered then — an ambient capture producer walks
-   into a ratified pair. ADR-0075 §2 *reserves* rather than grants the capture
+7. **Ambient capture walks into a ratified pair, and pays for it first.** The
+   voice surface's shape is `track:voice` below and its state is #1318; what
+   this stance holds is the price of the ambient rung. The design is not what is
+   missing: ADR-0094 already unifies client, sensor and actuator as capability
+   profiles of one spoke, with the band ceiling and the release gate an
+   always-listening edge needs. What that rung costs is named here rather than
+   discovered there. ADR-0075 §2 *reserves* rather than grants the capture
    exemption for buffered ambient capture; ADR-0093 §4 forbids a `Reader`
    proposing an `EpisodicMemory` at all; ADR-0094 §10 states the collision and
-   grants nothing either. Whoever opens the slot pays for that decision first.
+   grants nothing either. Whoever opens that milestone pays for the decision
+   first.
 
 ## Concurrency
 
@@ -134,7 +136,8 @@ exercise the capability, not when a test can.
 - The hosted/billing plane: a separate service outside the hub's trust boundary,
   needing its own trust ADR. Hosting is currently ruled against for the owner
   (stance 6).
-- Voice, whose slot follows this track (stance 7).
+- Voice, which is `track:voice`'s (below, #1318): its first rung rides this
+  track's gateway and browser surface rather than queuing behind the track.
 
 ## `track:memory` — learning and memory quality
 
@@ -214,6 +217,97 @@ ruling recorded on #1312.
 - The **engagement surface** the Gap register names as on-no-track debt. This
   track is its natural eventual home, but it stays undesigned until ruled.
 
+## `track:voice` — the voice surface
+
+Live record: **#1318** — which milestones have closed, and the exit ruling
+that closed each, are recorded there.
+
+**Purpose:** talking to the assistant, it talking back, and the ambient-capture
+ladder, under the direction ADR-0094 ratifies — client, sensor and actuator are
+capability profiles of one spoke, and the rules that unification carries are its
+§3 (nothing leaves the edge the spoke has not released), §5 (the hub decides the
+band a submission produces, and every spoke has a ceiling it may not submit
+above), §6 (a spoke decides *whether* to send, never *what a submission means*)
+and §7 (a spoke submits the source material rather than a lossy,
+model-dependent derivation of it — audio, not a transcript). The rungs follow
+the owner's trigger ladder — talk to it, proactive speech, buffered explicit
+capture, suggested capture, autonomous capture — where each rung earns the next,
+which is why the ladder is an ordering principle and not a commitment to reach
+its top. Milestones are ordered by **dependency only**, and each closes on a
+QA-driven exit ruling: a QA run
+(`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's
+ruling recorded on #1318.
+
+**Two rulings recorded at the track's opening**, both on #1318. **Rung 1 rides
+the browser:** milestone 19 is a web-client feature — mic capture and playback
+over the gateway — rather than a native spoke, which arrives at 21 where the
+rolling buffer needs it; this refines stance 7 below into *riding*
+`track:web-client`'s surface rather than merely queuing behind that track.
+**The #665 read-back disclosure ADR is the track's first lane:** it is conduct
+and not protocol, and #665's own terms require it ratified before the first
+spoke that speaks, so it waits on nothing else here.
+
+- **19 — talk to it.** Push-to-talk in the browser: mic capture over the
+  gateway, hub-side STT (a model in `models/` behind ADR-0013's router;
+  inference in worker processes, never the hub process), the composed reply from
+  `track:conversation`, spoken back via TTS. Attribution: an explicit press on
+  an authenticated web session is the principal — no speaker ID at this rung.
+  Disclosure per the #665 ADR. It depends on `track:conversation` 17–18
+  (composed and streamed answers), `track:web-client` 13–14 (the gateway and the
+  chat surface), and that ADR.
+  *Exit: the owner holds push-to-talk in a browser on another device, asks aloud
+  about their own life, and hears an answer drawing on accumulated memory; a
+  content class ruled unspeakable is deflected ("details on your phone"), not
+  read aloud.*
+- **20 — proactive speech.** Voice as a delivery surface: a pushed notification
+  (ADR-0131's answer-shaped delivery) rendered as speech. The disclosure rules
+  bite hardest here — an unprompted utterance into a room nobody addressed, so
+  occupancy-unknown is the default posture and not the edge case.
+  *Exit: a notification arrives as speech on an idle device, and a class the
+  owner ruled unspeakable deflects to an authenticated surface instead.*
+- **21 — the native spoke and buffered explicit capture.** The always-listening
+  ephemeral rolling buffer (~30s, continuously destroyed) plus "capture that": a
+  native voice spoke, because a browser tab can neither hold a mic open nor
+  honor buffer discipline; audio-not-transcript across the wire; a capture lands
+  `ATTESTED` with the spoke as `reported_by` and capture-triggered provenance.
+  ADR-0094 §10 defers the spoke surface until a second spoke exists, and
+  `track:web-client`'s gateway is that second spoke, so that surface is a
+  prerequisite of this milestone rather than part of it. **This milestone pays
+  the ambient collision first** (stance 7): whoever opens it rules that
+  collision before building. It also owes the remote-hop ruling — room audio to
+  a non-local hub under ADR-0017 §1, where transcript-only does not rescue the
+  hop.
+  *Exit: the owner says "capture that"; the preceding ~30s lands as an
+  inspectable episode at the hub with who-triggered-retention provenance; and
+  the buffer's non-retention outside a capture is demonstrable.*
+- **22 — suggested capture.** The classifier proposes, the owner disposes: a
+  review queue that expires. Milestone 21's explicit captures are the training
+  labels, and the classifier is itself personalized — the moat applies to the
+  sensing layer.
+  *Exit: the spoke proposes a capture the owner did not trigger; confirming
+  keeps it, and an unreviewed proposal expires without a trace.*
+
+**Deferred — stated, not scheduled:**
+
+- **Autonomous salience capture** — the ladder's last rung, and each rung earns
+  the next (ADR-0094's direction).
+- **Per-utterance speaker identification** — the `undetermined` attribution
+  channel (#691). Milestones 19–20 dodge it by construction (push-to-talk on an
+  authenticated session); milestone 21's buffer records rooms rather than
+  sessions, so it returns there at latest.
+- **Multi-person household disclosure** — the matched speaker asking about
+  another member's data. #665 names it and defers it, and the first lane defers
+  it on the same terms.
+- **Wake-word.** The direction is explicitly not wake-word-only; if one ever
+  arrives it is detection at the edge under ADR-0094 §6, whose rule is that a
+  detector's output may not be meaning, and not a new architecture.
+
+**Concurrency.** Rung 1 rides `track:web-client`'s gateway and browser surface,
+so a lane there is sequenced against that track's lanes rather than run beside
+them (#1226 §3, Concurrency above); the native spoke from milestone 21 is this
+track's own ground. Which lanes that sequencing has bound is on #1318 and #1230.
+Clones and review quota are one pool, under Concurrency above.
+
 ## `track:world` — the assistant sees and acts on the world
 
 Live record: **#1427** — which milestones have closed, and the exit ruling
@@ -234,7 +328,7 @@ at a designated seam). What the lineage and standing-grant gates read is a
 Milestone 24's exit names it and the deferred list below waits on it, which is
 why it takes this track's first milestone. Milestones are ordered by
 **dependency only**, and each closes on a QA-driven exit ruling recorded on
-#1427. Voice holds milestones 19–22 (#1318); this track starts at 23.
+#1427. `track:voice` above holds milestones 19–22; this track starts at 23.
 
 - **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
   through proposal, consolidation, facet assembly and tool-argument
