@@ -155,6 +155,13 @@ spent the mechanism to buy its output.
 > any of those in front of either listener is applied unchanged and is not lifted
 > by this ADR.
 
+> **Normative.** The clause above binds **the owner's provisioning act and the
+> design of any lane**, and it is not a start-time check. No clause of this ADR
+> requires the gateway to determine a certificate's issuer, its provenance, or
+> whether the name it carries is one the overlay assigned; the gateway checks what
+> §8 enumerates and nothing else, and a certificate that passes those checks is
+> bound whatever its origin.
+
 > **Normative.** Nothing in this ADR is conditioned on Tailscale. ADR-0124 §2's
 > acceptance is of an overlay rather than of a vendor, and an overlay that
 > satisfies ADR-0124 §2 and issues a certificate for a name it assigns satisfies
@@ -180,6 +187,28 @@ so the gateway's `whois` on its peer address learns about the proxy and not abou
 the browsing device, and ADR-0174 §4's admission has nothing left to compare
 against its list. Both refusals are ADR-0174's, restated here because this is the
 decision that could have overturned them and does not.
+
+**A ruling the gateway cannot mechanically enforce is still a ruling, and this
+corpus already keeps one on this listener.** ADR-0174 §2 forbids an
+operator-configured proxy, port forward, tunnel or "serve" feature in front of the
+loopback listener, and nothing in the gateway detects one; ADR-0168 §2's
+prohibition is "reinforced rather than lifted" all the same. The refusals above
+are of that kind, and saying so is what keeps a lane from inferring a check the
+gateway cannot make. **The tree is why it cannot make it**: the overlay agent's
+surface here is a stable identity and a set of addresses, and `service/overlay.py`
+records in terms that there is "deliberately no fallback to a name", because a
+value that can be renamed is the wrong thing to bind an identity to. So a gateway
+holding a valid certificate and key for a name in `gateway_remote_host_names` has
+no attested way to learn whether that name is the overlay's or the owner's own
+domain, and this ADR does not pretend otherwise: it rules which certificate the
+owner installs, and §8 rules what the gateway checks about whatever was installed.
+
+**Narrowing the decision to one verifiable overlay profile is the other way to
+close that gap, and it is refused.** It would make the refusals checkable by
+naming a vendor's issuance API — and ADR-0124 §2's acceptance "is of an overlay
+rather than of a vendor", a posture ADR-0174 §2 restates for this listener in
+terms. Buying enforceability with vendor-conditioning would cost more than the gap
+it closes, and the gap it closes is one the owner's own act already stands in.
 
 **The public-CA refusal is new and it is narrow.** ADR-0174 §7 did not name it,
 because it was surveying routes to a secure context rather than bounding them.
