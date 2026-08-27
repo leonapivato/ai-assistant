@@ -8166,12 +8166,11 @@ class AssistantEngine(Protocol):
         that case (ADR-0197 §13). And its ``turn`` is ``None`` for ADR-0197 §8's reason
         rather than ADR-0052 §3's. **Everything else is unchanged**, the ``timeout``
         argument's meaning and ``UnknownContinuationError`` included, and every resume
-        that continues a parked step is ruled exactly as it was before: it carries its
-        step, and ``approved=False`` becomes the ``DENY`` *ruling* ADR-0042 §4
-        guarantees — a :attr:`~ai_assistant.core.types.Disposition.DENIED` disposition in
-        the outcome, never an exception. ADR-0197 §13's own record on ADR-0042 supersedes
-        that guarantee **only** "as it reaches a resume answering a routed park", which is
-        what leaves it whole here.
+        that continues a parked step carries its step and is ruled exactly as it was
+        before this decision — which is a statement that the scope did not move, and
+        deliberately not a restatement of what that ruling *is*. What a refusal on such a
+        step produces is stated where it was always stated, ADR-0042 §4, and issue #1636
+        carries the one sentence in this file that disagreed with it.
 
         ``resume`` **routes nothing**: it carries an opaque token and a boolean and no
         utterance, so there is no input a router could consume, and what it performs is
@@ -8200,27 +8199,30 @@ class AssistantEngine(Protocol):
                 parked step, a ruling the trail no longer holds on the restart path,
                 or a step absent from the stored execution.
 
-                **A human's refusal is not one of them, and the clause naming it is
-                deleted rather than qualified.** ADR-0042 §4 rules that "the adapter
-                conveys consent; the policy rules on it; the engine records and
-                executes", so ``approved=False`` becomes a ``DENY`` *ruling* and the
-                outcome carries a
-                :attr:`~ai_assistant.core.types.Disposition.DENIED` step — never an
-                exception. Every implementation of this surface behaves that way and
-                the shared conformance suite has pinned it since ADR-0084
-                (``test_a_refusal_is_a_result_and_not_an_exception``); the sentence
-                that said otherwise described no implementation this repository has
-                ever had, so it is removed rather than refreshed in place
-                (`CONTRIBUTING.md` → "No state claims in living documents"). ADR-0085
-                §9 declares a method's failure **set** rather than which input
-                produces one, and this class stays in ``resume``'s set on the clauses
-                above, so no record is owed on it — ADR-0197 §13's own reasoning for
-                that section. Issue #1636 carries what remains open.
+                **Whether a human's own refusal is among them is open, and this
+                clause deliberately says neither.** The sentence that used to assert
+                it — "If the human refused" — is in dispute rather than merely stale:
+                ADR-0042 §4 rules that "the adapter conveys consent; the policy rules
+                on it; the engine records and executes", every implementation of this
+                surface returns a
+                :attr:`~ai_assistant.core.types.Disposition.DENIED` step, and the
+                shared conformance suite has pinned that since ADR-0084
+                (``test_a_refusal_is_a_result_and_not_an_exception``) — while
+                ADR-0197 §7 describes the same refusal as raising. Settling it is an
+                amendment to a ratified decision and belongs to a lane that can make
+                one; issue **#1636** carries it. So the clause is narrowed to the
+                three conditions no reading disputes, and neither answer is codified
+                here (`CONTRIBUTING.md` → "No state claims in living documents": a
+                claim in dispute is deleted or re-pointed, never refreshed in place).
+                ADR-0085 §9 declares a method's failure **set** rather than which
+                input produces one, so this class stays in ``resume``'s set either
+                way and nothing about it moves.
 
                 A resume answering a **routed** park raises it on none of the clauses
-                above either: no ``ActionPolicy`` is consulted and no
-                ``PermissionDecision`` recorded, so a refusal is returned as
-                ``RouteOutcome.REFUSED`` (ADR-0197 §7, §13).
+                above: no ``ActionPolicy`` is consulted and no ``PermissionDecision``
+                recorded, so a refusal is returned as ``RouteOutcome.REFUSED``
+                (ADR-0197 §7, §13). That much ADR-0197 decides rather than
+                describes, and it is what this change codifies.
             AuditError: If the resolution could not be recorded.
             ToolBindingError: If the selected tool could not be bound.
         """
