@@ -1737,3 +1737,60 @@ async def test_the_typed_forget_still_destroys_an_episodic_record_by_id() -> Non
 
     assert await harness.memory.get(episode.id) is None
     assert await harness.memory.get(_ECHOED_BELIEF) is not None
+
+
+async def _seed_episodes(memory: FakeMemoryStore, count: int) -> None:
+    """Put ``count`` matching episodes ahead of the belief in the listing's own order.
+
+    ADR-0073 §2's total order is ``last_updated`` descending, so these are stamped later
+    than :func:`_seed_belief`'s ``AT`` and fill the listing's first page.
+    """
+    await memory.write_atomic(
+        [
+            MemoryWrite(
+                record=EpisodicMemory(
+                    id=f"conv-earlier-{index}",
+                    content=f"The user asked: {_ECHOED_UTTERANCE}",
+                    occurred_at=AT + timedelta(minutes=index + 1),
+                    provenance=Provenance(
+                        source=MemorySource.OBSERVED,
+                        confidence=0.9,
+                        last_updated=AT + timedelta(minutes=index + 1),
+                    ),
+                ),
+                mode=MemoryWriteMode.INSERT_IF_ABSENT,
+            )
+            for index in range(count)
+        ]
+    )
+
+
+async def test_the_excluded_kind_is_filtered_by_the_store_and_not_after_the_page() -> None:
+    """ADR-0201 §3: the exclusion is the ``kinds`` argument, applied **before** the cut.
+
+    "An excluded record is not read into ``orchestration``, is not projected into a
+    ``Belief``, and is not discarded after a page has come back." A filter applied to what
+    came back satisfies §1 on a small store and fails here: ``routing._paged`` advances by
+    what the page *asked for* and stops the moment a page comes back short, so a whole
+    first page of episodes discarded after the read is a short page, the walk ends, and a
+    belief sitting behind them is never reached — ``NOT_FOUND`` on a record that plainly
+    exists, which is #1647's own class arriving through the fix for #1637.
+
+    A full page ahead of the belief is the only arrangement that tells the two apart, which
+    is why this case exists beside §6's three: each of those passes against the post-read
+    filter. ADR-0201 §3's other reason is not observable from a test and is not asserted
+    here — projecting every captured turn through ``Engine._project`` pays one
+    ``MemoryStore.get_many`` per record (ADR-0086 §6) for a result thrown away.
+    """
+    harness = _echoing_harness()
+    await _seed_belief(harness.memory, _ECHOED_BELIEF, _ECHOED_CONTENT)
+    await _seed_episodes(harness.memory, DEFAULT_PAGE_SIZE)
+
+    outcome = await harness.engine.converse(_ECHOED_UTTERANCE, timeout=PATIENT)
+
+    assert outcome.routed is not None
+    assert outcome.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    assert outcome.routed.confirmation is not None
+    (subject,) = outcome.routed.confirmation.subject
+    assert isinstance(subject, Belief)
+    assert subject.id == _ECHOED_BELIEF
