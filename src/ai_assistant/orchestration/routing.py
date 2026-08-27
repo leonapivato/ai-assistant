@@ -710,28 +710,49 @@ def _names(wanted: frozenset[str], value: str) -> bool:
 def _same_word(term: str, word: str) -> bool:
     """Whether ``term`` and ``word`` are the same word, give or take one inflection.
 
-    Equality, or one is the other followed by a suffix of :data:`_INFLECTIONS` — which is
-    what keeps ``like`` naming ``likes``, ``sail`` naming ``sailing`` and ``commute``
-    naming ``commutes`` while ``car`` names nothing of ``carpet``. Deliberately a closed
-    suffix list and not a stemmer: a stemmer is a dependency, a vocabulary and a set of
-    surprises, and the tolerance this needs is the difference between the person a user
-    speaks in and the person a stored belief is written in.
+    Equality, or one is the other followed by an ending of :data:`_INFLECTIONS` — which
+    keeps ``like`` naming ``likes``, ``sail`` naming ``sailing`` and ``commute`` naming
+    ``commutes`` while ``car`` names nothing of ``carpet``. Two guards narrow it further,
+    and both exist because the pair this gets wrong ends in a confirmation card naming a
+    record the user did not mean:
 
-    What it does not reach — ``ran`` for ``run``, ``feet`` for ``foot``, ``commuting``
-    for ``commute`` — ends in ``NOT_FOUND``, which is the honest answer and the one the
-    user can act on by saying the record's own word.
+    - **the stem is at least :data:`_STEM` characters**, so ``ad`` does not name the
+      source ``add`` and no two-letter fragment inflects into anything. A
+      ``SourceGrant.source`` is an identifier rather than English, and short identifiers
+      are exactly where a suffix rule invents relationships;
+    - **a bare** ``d`` **needs a stem ending in** ``e`` (``move`` → ``moved``), which is
+      the only shape it is an inflection of.
+
+    Deliberately not a stemmer: a stemmer is a dependency, a vocabulary and a set of
+    surprises, and the tolerance this needs is the difference between the person a user
+    speaks in and the person a stored belief is written in. What it does not reach —
+    ``ran`` for ``run``, ``feet`` for ``foot``, ``commuting`` for ``commute`` — ends in
+    ``NOT_FOUND``, the honest answer, and the user says the record's own word instead.
+
+    **What no rule short of a dictionary closes**, stated rather than implied: a pair
+    like ``bus`` and ``buss`` is spelled exactly as ``cat`` and ``cats`` are, so a rule
+    that admits the plural admits the pair. Distinguishing them needs a lexicon, which
+    is a dependency and a vocabulary this module would then own; what stands in its
+    place is §7's confirmation, which renders the typed record before anything of the
+    user's is destroyed.
     """
     if term == word:
         return True
     longer, shorter = (word, term) if len(word) > len(term) else (term, word)
-    return any(longer == shorter + suffix for suffix in _INFLECTIONS)
+    if len(shorter) < _STEM:
+        return False
+    return any(
+        longer == shorter + ending
+        for ending in _INFLECTIONS
+        if ending != "d" or shorter.endswith("e")
+    )
 
 
-#: The endings one word of a query may differ from a record's word by, and the whole of
-#: the tolerance :func:`_same_word` has. Small on purpose: every entry widens what a
-#: destructive operation may resolve to, and the cost of an ending that is missing is a
-#: ``NOT_FOUND`` the user can answer, while the cost of one too many is a confirmation
-#: card naming a record they did not mean.
+#: The shortest word :func:`_same_word` will inflect. Below it a suffix rule is inventing
+#: a relationship rather than recognising one — ``ad`` and ``add`` are not the same word,
+#: and a source identifier is not English.
+_STEM: Final = 3
+
 _INFLECTIONS: Final = ("s", "es", "d", "ed", "ing")
 
 #: One word of a record or a query: a run of letters or digits. Underscores are
@@ -760,8 +781,10 @@ _WORD: Final = re.compile(r"[^\W_]+")
 #:   without which "I have no pets" names the belief "I have pets";
 #: - **conjunctions** — ``and``, ``or``, ``but``, ``if``, ``when``, ``where`` — without
 #:   which "tea or coffee" names the belief that says "tea and coffee";
-#: - **particles and directional prepositions** — ``into``, ``over``, ``under``, ``up``,
-#:   ``out``, ``off``, ``down`` — which say where a thing is or went;
+#: - **every preposition but the two that introduce a reference** — ``for``, ``with``,
+#:   ``to``, ``from``, ``in``, ``on``, ``at``, ``by``, ``into``, ``over``, ``under`` —
+#:   which say what a thing's relationship to another is, or where it is or went, so
+#:   without them "I work for Acme" names the belief "I work with Acme";
 #: - **the mental-state and reporting verbs** — ``know``, ``remember``, ``think``,
 #:   ``say``, ``tell``, ``told`` — which are what a belief asserts, not how it is
 #:   referred to.
@@ -777,8 +800,12 @@ _FRAMING: Final[frozenset[str]] = frozenset(
         # pronouns and possessives
         "i me my mine myself we us our ours you your yours he him his she her hers",
         "it its they them their theirs",
-        # the prepositions that frame a reference rather than place a thing
-        "about of to from for on in at with by as",
+        # the two prepositions that introduce a *reference* to a record rather than say
+        # anything about it — "the question you asked me **about** my commute". The rest
+        # are absent for the reason below: `for` and `with` are the difference between
+        # working for Acme and working with them, and a query that lost them would name
+        # the belief asserting the other one.
+        "about of",
         # copulas, auxiliaries and modals
         "am is are was were be been being do does did done have has had",
         "will would shall should can could may might must",

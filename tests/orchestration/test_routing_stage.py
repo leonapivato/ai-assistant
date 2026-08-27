@@ -856,6 +856,40 @@ async def test_a_query_joining_its_terms_differently_does_not_name_the_record() 
     assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
 
 
+async def test_a_query_whose_preposition_the_record_changes_does_not_name_it() -> None:
+    """A preposition that says what a relationship *is* is not framing either.
+
+    "I work for Acme" and "I work with Acme" are different claims about the user, and
+    with one belief held there is no second candidate for the difference to show up as
+    ambiguity: the route would resolve to the record asserting the other relationship and
+    park a confirmation on it. Only ``about`` and ``of`` are framing, because those are
+    the two that introduce a *reference* to a record — "the question you asked me about
+    my commute" — rather than say anything about what it holds.
+    """
+    operations = Operations(beliefs_held=(belief("b-1", "I work with Acme"),))
+
+    resolution = await resolve(operations, RoutableOperation.FORGET, "that I work for Acme")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
+async def test_a_short_source_identifier_is_not_inflected_into_another_one() -> None:
+    """The suffix tolerance does not reach a two-letter word, and a source is not English.
+
+    ``SourceGrant.source`` is an identifier the system owns rather than prose, and short
+    identifiers are where a suffix rule invents relationships that are not there: ``ad``
+    and ``add`` differ by the same letter ``move`` and ``moved`` do. A ``revoke`` that
+    resolved this would withdraw a grant the user did not name — and ADR-0197 §7 makes
+    that the worst shape a failure takes here, because "a revoke of the wrong source
+    silently stops the assistant reading something the user relies on".
+    """
+    operations = Operations(grants_held=(grant("add"),))
+
+    resolution = await resolve(operations, RoutableOperation.REVOKE, "my ad")
+
+    assert resolution == Unresolved(outcome=RouteOutcome.NOT_FOUND, listing=None)
+
+
 async def test_a_framed_query_matching_two_beliefs_is_still_ambiguous() -> None:
     """Widening the match does not widen what may be **performed** (§5).
 
