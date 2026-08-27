@@ -8199,24 +8199,23 @@ class AssistantEngine(Protocol):
                 parked step, a ruling the trail no longer holds on the restart path,
                 or a step absent from the stored execution.
 
-                **Whether a human's own refusal is among them is open, and this
-                clause deliberately says neither.** The sentence that used to assert
-                it — "If the human refused" — is in dispute rather than merely stale:
-                ADR-0042 §4 rules that "the adapter conveys consent; the policy rules
-                on it; the engine records and executes", every implementation of this
-                surface returns a
-                :attr:`~ai_assistant.core.types.Disposition.DENIED` step, and the
-                shared conformance suite has pinned that since ADR-0084
-                (``test_a_refusal_is_a_result_and_not_an_exception``) — while
-                ADR-0197 §7 describes the same refusal as raising. Settling it is an
-                amendment to a ratified decision and belongs to a lane that can make
-                one; issue **#1636** carries it. So the clause is narrowed to the
-                three conditions no reading disputes, and neither answer is codified
-                here (`CONTRIBUTING.md` → "No state claims in living documents": a
-                claim in dispute is deleted or re-pointed, never refreshed in place).
-                ADR-0085 §9 declares a method's failure **set** rather than which
-                input produces one, so this class stays in ``resume``'s set either
-                way and nothing about it moves.
+                **A human's own refusal is not among them, and this clause is
+                narrowed rather than re-worded.** The sentence that used to assert it
+                — "If the human refused" — described no implementation this
+                repository has ever had: ADR-0042 §4 rules that "the adapter conveys
+                consent; the policy rules on it; the engine records and executes", so
+                a refusal is a ``DENY`` **ruling**, and the shared conformance suite
+                has pinned that against every implementation since ADR-0084
+                (``test_a_refusal_is_a_result_and_not_an_exception``). ADR-0197 §7
+                described the same refusal as raising "exactly as it does today", and
+                its own **amendment of 2026-08-27** records that as a stale
+                description rather than a decision. So the list above is exactly the
+                conditions that hold, and what this docstring should say *positively*
+                about a refusal is issue **#1636**'s to restate — it is deleted here
+                rather than refreshed in place (`CONTRIBUTING.md` → "No state claims
+                in living documents"). ADR-0085 §9 declares a method's failure
+                **set** rather than which input produces one, so this class stays in
+                ``resume``'s set either way and nothing about it moves.
 
                 A resume answering a **routed** park raises it on none of the clauses
                 above: no ``ActionPolicy`` is consulted and no ``PermissionDecision``
