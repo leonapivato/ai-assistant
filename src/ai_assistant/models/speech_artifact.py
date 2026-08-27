@@ -38,6 +38,17 @@ place only once every file matches the manifest, and then re-hashes **every** fi
 in the destination — because an sdist or a stale staging directory can carry a
 corrupted file that no download would ever replace. Presence is not trust
 (ADR-0024 §5).
+
+**And a file the manifest does not name is refused rather than ignored**, which
+is the half a per-file check does not give on its own. The build force-includes
+the whole vendored *directory*, so anything sitting in it is packaged — a file
+left behind by an earlier pin, or one an attacker with write access to the tree
+dropped there. Verifying only the named files would let such a file ship under
+this project's name with no digest, no notice and no mention in the manifest,
+which is exactly what "the SHA-256 of every file as shipped" is supposed to
+foreclose. This lane met the shape rather than imagining it: dropping two files
+from a manifest left them on disk and staged for packaging until they were
+removed by hand.
 """
 
 from __future__ import annotations
@@ -298,19 +309,42 @@ def missing_files(artifact: SpeechArtifact, directory: Path) -> list[str]:
     return sorted(name for name in artifact.manifest if not (directory / name).is_file())
 
 
+def unexpected_files(artifact: SpeechArtifact, directory: Path) -> list[str]:
+    """Return the files in ``directory`` the manifest does not name, sorted.
+
+    Args:
+        artifact: The artifact whose manifest to check against.
+        directory: The directory to inspect.
+
+    Returns:
+        Their paths relative to ``directory``, with ``/`` separators as the
+        manifest spells them.
+    """
+    if not directory.is_dir():
+        return []
+    named = set(artifact.manifest)
+    return sorted(
+        path.relative_to(directory).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file() and path.relative_to(directory).as_posix() not in named
+    )
+
+
 def verify_artifact(artifact: SpeechArtifact, directory: Path) -> None:
-    """Re-hash every manifest file in ``directory`` and reject any that differs.
+    """Check ``directory`` holds the manifest's files, their bytes, and nothing else.
 
     Presence is not trust (ADR-0024 §5): a file already staged, or one unpacked
-    from an sdist, is hashed here exactly as a freshly downloaded one is.
+    from an sdist, is hashed here exactly as a freshly downloaded one is. Absence
+    of anything else is checked too, because the build packages the whole
+    directory — see this module's docstring for why that is not a nicety.
 
     Args:
         artifact: The artifact whose manifest to verify against.
         directory: The directory holding the artifact.
 
     Raises:
-        SpeechArtifactError: If a file is missing, unreadable, or its digest does
-            not match the recorded manifest.
+        SpeechArtifactError: If a file is missing, unreadable, carries a digest
+            the manifest does not record, or is not named by the manifest at all.
     """
     for name in sorted(artifact.manifest):
         path = directory / name
@@ -332,6 +366,15 @@ def verify_artifact(artifact: SpeechArtifact, directory: Path) -> None:
                 f"expected {expected}, got {actual}"
             )
             raise SpeechArtifactError(msg)
+    unexpected = unexpected_files(artifact, directory)
+    if unexpected:
+        msg = (
+            f"speech artifact {artifact.directory_name!r} holds "
+            f"{len(unexpected)} file(s) its manifest does not name, and the build "
+            f"packages the whole directory: {', '.join(unexpected)}. Remove them, or "
+            f"record them in the manifest if they are meant to ship."
+        )
+        raise SpeechArtifactError(msg)
 
 
 def ensure_artifact(

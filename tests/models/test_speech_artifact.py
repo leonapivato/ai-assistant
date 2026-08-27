@@ -28,6 +28,7 @@ from ai_assistant.models.speech_artifact import (
     manifest_digest,
     missing_files,
     packaged_artifact_dir,
+    unexpected_files,
     verify_artifact,
 )
 
@@ -134,6 +135,14 @@ def test_nothing_is_missing_from_the_packaged_artifact(artifact: SpeechArtifact)
     assert missing_files(artifact, packaged_artifact_dir(artifact)) == []
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("artifact", SPEECH_ARTIFACTS, ids=lambda a: a.directory_name)
+def test_nothing_unmanifested_is_staged_for_packaging(artifact: SpeechArtifact) -> None:
+    # What this working tree would actually ship, checked against what it says it
+    # ships. The two are the same list or the build packages an unrecorded file.
+    assert unexpected_files(artifact, packaged_artifact_dir(artifact)) == []
+
+
 # --- acquisition -------------------------------------------------------------
 
 
@@ -203,6 +212,55 @@ def test_a_seam_that_produces_nothing_is_reported(tmp_path: Path) -> None:
 
     with pytest.raises(SpeechArtifactError, match="did not produce"):
         ensure_artifact(artifact, directory, download=_SilentDownload())
+
+
+def test_a_file_the_manifest_does_not_name_is_refused(tmp_path: Path) -> None:
+    # The build force-includes the whole vendored directory, so anything sitting
+    # in it ships — a file left behind by an earlier pin, or one dropped there by
+    # anyone with write access to the tree. Verifying only the *named* files would
+    # let such a file be redistributed under this project's name with no digest and
+    # no notice, which is what "the SHA-256 of every file as shipped" forecloses.
+    contents = {"model.onnx": b"weights"}
+    artifact, directory = _artifact(tmp_path, contents)
+    directory.mkdir(parents=True)
+    (directory / "model.onnx").write_bytes(contents["model.onnx"])
+    (directory / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with pytest.raises(SpeechArtifactError, match="does not name"):
+        verify_artifact(artifact, directory)
+
+
+def test_an_unexpected_file_is_found_in_a_nested_directory(tmp_path: Path) -> None:
+    # The voice's files sit flat today, but a re-pin could nest them, and a check
+    # that only listed the top level would stop seeing anything below it.
+    contents = {"model.onnx": b"weights"}
+    artifact, directory = _artifact(tmp_path, contents)
+    (directory / "extra").mkdir(parents=True)
+    (directory / "model.onnx").write_bytes(contents["model.onnx"])
+    (directory / "extra" / "stowaway.bin").write_bytes(b"nested")
+
+    assert unexpected_files(artifact, directory) == ["extra/stowaway.bin"]
+
+
+def test_acquisition_refuses_a_directory_carrying_an_extra_file(tmp_path: Path) -> None:
+    # `ensure_artifact` is what the build calls, so the refusal has to bite there
+    # and not only in the helper beneath it.
+    contents = {"model.onnx": b"weights"}
+    artifact, directory = _artifact(tmp_path, contents)
+    directory.mkdir(parents=True)
+    (directory / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with pytest.raises(SpeechArtifactError, match="does not name"):
+        ensure_artifact(artifact, directory, download=_RecordingDownload(contents))
+
+
+def test_an_exactly_matching_directory_has_nothing_unexpected(tmp_path: Path) -> None:
+    contents = {"model.onnx": b"weights", "tokens.txt": b"tokens"}
+    artifact, directory = _artifact(tmp_path, contents)
+
+    ensure_artifact(artifact, directory, download=_RecordingDownload(contents))
+
+    assert unexpected_files(artifact, directory) == []
 
 
 def test_verification_names_a_missing_file(tmp_path: Path) -> None:
