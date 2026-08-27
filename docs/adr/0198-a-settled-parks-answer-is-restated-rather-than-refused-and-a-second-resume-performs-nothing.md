@@ -1,6 +1,6 @@
 # 198. A settled park's answer is restated rather than refused, and a second resume performs nothing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-27
 - **Partially supersedes:**
   [ADR-0042](0042-the-interface-adapter-contract.md) — §4's rule that
