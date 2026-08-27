@@ -4625,10 +4625,10 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
         # It does not promise the answer did not land, and does not promise it did.
         assert "may have carried the action out" in said
         assert "may never have received the " in said
-        # Both reach the owner's account of what answering again does, and reach the
-        # *same* one — the ask's own device, so two endings cannot drift into two
-        # different instructions.
-        assert said.rstrip().endswith("PARK_ASK_AGAIN")
+        # Both reach the owner's account of where the park can be answered now, and
+        # reach the *same* one — the ask's own device, so two endings cannot drift into
+        # two different instructions.
+        assert said.rstrip().endswith("PARK_WHERE_NOW")
     # Their openings are what differ, because only one of them was an act of the owner's.
     assert unresolved.startswith('\nconst PARK_UNRESOLVED =\n  "You stopped waiting')
     assert "You stopped waiting" not in lost
@@ -4640,7 +4640,7 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     # recorded, where "the step stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM``
     # unresolved and its row intact… The park is unanswerable, not erased." A page
     # reading absence as a resolution would tell the owner the opposite of the state.
-    route = _constant(script, "PARK_ASK_AGAIN")
+    route = _constant(script, "PARK_WHERE_NOW")
     assert "Press Confirmations" in route
     assert "can still be answered" in route
     assert "nothing here calls it resolved" in route
@@ -4656,20 +4656,12 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     assert "after a reload" not in route
     assert "will not offer that park again" not in route
 
-    # **Three things it has to say, and each is a way of getting it wrong.** That a
-    # second answer performs nothing (§1, ADR-0044 §2b) — without which the pair reads
-    # as a way to carry the action out twice. That a recorded answer stands even where
-    # it disagrees with the one being sent — without which the pair reads as a way to
-    # *change* an answer, which is an act the engine does not have. And that the
-    # assistant may hold neither the park nor its answer any longer (§4), which is the
-    # arm this page must not render as a refusal.
-    assert "answered once" in route
-    assert "never carries the action out a second time" in route
-    assert "stands even where it is not the one you send now" in route
-    assert "this is not a way" in route
-    assert "send the answer you want rather than a question" in route
-    assert "it can no longer say what" in route
-    assert "rather than call it refused" in route
+    # **And it promises no control, because at this point there may be none.** A row is
+    # what carries the pair, and a row built from the recovery listing is replaced on
+    # the next read — so a park whose first answer landed is dropped from the listing and
+    # its row with it (#1665). What is promised is scoped to a park still on screen,
+    # which is true whether or not the listing kept it.
+    assert "Where this park is still on screen" in route
 
     # And the wait says there is no deadline, rather than implying one.
     waiting = _constant(script, "PARK_WAITING")
@@ -4677,6 +4669,57 @@ def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> N
     answered = _constant(script, "PARK_ANSWERED")
     assert "no longer the live one" in answered
     assert len({unresolved, lost, waiting, answered, route}) == 5
+
+
+def test_the_long_account_of_a_re_offer_is_the_rows_and_not_the_endings() -> None:
+    """What driving the page settled, and the file's own division is what decides it.
+
+    Every ending's sentence is written into the panel's fault slot and the row's is
+    written beside the pair, so a clause both carry lands on screen twice. ``PARK_ROUTE_BACK``
+    was short enough for that to pass unnoticed and this account is not — at a desktop
+    width the whole of it rendered twice, three inches apart, and a consent surface that
+    is not read is the failure this file spends the most words preventing.
+
+    So the split follows the division the file already keeps: **what happened** is said
+    once, at the ending, in the fault line — and **what is still true** is what the row
+    carries. The long account of what pressing the pair now means is a fact about the
+    pair, so it goes where the pair is; the ending carries the short one, which has to be
+    true even where no row survived the listing read that followed it (#1665).
+    """
+    script = _code("app.js")
+
+    row = _constant(script, "PARK_ASK_AGAIN")
+    ending = _constant(script, "PARK_WHERE_NOW")
+
+    # **Three things the row's account has to say, and each is a way of getting it
+    # wrong.** That a second answer performs nothing (ADR-0198 §1, ADR-0044 §2b) —
+    # without which the pair reads as a way to carry the action out twice. That a
+    # recorded answer is the one that stands — without which the pair reads as a way to
+    # *change* an answer, which is an act the engine does not have. And that the
+    # assistant may hold neither the park nor its answer any longer (§4), which is the
+    # arm this page must not render as a refusal.
+    assert "answered once" in row
+    assert "never carries the action out a second time" in row
+    assert "the answer already recorded, and that one stands" in row
+    assert "is not a way to change an answer" in row
+    assert "send the answer you want rather than a question" in row
+    assert "it can no longer say what became of" in row
+    assert "rather than call it refused" in row
+
+    # Only the row carries it, and only the endings carry the other.
+    assert "PARK_ASK_AGAIN" in _constant(script, "PARK_NOT_KNOWN")
+    for named in (
+        "PARK_UNRESOLVED",
+        "PARK_LOST",
+        "PARK_REFUSAL_NOT_KNOWN",
+        "PARK_REFUSAL_AFTER_UNKNOWN",
+        "PARK_REPLY_UNREADABLE",
+    ):
+        said = _constant(script, named)
+        assert said.rstrip().endswith("PARK_WHERE_NOW"), named
+        assert "PARK_ASK_AGAIN" not in said, named
+    assert "PARK_WHERE_NOW" not in _constant(script, "PARK_NOT_KNOWN")
+    assert ending != row
 
 
 def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
@@ -4867,7 +4910,7 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     assert "could not read an outcome from" in said
     assert "not known" in said
     assert "Nothing was re-sent and nothing was cancelled." in said
-    assert said.rstrip().endswith("PARK_ASK_AGAIN")
+    assert said.rstrip().endswith("PARK_WHERE_NOW")
     # It does not borrow a cause it has not established.
     for attributed in ("You stopped waiting", "connection carrying", "gateway refused that answer"):
         assert attributed not in said, attributed
@@ -4938,7 +4981,7 @@ def test_a_refusal_of_a_second_answer_is_never_read_as_a_denial_of_the_first() -
     assert "does not say what" in said
     assert "not a park it declined" in said
     assert "still not known" in said
-    assert said.rstrip().endswith("PARK_ASK_AGAIN")
+    assert said.rstrip().endswith("PARK_WHERE_NOW")
     assert said != _constant(script, "PARK_REFUSAL_NOT_KNOWN")
 
 

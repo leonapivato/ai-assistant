@@ -1997,19 +1997,49 @@ const PARK_WAITING =
 // table (ADR-0198 §4) — after which the token names nothing and the engine says so.
 // Neither of those is a denial, and `PARK_REFUSAL_AFTER_UNKNOWN` is where this page
 // keeps that promise.
+//
+// **It is the *row's* account and not the ending's, which is what driving the page
+// settled.** Both used to end in `PARK_ROUTE_BACK` and a reload was short enough for
+// that to pass unnoticed; this is not, and at a desktop width the whole of it landed on
+// screen twice — once in the fault line and once in the row three inches below it. A
+// consent surface that is not read is the failure this file spends the most words
+// preventing, so the long account goes where the pair is and the ending carries
+// `PARK_WHERE_NOW` instead. The file's own division is what decides which: what happened
+// is said once, at the ending; what is still true is what the row carries.
 const PARK_ASK_AGAIN =
-  "The controls for that park have come back, and pressing one is safe: a park is " +
-  "answered once, so a second answer never carries the action out a second time. " +
-  "If the first answer did arrive, what comes back is the answer already recorded, " +
-  "and that one stands even where it is not the one you send now — this is not a way " +
-  "to change an answer. If the first answer never arrived, the one you send now is " +
-  "the one that stands, so send the answer you want rather than a question. And if " +
-  "the assistant is holding neither that park nor its answer any longer, after a " +
-  "restart or once enough other parks have been answered, it can no longer say what " +
-  "became of yours: this browser will say so rather than call it refused. " +
-  "Press Confirmations to read what is still waiting: a park still listed there is " +
-  "one that can still be answered. A park the listing no longer offers is one this " +
-  "browser cannot answer from the listing — the listing says which parks are " +
+  "The controls have come back, and pressing one is safe: a park is answered once, so " +
+  "a second answer never carries the action out a second time. If the first answer did " +
+  "arrive, what comes back is the answer already recorded, and that one stands — this " +
+  "is not a way to change an answer. If it never arrived, the one you send now is the " +
+  "one that stands, so send the answer you want rather than a question. And if the " +
+  "assistant is holding neither that park nor its answer any longer, after a restart " +
+  "or once enough other parks have been answered, it can no longer say what became of " +
+  "yours: this browser will say so rather than call it refused.";
+
+// Where to answer it now, shared by every ending that read no reply.
+//
+// **It promises no control, because at this point there may be none.** The pair comes
+// back on the token, but a *row* is what carries it, and a row built from the recovery
+// listing is replaced on the next read — so a park whose first answer did land is
+// dropped from the listing (a settled binding is never listed, ADR-0198 §4) and its row
+// goes with it. What survives is a row a turn of this page's own parked, which lives in
+// the answer panel and no listing read clears. So this says "where this park is still on
+// screen", which is true either way, and #1665 carries the case it leaves: a stranded
+// token whose row the listing has dropped can no longer ask what was decided, though
+// ADR-0198 would now answer it.
+//
+// **And it keeps round 4's second blocker whole**: absence is read as nothing at all.
+// `AuditTrail.pending_confirmation` answers `None` for a binding already resolved *and*
+// for a `CONFIRM` whose origin was never recorded (ADR-0184 §2), for which "the step
+// stays durably `AWAITING_APPROVAL` with its `CONFIRM` unresolved and its row intact…
+// The park is unanswerable, not erased" — so a page reading a missing entry as a
+// resolution would tell the owner the opposite of the state.
+const PARK_WHERE_NOW =
+  "Where this park is still on screen you can answer it again: a park is answered " +
+  "once, so a second answer never carries the action out twice, and the row says what " +
+  "pressing one now means. Press Confirmations to read what is still waiting — a park " +
+  "still listed there is one that can still be answered. A park the listing no longer " +
+  "offers is one this browser cannot answer from it: the listing says which parks are " +
   "answerable and not why one is missing, so nothing here calls it resolved.";
 
 // **What a row carries while its token is claimed and its answer went unread.**
@@ -2063,7 +2093,7 @@ const PARK_UNRESOLVED =
   "What became of it is not known: the answer was sent and nothing here read a reply, " +
   "so the assistant may have carried the action out and may never have received the " +
   "answer at all. Nothing was re-sent and nothing was cancelled. " +
-  PARK_ASK_AGAIN;
+  PARK_WHERE_NOW;
 
 // **A refusal the gateway answered, that is nonetheless not known** (rounds 5 and 6).
 // ADR-0177 §7's third clause is read from ADR-0168 §9's distinction "and from nothing
@@ -2099,7 +2129,7 @@ const PARK_REFUSAL_NOT_KNOWN =
   "and the hub, or this browser could not read the condition at all. So what became of " +
   "it is not known: the action may have been carried out, with only the reply lost. " +
   "Nothing was re-sent and nothing was cancelled. " +
-  PARK_ASK_AGAIN;
+  PARK_WHERE_NOW;
 
 // **A refusal of a *second* answer, which says nothing about the first** (#1621).
 //
@@ -2133,7 +2163,7 @@ const PARK_REFUSAL_AFTER_UNKNOWN =
   "no longer find is not a park it declined. So what became of the earlier answer is " +
   "still not known: the action may have been carried out. Nothing was re-sent and " +
   "nothing was cancelled. " +
-  PARK_ASK_AGAIN;
+  PARK_WHERE_NOW;
 
 // **A reply that was read and cannot be made into an answer** (rounds 9 and 10), which
 // is round 8's blocker one step in: `asObject` answers `{}` for a `2xx` body that
@@ -2155,7 +2185,7 @@ const PARK_REPLY_UNREADABLE =
   "the answer. So what became of the park is not known: the action may have been " +
   "carried out, with only the account of it lost. " +
   "Nothing was re-sent and nothing was cancelled. " +
-  PARK_ASK_AGAIN;
+  PARK_WHERE_NOW;
 
 // **The same ending, reached without the owner asking for it**, which is round 4's
 // first blocker. A `fetch` that rejects is the browser's own request failing with no
@@ -2179,7 +2209,7 @@ const PARK_LOST =
   "became of it is not known: the answer was sent and nothing here read a reply, so " +
   "the assistant may have carried the action out and may never have received the " +
   "answer at all. Nothing was re-sent and nothing was cancelled. " +
-  PARK_ASK_AGAIN;
+  PARK_WHERE_NOW;
 
 // **A row that is no longer the live one, said rather than left looking answerable**
 // (#1536). `spent` is per park and one park is on screen twice — a turn that parks
