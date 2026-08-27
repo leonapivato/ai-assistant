@@ -16,16 +16,18 @@ assembles the user's own utterance and a closed enum this repository owns, and
 **nothing else**, so ADR-0098 §2's assembler obligation is vacuous by construction
 rather than discharged by a delimiter.
 
-**What lives here and what lives in the engine.** This module holds the two halves
-that are about *routing*: the model call and its envelope (:class:`RoutingStage`),
-and the deterministic resolution and performance of a named operation
-(:func:`resolve`, :func:`perform`). The engine drives them, because the two resources
-a route holds — ADR-0197 §7's ceiling slot and §9's reserved ``route_id`` — are taken
-in the engine's own park table under the engine's own lock, and a second holder of
-either would be a second answer to the question the ceiling exists to bound.
+**What lives here and what lives in the engine.** This module holds what is about
+*routing*: the model call and its envelope and the write-only trail seam
+(:class:`RoutingStage`), and the deterministic resolution and performance of a named
+operation (:func:`resolve`, :func:`perform`). The engine drives them, because the two
+resources a route holds — ADR-0197 §7's ceiling slot and §9's reserved ``route_id`` —
+are taken in the engine's own park table under the engine's own lock, and a second
+holder of either would be a second answer to the question the ceiling exists to bound.
 
 **The stage adds no member to** ``ModelProvider`` **and no Protocol for itself**
-(ADR-0197 §2). ``complete`` is the whole of what it consumes at the model seam.
+(ADR-0197 §2). ``complete`` is the whole of what it consumes at the model seam, and
+:class:`~ai_assistant.core.protocols.RoutingRecorder` is the whole of what it consumes
+at the trail seam.
 :class:`RoutedOperations` is not a contract: it is this module's own annotation for
 the engine's own operations, which is what keeps ``resolve`` and ``perform``
 testable without an engine and what makes ADR-0197 §2's third clause — "it performs
@@ -43,7 +45,7 @@ from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 import structlog
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import ModelError, RoutingTrailError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     Message,
@@ -55,13 +57,14 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.protocols import ModelProvider, RoutingRecorder
     from ai_assistant.core.types import (
         Belief,
         PermissionDecision,
         Question,
         RecordedInvocation,
         RoutedListing,
+        RoutedOperationRecord,
         SourceGrant,
         SourceReadRecord,
         SpendTotal,
@@ -199,11 +202,18 @@ class RoutedRoute:
 class RoutingStage:
     """Name one of the hub's own operations from one sentence, or decline (§1, §4).
 
-    Consumes exactly one contract — the injected
-    :class:`~ai_assistant.core.protocols.ModelProvider` — and originates **exactly
-    one** ``complete()`` call per pass. It does not loop, does not call again on a
-    failure that call returns, and takes no repair round. What the injected provider
-    does below that seam is not this stage's to constrain (ADR-0011 §2).
+    Reaches the model through the injected
+    :class:`~ai_assistant.core.protocols.ModelProvider` and originates **exactly one**
+    ``complete()`` call per pass. It does not loop, does not call again on a failure
+    that call returns, and takes no repair round. What the injected provider does below
+    that seam is not this stage's to constrain (ADR-0011 §2).
+
+    **It holds the write-only half of §9's trail, and holds nothing wider** (ADR-0197
+    §9): a :class:`~ai_assistant.core.protocols.RoutingRecorder` and never a
+    :class:`~ai_assistant.core.protocols.RoutingTrail`. What that forecloses is worse
+    than a cursor — a stage handed the whole trail could call ``clear`` and **erase the
+    record of its own decisions** — and it is a ``mypy --strict`` failure rather than a
+    review note, which is ADR-0185 §4's own standard on ADR-0097 §3's argument.
 
     **Everything that is not one of the two legal envelope shapes is a decline**, and
     that default is the right one rather than the lazy one. The three ways this stage
@@ -214,8 +224,8 @@ class RoutingStage:
     turn, sets no flag on ``TurnOutcome``, and takes no repair round.
     """
 
-    def __init__(self, *, model: ModelProvider) -> None:
-        """Wire the stage to the one model seam it routes through.
+    def __init__(self, *, model: ModelProvider, recorder: RoutingRecorder) -> None:
+        """Wire the stage to the model seam it routes through and the trail it writes.
 
         **One parameter, and no route of its own.** ADR-0197 §11 leaves "which model
         answers" undecided and §2 gives the stage no setting, so the seam it is handed
@@ -229,8 +239,17 @@ class RoutingStage:
                 composition root (ADR-0028 §4). ``Engine.__init__`` receives no
                 ``ModelProvider`` of its own, and reaching a concrete subsystem's
                 internals to find one is what golden rule 1 forbids.
+            recorder: The injected ``RoutingRecorder`` (ADR-0197 §9). **Required with no
+                default**, so a composition that omits it does not type-check —
+                ADR-0185 §5's posture on ADR-0097 §5's pattern, and the reason a
+                deployment cannot end up routing without recording. Structural typing
+                means the one ``permissions/`` store satisfies it and ``RoutingTrail``
+                alike, so the composition root passes one object here and to a future
+                read surface; what this stage cannot do is *name* ``recent``, ``export``
+                or ``clear``.
         """
         self._model = model
+        self._recorder = recorder
 
     async def route(self, utterance: str) -> RoutedRoute | None:
         """Name one operation and its query, or ``None`` to decline (ADR-0197 §4).
@@ -251,6 +270,42 @@ class RoutingStage:
             _log.warning("routing_declined", reason="model_error", exc_info=True)
             return None
         return _route_of(answer.content)
+
+    async def record(self, record: RoutedOperationRecord) -> bool:
+        """Append one row of §9's trail, and say whether the act it precedes may proceed.
+
+        **The row is written before the act it precedes, always** (ADR-0197 §9), and this
+        is the seam that write goes through — which is why the recorder is held here
+        rather than by the engine: §9 puts the capability on the stage, so what the stage
+        can reach is ``record`` and nothing else.
+
+        The row itself is built by the caller: its ``id`` is minted from the id factory
+        the engine already holds injected, and its ``decided_at`` comes from the injected
+        clock (ADR-0009). The store mints nothing and reads no clock.
+
+        **A refusal is classified here rather than raised**, because §9 gives the caller
+        exactly one thing to do with it: not proceed. The pass ends in
+        ``RouteOutcome.UNRECORDED``, the operation is not called, no park is registered
+        and no token is minted — for a read-only member as much as for a confirm-owed
+        one, which is one ordering and one failure mode rather than two.
+
+        Args:
+            record: The row to append.
+
+        Returns:
+            Whether the row landed. ``False`` is §9's refuse-to-act.
+        """
+        try:
+            await self._recorder.record(record)
+        except RoutingTrailError:
+            _log.warning(
+                "route_unrecorded",
+                operation=record.operation.value,
+                approval=record.approval.value,
+                exc_info=True,
+            )
+            return False
+        return True
 
 
 def _route_of(content: str) -> RoutedRoute | None:
@@ -277,7 +332,16 @@ def _route_of(content: str) -> RoutedRoute | None:
     """
     try:
         envelope = json.loads(content)
-    except ValueError:
+    except ValueError, RecursionError:
+        # ``RecursionError`` beside ``ValueError`` because the parser raises it rather
+        # than a decode error on a deeply nested reply — thousands of nested arrays are
+        # syntactically valid JSON and structurally unusable — and ADR-0197 §4 admits no
+        # third outcome: "anything that is not one of the two legal envelope shapes … is
+        # a **decline**. The routing stage raises nothing to the caller." Letting it
+        # propagate would fail an ordinary ask that routing was never meant to touch,
+        # which is the failure §4's decline-everything default exists to prevent. The
+        # ``try`` wraps the parse alone, so no recursion failure from anywhere else is
+        # swallowed here.
         _log.warning("routing_declined", reason="unparseable_reply")
         return None
     if not isinstance(envelope, dict):

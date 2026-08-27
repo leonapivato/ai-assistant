@@ -95,7 +95,6 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     NotificationBudgetError,
     PlanningError,
-    RoutingTrailError,
     TraceStoreError,
     UnknownContinuationError,
 )
@@ -175,7 +174,6 @@ if TYPE_CHECKING:
         NotificationPolicy,
         NotificationStore,
         PlanStore,
-        RoutingRecorder,
         SourceReadTrail,
         SpendLedger,
         TraceRetention,
@@ -1420,7 +1418,6 @@ class Engine:
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
-        routing_recorder: RoutingRecorder | None = None,
         routed_confirmation_ttl: timedelta = _DEFAULT_ROUTED_CONFIRMATION_TTL,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
@@ -1759,15 +1756,10 @@ class Engine:
                 *producer's*; see that module for why the seam is local.
             routing: The operation-routing stage (ADR-0197 §1, §2), or ``None`` on a
                 deployment that routes nothing — where the pipeline is exactly what it was
-                before this decision, and every ask plans. Wired **together with**
-                ``routing_recorder`` or not at all; the two are one obligation, because a
-                stage with no recorder can take no route (ADR-0197 §9 stops the act the
-                row precedes) and a recorder with no stage records nothing.
-            routing_recorder: The write-only half of ADR-0197 §9's trail — the seam the
-                stage holds, and the reason it can neither read nor ``clear`` what it
-                wrote. One ``permissions/`` store satisfies it and ``RoutingTrail`` alike,
-                so the composition root passes one object here and to a future read
-                surface.
+                before this decision, and every ask plans. **One parameter and not two**:
+                ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
+                façade never holds a trail seam of any width and cannot be wired into the
+                half-configured state where a stage could route without recording.
             routed_confirmation_ttl: ``Settings.routed_confirmation_ttl`` (ADR-0197 §7).
                 How long a routed park stays answerable before it is evicted and its
                 ceiling slot released. Positive and finite, with no spelling for "never":
@@ -1961,18 +1953,6 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._max_notification_budget = max_notification_budget
-        # ADR-0197 §1 and §9 are one wiring obligation rather than two. A stage with no
-        # recorder could never take a route — §9 stops the act a row precedes, so every
-        # pass would end `UNRECORDED` while the deployment looked configured — and a
-        # recorder with no stage is a store nothing writes to. Refused at construction
-        # rather than discovered at the first "forget that I ...".
-        if (routing is None) != (routing_recorder is None):
-            msg = (
-                "routing and routing_recorder are wired together or not at all: a routing "
-                "stage with no recorder can take no route, because ADR-0197 §9 stops the act "
-                "the row precedes, and a recorder with no stage records nothing"
-            )
-            raise ConfigurationError(msg)
         if routed_confirmation_ttl <= timedelta(0):
             msg = (
                 f"routed_confirmation_ttl must be positive, got {routed_confirmation_ttl!r}: a "
@@ -1981,7 +1961,6 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._routing = routing
-        self._routing_recorder = routing_recorder
         self._routed_ttl = routed_confirmation_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
@@ -5520,6 +5499,11 @@ class Engine:
         the row it was retrying. ``decided_at`` comes from the injected clock (ADR-0009),
         never from the store.
 
+        **The write itself goes through the stage**, which is where ADR-0197 §9 puts the
+        ``RoutingRecorder`` capability: the engine builds the row and the stage is the only
+        object that can append one, so no seam here can read or ``clear`` the trail whose
+        rows are about this engine's own acts.
+
         Returns:
             Whether the row landed. ``False`` is ADR-0197 §9's refuse-to-act: the pass ends
             in ``UNRECORDED``, the operation is not called, no park is registered and no
@@ -5527,12 +5511,12 @@ class Engine:
             — one ordering, one failure mode, and no partial mode in which some routed
             operations are recorded and others are not.
         """
-        recorder = self._routing_recorder
-        if recorder is None:  # pragma: no cover — the pairing check forbids this wiring
-            msg = "a route was taken with no routing recorder wired"
+        stage = self._routing
+        if stage is None:  # pragma: no cover — a route is taken only where one is wired
+            msg = "a route was taken with no routing stage wired"
             raise AssertionError(msg)
-        try:
-            row = RoutedOperationRecord(
+        return await stage.record(
+            RoutedOperationRecord(
                 id=self._id_factory(),
                 route_id=route_id,
                 decided_at=self._now(),
@@ -5541,16 +5525,7 @@ class Engine:
                 subject=subject,
                 conversation_id=conversation_id,
             )
-            await recorder.record(row)
-        except RoutingTrailError:
-            _log.warning(
-                "route_unrecorded",
-                operation=operation.value,
-                approval=approval.value,
-                exc_info=True,
-            )
-            return False
-        return True
+        )
 
     def _admit_route(self, operation: RoutableOperation) -> _RouteReservation | None:
         """Reserve this route's ceiling slot and its identity, atomically (§7, §9).
@@ -5589,15 +5564,40 @@ class Engine:
                 same form (ADR-0197 §7).
         """
         handle = self._admit_and_reserve() if operation.confirm_owed else None
-        live = {park.route_id for park in self._routed_parks.values()}
-        for _attempt in range(_ROUTE_ID_ATTEMPTS):
-            candidate = self._id_factory()
-            if candidate not in live and candidate not in self._reserved_routes:
-                self._reserved_routes.add(candidate)
-                return _RouteReservation(route_id=candidate, handle=handle)
+        try:
+            live = {park.route_id for park in self._routed_parks.values()}
+            for _attempt in range(_ROUTE_ID_ATTEMPTS):
+                candidate = self._id_factory()
+                if candidate not in live and candidate not in self._reserved_routes:
+                    self._reserved_routes.add(candidate)
+                    return _RouteReservation(route_id=candidate, handle=handle)
+        except BaseException:
+            # **The slot is reserved before the identity is, so the identity's own
+            # failure is a path the slot must be released on** (ADR-0197 §7, which names
+            # "the id factory raising" among them). This runs before
+            # :meth:`_routed_pass`'s ``try`` is entered, so nothing else would ever give
+            # the handle back: at a ceiling of one, a single raising mint would refuse
+            # every later routed confirmation for the life of the process, with no park
+            # to evict — the memory-exhaustion vector the ceiling exists to close,
+            # reintroduced through the ceiling itself.
+            #
+            # ``BaseException`` rather than ``Exception``, because a cancellation landing
+            # on the injected factory strands the slot exactly as a defect in it would,
+            # and the release is unconditional in both cases. Nothing is swallowed: the
+            # bare ``raise`` propagates whatever arrived.
+            self._release_slot(handle)
+            raise
+        self._release_slot(handle)
+        return None
+
+    def _release_slot(self, handle: str | None) -> None:
+        """Give back a ceiling slot reserved for a park that will not exist.
+
+        A no-op on a read-only route, which reserves none: it parks nothing, so it takes
+        no capacity (ADR-0197 §1).
+        """
         if handle is not None:
             self._reserved.discard(handle)
-        return None
 
     def _release_route(self, reservation: _RouteReservation, *, identity: bool) -> None:
         """Release a route's reservations (ADR-0197 §7, §9).

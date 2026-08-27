@@ -56,7 +56,7 @@ from ai_assistant.orchestration.routing import (
     resolve,
     routing_prompt,
 )
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeModelProvider, FakeRoutingRecorder
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import (
@@ -182,7 +182,7 @@ class Operations:
 
 def stage(reply: str) -> RoutingStage:
     """A stage whose one model call answers ``reply``."""
-    return RoutingStage(model=FakeModelProvider(reply))
+    return RoutingStage(model=FakeModelProvider(reply), recorder=FakeRoutingRecorder())
 
 
 # --- §4: the two legal envelope shapes, and nothing else --------------------
@@ -352,7 +352,7 @@ async def test_a_model_error_declines_rather_than_propagating() -> None:
         msg = "the route is exhausted"
         raise ModelError(msg)
 
-    routing = RoutingStage(model=FakeModelProvider(raising))
+    routing = RoutingStage(model=FakeModelProvider(raising), recorder=FakeRoutingRecorder())
 
     assert await routing.route("forget that I like jazz") is None
 
@@ -391,6 +391,29 @@ async def test_a_reply_that_is_not_an_envelope_declines(reply: str) -> None:
     assert await stage(reply).route("forget that I like jazz") is None
 
 
+async def test_a_reply_too_deeply_nested_to_parse_declines_rather_than_raising() -> None:
+    """A parser failure is not a decode error, and §4 admits no third outcome.
+
+    Thousands of nested arrays are **syntactically valid** JSON, so ``json.loads`` does
+    not answer with a decode error: it exhausts the interpreter's recursion limit and
+    raises ``RecursionError``, which is not a ``ValueError`` and would escape an
+    implementation that caught only that. ADR-0197 §4 is unqualified — "anything that is
+    not one of the two legal envelope shapes … is a **decline**. The routing stage raises
+    nothing to the caller, degrades no turn, sets no flag on ``TurnOutcome``, and takes no
+    repair round" — so letting it propagate would fail an ordinary ask that routing was
+    never meant to touch, which is the exact failure §4's decline-everything default
+    exists to prevent.
+
+    A reply the model chose is the only input this stage has, so nothing upstream bounds
+    its shape: `ModelProvider.complete` answers a `Message` whose content is arbitrary
+    text, and a conforming provider relaying a hostile or broken upstream reply is how
+    this arrives.
+    """
+    unparseable = "[" * 100_000 + "]" * 100_000
+
+    assert await stage(unparseable).route("forget that I like jazz") is None
+
+
 async def test_an_envelope_missing_its_required_query_declines() -> None:
     """§12's fourth failure class, stated as its own case.
 
@@ -423,7 +446,7 @@ async def test_the_stage_originates_exactly_one_model_call() -> None:
     taken for a malformed step could return a ``forget``.
     """
     provider = FakeModelProvider("not an envelope at all")
-    routing = RoutingStage(model=provider)
+    routing = RoutingStage(model=provider, recorder=FakeRoutingRecorder())
 
     assert await routing.route("forget that I like jazz") is None
 
@@ -439,7 +462,9 @@ async def test_the_stage_takes_no_model_override() -> None:
     """
     provider = FakeModelProvider(json.dumps({"no_operation": True}))
 
-    await RoutingStage(model=provider).route("what is the capital of Peru?")
+    await RoutingStage(model=provider, recorder=FakeRoutingRecorder()).route(
+        "what is the capital of Peru?"
+    )
 
     assert provider.calls[0].model is None
 

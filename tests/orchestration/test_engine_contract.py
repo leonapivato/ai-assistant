@@ -480,14 +480,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         conversations=conversations,
         observation=observation,
         questions=questions,
-        # ADR-0197's routing stage and the write-only half of §9's trail, wired together
-        # or not at all — the engine refuses the half-wiring, because a stage with no
-        # recorder could take no route while the deployment looked configured. A
-        # `_ScriptedRouter` over a provider that always names one operation is what makes
-        # a routed park reachable at all: §7 rules that `pending_confirmations` does not
-        # list one and that no durable store recovers it.
-        routing=RoutingStage(model=_RoutingProvider(routes)),
-        routing_recorder=FakeRoutingRecorder(),
+        # ADR-0197's routing stage, holding the write-only half of §9's trail (§9 puts
+        # the capability on the stage, so the façade holds no trail seam of any width). A
+        # provider that always names one operation is what makes a routed park reachable
+        # at all: §7 rules that `pending_confirmations` does not list one and that no
+        # durable store recovers it.
+        routing=RoutingStage(model=_RoutingProvider(routes), recorder=FakeRoutingRecorder()),
         # The **same** store object the drivers would be given, and the only holder
         # of the wide seam (ADR-0097 §3). A second store here would let a grant land
         # somewhere the gate never reads.
