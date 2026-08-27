@@ -5649,8 +5649,10 @@ class Engine:
             park = self._routed_parks.pop(handle)
             self._reserved_routes.discard(park.route_id)
 
-    async def _claim_routed_park(self, token: ContinuationToken) -> _RoutedPark | None:
-        """Claim the routed park ``token`` names, once and atomically (ADR-0197 §7).
+    async def _answer_routed_park(
+        self, token: ContinuationToken, *, approved: bool
+    ) -> tuple[_RoutedPark, RoutedOperation] | None:
+        """Claim the routed park ``token`` names and resolve it, in one critical section.
 
         Runs under ``_recovery_lock``, the same lock the engine's existing park resolution
         runs under, and **the claim is what evicts it**: the entry is removed before §9's
@@ -5663,25 +5665,34 @@ class Engine:
         resolves anything, so a park past its lifetime raises whether or not any capacity
         has been sought and whether or not ``pending_confirmations`` has run since.
 
-        **A claimed park keeps its ``route_id`` until its answer row has landed**, and
-        that is ADR-0197 §9 read from its purpose rather than from its shortest sentence.
-        §9 holds the reservation "for exactly as long as the park is live" and releases it
-        "in the same critical section that claims or evicts the park" — and an *evicted*
-        park is released here, because no answer is coming. A *claimed* one is not
-        finished: §9 orders the row before the effect precisely so the pair is one act, so
-        the park's lifecycle ends when its answer is recorded. Releasing at the pop instead
-        opens a window a repeating id factory reaches — the second route mints the same id,
-        registers its own ``OWED`` row, and the approved park's ``GIVEN`` then collides
-        with it and returns ``UNRECORDED``, spending the user's yes on nothing. §9 forbids
-        exactly that outcome in terms: "a pruned row costs history and **never costs a
-        resolution**". A collision here is caught where §9 puts every other one, at the
-        reserve rather than at the store, because at a small ``routing_trail_max_rows`` the
-        retained rows are not a census of live routes.
+        **The claim, the row, the operation and the identity's release are one critical
+        section**, which is ADR-0197 §9's clause read literally: a confirm-owed route
+        "holds its reservation for exactly as long as the park is live, and releases it in
+        the same critical section that claims or evicts the park". Releasing it *within*
+        the claim's own few statements and then writing the answer outside them would put
+        the release in that section and the park's answer outside it — and a repeating id
+        factory reaches the gap: a second route mints the same id, registers its own
+        ``OWED`` row, and the approved park's ``GIVEN`` then collides with a row about a
+        different subject and returns ``UNRECORDED``, spending the user's yes on nothing.
+        §9 forbids exactly that outcome in terms — "a pruned row costs history and **never
+        costs a resolution**" — so the section is the one that ends when the route does.
+        A collision is then caught where §9 puts every other one, at the reserve rather
+        than at the store, because at a small ``routing_trail_max_rows`` the retained rows
+        are not a census of live routes.
+
+        **What stays outside is the composing call**, exactly as it does for a parked step
+        (:meth:`_resolve_park`): a resolution is human-paced and serialising it costs
+        nothing that matters, while an arbitrarily slow provider held here would stand
+        between a second, unrelated ``resume`` and its own park.
+
+        Args:
+            token: The continuation the adapter relayed back.
+            approved: The human's answer.
 
         Returns:
-            The park, or ``None`` where this token names no routed park at all — which is
-            the ordinary case for a token naming a parked *step*, and is why this answers
-            rather than raising.
+            The park and what became of it, or ``None`` where this token names no routed
+            park at all — the ordinary case for a token naming a parked *step*, and why
+            this answers rather than raising.
 
         Raises:
             UnknownContinuationError: If the token names a routed park whose lifetime has
@@ -5703,13 +5714,10 @@ class Engine:
                     "rather than resuming this token"
                 )
                 raise UnknownContinuationError(msg)
-            # A **claimed** park keeps its identity until its answer row has landed, which
-            # :meth:`_resume_routed` releases in a ``finally``. The park's ceiling slot is
-            # already free — it left the table above — and only the id is held.
-            return park
+            return park, await self._resume_routed(park, approved=approved)
 
-    async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> TurnOutcome:
-        """Answer a routed park, and perform what the answer authorised (ADR-0197 §7).
+    async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> RoutedOperation:
+        """Record the answer and perform what it authorised, still under the lock (§7, §9).
 
         **The refusal is returned, never raised.** ``approved`` ``False`` yields
         ``RouteOutcome.REFUSED`` and **no** ``PermissionDeniedError``, because no
@@ -5718,11 +5726,12 @@ class Engine:
         exception. That is ADR-0197 §13's partial supersession of ADR-0042 §4, scoped to
         exactly this case: a ``resume`` continuing a parked *step* still raises.
 
-        **The claim keeps the route's identity and this releases it**, in a ``finally``
-        once the answer has landed or failed to (:meth:`_claim_routed_park`). Between the
-        two, no second route may mint this id — which is what stops a repeating factory
-        registering an ``OWED`` row that the approved park's ``GIVEN`` then collides with,
-        the failure §9 forbids when it rules that a pruned row "never costs a resolution".
+        **The route's identity is released here, in a ``finally``**, once the answer has
+        landed or failed to — inside :meth:`_answer_routed_park`'s critical section, which
+        is where §9 puts it. Until then no second route may mint this id, which is what
+        stops a repeating factory registering an ``OWED`` row that the approved park's
+        ``GIVEN`` then collides with, the failure §9 forbids when it rules that a pruned
+        row "never costs a resolution".
 
         **A row whose write fails ends in** ``UNRECORDED`` **with the park already
         claimed**, because §9 orders the write before the effect and §7 orders the claim
@@ -5753,6 +5762,19 @@ class Engine:
             # cancellation: an identity that could leak would exhaust the retry budget for
             # every later route (ADR-0197 §9).
             self._reserved_routes.discard(park.route_id)
+        return routed
+
+    async def _compose_and_capture_routed(
+        self, park: _RoutedPark, routed: RoutedOperation
+    ) -> TurnOutcome:
+        """Compose the answered park's reply and capture it, outside the lock (§10).
+
+        A resumption is captured as **its own episode** in the conversation that parked,
+        and its content carries no part of the routed account — not the listing, not the
+        display subject, not the scalar argument (ADR-0197 §10). The conversation is the
+        park's own, recovered from the entry rather than passed by the adapter: a
+        ``resume`` is handed an opaque token and nothing else.
+        """
         composed = await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome
         )
@@ -6100,19 +6122,24 @@ class Engine:
         runs outside it for the same reason and on ``converse``'s own precedent,
         which captures under no lock whatever.
 
-        **A routed park is claimed first, and it is claimed under the same lock**
-        (ADR-0197 §7). :meth:`_claim_routed_park` answers ``None`` where the token names no
-        routed park at all, which is the ordinary case for a token naming a parked step, so
-        the two kinds of park share one method and one token space without either knowing
-        about the other. A routed park that resolves differs from a step's in exactly three
-        respects and in no others: its outcome carries ``step`` ``None`` and ``routed``
+        **A routed park is answered first, and the whole of its resolution is under the
+        same lock** (ADR-0197 §7, §9). :meth:`_answer_routed_park` answers ``None`` where
+        the token names no routed park at all, which is the ordinary case for a token
+        naming a parked step, so the two kinds of park share one method and one token space
+        without either knowing about the other. Composing and capturing run outside it, on
+        the step path's own reasoning: an arbitrarily slow provider must not stand between
+        a second, unrelated ``resume`` and its own park.
+
+        A routed park that resolves differs from a step's in exactly three respects and in
+        no others: its outcome carries ``step`` ``None`` and ``routed``
         non-``None``, its refusal is returned as ``RouteOutcome.REFUSED`` rather than raised
         as a ``PermissionDeniedError``, and its ``turn`` is ``None`` for ADR-0197 §8's
         reason rather than ADR-0052 §3's.
         """
-        routed = await self._claim_routed_park(token)
-        if routed is not None:
-            return await self._resume_routed(routed, approved=approved)
+        answered = await self._answer_routed_park(token, approved=approved)
+        if answered is not None:
+            park, routed = answered
+            return await self._compose_and_capture_routed(park, routed)
         parked, step = await self._resolve_park(token, approved=approved, timeout=timeout)
         composed = await self._compose(parked.turn, step)
         return await self._capture_resumption(parked, step, composed)

@@ -1263,6 +1263,50 @@ async def test_an_approved_park_keeps_its_identity_until_its_answer_lands() -> N
     assert {row.route_id for row in recorder.rows} == {"R"}
 
 
+async def test_a_resume_cancelled_mid_answer_releases_the_identity_it_claimed() -> None:
+    """The release path the fence above adds, on the arm that is easiest to leave open.
+
+    A claimed park holds its ``route_id`` until its answer has landed, so the ``finally``
+    that gives it back has to run on **every** way out of the write — including a
+    cancellation. An implementation that released it only after a *successful* answer
+    would strand the identity for the life of the process: every later route drawing it
+    would exhaust its retry budget and end ``UNRECORDED``, which is the ceiling's own
+    failure mode arriving through the identity (ADR-0197 §9).
+
+    The cancellation reaches the **tracked task**, for :func:`_cancel_a_pass_inside_the_row_write`'s
+    reason: ``Engine._tracked`` shields the caller's await, so this is the drain's own
+    reach and the only one that can cancel a pass at all.
+    """
+    recorder = _BlockingRecorder(hold_at=2)
+    harness = _routed_harness(
+        recorder=recorder,
+        id_factory=_scripted_ids("h-1", "R", "row-1", "row-2", "h-2", "R"),
+    )
+    await _seed_belief(harness.memory)
+    parked = await _parked(harness)
+
+    answering = asyncio.ensure_future(
+        harness.engine.resume(_token(parked), approved=True, timeout=PATIENT)
+    )
+    await recorder.entered.wait()
+    # The drain's own reach, and the only one that cancels a shielded pass.
+    (inflight,) = harness.engine._inflight
+    inflight.cancel()
+    recorder.release.set()
+    for task in (inflight, answering):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    admitted = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+
+    assert admitted.routed is not None
+    assert admitted.routed.outcome is RouteOutcome.AWAITING_CONFIRMATION
+    # The later route took ``R`` back, which it can only do if the cancelled answer gave
+    # it up: the factory offers no other value at that draw.
+    owed = [row for row in recorder.rows if row.approval is RouteApproval.OWED]
+    assert [row.route_id for row in owed] == ["R", "R"]
+
+
 async def test_a_failed_route_releases_the_identity_it_reserved() -> None:
     """§9: "a route-id reservation is released on every path that does not end in a live park".
 
