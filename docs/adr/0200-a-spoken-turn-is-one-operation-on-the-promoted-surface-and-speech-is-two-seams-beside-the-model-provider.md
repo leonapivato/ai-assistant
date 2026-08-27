@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-27
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
@@ -989,39 +989,31 @@ ADR is that decision, so §6 needs no record: it wrote its own route out and thi
 change takes it. ADR-0177 §1 wrote one for `learn` alone and none for the
 enumeration, which is why (a) is a supersession where §6 is not.
 
-**The record ADR-0177's own status line owes is named here and filed.** ADR-0070
-§3 and `docs/adr/template.md` put a partial supersession on the *superseded*
-ADR's status line, leading, with the parenthesis naming exactly what was
-replaced. This lane's fence is this file, so the edit is not made here; the
-scope text it owes is `Partially superseded by ADR-0200 (§1's thirty-operation
-enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which
-gains that operation's turn budget)`, appended to that line's existing
-supersession pair as `docs/adr/template.md` directs, and it is tracked as its
-own change in #1667. A reader of ADR-0177 who has not seen it is a reader this
-paragraph exists to catch.
+**The record ADR-0177 owes is made in this change**, in the shape ADR-0201 §8
+specifies for the same operation on ADR-0197 and for its reasons. ADR-0177's
+`Status` is already a **leading-token** line — `Partially superseded by ADR-0178
+(…)` — so this decision accumulates a second pair on it under ADR-0070 §4's
+partial form and `docs/adr/template.md`'s "add its pair on the same line …
+without dropping the first", and an appended dated note records the supersession
+under ADR-0070 §1. The scope parenthesis names clauses and carries no `ADR-NNNN`
+token, which is §4's authoring constraint and what keeps its extraction invariant
+true: every `ADR-NNNN` after the leading token is a target. Nothing moves off that
+line: ADR-0177's amendment record already lives in its own dated note, so
+ADR-0082 §2's fourth paragraph has no subject here, and ADR-0186's record is left
+byte-unchanged.
 
-**Why the record is filed rather than made here, and what is contested about
-it.** Two rounds of review asked for the edit in this change, so the ground is
-worth stating plainly rather than left to be inferred.
-
-The **decisive** reason is scope, not timing: this lane's fence is this one file,
-and a fence exists because a lane cannot see what another lane holds. Widening
-one is the dispatcher's call and not a lane's, so the record is written out
-verbatim above and filed as #1667 rather than applied to a file this lane was not
-given. Nothing about the decision is deferred with it — §12's scope is settled
-here, in a marked clause, and #1667 quotes it.
-
-The **timing** question is genuinely unsettled by the texts, and this ADR does
-not pretend otherwise. ADR-0070 §1's bullet is headed "recording a supersession
-**that has landed**" and then explains that the act "presupposes the superseding
-ADR *exists*" — a phrase written to forbid a supersession naming no ADR at all,
-not obviously to license one naming an unmerged draft. `CONTRIBUTING.md` →
-"Trivial ADR edits" repeats "has landed". Against that, ADR-0200 does exist in
-this change and the pair would land atomically. Both readings are available on
-the text, which is what makes it a question for whoever holds the fence rather
-than a defect in this document; §13 makes the record a precondition of the wave
-that would otherwise act on the stale enumeration, so nothing is built on the gap
-whichever way it is resolved.
+**Two rounds of review argued about whether this belonged in this change, and
+ADR-0082 §7 had already settled it.** An earlier draft of this section filed the
+record instead of making it, and defended the delay on ADR-0070 §1's bullet
+heading — "recording a supersession **that has landed**" — as against its own next
+sentence, "presupposes the superseding ADR *exists*". That is #458's recurring
+misreading, and ADR-0082 §7 names it as such and states the condition rather than
+re-deciding it: "§1's condition is that the superseding ADR **exists**, not that
+it is ratified — the hazard §1 names is a `Status` line pointing at nothing, and
+an atomic pair makes that unreachable." ADR-0201 §8 restates the same reading and
+draws the consequence this change takes: "a lane whose fence admits both files may
+make it atomically." So the record rides here, `Proposed` or not, and #1667 —
+opened when it could not — closes with this PR.
 
 Three near misses, named so that a reviewer can check them rather than take
 them:
@@ -1081,12 +1073,12 @@ each wave must contain if it exists.
 > land in a lane fenced to `interfaces/gateway/`, briefed against the merged text
 > of the wave above, under `track:web-client`'s concurrency rule (#1226 §3).
 
-> **Normative.** That third wave carries **three preconditions**, and a lane
-> briefed against it before all three hold is briefed wrong: ADR-0199 ratified
-> and merged (§7 — satisfied at `62724fe1`); ADR-0177's status line carrying
-> §12's supersession record; and,
-> **for the remote-browser case only**, a ratified scheme decision under ADR-0174
-> §11 (§10). The loopback case waits on the first two alone.
+> **Normative.** That third wave carries one precondition beyond this ADR's
+> merge, and it binds **the remote-browser case only**: a ratified scheme
+> decision under ADR-0174 §11 (§10). The loopback case waits on nothing but this
+> merge. ADR-0199 was a second such precondition when this ADR was drafted and is
+> discharged — it ratified at `62724fe1` — and ADR-0177's record is made in this
+> change (§12) rather than owed by a later one.
 
 | Clause | Deliverable | Test item |
 | --- | --- | --- |
@@ -1118,7 +1110,7 @@ each wave must contain if it exists.
 | §4 (cancellation) | A delivered cancellation propagates from either stage | Two tests cancelling inside `transcribe` and inside `synthesize`, asserting neither degrades |
 | §10 | `POST /ask/spoken`; front end records and plays and calls no browser speech API | A route test; a test asserting the bundle references no `SpeechRecognition` or `speechSynthesis` |
 | §10 (secure context) | Nothing capturing a microphone on a non-loopback origin ships before ADR-0174 §11's decision | The lane's own precondition, checked at briefing rather than by a test |
-| §12 | ADR-0177's status line carries the supersession record, in a change of its own | A reader of ADR-0177 reaches ADR-0200 from its header |
+| §12 | Nothing — ADR-0177's record is made in this ADR's own change, not by an implementing lane | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0177 reaches ADR-0200 from its header |
 
 > **Normative.** A lane satisfies the rows of this table that fall inside its
 > fence and adds none: a deliverable this table does not name is out of that
@@ -1143,13 +1135,14 @@ long recording. And the tree now has three `bytes`-shaped ceilings in three
 layers; §6 states the arithmetic connecting them because nothing mechanical
 does.
 
-**What is blocked, and by what.** The remote-browser half of milestone 19's exit
-test waits on ADR-0174 §11's scheme decision, which nothing here can supply
-(§10, #1668). ADR-0177's status line owes the record §12 names (#1667). Neither
-blocks the hub-side waves, which is the useful part of discovering them at the
-ADR rather than in a surface lane. ADR-0199 was the third of these when this ADR
-was drafted and is no longer: it merged at `62724fe1`, and §3 and §7 are written
-against its ratified text rather than against an expectation of it.
+**What is blocked, and by what.** One thing, and it is not hub-side: the
+remote-browser half of milestone 19's exit test waits on ADR-0174 §11's scheme
+decision, which nothing here can supply (§10, #1668). The two other dependencies
+this ADR carried while it was drafted are discharged in it — ADR-0199 ratified at
+`62724fe1`, so §3 and §7 are written against its text rather than an expectation
+of it, and ADR-0177's record is made in this change rather than filed (§12,
+closing #1667). Discovering all three at the ADR rather than in a surface lane is
+the useful part.
 
 **What becomes possible that this ADR does not take.** §3 discharges ADR-0199
 §8's shipping gate in its narrowest form — the operation is the channel — so the
