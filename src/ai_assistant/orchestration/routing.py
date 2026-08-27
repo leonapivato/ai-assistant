@@ -685,26 +685,40 @@ def _wanted(query: str) -> frozenset[str]:
     Two steps, and the difference between them is the whole of how a word can be
     framing *sometimes*:
 
-    1. **A leading run of reference words is stripped** — every word from the start of
-       the query that is in :data:`_FRAMING` or :data:`_REFERENCE`, stopping at the
-       first that is neither. This is the shape a person names a record in: "the
-       question you asked me about my commute" is six words of reference and then the
-       one word that says which. Because it is a *prefix* rule, the same words go on
-       constraining the match everywhere else in the query — "that I talked about
-       Alice" keeps its ``about``, and so does not name the belief "I talked with
-       Alice".
+    1. **A leading run is stripped.** Always the :data:`_FRAMING` words — the articles
+       and pronouns a copied span opens with, "that I …". And, *only* where the query
+       opens on an article followed by a record kind, the :data:`_REFERENCE` words as
+       well: "the question you asked me about my commute" is six words of reference and
+       then the one word that says which. That opening is what tells a reference from an
+       assertion, so "that I question authority" keeps its ``question`` and does not name
+       the belief "I respect authority".
     2. **What remains is filtered by** :data:`_FRAMING` **alone**, which is what lets a
-       stored belief be written in the third person while the user speaks in the first.
+       stored belief say ``his wife`` where the user said ``my wife``.
 
     A set rather than a sequence, because the match is on which words the query names
     and never on the order it named them in: the router copies a span out of a sentence,
     and the sentence's word order is the sentence's, not the record's.
     """
     terms = _terms(query)
+    strippable = _FRAMING | _REFERENCE if _opens_on_a_record(terms) else _FRAMING
     start = 0
-    while start < len(terms) and (terms[start] in _FRAMING or terms[start] in _REFERENCE):
+    while start < len(terms) and terms[start] in strippable:
         start += 1
     return frozenset(terms[start:]) - _FRAMING
+
+
+def _opens_on_a_record(terms: tuple[str, ...]) -> bool:
+    """Whether ``terms`` opens the way a person names a record: ``the`` then its kind.
+
+    Narrow on purpose, and narrower than "a record kind appears somewhere". Every word
+    of :data:`_REFERENCE` is an ordinary word in the middle of a sentence — ``question``
+    is a verb in "I question authority" and a subject in "I hate the question of taxes",
+    ``about`` asserts a relationship in "I talked about Alice" — so stripping them
+    wherever they turn up would resolve each of those to a record asserting something
+    else. What is distinctive about a reference is where it sits: it is how the sentence
+    *opens*, with the article that makes it a noun phrase in front of it.
+    """
+    return len(terms) > 1 and terms[0] in _ARTICLES and terms[1] in _KINDS
 
 
 def _names(wanted: frozenset[str], value: str) -> bool:
@@ -794,19 +808,25 @@ _INFLECTIONS: Final = ("s", "es", "d", "ed", "ing", "'s")
 #: words and a query naming ``calendar`` reaches it.
 _WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
+#: The articles and demonstratives: half of :data:`_FRAMING`, and the half that can open
+#: a reference to a record (:func:`_opens_on_a_record`).
+_ARTICLES: Final[frozenset[str]] = frozenset(("a", "an", "the", "this", "that", "these", "those"))
+
 #: The words a query carries as framing wherever they appear, dropped from the query
 #: side of the comparison and from that side only (#1647).
 #:
 #: **The test for membership is one question**: can the word be dropped, *anywhere in a
-#: sentence*, without changing which proposition the query is about? Only the
-#: closed-class function words pass it — articles and demonstratives, pronouns and
-#: possessives, the copulas, auxiliaries and modals, and the contractions of a pronoun
-#: with one of those. They are what a copied span drags along and what differs between a
-#: user speaking in the first person and a belief stored in the third.
+#: sentence*, without changing which proposition the query is about? Two classes pass
+#: it and nothing else does — articles and demonstratives, and pronouns and possessives.
+#: They are what a copied span drags along ("**that I** drive a green estate car") and
+#: what differs between a user speaking in the first person and a belief stored in the
+#: third, and #1647's own arms are what each is here for: ``that`` for the connective
+#: the router keeps, ``my`` for "stop reading **my** calendar" against a grant whose
+#: source is ``calendar``.
 #:
 #: **What is deliberately absent matters as much as what is here**, because a term
 #: dropped from the query stops constraining the match, and a query that no longer
-#: constrains can name the record that says the opposite:
+#: constrains can name the record that says something else:
 #:
 #: - **negations, contracted ones included** — ``no``, ``none``, ``not``, and every
 #:   ``n't`` form, which is why :func:`_terms` keeps a contraction whole: without
@@ -815,61 +835,64 @@ _WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 #:   becomes any instance of it;
 #: - **conjunctions** — ``and``, ``or``, ``but``, ``if``, ``when``, ``where`` — without
 #:   which "tea or coffee" names the belief that says "tea and coffee";
-#: - **every preposition** — ``for``, ``with``, ``to``, ``from``, ``in``, ``on``,
-#:   ``at``, ``by``, ``into``, ``over`` — which say what a thing's relationship to
-#:   another is, or where it is or went, so without them "I work for Acme" names the
-#:   belief "I work with Acme". ``about`` and ``of`` are in :data:`_REFERENCE` rather
-#:   than here for exactly this reason: they frame a *reference* at the start of a query
-#:   and assert a relationship anywhere else;
+#: - **every preposition** — ``for``, ``with``, ``to``, ``from``, ``in``, ``on`` —
+#:   which say what a thing's relationship to another is, or where it is, so without
+#:   them "I work for Acme" names the belief "I work with Acme";
+#: - **the copulas, auxiliaries and modals** — ``am``, ``is``, ``was``, ``can``,
+#:   ``will`` — which carry tense and modality, so without them "I am a doctor" names
+#:   the belief "I was a doctor" and "I can swim" names "I will swim". The contractions
+#:   of a pronoun with one of them (``I'm``, ``he's``) are absent for the same reason:
+#:   the copula is inside them;
 #: - **the mental-state and reporting verbs** — ``know``, ``remember``, ``think``,
 #:   ``say``, ``tell``, ``told`` — which are what a belief asserts, not how it is
 #:   referred to.
 #:
 #: The record side keeps all of its words, which is what makes the asymmetry safe: a
-#: record whose own words are ``the`` and ``is`` is still matched by a query naming
+#: record whose own words are ``the`` and ``my`` is still matched by a query naming
 #: them, because the match is tested against everything the record says.
-_FRAMING: Final[frozenset[str]] = frozenset(
+_FRAMING: Final[frozenset[str]] = _ARTICLES | frozenset(
     word
     for group in (
-        # articles and demonstratives
-        "a an the this that these those",
         # pronouns and possessives
         "i me my mine myself we us our ours you your yours he him his she her hers",
         "it its they them their theirs",
-        # copulas, auxiliaries and modals
-        "am is are was were be been being do does did done have has had",
-        "will would shall should can could may might must",
-        # a pronoun contracted with one of those — and **no** `n't` form, ever
-        "i'm it's he's she's that's there's here's what's who's let's",
-        "you're we're they're i've you've we've they've",
-        "i'd you'd he'd she'd we'd they'd i'll you'll he'll she'll we'll they'll",
+    )
+    for word in group.split()
+)
+#: The kinds of record this engine holds, as a person names them.
+_KINDS: Final[frozenset[str]] = frozenset(
+    word
+    for group in (
+        "belief beliefs fact facts question questions memory memories note notes",
+        "record records source sources grant grants thing things",
     )
     for word in group.split()
 )
 
 #: The words that name a **record** rather than say what it holds, stripped from the
-#: **start** of a query only (:func:`_wanted`).
+#: start of a query and only where it opens on an article and one of :data:`_KINDS`
+#: (:func:`_wanted`).
 #:
 #: A person refers to what the assistant keeps by its kind — "the question you asked me
 #: about my commute" — and those words are about the record's existence rather than
 #: about what ``Question.content`` says. But every one of them is an ordinary word
-#: elsewhere: ``about`` asserts a relationship in "I talked about Alice", ``question``
-#: is a subject in "I hate the question of taxes", and a bag-wide filter would drop them
-#: there too and name the belief that says something else. Position is what tells the
-#: two apart, and it is available without parsing anything: a reference to a record is
-#: how a sentence *opens*.
+#: elsewhere, which is why the opening is what admits them rather than their mere
+#: presence: ``about`` asserts a relationship in "I talked about Alice", ``question`` is
+#: a verb in "I question authority" and a subject in "I hate the question of taxes". A
+#: filter that dropped them there would name the belief that says something else, and
+#: position tells the two apart with no parsing and no second model call.
 _REFERENCE: Final[frozenset[str]] = frozenset(
-    word
-    for group in (
+    {
         # the two prepositions that introduce a reference
-        "about of",
-        # the kinds of record this engine holds
-        "belief beliefs fact facts question questions memory memories note notes",
-        "record records source sources grant grants thing things",
+        "about",
+        "of",
         # and the assistant's own asking, which is how a question gets referred to
-        "ask asks asked asking",
-    )
-    for word in group.split()
+        "ask",
+        "asks",
+        "asked",
+        "asking",
+    }
+    | _KINDS
 )
 
 
