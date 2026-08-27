@@ -4136,6 +4136,45 @@ def test_a_routed_read_row_never_says_what_a_use_did_with_it() -> None:
     assert "never the thing itself" in body, "a count, said to be one"
 
 
+def test_the_page_shifts_no_instant_and_reaches_for_no_zone_database() -> None:
+    """ADR-0194 §5 and §6: a period bound is read "from the value's **own**
+    ``start_offset``/``end_offset``… never from the client's zone and never through
+    the client's ``tzdata``".
+
+    So the arithmetic is the gateway's and the page renders what it is handed. This
+    is asserted over the whole script rather than over one function, because the
+    thing being ruled out is a *reach* — a ``Date`` constructed to shift an instant,
+    or a formatter that consults the browser's zone — and it would be as wrong in a
+    helper as in the renderer.
+    """
+    script = _code("app.js")
+
+    assert "new Date(" not in script
+    assert "Intl." not in script
+    assert "toLocale" not in script
+    assert "getTimezoneOffset" not in script
+
+
+def test_a_ruling_whose_pointers_disagree_is_refused_rather_than_read() -> None:
+    """ADR-0193 §11 names exactly **three** authorisation states, and a ruling that
+    answers one decision while resting on another is none of them.
+
+    An earlier shape of this renderer described that pair in a fourth line, which
+    reads as a claim about authorisation. It is refused whole instead: the row says
+    it cannot be read, names neither pointer as the authorisation, and renders none
+    of its other fields — which is ``interfaces.cli._authorisation_line``'s refusal
+    to guess, scoped to the row because a routed listing rides a turn.
+
+    The second assertion is the one that fails on the fourth state coming back:
+    ``authorisationWords`` must have exactly three returns, so there is no branch
+    left for a pair that never reaches it.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "if (decision.unreadable) {" in functions["renderDecisionFields"]
+    assert len(re.findall(r"\breturn\b", functions["authorisationWords"])) == 3
+
+
 def test_a_routed_total_is_never_presented_as_a_bill() -> None:
     """ADR-0194 §6: a total is the sum of what this system's own tools reported, and
     no surface presents one as an amount billed, owed or charged.

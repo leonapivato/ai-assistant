@@ -127,14 +127,21 @@ def _read() -> SourceReadRecord:
     )
 
 
-def _decision() -> PermissionDecision:
-    """One recorded ruling, an ``ALLOW`` resting on a decision about that call."""
+def _decision(
+    *, authorised_by: str | None = "d-0", resolves: str | None = "d-0"
+) -> PermissionDecision:
+    """One recorded ruling, an ``ALLOW`` resting on a decision about that call.
+
+    The two pointers are arguments because ADR-0193 §11's three states are read off
+    the pair, and because the fourth combination — both present and different — is
+    the one no audit trail accepts and this surface must refuse to read.
+    """
     return PermissionDecision(
         id="d-1",
         ruling=PermissionRuling(
             outcome=PermissionOutcome.ALLOW,
             reason="you approved this call",
-            authorised_by="d-0",
+            authorised_by=authorised_by,
         ),
         tool=ToolDefinition(
             id="smtp",
@@ -151,7 +158,7 @@ def _decision() -> PermissionDecision:
         ),
         parameters_digest="a" * 64,
         decided_at=_AT,
-        resolves="d-0",
+        resolves=resolves,
     )
 
 
@@ -165,14 +172,14 @@ def _invocation() -> RecordedInvocation:
     )
 
 
-def _total() -> SpendTotal:
-    """One measured period, with a ceiling — the arm whose amounts must cross as text."""
+def _total(*, offset: timedelta = timedelta(0)) -> SpendTotal:
+    """One measured period, with a ceiling and a UTC offset the bounds are read in."""
     return SpendTotal(
         period=SpendPeriod.CALENDAR_DAY,
         period_start=_AT,
         period_end=_AT,
-        start_offset=timedelta(0),
-        end_offset=timedelta(0),
+        start_offset=offset,
+        end_offset=offset,
         ceiling=Decimal("5"),
         currency="USD",
         accounted=Decimal("0.3"),
@@ -374,6 +381,7 @@ async def test_a_routed_ruling_carries_no_tier_reach_and_no_authorises() -> None
         row = view["listing"][0]
         assert set(row) == {
             "id",
+            "unreadable",
             "outcome",
             "reason",
             "decided_at",
@@ -414,6 +422,110 @@ async def test_an_operation_that_carried_no_listing_crosses_a_null_one() -> None
         view = await _view(one, _routed(RoutableOperation.RECENT_READS, RouteOutcome.FAILED))
 
         assert view["listing"] is None
+
+
+@pytest.mark.parametrize(
+    ("offset", "rendered", "label"),
+    [
+        (timedelta(0), "2026-08-27 09:00:00", "+00:00"),
+        (timedelta(hours=2), "2026-08-27 11:00:00", "+02:00"),
+        (timedelta(hours=-5, minutes=-30), "2026-08-27 03:30:00", "-05:30"),
+        (timedelta(hours=5, minutes=30, seconds=21), "2026-08-27 14:30:21", "+05:30:21"),
+    ],
+)
+async def test_a_period_bound_crosses_rendered_from_its_own_offset(
+    offset: timedelta, rendered: str, label: str
+) -> None:
+    """ADR-0194 §6: "each bound rendered from the value's **own**
+    ``start_offset``/``end_offset`` and labelled with that offset — never from the
+    client's zone and never through the client's ``tzdata``".
+
+    An earlier shape of this view crossed the UTC instant beside the offset label,
+    which is a bound in one offset labelled with another — and every case it had used
+    a zero offset, where the two are indistinguishable. So the cases here are the
+    ones that separate them: positive, negative-with-minutes, and an offset carrying
+    **seconds**, which a renderer truncating to ``+HH:MM`` states a bound the ledger
+    did not use.
+
+    **The arithmetic is asserted at this edge deliberately.** §5 bars the bound from
+    being read through the client's zone database, so doing it in the gateway is what
+    makes that true of the browser rather than hoped of it.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.SPEND_TOTALS,
+                RouteOutcome.PERFORMED,
+                listing=(_total(offset=offset),),
+            ),
+        )
+
+        row = view["listing"][0]
+        assert row["period_start"] == rendered
+        assert row["period_end"] == rendered
+        assert row["start_offset"] == label
+        assert row["end_offset"] == label
+
+
+async def test_a_ruling_that_answers_one_decision_and_rests_on_another_is_not_read() -> None:
+    """ADR-0193 §11 names exactly **three** authorisation states, and a ruling that
+    answers one decision while resting on another is none of them.
+
+    ``PermissionDecision`` admits the pair at construction — no validator refuses it —
+    while the trail refuses to *record* one
+    (:class:`~ai_assistant.core.errors.InvalidResolutionError`, whose stated subject
+    includes "when the resolving ruling's ``authorised_by`` does not match its
+    ``resolves``"). So a row reaching a reader with it is a value no store this system
+    wrote would hold, and ``interfaces.cli._authorisation_line`` raises rather than
+    choosing between the two pointers.
+
+    This surface marks the **row** instead of raising, because a routed listing rides
+    a turn and raising would take the reply and the routed account with it. What is
+    asserted is the part that must not differ: the row says it is unreadable, and the
+    page's own renderer is what turns that into a refusal rather than a fourth state.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(_decision(authorised_by="g-1", resolves="d-0"),),
+            ),
+        )
+
+        assert view["listing"][0]["unreadable"] is True
+
+
+@pytest.mark.parametrize(
+    ("authorised_by", "resolves"),
+    [("d-0", "d-0"), ("g-1", None), (None, "d-0"), (None, None)],
+)
+async def test_the_three_states_a_trail_does_accept_are_read_normally(
+    authorised_by: str | None, resolves: str | None
+) -> None:
+    """The other side of the pair above, and it is what fails on a predicate written
+    too widely.
+
+    ADR-0193 §6's discriminator is whether ``resolves`` is set, and §11's three states
+    are: a decision about this call (both set and equal), a standing authorisation
+    (``authorised_by`` set, ``resolves`` unset), and the policy's own rules
+    (``authorised_by`` unset). A fourth combination — ``resolves`` set with no
+    ``authorised_by`` — is an ``ALLOW`` resting on no decision that nonetheless
+    answers a question, which §11 reads as the third state and this must not refuse.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(_decision(authorised_by=authorised_by, resolves=resolves),),
+            ),
+        )
+
+        assert view["listing"][0]["unreadable"] is False
 
 
 # --- §7: the card and its token -----------------------------------------------
