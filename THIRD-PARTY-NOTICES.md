@@ -5,10 +5,17 @@ own source code. This project's code is licensed under the MIT Licence; see the
 root `LICENSE` file, which covers **only** this project and nothing recorded
 here.
 
-This file exists because the wheel and the sdist **redistribute** a pre-trained
-embedding model (ADR-0024). It records what that artifact is, where it came
-from, and the licence each upstream source claims for it, and it reproduces the
-full text of every licence claimed.
+This file exists because the wheel and the sdist **redistribute** pre-trained
+models: an embedding model (ADR-0024) and, since ADR-0200, the two speech models
+the transcription and synthesis seams run on. It records what each artifact is,
+where it came from, and the licence each upstream source claims for it, and it
+reproduces the full text of every licence claimed.
+
+There are three artifacts. Each is packaged under
+`ai_assistant/models/_vendor/<directory>/`, and the SHA-256 of every file as
+shipped is recorded in this project's source and verified at build time.
+
+# 1. The embedding model
 
 ## What is redistributed
 
@@ -79,6 +86,99 @@ the notice required by either.
 `fastembed`, the library through which this artifact is loaded, records
 `license='mit'` for `BAAI/bge-small-en-v1.5` in its own model metadata
 (`DenseModelDescription`, version 0.8.0).
+
+---
+
+# 2. The speech-recognition model
+
+## What is redistributed
+
+| | |
+|---|---|
+| Model | Moonshine tiny (English), int8-quantised |
+| Artifact source repository | `csukuangfj/sherpa-onnx-moonshine-tiny-en-int8` (`https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-tiny-en-int8`) |
+| Pinned commit | `bf2b762c076d8ea61e2af0b3851c9564fb77552e` |
+| Files | `preprocess.onnx`, `encode.int8.onnx`, `uncached_decode.int8.onnx`, `cached_decode.int8.onnx`, `tokens.txt` |
+
+Those five files are the whole of the redistributed artifact. They are packaged
+under `ai_assistant/models/_vendor/moonshine-tiny-en-int8/`. The SHA-256 of each
+file as shipped is recorded in `src/ai_assistant/models/speech_artifact.py`
+(`MOONSHINE_TINY_EN_INT8`) and is verified at build time.
+
+### Statement of changes
+
+The five files are redistributed **verbatim and unmodified** — byte for byte as
+published at the pinned commit, which is what the recorded SHA-256 of each file
+asserts. Nothing is retrained, re-quantised, re-exported, converted, stripped or
+otherwise altered. The source repository holds other files this distribution does
+**not** ship (its `README.md`, its `LICENSE`, and sample recordings under
+`test_wavs/`); shipping a subset is not a modification of the files shipped, and
+the licence text its `LICENSE` carries is reproduced in full below.
+
+## The upstream work, and the licence the source claims
+
+- Project: Moonshine, by Useful Sensors
+  (`https://github.com/usefulsensors/moonshine`). The source repository above is
+  a conversion of that model to the four-file ONNX layout `sherpa-onnx` loads.
+- Source: `https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-tiny-en-int8`
+- Licence claimed: **MIT**. At the pinned commit the repository carries a
+  `LICENSE` file whose text is the MIT Licence with the copyright line
+  `Copyright (c) 2024 Useful Sensors`. Its card metadata declares no licence
+  field, so the `LICENSE` file is the claim, transcribed here without
+  adjudication.
+- Copyright holder: **Useful Sensors**, per that file's own copyright line.
+- The conversion itself: the repository states no separate licence for the ONNX
+  export and no second copyright line, so no claim has been composed for it.
+  Attribution for the conversion is to the repository's publisher.
+
+---
+
+# 3. The speech-synthesis model
+
+## What is redistributed
+
+| | |
+|---|---|
+| Model | Supertonic 3 (text-to-speech), int8-quantised |
+| Artifact source repository | `csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11` (`https://huggingface.co/csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11`) |
+| Pinned commit | `cca5a0e6c96e1d2c720986bf7e75fcc81dee3ae4` |
+| Files | `LICENSE`, `duration_predictor.int8.onnx`, `text_encoder.int8.onnx`, `vector_estimator.int8.onnx`, `vocoder.int8.onnx`, `tts.json`, `unicode_indexer.bin`, `voice.bin` |
+
+Those eight files are the whole of the redistributed artifact. They are packaged
+under `ai_assistant/models/_vendor/supertonic-3-int8/`. The SHA-256 of each file
+as shipped is recorded in `src/ai_assistant/models/speech_artifact.py`
+(`SUPERTONIC_3_INT8`) and is verified at build time.
+
+**The upstream `LICENSE` file is one of the eight**, deliberately: the MIT Licence
+requires its notice to travel with the material, and shipping the file beside the
+weights is the most direct way to do that. Its text is also reproduced below.
+
+### Statement of changes
+
+The eight files are redistributed **verbatim and unmodified** — byte for byte as
+published at the pinned commit. Nothing is retrained, re-quantised, re-exported,
+converted, stripped or otherwise altered. The source repository holds one file
+this distribution does not ship, its `README.md`.
+
+## The upstream work, and the licence the source claims
+
+- Project: Supertonic, by Supertone Inc.
+  (`https://github.com/supertone-inc/supertonic`).
+- Source: `https://huggingface.co/csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11`
+- Licence claimed: **MIT**. The repository carries a `LICENSE` file whose text is
+  the MIT Licence with the copyright line `Copyright (c) 2025 Supertone Inc.`.
+  Its card metadata declares no licence field, so that file is the claim.
+- Copyright holder: **Supertone Inc.**, per that file's own copyright line.
+- The int8 quantisation: the repository states no separate licence for it and no
+  second copyright line, so no claim has been composed for it.
+
+### What is deliberately **not** redistributed
+
+An earlier candidate for this seam was a Piper VITS voice, whose
+grapheme-to-phoneme pass reads an **espeak-ng data directory** — several hundred
+files derived from a **GPL-3.0** project. It was rejected, and no espeak-ng
+material is packaged in this distribution. The model above is indexed directly off
+the characters it is handed and needs no pronunciation data at all.
 
 ---
 
@@ -321,4 +421,70 @@ Reproduced verbatim from `https://www.apache.org/licenses/LICENSE-2.0.txt`.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+```
+
+
+---
+
+## MIT License — Moonshine
+
+Reproduced from the `LICENSE` file of
+`https://huggingface.co/csukuangfj/sherpa-onnx-moonshine-tiny-en-int8` at the
+pinned commit.
+
+```text
+MIT License
+
+Copyright (c) 2024 Useful Sensors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## MIT License — Supertonic
+
+Reproduced from the `LICENSE` file of
+`https://huggingface.co/csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11`
+at the pinned commit — the same file this distribution packages beside the
+weights.
+
+```text
+MIT License
+
+Copyright (c) 2025 Supertone Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

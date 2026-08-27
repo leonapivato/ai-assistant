@@ -4,7 +4,7 @@ The whole of ADR-0118 §7's containment lives here, so ``fastembed_embedder.py``
 stays about the *adapter* rather than about how it survived a backend that
 stopped returning. ADR-0200 §5 puts the two speech seams under the same two-layer
 containment "taken whole", so ``moonshine_transcriber.py`` and
-``vits_synthesizer.py`` use this object too and for the same reasons — one
+``supertonic_synthesizer.py`` use this object too and for the same reasons — one
 instance each, never shared, because a slot bound to one engine's health must not
 refuse a call to another. What each of them gets is:
 

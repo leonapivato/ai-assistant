@@ -16,7 +16,7 @@ needed.
 composition root builds, so it is imported on every path including the one that
 must not pay for fastembed, and it costs nothing to import (ADR-0118 §2).
 
-The two speech implementations (``MoonshineTranscriber``, ``VitsSynthesizer``)
+The two speech implementations (``MoonshineTranscriber``, ``SupertonicSynthesizer``)
 are kept out for exactly ``FastEmbedEmbedder``'s reason: importing either pulls in
 ``sherpa_onnx`` and, through it, a second inference runtime. Their deadline
 decorators are re-exported for ``BoundedEmbedder``'s reason — the composition root

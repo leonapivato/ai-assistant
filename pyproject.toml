@@ -150,7 +150,7 @@ dependencies = [
     "av>=18.1",
     # The two on-device speech engines ADR-0200 §1 seams, and nothing else. It is
     # imported only by `ai_assistant/models/moonshine_transcriber.py` and
-    # `ai_assistant/models/vits_synthesizer.py`, which a contract below confines
+    # `ai_assistant/models/supertonic_synthesizer.py`, which a contract below confines
     # it to.
     #
     # **One library for both seams, which is the point.** ADR-0200 §1 makes

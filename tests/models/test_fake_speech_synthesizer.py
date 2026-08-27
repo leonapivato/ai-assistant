@@ -2,7 +2,7 @@
 
 What lets other subsystems trust ``ai_assistant.testing.FakeSpeechSynthesizer`` as
 a stand-in for a real voice: it is held to the same contract as
-``VitsSynthesizer``. Behaviour beyond that contract — determinism, the call
+``SupertonicSynthesizer``. Behaviour beyond that contract — determinism, the call
 record, the armed failure — is pinned here.
 """
 

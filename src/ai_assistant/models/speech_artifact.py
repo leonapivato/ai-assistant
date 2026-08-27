@@ -32,16 +32,6 @@ importing this module never pulls a network client into a runtime process.
 Each :class:`SpeechArtifact` below is a whole vendored directory: a repository, a
 commit, and the SHA-256 of every file as shipped.
 
-**The digests live in a JSON file beside this one rather than in it**, which is
-where this module departs from ``embedding_artifact.py`` and why. That artifact
-is five files and its manifest reads as five lines of a decision. One of these is
-**361** — a phoneme model plus the pronunciation data its grapheme-to-phoneme pass
-needs — and 361 lines of hex inlined here would bury the pins, the reasoning and
-the acquisition seam under data nobody reads. Nothing is weakened by the move: the
-manifests are checked into git like any other source, they are read from a path
-derived from this file's own location, and every file in a destination is still
-re-hashed against them. What changes is only where the bytes are written down.
-
 :func:`ensure_artifact`
 downloads only what is missing, into a temporary directory that is moved into
 place only once every file matches the manifest, and then re-hashes **every** file
@@ -52,9 +42,7 @@ corrupted file that no download would ever replace. Presence is not trust
 
 from __future__ import annotations
 
-import functools
 import hashlib
-import json
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -68,11 +56,6 @@ if TYPE_CHECKING:
 #: Directory inside this package that every vendored artifact is staged under —
 #: the embedding model's and both speech models' alike.
 VENDOR_DIRECTORY_NAME = "_vendor"
-
-#: Directory beside this module holding one JSON manifest per artifact, named for
-#: the artifact's vendored directory. Checked into version control, unlike the
-#: artifacts themselves.
-MANIFEST_DIRECTORY_NAME = "speech_manifests"
 
 _READ_CHUNK = 1 << 20
 
@@ -99,63 +82,20 @@ class SpeechArtifact:
     """One vendored model directory, pinned to the exact bytes shipped.
 
     Attributes:
-        directory_name: What the directory is called under ``_vendor/``, and the
-            stem of the JSON manifest that records its digests.
+        directory_name: What the directory is called under ``_vendor/``.
         repo_id: The Hugging Face repository the files come from.
         revision: The immutable commit they are pinned to, so that a moved
             default branch does not change what a build produces.
+        manifest: Every file this product ships from that repository, mapped to
+            the SHA-256 of the exact bytes shipped. The *bytes*, not the
+            revision: a re-pin that changes them changes what runs, and the check
+            is against these rather than against the commit.
     """
 
     directory_name: str
     repo_id: str
     revision: str
-
-    @property
-    def manifest(self) -> Mapping[str, str]:
-        """Every file shipped from ``repo_id``, mapped to the SHA-256 of its bytes.
-
-        The *bytes*, not the revision: a re-pin that changes them changes what
-        runs, and the check is against these rather than against the commit.
-
-        Returns:
-            File name relative to the artifact directory, to lowercase hex digest.
-
-        Raises:
-            SpeechArtifactError: If the manifest file is missing or unreadable.
-        """
-        return _manifest_of(self.directory_name)
-
-
-@functools.cache
-def _manifest_of(directory_name: str) -> Mapping[str, str]:
-    """Read one artifact's recorded digests, cached for the process's lifetime.
-
-    Cached because both the build hook and every verification read it, and the
-    file cannot change under a running process in any way that a re-read would
-    legitimately pick up: it is source, not state.
-
-    Args:
-        directory_name: The artifact's vendored directory name.
-
-    Returns:
-        The recorded manifest, read-only.
-
-    Raises:
-        SpeechArtifactError: If the manifest is missing, unreadable, or is not a
-            JSON object of strings.
-    """
-    path = Path(__file__).resolve().parent / MANIFEST_DIRECTORY_NAME / f"{directory_name}.json"
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        msg = f"could not read the recorded manifest for {directory_name!r} from {path}"
-        raise SpeechArtifactError(msg) from exc
-    if not isinstance(document, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in document.items()
-    ):
-        msg = f"the recorded manifest for {directory_name!r} is not an object of strings"
-        raise SpeechArtifactError(msg)
-    return MappingProxyType(dict(document))
+    manifest: Mapping[str, str]
 
 
 #: The speech-recognition model. Moonshine tiny (English), int8-quantised, in the
@@ -167,31 +107,74 @@ MOONSHINE_TINY_EN_INT8 = SpeechArtifact(
     directory_name="moonshine-tiny-en-int8",
     repo_id="csukuangfj/sherpa-onnx-moonshine-tiny-en-int8",
     revision="bf2b762c076d8ea61e2af0b3851c9564fb77552e",
+    manifest=MappingProxyType(
+        {
+            "cached_decode.int8.onnx": (
+                "2aff28bba6a03d8dcf5c9feac45462629bae37317442299f28115ad09da773f6"
+            ),
+            "encode.int8.onnx": (
+                "8774dfba578de027ec6595c2c654a0836434489bc963a0db124a7f181f571acb"
+            ),
+            "preprocess.onnx": ("f33addce61a143460fe753b5ee5b7db255e5140b5b779c065b94f6c83ff0bf4e"),
+            "tokens.txt": ("1165c2aeb9f72f457a83be2d459a09054f27490acd9b41bd43794dfd25e296ea"),
+            "uncached_decode.int8.onnx": (
+                "216737000dd5881a17aa043f6bbd286add33e4c3b0ae257153e2ec15438bdc41"
+            ),
+        }
+    ),
 )
 
-#: The speech-synthesis model. A Piper VITS voice, with the espeak-ng data its
-#: grapheme-to-phoneme pass reads.
+#: The speech-synthesis model, int8-quantised. Its licence is why it is this one
+#: and not either of the two obvious alternatives, and its input is why it is
+#: eight files rather than three hundred and sixty.
 #:
-#: **The phoneme voice was chosen over the lexicon voice on a measurement, and the
-#: measurement is the reason this artifact is 361 files.** The obvious cheaper
-#: candidate — a VITS model driven from a CMU pronunciation lexicon, three files
-#: and no phoneme data — silently **drops every word the lexicon does not
-#: contain**: "you have a meeting with Sam at 3pm" renders without "3pm", and an
-#: unknown name renders without the name. ADR-0200 §4 makes it this seam's
-#: obligation that the audio is an audible rendering *of the text*, and a
-#: synthesizer that omits the time from an appointment does not discharge it —
-#: for a personal assistant the out-of-vocabulary words are precisely the names,
-#: numbers and abbreviations the answer is about. The phoneme voice renders all
-#: three test phrases whole, and does it about seventeen times faster.
-VITS_PIPER_EN_US_AMY_LOW = SpeechArtifact(
-    directory_name="vits-piper-en_US-amy-low",
-    repo_id="csukuangfj/vits-piper-en_US-amy-low",
-    revision="76da6ca287517a49f58b943c4c4fdb0c1e94d61f",
+#: **It takes text directly**, indexed against a unicode table it ships, so it
+#: needs no grapheme-to-phoneme dictionary at all. That is what rules out the
+#: near miss: every phoneme voice in this family reads its pronunciation from an
+#: **espeak-ng data directory**, which is several hundred files of *GPL-3.0*
+#: material — and vendoring GPL-3.0 data into an MIT distribution is a licensing
+#: decision this lane has no standing to take in passing, on top of the
+#: corresponding-source obligation it would carry.
+#:
+#: **The other alternative, a VITS voice driven from a CMU pronunciation lexicon,
+#: is permissively licensed and was rejected on a measurement**: it silently
+#: **drops every word its lexicon does not contain**. "You have a meeting with Sam
+#: at 3pm" renders without the time, and an unfamiliar name renders without the
+#: name. ADR-0200 §4 makes it this seam's obligation that the audio is an audible
+#: rendering *of the text*, and for a personal assistant the out-of-vocabulary
+#: words are exactly the names, numbers and abbreviations the answer is about.
+#: This model renders all of them, and its own ``LICENSE`` file ships with it.
+SUPERTONIC_3_INT8 = SpeechArtifact(
+    directory_name="supertonic-3-int8",
+    repo_id="csukuangfj2/sherpa-onnx-supertonic-3-tts-int8-2026-05-11",
+    revision="cca5a0e6c96e1d2c720986bf7e75fcc81dee3ae4",
+    manifest=MappingProxyType(
+        {
+            "LICENSE": ("0dfe0d0ba84416fe3879d9a34f4909d8d0137c78d1e95834177b0414ac096fa2"),
+            "duration_predictor.int8.onnx": (
+                "c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db"
+            ),
+            "text_encoder.int8.onnx": (
+                "c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff"
+            ),
+            "tts.json": ("42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09"),
+            "unicode_indexer.bin": (
+                "8402ca48e5189a8950138580b0fff64db6f072f24ac07cd54ba8b2fbb9883b30"
+            ),
+            "vector_estimator.int8.onnx": (
+                "20cd86fa5c6effedfda0e7cffe5b0569ca401c440a0c3a1d72bf39286c0db3fd"
+            ),
+            "vocoder.int8.onnx": (
+                "e923d60f53f95eb1ce235f1dc33ec56d9c057823c96fa6f8acf98f32b0da6152"
+            ),
+            "voice.bin": ("67d5209b0ee8ce6c74105ffbe12fe6a7628aea3b4ba2fcb308a4a67938a93ce8"),
+        }
+    ),
 )
 
 #: Every speech artifact this distribution ships. The build hook iterates this, so
 #: adding a third model is a constant here and no change to the hook.
-SPEECH_ARTIFACTS: tuple[SpeechArtifact, ...] = (MOONSHINE_TINY_EN_INT8, VITS_PIPER_EN_US_AMY_LOW)
+SPEECH_ARTIFACTS: tuple[SpeechArtifact, ...] = (MOONSHINE_TINY_EN_INT8, SUPERTONIC_3_INT8)
 
 
 class Download(Protocol):

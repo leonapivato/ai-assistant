@@ -4,7 +4,7 @@ The speech seams exchange :class:`~ai_assistant.core.types.SpokenAudio` — a
 container-and-codec a browser produces or plays — while every inference engine
 consumes and produces bare mono PCM. This module is the whole of the translation
 between the two, so :mod:`ai_assistant.models.moonshine_transcriber` and
-:mod:`ai_assistant.models.vits_synthesizer` stay about their engines.
+:mod:`ai_assistant.models.supertonic_synthesizer` stay about their engines.
 
 **The declared media type picks the demuxer; the bytes never do.** Both entry
 points below name the container format to the underlying library rather than
@@ -200,9 +200,18 @@ def encode_mono(
         The container's octets, complete and playable.
 
     Raises:
-        ContainerError: If the rendering could not be written.
+        ContainerError: If ``samples`` is empty, or the rendering could not be
+            written.
     """
     container_name, codec_name, _ = _CONTAINERS[media_type]
+    if samples.size == 0:
+        # Refused rather than written as an empty container: a rendering of no
+        # samples is not a rendering, and a caller that has nothing to say does
+        # not reach this seam (ADR-0200 §4 gives that shape a `None` instead).
+        # Stated here because the alternative — a valid container with no audio —
+        # would travel all the way to a player and be silent.
+        msg = f"a {media_type.value} rendering of no samples is not a rendering"
+        raise ContainerError(msg)
     buffer = io.BytesIO()
     try:
         with av.open(buffer, mode="w", format=container_name) as container:
