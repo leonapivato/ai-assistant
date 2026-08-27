@@ -154,9 +154,14 @@ from ai_assistant.core.types import (
     NotificationReach,
     ObservationReport,
     ObservedProposal,
+    OriginUnrecordedBinding,
+    PermissionDecision,
     Question,
     QuietWindow,
+    RecordedInvocation,
     SourceGrant,
+    SourceReadRecord,
+    SpendTotal,
     StepOutcome,
     SuccessorLink,
     TurnOutcome,
@@ -207,7 +212,13 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import RoutableOperation, RoutedListing, RoutedOperation
+    from ai_assistant.core.types import (
+        CanonicalDestination,
+        EgressBinding,
+        RoutableOperation,
+        RoutedListing,
+        RoutedOperation,
+    )
     from ai_assistant.wire.overlay import OverlayAgent
 
 _log = structlog.get_logger(__name__)
@@ -3995,25 +4006,229 @@ def _successor_view(successor: SuccessorLink | None) -> dict[str, Any] | None:
     return {"id": successor.id, "state": successor.state.value}
 
 
-#: Which of ADR-0197 §8's arms this surface has a record view for, and the view for
-#: each. The three the browser can render are the three its own panels already
-#: render — a belief, a question and a source grant — which is every arm an
-#: **ambiguity** listing can take (§5's lookup runs only for the three confirm-owed
-#: operations) plus the read-only ``questions`` and ``standing_grants``.
+def _read_view(record: SourceReadRecord) -> dict[str, Any]:
+    """One recorded read attempt, whole (ADR-0185 §2, ADR-0186 §7's last two clauses).
+
+    **All seven of the record's fields cross**, because a surface that cannot render a
+    row whole renders fewer rows and not partial ones. Nothing here truncates,
+    summarises, samples or counts in place of any part of one.
+
+    **What is deliberately absent is what the record does not hold.** There is no
+    content, no entry, no path and no configured location, and no string derived from
+    any of them: ``source`` is the reader's *declared identity* and ``produced`` is a
+    count rather than a thing. A view reaching for "what did it say" would be reaching
+    for something ADR-0004 §5 and ADR-0093 §8 forbid being written down.
+    """
+    return {
+        "id": record.id,
+        "source": record.source,
+        "use": record.use.value,
+        "checked_at": record.checked_at.isoformat(),
+        "outcome": record.outcome.value,
+        "grant": record.grant,
+        "produced": record.produced,
+    }
+
+
+def _invocation_view(recorded: RecordedInvocation) -> dict[str, Any]:
+    """One recorded act on an authorisation (ADR-0192 §4).
+
+    **One attempt is up to two rows and they cross as the two rows they are.**
+    ``completes`` is what tells a claim from a completion, carried rather than
+    inferred, because nothing here pairs them, counts them as one or renders either
+    in the other's vocabulary.
+
+    **The cost crosses as text**, for :func:`_decimal`'s reason: an amount read by
+    ``JSON.parse`` is a double, and a price the tool reported would reach the owner
+    changed. ``basis`` is the discriminator and it is not derivable from the amount —
+    ``FREE`` and ``UNKNOWN`` are different statements and neither is a number.
+    """
+    row = recorded.invocation
+    cost = row.incurred_cost
+    return {
+        "id": row.id,
+        "recorded_at": row.recorded_at.isoformat(),
+        "completes": row.completes,
+        "decision_id": row.decision_id,
+        "tool": recorded.tool,
+        "capability": recorded.capability,
+        "egress_call": recorded.egress_call,
+        "outcome": None if row.outcome is None else row.outcome.value,
+        "failure_kind": None if row.failure_kind is None else row.failure_kind.value,
+        "cost": (
+            None
+            if cost is None
+            else {
+                "basis": cost.basis.value,
+                "amount": None if cost.amount is None else str(cost.amount),
+                "currency": cost.currency,
+            }
+        ),
+    }
+
+
+def _decision_view(decision: PermissionDecision) -> dict[str, Any]:
+    """One recorded ruling, as ADR-0186 §7 enumerates it.
+
+    §7's own fields — the outcome, the reason, the instant, and the recorded
+    declaration's identifier and capability, read from the row and never from a
+    registry — plus the decision's own id, because §7's resolution clause obliges an
+    answer to *name* the question it answers.
+
+    **What is deliberately not carried is as load-bearing.** ``reads``, ``writes`` and
+    ``discloses`` are absent (§8's fifth clause): they are ceilings on what a tool
+    *may* reach rather than per-call measurements, and a tier reach beside a recipient
+    list would assert the measurement ADR-0016 §3 declines to offer. Nothing here
+    computes :meth:`PermissionDecision.authorises` either (§8's second clause).
+
+    **The digest is a digest** (§8's fourth clause). It is what binds the arguments a
+    ruling was taken over, and it is neither the payload nor expandable into one.
+
+    **``authorised_by`` and ``resolves`` both cross, and the page reads the state off
+    the pair** (ADR-0193 §6, §11). The discriminator is whether ``resolves`` is set,
+    with no field added to carry the basis itself, so a view that pre-computed the
+    state would be putting §6's discriminator in a second place.
+    """
+    return {
+        "id": decision.id,
+        "outcome": decision.ruling.outcome.value,
+        "reason": decision.ruling.reason,
+        "decided_at": decision.decided_at.isoformat(),
+        "tool_id": decision.tool.id,
+        "capability": decision.tool.capability,
+        "parameters_digest": decision.parameters_digest,
+        "resolves": decision.resolves,
+        "authorised_by": decision.ruling.authorised_by,
+        "binding": _recorded_binding_view(decision.egress_binding),
+    }
+
+
+def _recorded_binding_view(
+    binding: EgressBinding | OriginUnrecordedBinding | None,
+) -> dict[str, Any] | None:
+    """The binding a ruling was taken over, in ADR-0178 §7's facts (ADR-0186 §7).
+
+    :func:`_egress_view`'s facts, because they *are* the same facts — ADR-0178 §5
+    builds a ``ConfirmationEgress`` from the recorded decision, so a second wording
+    would be a second vocabulary to keep in step with the first. What changes is the
+    **labels**, and that change is ADR-0186 §8's third clause: a card says where a
+    call is going because it has not gone; a row says what a ruling was taken over,
+    because the trail bounds resolutions and no row knows whether anything ran.
+
+    **A ``None`` binding asserts nothing** (§7's fourth clause): it means the request
+    was not an egress call and continues to mean exactly that, so nothing stands in
+    for it.
+
+    **``origin_unrecorded`` is ADR-0184 §2's arm carried rather than inferred.** Such
+    a row states nothing either way about the material the call was planned over, and
+    a page reading a missing boolean as ``false`` would turn "not recorded" into "no
+    external content", which is a claim the record does not make.
+    """
+    if binding is None:
+        return None
+    unrecorded = isinstance(binding, OriginUnrecordedBinding)
+    return {
+        "account_identity": binding.account.identity,
+        "origin_unrecorded": unrecorded,
+        "planned_with_external_content": (
+            None
+            if isinstance(binding, OriginUnrecordedBinding)
+            else binding.planned_with_external_content
+        ),
+        "destinations": [
+            _recorded_destination_view(member) for member in binding.canonical_destination_set
+        ],
+        "spans": [_span_view(span) for span in binding.spans],
+    }
+
+
+def _recorded_destination_view(member: CanonicalDestination) -> dict[str, Any]:
+    """One member of a recorded canonical destination set (ADR-0186 §7).
+
+    :func:`_destination_view`'s shape, so the page renders both sets through one
+    function: the two member types differ only in their **account** arm, and
+    flattening that here is what lets ADR-0178 §7's recipient wording be written once.
+    """
+    return {
+        "account_identity": None if member.account is None else member.account.identity,
+        "protocol": None if member.protocol is None else member.protocol.value,
+        "canonical": member.canonical,
+    }
+
+
+def _spend_view(total: SpendTotal) -> dict[str, Any]:
+    """One period's total, as ADR-0194 §5 and §6 require it to be read.
+
+    **An absence is carried as the state it is, and ``currency`` is what tells the two
+    apart.** ``currency`` ``null`` means no currency is configured and no total was
+    computed; a present ``currency`` beside ``accounted`` ``null`` means the period
+    could not be measured. A view that collapsed them would tell an owner "no total"
+    while their calls are being refused.
+
+    **The amounts cross as text**, for :func:`_decimal`'s reason: a ceiling read by
+    ``JSON.parse`` is a double, and a ceiling the owner set would reach them changed.
+
+    **The offsets cross beside the bounds and are not folded into them.** ADR-0194's
+    bounds are instants and the offset is what was in force, so a view that shifted
+    the instant would be deciding a calendar question the record does not delegate.
+    """
+    return {
+        "period": total.period.value,
+        "period_start": total.period_start.isoformat(),
+        "period_end": total.period_end.isoformat(),
+        "start_offset": _offset_text(total.start_offset),
+        "end_offset": _offset_text(total.end_offset),
+        "ceiling": None if total.ceiling is None else str(total.ceiling),
+        "currency": total.currency,
+        "accounted": None if total.accounted is None else str(total.accounted),
+    }
+
+
+def _offset_text(offset: timedelta) -> str:
+    """Spell a UTC offset as ``+HH:MM``, or ``+HH:MM:SS`` where seconds are in force.
+
+    ``interfaces.cli._offset_label``'s rule, because it is the same fact reaching a
+    second surface: a zone whose offset carries seconds is rare and real, and
+    truncating one would state a bound the ledger did not use.
+    """
+    total = int(offset.total_seconds())
+    sign = "-" if total < 0 else "+"
+    hours, rest = divmod(abs(total), 3600)
+    minutes, seconds = divmod(rest, 60)
+    stem = f"{sign}{hours:02d}:{minutes:02d}"
+    return stem if not seconds else f"{stem}:{seconds:02d}"
+
+
+#: A view for **every** arm of ADR-0197 §8's :data:`RoutedListing`, which is what
+#: §10's "the listing where one is carried" requires of an adapter and admits no
+#: exception for an arm this page had no panel for.
 #:
-#: The four that are absent — ``SourceReadRecord``, ``RecordedInvocation``,
-#: ``PermissionDecision`` and ``SpendTotal`` — are absent because ADR-0177 §1's
+#: **Four of the seven had no view before this lane and now do.** ADR-0177 §1's
 #: enumeration has never admitted ``recent_reads``, ``recent_invocations``,
-#: ``recent_decisions`` or ``spend_totals`` to a browser request, so this surface has
-#: no view, no renderer and no rendering obligations discharged for any of them.
-#: Minting them here would be the browser's first trail surface decided inside a
-#: rendering lane, which is what ADR-0197 §12's "with the renderer it already has for
-#: the operation" bounds this lane against. The page says so rather than
-#: summarising, counting or silently dropping the listing (§5's last clause).
+#: ``recent_decisions`` or ``spend_totals`` to a *browser request*, and ADR-0186 §6
+#: and §10 keep it that way — but that bar is on the **route** and not on the
+#: rendering. A routed pass makes no browser request for any of them: the hub decided
+#: the route (ADR-0197 §12), and what reaches this adapter is a result it must render
+#: or misreport. Withholding it and naming the CLI instead was this lane's first
+#: shape and adversarial review blocked it correctly: §10 is unqualified, and a
+#: referral is a turn that did something rendered as a turn that did nothing.
+#:
+#: What each of the four owes is inherited rather than invented — ADR-0186 §7's
+#: enumeration and §8's bars for a ruling and a read, ADR-0192 §4's two-rows rule for
+#: an act, ADR-0194 §5 and §6 for a total — and each view above states which.
+#:
+#: This does **not** widen ADR-0177 §1: no path resolves to any of the four, no
+#: browser argument reaches one, and ``test_gateway_decisions.py`` and
+#: ``test_gateway_reads.py`` still pin that. A browser *panel* for them is the later
+#: consumer lane ADR-0186 §6 names, and is #1642.
 _ROUTED_ARM_VIEWS: Final[Mapping[type[BaseModel], Callable[[Any], dict[str, Any]]]] = {
     Belief: _belief_view,
     Question: _question_view,
     SourceGrant: _grant_view,
+    SourceReadRecord: _read_view,
+    RecordedInvocation: _invocation_view,
+    PermissionDecision: _decision_view,
+    SpendTotal: _spend_view,
 }
 
 
@@ -4030,14 +4245,12 @@ def _routed_view(routed: RoutedOperation | None) -> dict[str, Any] | None:
     own total mapping — because "an empty tuple is a legal value of every arm, so the
     shape decides nothing on exactly the case a listing is most likely to take".
 
-    **A listing this surface cannot render crosses as an absence that says so.**
-    ``listing`` ``null`` beside ``listing_unrendered`` ``true`` is a listing that was
-    carried and that this page has no renderer for; ``listing`` ``null`` beside
-    ``listing_unrendered`` ``false`` is a pass that carried none. Collapsing the two
-    would let the page render "nothing was listed" over records the hub returned,
-    which is the falsehood-about-what-happened ADR-0170 §6 exists to refuse. Nothing
-    here summarises the withheld records, counts them, or renders a subset of them
-    (§5's last clause).
+    **Every arm crosses as its records**, which is §10's "the listing where one is
+    carried" and admits no exception for an arm this page had no panel for.
+    :data:`_ROUTED_ARM_VIEWS` is total over the seven, and an earlier shape of this
+    lane that withheld four of them was blocked on review: a referral where a listing
+    should be is a turn that did something rendered as a turn that did nothing, which
+    is ADR-0197's own stated cost of ignoring the member.
 
     **The token crosses because the page has to relay it back and for no other
     reason** (ADR-0177 §8), exactly as :func:`_confirmation_view`'s does: it is
@@ -4057,13 +4270,13 @@ def _routed_view(routed: RoutedOperation | None) -> dict[str, Any] | None:
     """
     if routed is None:
         return None
-    listing = None if routed.listing is None else _routed_records(routed.operation, routed.listing)
     confirmation = routed.confirmation
     return {
         "operation": routed.operation.value,
         "outcome": routed.outcome.value,
-        "listing": listing,
-        "listing_unrendered": routed.listing is not None and listing is None,
+        "listing": (
+            None if routed.listing is None else _routed_records(routed.operation, routed.listing)
+        ),
         "confirmation": (
             None
             if confirmation is None
@@ -4076,25 +4289,26 @@ def _routed_view(routed: RoutedOperation | None) -> dict[str, Any] | None:
     }
 
 
-def _routed_records(
-    operation: RoutableOperation, listing: RoutedListing
-) -> list[dict[str, Any]] | None:
-    """Render one routed listing, or answer ``None`` where this surface cannot.
+def _routed_records(operation: RoutableOperation, listing: RoutedListing) -> list[dict[str, Any]]:
+    """Render one routed listing, record by record (ADR-0197 §10).
 
-    ADR-0197 §8's discriminator rule in one place: the arm is read off ``operation``,
-    and :data:`_ROUTED_ARM_VIEWS` decides whether this surface has a view for it.
+    **The discriminator is** ``operation`` **and never the value's shape** (§8): the
+    arm is read through :func:`~ai_assistant.core.types.routed_listing_arm` — ``core``'s
+    own total mapping — because "an empty tuple is a legal value of every arm, so the
+    shape decides nothing on exactly the case a listing is most likely to take".
+
+    **Every record, in the listing's own order** (§5's last clause): "no surface
+    renders fewer candidates than the outcome carries or summarises in place of
+    them". There is no bound here, no slice and no count standing in for a row.
 
     Args:
         operation: The routed operation, which is the discriminator.
         listing: The records carried beside it.
 
     Returns:
-        One view per record, in the order the listing carries them — never a subset
-        and never a summary — or ``None`` where the browser renders no such record.
+        One view per record, in the order the listing carries them.
     """
-    view = _ROUTED_ARM_VIEWS.get(routed_listing_arm(operation))
-    if view is None:
-        return None
+    view = _ROUTED_ARM_VIEWS[routed_listing_arm(operation)]
     return [view(one) for one in listing]
 
 

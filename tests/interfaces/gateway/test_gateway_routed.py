@@ -8,14 +8,15 @@ is the level #1337's obligation is stated at: ``_outcome_view`` is an explicit
 enumeration, so a member reaching the browser is a decision taken here and nowhere
 else.
 
-**Four of ADR-0197 §8's seven listing arms deliberately do not cross as records.**
-This page has no view for a ``SourceReadRecord``, a ``RecordedInvocation``, a
-``PermissionDecision`` or a ``SpendTotal``, because ADR-0186 §6 and §10 rule that a
-browser view of either trail "is a later consumer lane with its own ratified
-decision" and ADR-0177 §1's enumeration has admitted none of the four operations.
-What crosses instead is the **fact** that a listing was carried and is not rendered
-here — never a summary, never a count and never a subset (ADR-0197 §5's last
-clause) — and that boundary is what the second half of this module pins.
+**All seven of ADR-0197 §8's listing arms cross as their records**, and four of
+them had no view on this page before this lane. ADR-0177 §1's enumeration has never
+admitted ``recent_reads``, ``recent_invocations``, ``recent_decisions`` or
+``spend_totals`` to a *browser request*, and ADR-0186 §6 and §10 keep it that way —
+but that bar is on the **route** and not on the rendering, and a routed pass makes
+no browser request for any of them. §10 is unqualified, so a page that named the
+CLI instead would be rendering a turn that did something as a turn that did
+nothing. The second half of this module pins that no path resolves to the four all
+the same.
 
 **Driven through a real socket** for ``test_gateway_confirmations.py``'s reason, on
 ``test_gateway_streams``' own harness rather than a fourth copy of it.
@@ -23,7 +24,8 @@ clause) — and that boundary is what the second half of this module pins.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -32,16 +34,29 @@ from test_gateway_streams import Harness, _harness
 from ai_assistant.core.types import (
     Belief,
     BeliefBand,
+    CostBasis,
     GrantScope,
+    Idempotency,
     MemoryKind,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     Question,
     QuestionState,
     ReadOutcome,
+    RecordedInvocation,
+    Reversibility,
+    RiskLevel,
     RoutableOperation,
     RoutedOperation,
     RouteOutcome,
     SourceGrant,
     SourceReadRecord,
+    SpendPeriod,
+    SpendTotal,
+    ToolCost,
+    ToolDefinition,
+    ToolInvocation,
     TurnOutcome,
     routed_listing_arm,
 )
@@ -55,16 +70,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assista
 
 _AT = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
 
-#: The four operations whose records this page has no view for, each with the
-#: surface where they *are* read. Written out rather than derived from
-#: ``_ROUTED_ARM_VIEWS``, so a lane that added a view without deciding what the page
-#: says about it fails here.
-_UNRENDERED: dict[RoutableOperation, str] = {
-    RoutableOperation.RECENT_READS: "assistant reads",
-    RoutableOperation.RECENT_INVOCATIONS: "assistant invocations",
-    RoutableOperation.RECENT_DECISIONS: "assistant decisions",
-    RoutableOperation.SPEND_TOTALS: "assistant spend",
-}
+#: The four operations whose records reached this page for the first time in this
+#: lane. Named rather than derived, because each owes a rendering floor its own
+#: decision already states and a lane adding a fifth should have to say which.
+_NEW_ARMS: tuple[RoutableOperation, ...] = (
+    RoutableOperation.RECENT_READS,
+    RoutableOperation.RECENT_INVOCATIONS,
+    RoutableOperation.RECENT_DECISIONS,
+    RoutableOperation.SPEND_TOTALS,
+)
 
 
 def _belief(record_id: str = "b-1", *, content: str = "you drink tea") -> Belief:
@@ -113,6 +127,68 @@ def _read() -> SourceReadRecord:
     )
 
 
+def _decision() -> PermissionDecision:
+    """One recorded ruling, an ``ALLOW`` resting on a decision about that call."""
+    return PermissionDecision(
+        id="d-1",
+        ruling=PermissionRuling(
+            outcome=PermissionOutcome.ALLOW,
+            reason="you approved this call",
+            authorised_by="d-0",
+        ),
+        tool=ToolDefinition(
+            id="smtp",
+            capability="send_email",
+            description="Send an email.",
+            risk_level=RiskLevel.LOW,
+            reversibility=Reversibility.REVERSIBLE,
+            side_effecting=True,
+            reads=(),
+            writes=(),
+            discloses=(),
+            cost=ToolCost(basis=CostBasis.FREE),
+            idempotency=Idempotency.NATURAL,
+        ),
+        parameters_digest="a" * 64,
+        decided_at=_AT,
+        resolves="d-0",
+    )
+
+
+def _invocation() -> RecordedInvocation:
+    """One recorded act on an authorisation — the claim half of ADR-0192 §4's pair."""
+    return RecordedInvocation(
+        invocation=ToolInvocation(id="i-1", decision_id="d-1", recorded_at=_AT),
+        tool="smtp",
+        capability="send_email",
+        egress_call=True,
+    )
+
+
+def _total() -> SpendTotal:
+    """One measured period, with a ceiling — the arm whose amounts must cross as text."""
+    return SpendTotal(
+        period=SpendPeriod.CALENDAR_DAY,
+        period_start=_AT,
+        period_end=_AT,
+        start_offset=timedelta(0),
+        end_offset=timedelta(0),
+        ceiling=Decimal("5"),
+        currency="USD",
+        accounted=Decimal("0.3"),
+    )
+
+
+#: One listing per arm this lane added, so the coverage case drives each with the
+#: record its own operation returns rather than with a stand-in.
+_LISTINGS: dict[RoutableOperation, RoutedListing] = {
+    RoutableOperation.RECENT_READS: (_read(),),
+    RoutableOperation.RECENT_INVOCATIONS: (_invocation(),),
+    RoutableOperation.RECENT_DECISIONS: (_decision(),),
+    RoutableOperation.SPEND_TOTALS: (_total(),),
+}
+
+
 def _routed(
     operation: RoutableOperation,
     outcome: RouteOutcome,
@@ -159,7 +235,6 @@ async def test_the_routed_account_crosses_whole_and_beside_the_reply() -> None:
             "operation",
             "outcome",
             "listing",
-            "listing_unrendered",
             "confirmation",
         }
         assert body["outcome"]["routed"]["operation"] == "forget"
@@ -191,7 +266,6 @@ async def test_a_listing_this_page_renders_crosses_as_its_records() -> None:
             ),
         )
 
-        assert view["listing_unrendered"] is False
         assert [one_row["content"] for one_row in view["listing"]] == [
             "you drink tea",
             "you drink chai",
@@ -215,62 +289,131 @@ async def test_the_read_only_arms_this_page_renders_cross_as_records(
     async with _harness(FakeAssistantEngine()) as one:
         view = await _view(one, _routed(operation, RouteOutcome.PERFORMED, listing=listing))
 
-        assert view["listing_unrendered"] is False
         assert len(view["listing"]) == 1
 
 
 # --- the boundary: four arms this page has no view for ------------------------
 
 
-def test_the_arms_this_page_renders_are_the_ones_its_panels_render() -> None:
-    """ADR-0186 §6 and §10, and ADR-0177 §1's closed enumeration.
+def test_every_arm_of_a_routed_listing_has_a_view() -> None:
+    """ADR-0197 §10: an adapter renders "the listing where one is carried", and the
+    clause admits no exception for an arm this page had no panel for.
 
-    "A browser view of either trail is a later consumer lane with its own ratified
-    decision", and no such decision exists — so this lane renders the three arms the
-    page's own panels already render and mints no view for the other four. Pinned as
-    a set, so adding one is a decision taken deliberately rather than by a helper
-    someone reached for.
+    Read against ``core``'s own total mapping rather than against a list written
+    here, so a member added under ADR-0197 §3's widening rule fails this the moment
+    its arm has no view — which is the failure mode the alternative hides, since a
+    missing view would otherwise surface as a listing silently not rendered.
     """
-    assert set(_ROUTED_ARM_VIEWS) == {Belief, Question, SourceGrant}
-    for operation in _UNRENDERED:
-        assert routed_listing_arm(operation) not in _ROUTED_ARM_VIEWS, operation
+    for operation in RoutableOperation:
+        assert routed_listing_arm(operation) in _ROUTED_ARM_VIEWS, operation
 
 
-async def test_a_listing_this_page_cannot_render_crosses_as_an_absence_that_says_so() -> None:
-    """The one thing this surface must not do is turn a carried listing into silence.
+@pytest.mark.parametrize("operation", _NEW_ARMS)
+async def test_the_arms_this_lane_added_cross_as_their_records(
+    operation: RoutableOperation,
+) -> None:
+    """The four that had no view before, each driven as a routed ``PERFORMED``.
 
-    ``listing`` ``null`` beside ``listing_unrendered`` ``true`` is a listing that was
-    carried and has no renderer here; ``listing`` ``null`` beside
-    ``listing_unrendered`` ``false`` is a pass that carried none. Collapsing the two
-    would let the page say nothing was listed over records the hub returned, which is
-    ADR-0170 §6's failure arriving through the view.
+    What is asserted is that the records themselves cross — a listing of the right
+    length, carrying the record's own identifying field — because the failure this
+    replaces was a listing that crossed as ``null`` beside a referral to the CLI.
+    """
+    listing: RoutedListing = _LISTINGS[operation]
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(one, _routed(operation, RouteOutcome.PERFORMED, listing=listing))
 
-    **And no part of the records crosses** — not a count, not a summary, not a subset
-    (ADR-0197 §5's last clause). The source below is what a leaked field would carry,
-    so it is searched for in the whole response body rather than in the account alone.
+        assert view["listing"] is not None
+        assert len(view["listing"]) == len(listing)
+
+
+async def test_a_routed_read_crosses_all_seven_of_its_fields() -> None:
+    """ADR-0185 §2 and ADR-0186 §7's last two clauses: a surface that cannot render a
+    row whole renders fewer rows and not partial ones.
+
+    The member set is asserted whole, because the failure a presence check misses is
+    the one this view is most likely to have: a field quietly dropped because no case
+    named it.
     """
     async with _harness(FakeAssistantEngine()) as one:
-        one.engine.turn_outcome = _routed(
-            RoutableOperation.RECENT_READS, RouteOutcome.PERFORMED, listing=(_read(),)
+        view = await _view(
+            one,
+            _routed(RoutableOperation.RECENT_READS, RouteOutcome.PERFORMED, listing=(_read(),)),
         )
-        status, body = await one.whole("POST", "/ask", {"utterance": "what did you read"})
 
-        assert status == 200, body
-        view = body["outcome"]["routed"]
-        assert view["listing"] is None
-        assert view["listing_unrendered"] is True
-        assert view["operation"] == "recent_reads"
-        assert "r-1" not in str(body)
+        assert set(view["listing"][0]) == {
+            "id",
+            "source",
+            "use",
+            "checked_at",
+            "outcome",
+            "grant",
+            "produced",
+        }
 
 
-async def test_an_operation_that_carried_no_listing_is_not_reported_as_withheld() -> None:
-    """The other side of the pair above, which is the assertion that fails on a view
-    computing ``listing_unrendered`` from the arm alone."""
+async def test_a_routed_ruling_carries_no_tier_reach_and_no_authorises() -> None:
+    """ADR-0186 §8's fifth and second clauses, which are about what must **not** be
+    on a decision row.
+
+    ``reads``, ``writes`` and ``discloses`` are ceilings on what a tool *may* reach
+    rather than per-call measurements (ADR-0016 §3), so a tier reach beside a
+    recipient list asserts a measurement nothing offers; and nothing computes,
+    displays or implies :meth:`PermissionDecision.authorises`. An enumerating view is
+    where both are kept out, so this is asserted over the member set.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(_decision(),),
+            ),
+        )
+
+        row = view["listing"][0]
+        assert set(row) == {
+            "id",
+            "outcome",
+            "reason",
+            "decided_at",
+            "tool_id",
+            "capability",
+            "parameters_digest",
+            "resolves",
+            "authorised_by",
+            "binding",
+        }
+        assert "authorises" not in str(row)
+
+
+async def test_a_routed_total_crosses_its_amounts_as_text() -> None:
+    """ADR-0194 §5, and :func:`_decimal`'s losslessness rule reaching one more value.
+
+    A ``Decimal`` read by ``JSON.parse`` is a double, so a ceiling the owner set
+    would reach them changed — and a spend surface showing a figure the ledger did
+    not hold is worse than one showing none.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(RoutableOperation.SPEND_TOTALS, RouteOutcome.PERFORMED, listing=(_total(),)),
+        )
+
+        row = view["listing"][0]
+        assert row["accounted"] == "0.3"
+        assert row["ceiling"] == "5"
+        assert row["currency"] == "USD"
+
+
+async def test_an_operation_that_carried_no_listing_crosses_a_null_one() -> None:
+    """``listing`` ``null`` is a pass that carried none, and it is the only thing
+    ``null`` means there now: no arm is withheld, so nothing has to be told apart
+    from an absence."""
     async with _harness(FakeAssistantEngine()) as one:
         view = await _view(one, _routed(RoutableOperation.RECENT_READS, RouteOutcome.FAILED))
 
         assert view["listing"] is None
-        assert view["listing_unrendered"] is False
 
 
 # --- §7: the card and its token -----------------------------------------------
