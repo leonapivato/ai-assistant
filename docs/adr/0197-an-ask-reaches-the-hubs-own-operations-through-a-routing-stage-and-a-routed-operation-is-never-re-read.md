@@ -758,6 +758,13 @@ whole product is that it noticed.
 > therefore derivable from `operation` alone, which is what lets a validator state
 > this without a second field.
 
+**The outer and inner `operation` agreeing is the invariant an inner-model
+validator cannot reach.** A card is valid on its own terms while describing a
+different operation from the route that produced it, and a user reading "revoke
+this grant?" would be approving a `forget`. One discriminator per value is §8's
+rule, and two values carrying it must agree or the pair is not a description of one
+route.
+
 **The read-only set is three because §5 gives a read-only route nothing to be
 ambiguous about.** Such an operation takes no query and resolves no argument, so
 there is no lookup, and `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED` and `NOT_FOUND` are all
@@ -766,11 +773,7 @@ statements about a confirmation §7 never offers it. Writing the rule as a close
 per tag rather than as the three exclusions the pipeline happens to notice is what
 keeps §8's own claim true — that `RoutedOperation` is unable to describe a pass that
 did not happen — and it is the form that stays complete when a ninth member is added
-to `RouteOutcome` rather than silently admitting it on both tags. The last is the one an inner-model validator cannot reach: a
-> card is valid on its own terms while describing a different operation from the
-> route that produced it, and a user reading "revoke this grant?" would be
-> approving a `forget`. One discriminator per value is §8's rule, and two values
-> carrying it must agree or the pair is not a description of one route.
+to `RouteOutcome` rather than silently admitting it on both tags.
 
 > **Normative.** `TurnOutcome` gains a validator clause stating that `routed` and
 > `step` are never both non-`None`. §1 ends the pipeline at a taken route, so a pass
@@ -1398,10 +1401,12 @@ consumer group and not a second decision.
 > asserted with a `confirmation` whose `operation` differs from the outer one and
 > which is otherwise wholly valid, and the fifth with a **read-only** `operation`
 > carrying `AWAITING_CONFIRMATION` beside a wholly valid one-element confirmation,
-> with the same operation carrying `REFUSED`, and with the same operation carrying
-> each of `AMBIGUOUS`, `AMBIGUOUS_TRUNCATED` and `NOT_FOUND` — the last three over an
-> otherwise valid listing, since it is those that a validator written as "not a
-> confirmation outcome" admits; `OperationConfirmation`'s own validator against
+> with the same operation carrying `REFUSED`, with the same operation carrying
+> `AMBIGUOUS` and `AMBIGUOUS_TRUNCATED` over an otherwise valid listing, and with
+> the same operation carrying `NOT_FOUND` and `listing` **`None`** — that last
+> combination and no other, because a read-only `NOT_FOUND` *with* a listing is
+> already refused by the listing invariant above, so a test written that way passes
+> against a validator with no tag-to-outcome rule at all; `OperationConfirmation`'s own validator against
 > a **zero**-element subject, a **two**-element subject, and an element of the
 > wrong arm; the
 > `routed`/`step` mutual exclusion; and §8's widened `TurnOutcome` shape across
