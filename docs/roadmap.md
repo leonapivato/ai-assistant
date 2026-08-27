@@ -277,17 +277,22 @@ the lane this track opens with and it waits on nothing else here.
   `track:web-client`'s gateway is that second spoke, so that surface is a
   prerequisite of this milestone rather than part of it. **What this milestone
   rules before it builds anything**, none of it settled here: the ambient
-  collision (stance 7); the remote hop, since room audio to a non-local hub is
-  ADR-0017 §1's question and transcript-only does not rescue it; the custody
-  terms of ADR-0094 §7–§8 — a spoke may not destroy the material a submission
-  was derived from while that submission is unresolved, the hub retains it only
-  for a bounded verification window, raw source material is never an episode,
-  and the figures (the window's, the buffer's, and the custody handoff §8 leaves
-  undecided) are named by this milestone's deciding ADR rather than by ADR-0094;
-  and the mixed-origin seam, because a captured room carries a third party's
-  speech, which ADR-0098 §1 rules external content where the owner's own
-  utterance is not — the mechanism for a record holding both, and the gate
-  consequence behind it, are ADR-0098 §12's first deferral (ADR-0163 §8).
+  collision (stance 7); what may cause a release and the revocable grant model
+  beside it, which ADR-0094 §10 defers to the first capture producer and this
+  is it — release is not authorisation (§3), so who may say "capture that" in a
+  room is a permission question, and it arrives with the `undetermined`
+  attribution channel the deferred list below returns here at latest (#691);
+  the remote hop, since room audio to a non-local hub is ADR-0017 §1's question
+  and transcript-only does not rescue it; the custody terms of ADR-0094 §7–§8 —
+  a spoke may not destroy the material a submission was derived from while that
+  submission is unresolved, the hub retains it only for a bounded verification
+  window, raw source material is never an episode, and the figures (the
+  window's, the buffer's, and the custody handoff §8 leaves undecided) are named
+  by this milestone's deciding ADR rather than by ADR-0094; and the mixed-origin
+  seam, because a captured room carries a third party's speech, which ADR-0098
+  §1 rules external content where the owner's own utterance is not — the
+  mechanism for a record holding both, and the gate consequence behind it, are
+  ADR-0098 §12's first deferral (ADR-0163 §8).
   *Exit: the owner says "capture that"; the preceding ~30s lands as an
   inspectable episode at the hub with who-triggered-retention provenance; and
   the buffer's non-retention outside a capture is demonstrable.*
