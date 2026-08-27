@@ -32,6 +32,7 @@ argument, so a test changes one thing without restating the rest.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
@@ -40,6 +41,7 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     NotificationBudgetError,
+    PlanningError,
     UngrantableSourceError,
     UnknownContinuationError,
     UnknownConversationError,
@@ -154,6 +156,32 @@ _BEFORE_A_WORD: Final = re.compile(r"(?<=\s)(?=\S)")
 _CONFIDENCE = 0.9
 
 
+#: The retention bound §4 of ADR-0198 reuses, and the ceiling the real engine
+#: defaults to. Stated here rather than imported, because it is a deployment
+#: default rather than a contract value — what the contract fixes is that the two
+#: numbers are **one**, not what the number is.
+_DEFAULT_MAX_OUTSTANDING: Final = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _Settled:
+    """What one answered continuation token still names (ADR-0198 §1).
+
+    The fake's counterpart to the engine's own settled record, and it retains the
+    same three immutable facts and no fourth: the disposition the resolution
+    reached, the binding's ``step_id``, and the ``tool_id`` the step bound. The
+    execution **state** is deliberately absent — §2 rules it re-read at the moment
+    of the restatement rather than snapshotted at settlement, so it is held in
+    :attr:`FakeAssistantEngine.executions`, which stands in for a plan store and
+    which a test can empty to reach §2's store-no-longer-holds-it case.
+    """
+
+    execution_id: str
+    step_id: str
+    tool_id: str | None
+    disposition: Disposition
+
+
 #: The answer a routed pass this fake resolved carries. Fixed rather than composed,
 #: because a fake originates no model call — and present rather than ``None`` because
 #: ADR-0197 §8 makes a routed pass that is not a park owe one.
@@ -180,7 +208,12 @@ class FakeAssistantEngine:
             the question's own state.
     """
 
-    def __init__(self, *, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
+    ) -> None:
         """Create an engine holding nothing.
 
         Args:
@@ -188,8 +221,15 @@ class FakeAssistantEngine:
                 A conformance test sets it small so the boundary is cheap to reach;
                 the default is ADR-0084 §3's 16 MiB frame size less §8b's 512-byte
                 envelope reserve, which is what a deployment gets by saying nothing.
+            max_outstanding_confirmations: The ceiling ADR-0198 §4 reuses as the
+                bound on :attr:`settled`. This fake parks by a lever rather than by
+                admitting a turn, so the ceiling's *backpressure* half has nothing
+                here to bind; what it does bind is the retention, which is the half
+                a conformance case can reach. A subject built at one is how §4's
+                discard is made cheap to observe.
         """
         self._max_payload_bytes = max_payload_bytes
+        self._max_outstanding = max_outstanding_confirmations
         #: The notification surface's whole state, public so a consumer can
         #: seed it: ``await engine.notification_store.admit(candidate,
         #: policy=engine.notification_policy)`` is how a held record gets
@@ -239,6 +279,20 @@ class FakeAssistantEngine:
         #: present state left the next case open, so what is kept is the history.
         self._spent: set[str] = set()
         self.parked: dict[str, Confirmation] = {}
+        #: The bindings this engine has **answered** and still retains, by handle and
+        #: oldest settlement first (ADR-0198 §1, §4). A third table beside ``parked``
+        #: and ``routed_parked`` for their reason: which table a handle is in is what
+        #: decides what a ``resume`` presenting it gets, and a settled record is not a
+        #: park — it holds no live turn, authorises nothing, and is never enumerated
+        #: by ``pending_confirmations``. Bounded by
+        #: ``max_outstanding_confirmations``, discarding the least recently settled.
+        self.settled: dict[str, _Settled] = {}
+        #: The execution state each settled binding names, standing in for the plan
+        #: store a restatement re-reads (ADR-0198 §2). Public and mutable because
+        #: §2's other clause — where the store no longer holds the execution, the
+        #: restatement raises ``PlanningError`` and asserts nothing — is reachable
+        #: only by taking one out, and no call on this surface removes one.
+        self.executions: dict[str, ExecutionState] = {}
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
@@ -449,13 +503,26 @@ class FakeAssistantEngine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
     ) -> TurnOutcome:
-        """Answer a parked confirmation, or refuse a token this engine cannot resolve.
+        """Answer a parked confirmation, restate an answer already given, or refuse.
 
         **Two kinds of park, one method and one token space** (ADR-0197 §7). A handle in
         :attr:`routed_parked` answers a routed operation and its outcome carries ``step``
         ``None`` and ``routed`` non-``None``; every other handle answers a parked step and
         is ruled exactly as it was before ADR-0197. A token in neither is unresolvable and
         yields ``UnknownContinuationError`` and never a denial (ADR-0084 §7).
+
+        **A handle in :attr:`settled` is answered rather than refused** (ADR-0198 §§1-3).
+        Resolving a parked step retains its binding under the handle, and a later
+        ``resume`` presenting that token **restates** the recorded answer: it returns an
+        outcome describing the settled binding and raises nothing. The restatement is
+        returned **whatever ``approved`` carries** and the recorded answer stands
+        unchanged, because a park is answered once (ADR-0044 §2b) and a second answer is
+        never honourable whatever it says. It performs nothing: no tool, no ruling, no
+        composed reply, no captured episode.
+
+        **A routed park is not retained** (§6), which is why the routed branch runs first
+        and is unchanged: it is claimed once and atomically, and a second presentation of
+        its token still falls through to the refusal below.
         """
         check_arguments(
             "resume",
@@ -468,11 +535,7 @@ class FakeAssistantEngine:
         if token.handle in self.routed_parked:
             return await self._resume_routed(token.handle, approved=approved)
         if token.handle not in self.parked:
-            msg = (
-                "this token names no step awaiting confirmation in this engine; call "
-                "pending_confirmations() to re-mint a token for any park that is still answerable"
-            )
-            raise UnknownContinuationError(msg)
+            return self._restate(token.handle)
         confirmation = self.parked.pop(token.handle)
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
@@ -504,11 +567,92 @@ class FakeAssistantEngine:
             step_id="step-1",
             tool_id=confirmation.tool_id,
         )
+        # Answered once, and now **retained** rather than forgotten (ADR-0198 §1).
+        # The eviction above and this write are one step with no ``await`` between
+        # them, which is §1's same-critical-section clause as this fake can state it:
+        # there is no instant at which the handle names neither a park nor a settled
+        # record. The state is filed where a restatement re-reads it from, never
+        # carried on the record itself (§2).
+        self.executions[resolved.state.id] = resolved.state
+        self._retain(
+            token.handle,
+            _Settled(
+                execution_id=resolved.state.id,
+                step_id=resolved.step_id,
+                tool_id=resolved.tool_id,
+                disposition=resolved.disposition,
+            ),
+        )
         # ``turn`` is ``None`` here because this engine parks nothing from a live
         # turn — the shape a **recovered** park produces after a restart, which
         # ADR-0052 §3 ratifies. The *step* is what a resume is for and is always
         # present (ADR-0085 §4).
         return self._checked(TurnOutcome(turn=None, step=resolved), "resume")
+
+    def _retain(self, handle: str, settled: _Settled) -> None:
+        """Record one answered binding under its handle, within ADR-0198 §4's bound.
+
+        The bound is ``max_outstanding_confirmations`` and no figure is invented: the
+        number of answers a client can be uncertain about at once is bounded by the
+        number of tokens it can hold at once. A **count**, never a lifetime — no
+        clock is read, so nothing here makes a token's answerability depend on how
+        long a user stared at a page — and the discard is the **least recently
+        settled**, which this table's insertion order already is, since a handle
+        settles at most once and a restatement reads without re-inserting.
+        """
+        while len(self.settled) >= self._max_outstanding:
+            self.settled.pop(next(iter(self.settled)))
+        self.settled[handle] = settled
+
+    def _restate(self, handle: str) -> TurnOutcome:
+        """Say what a settled binding was decided, or refuse a token naming nothing.
+
+        The restatement's shape is ADR-0170 §4's second one exactly (ADR-0198 §2):
+        ``turn`` ``None``, ``routed`` ``None``, ``reply`` ``None`` and
+        ``reply_degraded`` ``False``, beside a ``step`` carrying the resolution's
+        immutable facts and a ``confirmation`` of ``None`` — which the type's own
+        validator already requires of a disposition that is not
+        ``AWAITING_CONFIRMATION``.
+
+        **The state is re-read here and never cached at settlement.**
+        ``StepOutcome.state`` is the durable execution state after the last transition
+        committed, and a value snapshotted at settlement stops being that the moment
+        anything advances the execution (ADR-0139 §2). Where :attr:`executions` no
+        longer holds it — the fake's spelling of a plan store that has dropped it —
+        this raises ``PlanningError`` and asserts nothing about the outcome, because
+        an outcome it cannot read is not one it may state.
+
+        Args:
+            handle: The continuation handle presented, naming no park.
+
+        Returns:
+            The restated outcome.
+
+        Raises:
+            UnknownContinuationError: If the handle names no settled record either.
+                **Never a denial** (ADR-0084 §7).
+            PlanningError: If the settled binding's execution is no longer held.
+        """
+        settled = self.settled.get(handle)
+        if settled is None:
+            msg = (
+                "this token names no step awaiting confirmation in this engine, and no answer "
+                "this engine still holds; call pending_confirmations() to re-mint a token for "
+                "any park that is still answerable"
+            )
+            raise UnknownContinuationError(msg)
+        state = self.executions.get(settled.execution_id)
+        if state is None:
+            msg = f"the store no longer holds execution {settled.execution_id!r} for this token"
+            raise PlanningError(msg)
+        restated = StepOutcome(
+            disposition=settled.disposition,
+            state=state,
+            step_id=settled.step_id,
+            tool_id=settled.tool_id,
+            confirmation=None,
+        )
+        return self._checked(TurnOutcome(turn=None, step=restated), "resume")
 
     # --- the two accumulation legs ----------------------------------------
 

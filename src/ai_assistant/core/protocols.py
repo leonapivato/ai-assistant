@@ -8176,6 +8176,61 @@ class AssistantEngine(Protocol):
         utterance, so there is no input a router could consume, and what it performs is
         the operation an earlier pass already routed to (ADR-0197 §1).
 
+        **A token whose binding this engine has already settled and still retains is
+        answered, not refused** (ADR-0198 §§1-3). Such a call **restates** the binding's
+        recorded answer: it returns a ``TurnOutcome`` describing the settled binding and
+        raises no
+        :class:`~ai_assistant.core.errors.UnknownContinuationError`. A restatement is
+        returned **whatever the call's ``approved`` carries**, and the recorded answer
+        stands unchanged — a park is answered once (ADR-0044 §2b), so a second answer is
+        never honourable whatever it says, and the engine states what was decided rather
+        than refusing to say. It is what makes ADR-0177 §7's fourth clause resolvable at
+        this seam: a browser request sent with no response read is an outcome that is not
+        known "whatever the gateway did", ADR-0139 §4 rules that where a surface cannot
+        read the state "the user's next call can", and a ``resume`` presenting the same
+        token **is** that next call.
+
+        **What a restatement carries** (§2). ``turn`` ``None``, ``routed`` ``None``,
+        ``reply`` ``None`` and ``reply_degraded`` ``False`` — ADR-0170 §4's second shape
+        exactly — beside a non-``None`` ``step`` whose ``disposition``, ``step_id`` and
+        ``tool_id`` are the resolution's immutable facts and whose ``confirmation`` is
+        ``None``. Its ``state`` is **re-read at the moment of the restatement** and is
+        never a snapshot cached at settlement: ``StepOutcome.state`` is the durable
+        execution state after the last transition committed, and a cached value stops
+        being that as soon as anything advances the execution (ADR-0139 §2). ``turn`` is
+        ``None`` even where the settled park was an in-process one, which ADR-0198 §8
+        records as an amendment of ADR-0052 §3.
+
+        Where the plan store **no longer holds** the settled binding's execution, the
+        restatement raises :class:`~ai_assistant.core.errors.PlanningError` — the same
+        failure a *resolution* raises for the same condition — and the engine asserts
+        nothing about the outcome: one it cannot read is not one it may state, which is
+        ADR-0139 §4's third limb arriving at this seam. It is not added to the ``Raises:``
+        list below, and that is ADR-0198 §5 rather than an omission: ``resume``'s declared
+        failure set (ADR-0085 §9) is **unchanged** by that decision, and this condition
+        and this class both predate it on the resolution path.
+
+        **A restatement performs nothing** (§3). No ``StepRunner``, no ``ActionPolicy``,
+        no recorded ``PermissionDecision``, no tool invocation, no composed reply and no
+        captured episode — so a settled binding yields one resolution, one ruling, one
+        execution attempt and at most one captured resumption, however many times its
+        token is presented. It partially supersedes ADR-0042 §4's "only
+        ``approved=False → DENY`` is guaranteed", scoped to exactly this case and beside
+        ADR-0197 §13's routed pair (ADR-0198 §8).
+
+        **Retention is bounded, holds no ceiling slot, and is never enumerated** (§4).
+        The retained set is bounded by ``max_outstanding_confirmations``, discarding the
+        least recently settled; it holds no slot at that ceiling, because the ceiling
+        bounds *unanswered* parks; it has no lifetime and no clock is read; it is neither
+        listed nor minted for by :meth:`pending_confirmations`, nor reached by that
+        method's reconciliation; and it is process-scoped and never persisted, so a
+        restart empties it exactly as it empties the handle table (ADR-0084 §7).
+
+        **A routed park is ruled exactly as ADR-0197 §7 rules it and none of this reaches
+        one** (ADR-0198 §6). It is claimed once and atomically, no settled record is
+        retained for it, and a second presentation of its token resolves nothing and
+        raises.
+
         Args:
             token: The opaque continuation the engine minted. Relayed, never
                 interpreted or re-derived by the adapter (ADR-0042 §4).
@@ -8187,13 +8242,33 @@ class AssistantEngine(Protocol):
             What the resumption produced.
 
         Raises:
-            UnknownContinuationError: If the token names no parked step this engine
-                can resume — unknown, expired, already claimed, or from a previous
-                process life. **Never a denial**: nobody ruled on this action
-                (ADR-0084 §7). A routed park (ADR-0197 §7) obeys that rule whole: it
-                is claimed once and atomically, so a second presentation of its token
-                — concurrent or later, and whatever its ``approved`` value — resolves
-                nothing and raises this.
+            UnknownContinuationError: If the token names neither a parked step this
+                engine can resume nor an answer it still retains. The cases, stated
+                positively (ADR-0198 §5): an unknown handle; a handle from a previous
+                process life; a park ``pending_confirmations``' own reconciliation
+                evicted because the trail no longer holds its binding pending
+                (ADR-0052 §2); a routed park already claimed; an **expired routed**
+                park; and a settled record discarded under ADR-0198 §4's bound. In
+                every one of them it is **never a denial**: nobody ruled on this
+                action (ADR-0084 §7).
+
+                It ceases to cover exactly one case and gains none — a token whose
+                binding this engine has settled and still retains, which is restated
+                above. Two cases are **not** among them and are named because a reader
+                would otherwise assume them. An ordinary parked step answered past its
+                ``expires_at`` is refused with ``PermissionDeniedError`` before
+                anything is authored, its park stays registered, and ADR-0084 §7 rules
+                in terms that such a token "is not 'expired'" — collapsing the two
+                would tell a user their answer was too late when in fact the hub
+                restarted. And the outstanding-confirmation ceiling **evicts nothing**:
+                at the ceiling the engine refuses to drive another step rather than
+                parking one and stranding it, so a live continuation is never dropped
+                for capacity.
+
+                A routed park (ADR-0197 §7) obeys the rule whole: it is claimed once
+                and atomically, so a second presentation of its token — concurrent or
+                later, and whatever its ``approved`` value — resolves nothing and
+                raises this.
             PermissionDeniedError: If the recorded ruling does not authorise the
                 call — a recorded decision that is not a ``CONFIRM`` about this
                 parked step, a ruling the trail no longer holds on the restart path,

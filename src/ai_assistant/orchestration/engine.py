@@ -1299,6 +1299,45 @@ class _Parked:
 
 
 @dataclass(frozen=True, slots=True)
+class _Settled:
+    """What one **answered** continuation token still names (ADR-0198 §1).
+
+    A settled record, not a park: it carries the binding and the immutable facts of
+    the resolution that answered it, it holds no live turn, it authorises nothing,
+    and no code path resolves anything through it. Presenting its token again
+    **restates** the answer already recorded rather than meeting
+    ``UnknownContinuationError`` (§1), which is what lets a surface whose first
+    answer's fate is unknown ask "did it land?" and be told (#1621).
+
+    **Only immutable facts are retained** (§2). The ``Disposition`` is the gate's
+    verdict on a decision ADR-0044 §2b makes unrepeatable, so it cannot go stale; the
+    ``step_id`` and ``tool_id`` name what was bound. ``StepOutcome.state`` is *not*
+    here on purpose — it is "the durable execution state after the last transition
+    committed", and a value cached at settlement stops being that the moment anything
+    advances the execution, so a restatement re-reads it from the plan store
+    (ADR-0139 §2). What can change is read; what cannot is retained.
+
+    **Not a park in any table that counts one.** A settled record holds no slot at
+    ``max_outstanding_confirmations`` — that ceiling bounds *unanswered* parks, and
+    counting these would let a client that answered every confirmation meet
+    backpressure for having done so (§4). The retained set is bounded by that same
+    number, discarding the least recently settled, and is never enumerated by
+    ``pending_confirmations`` nor reached by its reconciliation.
+
+    Attributes:
+        execution_id: The settled binding's execution, re-read at each restatement.
+        step_id: The settled binding's step.
+        tool_id: The tool the step bound, or ``None`` where it bound none.
+        disposition: The disposition the resolution reached.
+    """
+
+    execution_id: str
+    step_id: str
+    tool_id: str | None
+    disposition: Disposition
+
+
+@dataclass(frozen=True, slots=True)
 class _RoutedSurface:
     """The engine's own operations, as ADR-0197 §2's third clause reaches them.
 
@@ -1969,6 +2008,13 @@ class Engine:
         self._drain_timeout = drain_timeout
         self._parked: dict[str, _Parked] = {}
         self._routed_parks: dict[str, _RoutedPark] = {}
+        #: The bindings this engine has **answered** and still retains, oldest
+        #: settlement first (ADR-0198 §1, §4). Insertion order is settlement order —
+        #: a handle settles at most once and a restatement never re-inserts — so the
+        #: least recently settled record is the first key, which is what §4's bound
+        #: discards. Bounded by ``max_outstanding_confirmations`` and by nothing
+        #: else: no lifetime, no clock, and no setting of its own.
+        self._settled: dict[str, _Settled] = {}
         self._reserved: set[str] = set()
         self._reserved_routes: set[str] = set()
         self._recovery_lock = asyncio.Lock()
@@ -2873,6 +2919,20 @@ class Engine:
         ``approved=True`` may still be refused by the policy (ADR-0042 §4). The
         adapter conveys consent; the policy rules; the engine records and executes.
 
+        **A token whose binding this engine has already settled and still retains is
+        answered rather than refused** (ADR-0198 §§1-3). Such a call **restates** the
+        recorded answer: it returns an outcome describing the settled binding, it
+        consults no policy and drives no runner, and its own ``approved`` is not
+        consulted at all — a park is answered once (ADR-0044 §2b), so a second answer
+        is never honourable whatever it says, and the engine states what was decided
+        rather than refusing to say. That is what lets a surface whose first answer's
+        fate is unknown ask "did it land?" and be told (#1621); before it, the second
+        call met ``UnknownContinuationError``, whose ratified remedy — enumerate and
+        re-mint — is the one remedy a replay cannot use, since ADR-0052 §1 step 2
+        never lists a settled binding. Retention is bounded by
+        ``max_outstanding_confirmations``, holds no slot at that ceiling, has no
+        lifetime, is never enumerated and never persisted (§4).
+
         **This takes no conversation id, and that is a decision** (ADR-0074 §9 item
         5). It recovers the parked turn's conversation from the binding the parking
         turn durably recorded, because a resume that *accepted* an id could be
@@ -2903,14 +2963,23 @@ class Engine:
             it. A resume driven from a **recovered** park composes nothing —
             ``turn`` is ``None`` there, so context and memories were never persisted
             and there is nothing to compose from, which ADR-0170 §4 makes a ``None``
-            ``reply`` with ``reply_degraded`` ``False``.
+            ``reply`` with ``reply_degraded`` ``False``. A **restatement** is that
+            same shape and carries it for its own reason (ADR-0198 §2): ``turn``
+            ``None``, ``routed`` ``None``, ``reply`` ``None`` and ``reply_degraded``
+            ``False``, beside a ``step`` carrying the settled binding's disposition,
+            step id and tool id, and its execution state **re-read now** rather than
+            snapshotted at settlement.
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            PlanningError: If ``token`` names no parked step this engine holds — a
-                token from a previous process, or one already resolved and evicted
-                (its lifetime is process-scoped; ADR-0042 §4, the Revisit-if clause
-                ties durable resume to #242).
+            PlanningError: If ``token`` names neither a parked step this engine holds
+                nor an answer it still retains — a token from a previous process, one
+                reconciled away under ADR-0052 §2, or one whose settled record has
+                aged out of ADR-0198 §4's bound. Its lifetime is process-scoped
+                (ADR-0042 §4; the Revisit-if clause ties durable resume to #242).
+                Also where the plan store no longer holds the execution a settled
+                record names, which is an outcome this engine cannot read and so may
+                not state (ADR-0198 §2).
             PermissionDeniedError: If the recorded decision is not a ``CONFIRM``
                 about this parked step (``StepRunner`` refuses it).
             AuditError, ToolBindingError: As the stages raise.
@@ -3866,6 +3935,17 @@ class Engine:
         (:meth:`_admit_and_reserve`): they are bounded by durable state, not by client
         behaviour. Recovery presents parks that already happened and are already
         durable — refusing to surface one would strand it (ADR-0052 §2).
+
+        **A settled binding is neither listed nor minted for, and the retained
+        records are not reached at all** (ADR-0198 §4). The skip above is what does
+        it and it is unchanged: a binding whose ``CONFIRM`` the trail no longer holds
+        pending is exactly a settled one, and re-presenting it would be the #257
+        hazard ADR-0044 §2b closes. The reconciliation below likewise ranges over
+        ``_parked`` alone — a settled record is not a park, so it is neither evicted
+        by it nor treated as one — which is why the answer to "did my answer land?"
+        is :meth:`resume` and not this listing: an enumeration carrying settled
+        bindings would put a resolved action back in front of a user in the type
+        whose whole purpose is "what you may still answer".
 
         Returns:
             One :class:`Confirmation` per durably-parked, still-unresolved step,
@@ -5075,6 +5155,12 @@ class Engine:
         leave a stale entry that blocks forever). So capacity counts only
         turn-carrying parks.
 
+        **A settled record does not count either, and it is the clearest case**
+        (ADR-0198 §4). This ceiling bounds *unanswered* parks; a settled record is the
+        opposite of one, and counting it would let a client that answered every
+        confirmation meet backpressure for having done so. The retained set is bounded
+        separately, by the same number, in :meth:`_retain`.
+
         Called *before* the runner can park and before the turn is persisted, so a
         refusal leaves neither durable execution state nor a durable goal/plan.
 
@@ -5109,10 +5195,25 @@ class Engine:
         The reservation is released by :meth:`_converse` once the turn is known to
         park (moved into the parked table) or not. Called *before* the runner can
         park, so a raising factory fails with no durable state yet committed.
+
+        **Uniqueness is against every live table, and the retained settled records
+        are one of them** (ADR-0198 §4). A settled record's token is still
+        answerable — it restates — so a handle naming one is as taken as a handle
+        naming a park, and the existing mint tests the candidate against it exactly
+        as against the other three.
         """
         handle = self._id_factory()
         suffix = 0
-        while handle in self._parked or handle in self._routed_parks or handle in self._reserved:
+        while (
+            handle in self._parked
+            or handle in self._routed_parks
+            or handle in self._reserved
+            # A handle naming a **settled** record is taken too (ADR-0198 §4): the
+            # record is still answerable by restatement, so re-minting it for a new
+            # park would make one token name two bindings and hand the second park's
+            # caller the first's answer.
+            or handle in self._settled
+        ):
             suffix += 1
             handle = f"{self._id_factory()}#{suffix}"
         self._reserved.add(handle)
@@ -6122,6 +6223,14 @@ class Engine:
         runs outside it for the same reason and on ``converse``'s own precedent,
         which captures under no lock whatever.
 
+        **A restatement ends inside the critical section and returns from here**
+        (ADR-0198 §§1-3). Where the token names a settled record rather than a park,
+        :meth:`_resolve_park` answers ``None`` in place of the parked entry and the
+        method returns the restated step alone: nothing is composed, because the
+        answer was composed once for the request that performed the act, and nothing
+        is captured, because a restatement is not an exchange and a second episode
+        under one answer is a binding ADR-0074 §3 cannot describe.
+
         **A routed park is answered first, and the whole of its resolution is under the
         same lock** (ADR-0197 §7, §9). :meth:`_answer_routed_park` answers ``None`` where
         the token names no routed park at all, which is the ordinary case for a token
@@ -6141,6 +6250,17 @@ class Engine:
             park, routed = answered
             return await self._compose_and_capture_routed(park, routed)
         parked, step = await self._resolve_park(token, approved=approved, timeout=timeout)
+        if parked is None:
+            # A **restatement** (ADR-0198 §§1-3), and it ends here rather than
+            # continuing down this method: it composes nothing — the answer was
+            # composed once, for the request that performed the act, and a second
+            # model call would hold this caller behind a provider to produce prose
+            # differing from what the first caller read for reasons no user could
+            # account for — and it captures nothing, because it is not an exchange
+            # and a second episode under one answer is a binding ADR-0074 §3 cannot
+            # describe. ``turn`` ``None`` beside ``reply`` ``None`` and
+            # ``reply_degraded`` ``False`` is ADR-0170 §4's second shape exactly.
+            return TurnOutcome(turn=None, step=step)
         composed = await self._compose(parked.turn, step)
         return await self._capture_resumption(parked, step, composed)
 
@@ -6150,8 +6270,8 @@ class Engine:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-    ) -> tuple[_Parked, StepOutcome]:
-        """Record the answer, drive what it authorised, and evict the binding.
+    ) -> tuple[_Parked | None, StepOutcome]:
+        """Record the answer and drive it, or restate an answer already recorded.
 
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
         recovery enumeration: resolving records the decision through the runner and
@@ -6161,19 +6281,31 @@ class Engine:
         — so recovery cannot observe a binding mid-resolution. Resolutions are
         human-paced, so serializing them behind this one lock is free in practice.
 
+        **The eviction and the settled record are one critical section** (ADR-0198
+        §1). The park is replaced by its settled record before this lock is released,
+        never after: a window in which the handle names neither would hand a
+        concurrent ``resume`` the very ``UnknownContinuationError`` the decision
+        exists to stop, and it would open on exactly the race #1621 describes — a
+        recovery listing overtaking a resume, the loser told its action was declined
+        for an action that ran.
+
+        **A resolution that does not complete installs nothing** (§3). The record is
+        written only where the answer was recorded, the runner returned and the park
+        was evicted, all three below; a resolution that raised leaves the park where
+        it was, and what becomes of it afterwards is what became of it before this
+        decision — a direct retry re-enters resolution, and a recovery enumeration
+        running in between may reconcile the binding away under ADR-0052 §2.
+
         Returns:
-            The parked entry this token named, and what became of its step.
+            The parked entry this token named and what became of its step, or
+            ``None`` beside the restated step where the token named a **settled**
+            record. ``None`` is what tells :meth:`_resume` to stop: a restatement
+            drives no runner, composes nothing and captures nothing.
         """
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
             if parked is None:
-                msg = (
-                    "this token names no step awaiting confirmation in this engine; it may be "
-                    "from an earlier run of the process, or already resolved. Call "
-                    "pending_confirmations() to re-mint a token for any park that is still "
-                    "answerable"
-                )
-                raise UnknownContinuationError(msg)
+                return None, await self._restate(token)
             state = await self._plans.get_execution(parked.execution_id)
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
@@ -6188,11 +6320,128 @@ class Engine:
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
             step = self._step_outcome(parked.turn, disposition, step_id=parked.step_id, handle=None)
-            # Resolved once: a second answer would be refused by the trail's
-            # single-resolution index anyway; evicting keeps the table bounded and
-            # turns a replay into a clean "unknown token" (ADR-0042 §4).
+            # Answered once, and now **retained** rather than forgotten (ADR-0198 §1).
+            # ADR-0044 §2b makes a second resolution impossible anyway; what changes is
+            # what the engine says about one. Evicting used to turn a replay into an
+            # "unknown token", whose ratified remedy — enumerate and re-mint — is the
+            # one remedy a replay cannot use, since ADR-0052 §1 step 2 never lists a
+            # settled binding. So the park becomes a settled record in its place.
             self._parked.pop(token.handle, None)
+            self._retain(
+                token.handle,
+                _Settled(
+                    execution_id=parked.execution_id,
+                    step_id=parked.step_id,
+                    tool_id=disposition.tool_id,
+                    disposition=disposition.disposition,
+                ),
+            )
             return parked, step
+
+    def _retain(self, handle: str, settled: _Settled) -> None:
+        """Record one answered binding under its handle, within §4's bound.
+
+        **The ceiling is ``max_outstanding_confirmations`` and no figure is
+        invented** (ADR-0198 §4). The number of answers a client can be uncertain
+        about at once is bounded by the number of tokens it can hold at once, and
+        that is what this setting already bounds — so the two numbers are one, and a
+        deployment that raises the ceiling raises this window in the same breath and
+        for the same reason. No new setting scales, extends or disables it.
+
+        **A count, not a lifetime, and no clock is read.** ADR-0197 §7 bounds a
+        *live* routed park with a clock because such a park holds a ceiling slot and
+        a route identity — scarce resources a park nobody answers would hold forever.
+        A settled record holds neither; its only cost is a few fields of memory, a
+        count bounds memory exactly, and nothing here makes a token's answerability
+        depend on how long a user stared at a page.
+
+        Discarding is **least recently settled**, which this table's insertion order
+        already is: a handle settles at most once, and a restatement reads without
+        re-inserting, so the oldest key is the oldest settlement. What the bound costs
+        is stated rather than hidden — a restatement sought after that many other
+        parks have settled meets ``UnknownContinuationError`` again, which is the
+        behaviour every replay had before this decision, so the bound narrows the
+        improvement and regresses nothing.
+
+        Runs inside :meth:`_resolve_park`'s critical section, with no ``await`` of its
+        own, so the eviction and this write cannot be observed apart.
+        """
+        while len(self._settled) >= self._max_outstanding:
+            self._settled.pop(next(iter(self._settled)))
+        self._settled[handle] = settled
+
+    async def _restate(self, token: ContinuationToken) -> StepOutcome:
+        """Say what a settled binding was decided, or refuse a token naming nothing.
+
+        Called by :meth:`_resolve_park` with ``_recovery_lock`` **held**, and it must
+        be: the check that the handle names no park and the read of the settled table
+        are one decision, and a concurrent resolution completing between them is
+        precisely the race ADR-0198 §1 closes.
+
+        **The call's ``approved`` is not consulted at all** (§1). A park is answered
+        once (ADR-0044 §2b), so a second answer is never honourable whatever it says,
+        and the recorded answer stands unchanged. The engine could instead retain the
+        answer given and refuse a contradicting one with a second typed error; that
+        buys a distinct message and costs the surface the fact it came for, since a
+        caller handed an error learns that the binding was answered and never learns
+        *how*, and the token is opaque so it cannot ask any other way. A caller handed
+        the outcome learns both, and the disagreement is visible to it without a
+        second error class.
+
+        **``state`` is re-read here and never cached at settlement** (§2). It is
+        defined as the durable execution state after the last transition committed,
+        and a value snapshotted at settlement stops being that the moment anything
+        else advances the execution — ADR-0139 §2's rule, at a second seam. Where the
+        store no longer holds the execution, this raises ``PlanningError``, the same
+        failure a resolution raises for the same condition, and asserts nothing about
+        the outcome: an outcome it cannot read is not one it may state.
+
+        **Nothing is performed, consulted, recorded or captured** (§3). No
+        ``StepRunner``, no ``ActionPolicy``, no ``PermissionDecision``, no tool, no
+        composed reply and no episode — so a settled binding yields one resolution,
+        one ruling, one execution attempt and at most one captured resumption,
+        however many times its token is presented. This is ADR-0044 §2b's refusal
+        reaching the caller as an answer instead of as an error: the trail's
+        single-resolution index would refuse a second resolution anyway, and the
+        engine now reports the fact that index is protecting.
+
+        Args:
+            token: The continuation presented, whose handle names no park.
+
+        Returns:
+            The settled binding's step, carrying the immutable facts the record holds
+            and the execution state read now.
+
+        Raises:
+            UnknownContinuationError: If the handle names no settled record either —
+                unknown, from a previous process life, reconciled away under ADR-0052
+                §2, or discarded under §4's bound. **Never a denial** (ADR-0084 §7).
+            PlanningError: If the plan store no longer holds the settled binding's
+                execution.
+        """
+        settled = self._settled.get(token.handle)
+        if settled is None:
+            msg = (
+                "this token names no step awaiting confirmation in this engine, and no answer "
+                "this engine still holds; it may be from an earlier run of the process, or its "
+                "answer may have aged out. Call pending_confirmations() to re-mint a token for "
+                "any park that is still answerable"
+            )
+            raise UnknownContinuationError(msg)
+        state = await self._plans.get_execution(settled.execution_id)
+        if state is None:
+            msg = f"the store no longer holds execution {settled.execution_id!r} for this token"
+            raise PlanningError(msg)
+        # ``confirmation`` is ``None``, which the type's own validator already requires
+        # of a disposition that is not AWAITING_CONFIRMATION — and a settled binding's
+        # never is: ADR-0044 §2b makes the resolution unrepeatable.
+        return StepOutcome(
+            disposition=settled.disposition,
+            state=state,
+            step_id=settled.step_id,
+            tool_id=settled.tool_id,
+            confirmation=None,
+        )
 
     async def _capture_resumption(
         self, parked: _Parked, step: StepOutcome, composed: ComposedReply | None
