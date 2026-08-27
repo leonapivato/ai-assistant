@@ -555,6 +555,28 @@ def _authority(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def _hold_what_the_peer_sent_for_tls(writer: asyncio.StreamWriter) -> None:
+    """Stop reading this connection until :meth:`Gateway._handshake` takes it over.
+
+    **Called before the first ``await`` on a remote connection, and that is the
+    whole of the requirement.** ``asyncio.start_server`` adds the socket's reader
+    and schedules the connection's task in one pass of the loop, in that order, so a
+    pause taken before the coroutine yields runs before the socket is ever polled —
+    and every byte the peer sent is still in the kernel, unread, for TLS.
+
+    ``loop.start_tls`` pauses and resumes reading itself, so it inherits a paused
+    transport and hands it back reading under the TLS protocol; pausing twice is a
+    no-op. A connection refused before the handshake is closed rather than resumed,
+    which is what a refusal at ADR-0174 §3 or ADR-0168 §8 already does.
+
+    Args:
+        writer: The accepted connection.
+    """
+    transport = writer.transport
+    if isinstance(transport, asyncio.ReadTransport):  # pragma: no branch — always is
+        transport.pause_reading()
+
+
 def _cookie(half: str, *, remote: bool) -> str:
     """The `Set-Cookie` value for one minted session (ADR-0168 §6, ADR-0202 §7).
 
@@ -1241,6 +1263,23 @@ class Gateway:
         re-read here and is not re-read while the process runs, so a renewal takes
         effect at the next start and nothing watches a file.
 
+        **Its validity is not re-checked here either, and adversarial review is why
+        that is written down.** Round 1 of this PR read §8's "the moment of binding
+        lies inside the certificate's validity period" as obliging a second check
+        against the clock immediately before the bind, since the overlay-agent query
+        above sits between the constructor's check and this line. The same sentence
+        of §8 places that check "at start, **before it binds or discloses a bootstrap
+        value**", which is where it is; and §4 settles what the extra check would be
+        worth. A gateway that binds a certificate expiring one second later serves it
+        until it is restarted — "a renewed certificate takes effect when the gateway
+        is **next started**", and an owner who never renews "discovers it at a restart
+        rather than at the moment of expiry". A running gateway holding an expired
+        certificate is therefore a state this ADR accepts in terms. Refusing in the
+        microseconds before the bind while accepting the same state microseconds after
+        it would buy nothing and would claim a guarantee the design does not make.
+        §5's disclosure is what covers the interval instead: the expiry is on the
+        owner's terminal at every start.
+
         Returns:
             The bound server, or ``None`` where the listener is off.
 
@@ -1428,6 +1467,12 @@ class Gateway:
             remote: Whether this is the remote browser listener's door.
         """
         connection = _Connection(remote=remote)
+        if remote:
+            # Before the first `await` on this connection, and see `_handshake` for
+            # why that is the whole of the requirement: the peer's first bytes are
+            # the TLS handshake's and must not be read as though they were a
+            # request's while the identity query is out.
+            _hold_what_the_peer_sent_for_tls(writer)
         if not self._admit_connection(connection):
             await _close(writer)
             return
@@ -1533,6 +1578,23 @@ class Gateway:
         cannot parse; and a peer that spoke plain HTTP to this door gets the refusal
         §2 requires — no fallback and no redirect, because "serving a redirect would
         require the plain-HTTP listener it refuses".
+
+        **The peer's first bytes are held for this and not read before it**, which
+        :func:`_hold_what_the_peer_sent_for_tls` is the whole of. A browser sends its
+        `ClientHello` the moment the connection is accepted, and ADR-0174 §3's
+        identity query sits between the accept and this — so without the pause those
+        bytes are read off the socket as though they were a request's, and the
+        handshake below waits for what has already arrived.
+
+        **The standard library closes that gap today and this does not rely on it.**
+        CPython's ``loop.start_tls`` moves a ``StreamReader``'s buffered bytes into
+        the TLS layer on the server side, which arrived in a 3.14 patch release
+        (``gh-142352``); ``requires-python`` is ``>=3.14``, so an interpreter without
+        it is a deployment this project admits. Adversarial review raised the timing
+        on the first round of this PR, and the claim as stated is false of the
+        interpreter this repository runs and true of one it permits — which is the
+        same defect from the deployment's point of view. Pausing costs one call, is
+        correct on both, and stops the door depending on a patch number.
 
         **The handshake is bounded by ``gateway_read_timeout``**, which is ADR-0168
         §8's figure applied to the one thing that can now stall before a request

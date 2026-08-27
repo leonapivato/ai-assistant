@@ -47,7 +47,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 import structlog
@@ -57,7 +57,7 @@ from gateway_tls import browser_context, issue_pair
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.interfaces.gateway.server import Gateway
+from ai_assistant.interfaces.gateway.server import Gateway, _hold_what_the_peer_sent_for_tls
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError
 from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -142,6 +142,24 @@ class _FakeAgent:
             return _named(self.bound, "the agent places no node at that address")
         found = self.peers.pop(0) if self.peers else self.default_peer
         return _named(found, "the overlay agent knows no node at that address")
+
+
+class _YieldingAgent(_FakeAgent):
+    """An agent whose answer takes a turn of the loop, as a real one's does.
+
+    :class:`_FakeAgent` answers without ever awaiting, which is the one thing a real
+    agent cannot do: ADR-0174 §3's identity is a round trip over a local socket. The
+    difference is invisible to every other case and decisive for one — the peer's
+    `ClientHello` arrives while that query is out, and a gateway that read it as a
+    request's bytes would leave the handshake waiting for what it had already
+    swallowed. Adversarial review raised exactly that on this PR's first round,
+    noting that the fake above cannot exercise it.
+    """
+
+    async def identify(self, host: str, port: int) -> str:
+        """Answer, but not before the loop has had the connection's bytes."""
+        await asyncio.sleep(0.05)
+        return await super().identify(host, port)
 
 
 class _SilentAgent(_FakeAgent):
@@ -1488,3 +1506,70 @@ async def test_the_pair_is_read_once_and_never_re_read(remote: Remote, tmp_path:
 
     assert (await _read_answer(reader)).status == 200
     writer.close()
+
+
+async def test_a_handshake_survives_an_identity_query_that_takes_a_turn() -> None:
+    """The `ClientHello` is held for the handshake, not read as a request's bytes.
+
+    ADR-0202 §5 puts ADR-0174 §3's identity check **before** the handshake, and a
+    browser sends its `ClientHello` the moment the connection is accepted — so the
+    two overlap on every real connection, where the identity is a round trip over a
+    local socket. A gateway that let those bytes reach its request reader would leave
+    the handshake waiting for what had already arrived, and the browser would see a
+    connection that hangs and then times out.
+
+    The agent here yields, which every real one does and
+    :class:`_FakeAgent` never does. Adversarial review found the gap on this PR's
+    first round and named the fake as the reason the other cases could not see it.
+
+    **What this case pins is the composition rather than the pause**, and saying so
+    is more useful than implying otherwise: CPython closes the same gap inside
+    ``loop.start_tls`` (``gh-142352``), so on the interpreter this suite runs the
+    handshake completes whether or not the door paused. The interpreters
+    ``requires-python`` also admits are what the pause is for, and
+    :func:`test_a_remote_connection_stops_being_read_before_anything_is_awaited` is
+    the case that fails when it is removed.
+    """
+    async with _remote(agent=_YieldingAgent()) as one:
+        answer = await asyncio.wait_for(one.send("GET / HTTP/1.1\nHost: {host}"), timeout=10)
+
+    assert answer.status == 200
+
+
+class _RecordingTransport(asyncio.ReadTransport):
+    """A transport that records the one call the door makes on it."""
+
+    def __init__(self) -> None:
+        """Start reading, as an accepted connection does."""
+        super().__init__()
+        self.paused = False
+
+    def pause_reading(self) -> None:
+        """Take the note."""
+        self.paused = True
+
+
+class _StubWriter:
+    """Just enough of a ``StreamWriter`` to hold a transport."""
+
+    def __init__(self, transport: asyncio.ReadTransport) -> None:
+        """Hold the transport the door will reach for."""
+        self.transport = transport
+
+
+def test_a_remote_connection_stops_being_read_before_anything_is_awaited() -> None:
+    """The pause is the door's own act and does not depend on the interpreter.
+
+    ``loop.start_tls`` moves a ``StreamReader``'s buffered bytes into the TLS layer
+    on the server side, which arrived in a 3.14 patch release (``gh-142352``) —
+    later than the ``>=3.14`` floor this project sets, so a deployment without it is
+    one this project admits. That is why the door pauses rather than relying on it,
+    and this is the case that fails when the pause is taken out: nothing about it
+    turns on which patch release is running.
+    """
+    transport = _RecordingTransport()
+    writer = cast("asyncio.StreamWriter", _StubWriter(transport))
+
+    _hold_what_the_peer_sent_for_tls(writer)
+
+    assert transport.paused
