@@ -98,6 +98,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RoutingStage,
     StepExecutor,
     StepRunner,
     WriteOutcome,
@@ -128,6 +129,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeReader,
+    FakeRoutingRecorder,
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -143,7 +145,8 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import EgressBinder, SourceReadTrail
+    from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import EgressBinder, RoutingRecorder, SourceReadTrail
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
@@ -237,6 +240,14 @@ TRACE_RETENTION = timedelta(days=365)
 #: the composition root's job in production; here they are fixed so a test can
 #: assert the route the report names.
 OBSERVATION_BATCH = 20
+
+#: ADR-0197 §7's routed-park lifetime, as ``Settings`` defaults it. Named here so a
+#: case that advances the injected clock past it names one figure rather than two.
+ROUTED_TTL = timedelta(minutes=15)
+
+#: The engine's own default outstanding-confirmation ceiling, restated so a case that
+#: wants backpressure can lower it without every other case naming a number.
+DEFAULT_MAX_OUTSTANDING = 1024
 OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 CAPABILITY = "send_email"
@@ -425,7 +436,30 @@ class Harness:
         binder: EgressBinder | None = None,
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
+        routing: RoutingStage | None = None,
+        routing_recorder: RoutingRecorder | None = None,
+        routed_confirmation_ttl: timedelta = ROUTED_TTL,
+        max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
+        now: Clock | None = None,
+        id_factory: Callable[[], str] | None = None,
     ) -> None:
+        # ADR-0197's four knobs. ``routing``/``routing_recorder`` are one obligation
+        # rather than two — the engine refuses a half-wiring — so a harness given a
+        # stage and no recorder is handed the canonical fake, which is what a
+        # composition root does with the one ``permissions/`` store. Every other case
+        # in this module gets neither, which is the deployment the pipeline had before
+        # ADR-0197 and is why they are unaffected by it.
+        self.routing = routing
+        self.routing_recorder: RoutingRecorder | None = (
+            None
+            if routing is None
+            else (FakeRoutingRecorder() if routing_recorder is None else routing_recorder)
+        )
+        # The **injected** clock (ADR-0009), settable so ADR-0197 §7's lifetime is
+        # pinned by advancing it rather than by waiting: "a test advances it rather
+        # than waits", and a case that reclaimed a slot before resuming would pass
+        # against an implementation whose expiry is only ever noticed by housekeeping.
+        self.clock: Clock = (lambda: AT) if now is None else now
         self.plans = FakePlanStore(now=lambda: AT)
         # ``trail`` is a knob because the audit surface's own reader cases need a
         # store that holds **bytes**: ADR-0184 §10 puts the origin-unrecorded row's
@@ -608,10 +642,16 @@ class Harness:
             calendar_ingestion=self.ingestion,
             email_ingestion=self.email_ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
-            id_factory=lambda: next(self.handles),
-            # The whole harness runs at one instant, so the horizon the sweep
-            # measures back from is a figure a case can name (ADR-0119 §10).
-            now=lambda: AT,
+            id_factory=(lambda: next(self.handles)) if id_factory is None else id_factory,
+            routing=self.routing,
+            routing_recorder=self.routing_recorder,
+            routed_confirmation_ttl=routed_confirmation_ttl,
+            max_outstanding_confirmations=max_outstanding_confirmations,
+            # The whole harness runs at one instant unless a case moves it, so the
+            # horizon the sweep measures back from is a figure a case can name
+            # (ADR-0119 §10) — and ADR-0197 §7's routed-park lifetime is a figure a
+            # case can *advance* past.
+            now=self.clock,
             drain_timeout=drain_timeout,
         )
 
