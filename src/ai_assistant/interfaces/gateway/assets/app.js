@@ -1719,15 +1719,106 @@ function unreadableRecord(record) {
   return record.unreadable === true;
 }
 
+// What an empty routed listing says, per operation (#1648).
+//
+// **A listing that carries no records is a state, and this page says which state it
+// is.** ADR-0197 §10's first Normative is that an adapter renders the routed account
+// "in addition to any composed reply, never instead of it, and never in place of
+// it", and an empty `div` suppresses it in exactly the case a reader most needs it:
+// the composed reply says the list is beside this message, so a reader who sees no
+// list cannot tell "the record is empty" from "the page failed to render the
+// record". Those two are materially different answers to the same question, and a
+// blank is how a surface gives the wrong one silently.
+//
+// **Empty is the common state and not the edge.** Four of the six read-only members
+// — `recent_reads`, `recent_invocations`, `recent_decisions` and `standing_grants` —
+// are empty on a hub with no sources configured, and `questions` is empty on one
+// with nothing deferred.
+//
+// **The words are the CLI's, because the two doors answer alike.** ADR-0197 §12's
+// last Normative has each adapter render the routed account "with the renderer it
+// already has for the operation", and `interfaces/cli._render_routed_listing` gets
+// its empty-state prose for free by delegating to `_render_reads`, `_render_standing`
+// and their siblings. This page renders each arm's *fields* through the renderer it
+// already has (`ROUTED_ARM_RENDERERS`) but owns the listing frame itself, so the
+// sentences those renderers carry are restated here rather than inherited.
+//
+// **The first line states it and the rest qualify it**, which is the CLI's own split
+// between the sentence and the caveat below it: a bounded record that is empty is
+// not a claim that nothing ever happened, and saying only the first half would be a
+// stronger claim than the record supports.
+//
+// **Total over ADR-0197 §3's nine operations**, for `ROUTED_ARM`'s reason. The three
+// confirm-owed members and `spend_totals` reach here only through a state their own
+// decisions forbid — §5 reaches an ambiguity on more than one match, and
+// `AssistantOperations.spend_totals` returns "both entries whatever is configured" —
+// so each says the page cannot account for what it was handed. That is the honest
+// reading of an impossible value, and it is still a sentence rather than a blank.
+const ROUTED_EMPTY_UNEXPLAINED =
+  "There is nothing here to show, and this page cannot say why: this answer carries " +
+  "a listing, and an empty one is not a state the hub produces for what was asked.";
+
+const ROUTED_EMPTY = {
+  questions: ["Nothing is waiting on your answer."],
+  recent_reads: [
+    "Nothing recorded. No attempt to read a source is in this record.",
+    "That is not a claim that nothing was ever read: this record states what it " +
+      "holds, the oldest attempts are dropped as it fills, and a fault can leave a " +
+      "read with no row.",
+  ],
+  recent_invocations: [
+    "Nothing recorded. No act on an authorisation is in this record.",
+    "That is not a claim that nothing was ever attempted: this record states what " +
+      "it holds, and a fault can leave an act with fewer rows than it made.",
+  ],
+  recent_decisions: ["Nothing recorded. No ruling has been made yet."],
+  standing_grants: [
+    "You have not granted anything. I am allowed to read no source at all.",
+    "'Sources you can connect me to' lists what is configured, and is where you " +
+      "grant one.",
+  ],
+  spend_totals: [ROUTED_EMPTY_UNEXPLAINED],
+  forget: [ROUTED_EMPTY_UNEXPLAINED],
+  revoke: [ROUTED_EMPTY_UNEXPLAINED],
+  forget_question: [ROUTED_EMPTY_UNEXPLAINED],
+};
+
+// The empty state for one operation, into the listing's own node so that what the
+// account carries stays inside the account.
+//
+// **A member added under ADR-0197 §3's widening rule falls back to a sentence and
+// never to silence.** `ROUTED_ARM`'s omission is deliberately a missing key, because
+// a record rendered by the wrong renderer is worse than one not rendered at all.
+// Here the opposite holds: the whole defect this fixes is a listing that said
+// nothing, so the one thing a missing key must not produce is a blank.
+function renderEmptyListing(list, operation) {
+  const said = ROUTED_EMPTY[operation] || [ROUTED_EMPTY_UNEXPLAINED];
+  said.forEach((text, index) => line(list, text, index === 0 ? "notice" : "hint"));
+}
+
 // Every record the listing carries, in the order it carries them.
 //
 // **Never fewer, and never a summary of them** (ADR-0197 §5's last clause, which is
 // ADR-0186 §7's rule for a trail row applied to a candidate listing). A narrow
 // screen gets a longer page, not a shorter list. The one row that is not rendered is
 // the one §7 itself makes unrenderable, and the listing says when that happened.
+//
+// **A listing carrying no records is answered before the loop and never by it**
+// (#1648). The two absences are different facts and are kept apart: an empty listing
+// is a record with nothing in it, while a listing whose every row was dropped is a
+// record with something in it this page may not show. Keying the empty state on the
+// records rendered would collapse them and report the second as the first, telling a
+// reader nothing was ever ruled on when the truth is that the rulings could not be
+// read — so the zero test is on what arrived, and `UNREADABLE_RULINGS` stays the only
+// thing said about what went.
 function renderRoutedListing(body, operation, listing) {
   const list = document.createElement("div");
   list.className = "routed-listing";
+  if (listing.length === 0) {
+    renderEmptyListing(list, operation);
+    body.appendChild(list);
+    return;
+  }
   let dropped = 0;
   listing.forEach((record) => {
     if (unreadableRecord(record)) {
