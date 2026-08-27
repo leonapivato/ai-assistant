@@ -148,11 +148,22 @@ of the same class as the memory database, so it lives owner-only:
 chmod 0600 laptop.tail2e4542.ts.net.key
 ```
 
-The gateway refuses to start on a key any other user may read or write, and on a
-certificate any other user may **write** — a certificate you cannot vouch for is
-one somebody else chose your browser's chain with. World-*readable* is fine for
-the certificate; it is public by construction (ADR-0202 §3). Keep both somewhere
-only you can write to.
+What the gateway checks is the **owner and the mode**, and it is worth knowing
+exactly what that is and is not. It refuses to start on a key whose mode grants
+any permission at all to group or other, and on a certificate whose mode grants
+group or other **write**; world-*readable* is fine for the certificate, which is
+public by construction. It refuses either file owned by another user, and either
+sitting under a directory an untrusted user could swap it out through (ADR-0202
+§3).
+
+**That is not a check that nobody else can read the key, and it is not offered as
+one.** A POSIX ACL granting another local user access survives an owner-only mode,
+and this system reads no ACLs — a filesystem walk "can be wrong: a bind mount, an
+ACL, a symlinked ancestor" (ADR-0084 §1), so it is defence in depth rather than
+the thing that protects the key. What protects the key is that it is on your own
+machine, owned by your own user. Keep both files somewhere only you can write to,
+and if you have handed anyone else access to that directory, the mode will not
+take it back.
 
 **Nothing renews them for you.** Renewal is your act — run `tailscale cert`
 again — and a renewed certificate takes effect the next time the gateway starts.
