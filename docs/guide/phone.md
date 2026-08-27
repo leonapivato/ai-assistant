@@ -43,9 +43,8 @@ way to *know* it, so it withheld the capabilities it reserves for trustworthy
 origins — microphone capture among them. With the classification in hand it
 stops withholding them.
 
-That is a precondition and not a feature: the page does not capture a microphone
-today, and this decision does not decide that it ever will (ADR-0202 §9).
-Entering a credential is still a loopback-only act, on a separate rule of its own
+Step 8 is what that buys: holding a button on the phone and speaking. Entering a
+credential is still a loopback-only act, on a separate rule of its own
 (ADR-0177 §3).
 
 ## 1. Put both devices on one overlay network
@@ -350,6 +349,45 @@ Getting the value onto the phone is your problem and worth a moment's thought:
 it admits a browser to everything the assistant can do. Reading 43 characters
 off the laptop screen is the boring answer and a perfectly good one.
 
+## 8. Talk to it
+
+**Hold to talk** is under the Ask box. Hold it down, speak, and let go — the
+recording goes up when you release, and the answer comes back on that same
+request. There is nothing to press to stop and nothing to press to send.
+
+You get three things back, and they are three different statements.
+
+- **`Heard: …`**, under the button. That is the transcript the hub worked from,
+  shown every time it got one. It is there so that an answer to the wrong
+  question is something you can see the cause of rather than guess at — if it
+  misheard you, that line is where it says so.
+- **The answer**, in the panel below, exactly as a typed question's answer
+  appears. It is the same rendering: a spoken turn is an ordinary turn that
+  arrived by a different door.
+- **The answer spoken aloud**, played as it arrives.
+
+Two things it says instead, and neither is something going wrong.
+
+- **"I heard nothing in that recording"** — the press caught no words. Nothing
+  was asked, so nothing was answered and no conversation was started.
+- **"That answer is shown here and was not spoken"** — the answer is complete
+  and on screen, and only the audio is missing. Speech is composed after the
+  answer is, so a failure there costs you the sound and never the answer.
+
+**Nothing about your voice is kept.** The recording exists for the length of the
+call and is written to no store, no log and no trail — not by the browser, not by
+the gateway, and not by the hub.
+
+**The page runs no speech engine of its own.** It does not use your browser's
+dictation or its speech synthesis: what is transcribed and what is spoken are the
+hub's, which is what lets the assistant's ruling about what may be said aloud
+apply to the loudspeaker rather than to a text box.
+
+**If the button is there but greyed out**, the page says why underneath it. The
+usual cause is the origin: a browser hands a microphone only to a page it
+considers secure, which is this `https://` one and the laptop's own
+`http://127.0.0.1` one — and no other. Typing works everywhere.
+
 ## Why your phone had to be listed
 
 Being on the overlay gets your phone the page. It does not get it a session.
@@ -410,6 +448,16 @@ name. Type the `https://` origin with the name in it, from step 5's line. Do not
 click through the warning: the browser's refusal is the mechanism this whole page
 exists to obtain, and overruling it gives back exactly what the certificate
 bought.
+
+**The button says the browser will not hand the page a microphone.** You are on
+an origin the browser does not consider secure — most often `http://` at the
+numeric address rather than the `https://` name from step 5. The remedy is step
+6's: type the origin with the scheme and the name in it.
+
+**You held the button and it says "this browser would not start recording".**
+The microphone opened and the encoder refused it. Hold it again; if it keeps
+happening, that browser cannot record either of the two formats this surface
+carries, and typing is the way in on that device.
 
 **You want the local browser back and the certificate has lapsed.** Unset
 `ASSISTANT_GATEWAY_REMOTE_ADDRESS` together with both TLS paths and restart. The

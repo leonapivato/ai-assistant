@@ -255,6 +255,21 @@ The **Ask** panel takes the bootstrap panel's place once the session exists.
 Type into *What do you want the assistant to do?* and send it. The answer
 arrives on the page as it is composed rather than in one piece at the end.
 
+Or **hold to talk**, under the box: hold the button down, speak, and let go. The
+recording goes up when you release and the answer comes back on that request —
+shown in the panel exactly as a typed question's is, and spoken aloud as it
+arrives. Under the button you get `Heard: …`, the transcript the assistant worked
+from, so an answer to the wrong question is something you can see the cause of.
+
+Two things it may say instead, neither of which is a failure: *"I heard
+nothing"*, meaning the press caught no words and nothing was asked; and *"that
+answer is shown here and was not spoken"*, meaning the answer is complete on
+screen and only the audio is missing. Nothing of the recording is kept anywhere.
+If the button is greyed out, the page says why under it — the browser hands a
+microphone only to a page it considers secure, which this one is and the
+`http://` address of another machine is not
+([`phone.md`](phone.md) sets up the one that works).
+
 That is the whole of the first run. The rest of the page is the control surface
 over what the assistant remembers, what it may read, and what it is holding to
 tell you — every one of those is also an `assistant` subcommand, and they are
