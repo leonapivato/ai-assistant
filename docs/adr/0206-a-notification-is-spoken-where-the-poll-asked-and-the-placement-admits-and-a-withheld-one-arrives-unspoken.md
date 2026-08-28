@@ -1,6 +1,6 @@
 # 206. A notification is spoken where the poll asked and the placement admits, and a withheld one arrives unspoken
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-28
 
 ## Context
