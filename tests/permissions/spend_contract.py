@@ -2225,9 +2225,22 @@ class SpendGateContract:
         is below ``1E15``, so exceeding ``1E19`` takes ten thousand of them. There
         is no cheaper fixture for this property, and it is built once rather than
         twice for that reason.
+
+        **The count is minimal, and that is asserted rather than asserted about**
+        (#1752). This fixture is one of the two longest cases in the suite, so a
+        later reader looking for time will look here first; the assertion below
+        says in arithmetic what the paragraph above says in prose — one row fewer,
+        at the widest amount §1 admits, does **not** reach ``1E19``, so no smaller
+        count discharges §11's clause and the cost is not a number anyone chose.
+        What *was* available is the per-row cost: appending a completion to the
+        canonical fake scanned every row already held, which made this fixture
+        quadratic in a way nothing about the obligation required.
         """
         widest = "999999999999999.999999999"
         count = 10_001
+        assert _times(Decimal(widest), count - 1) < Decimal("1E19"), (
+            "a cheaper fixture exists; §11's clause no longer needs this count"
+        )
         clock = MovableClock()
         subject = harness.open(
             replace(BOUNDED, day_ceiling=Decimal("1"), month_ceiling=Decimal("1")), now=clock

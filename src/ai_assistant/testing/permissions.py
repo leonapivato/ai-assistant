@@ -573,6 +573,16 @@ class FakeAuditTrail:
         # ``recorded_at``, so a clock that steps backwards cannot make a completed
         # act stop being the most recent one.
         self._invocations: dict[str, ToolInvocation] = {}
+        # The claim ids a completion row already names, maintained beside
+        # ``_invocations`` on every write to it. It answers ADR-0192 §2's
+        # "an outcome cannot be written twice" in constant time, where scanning
+        # the rows for it makes appending ``n`` completions cost ``n**2``
+        # comparisons -- which ADR-0194 §11's ten-thousand-row fixture pays in
+        # full. It is derived state and never a second source of truth: every
+        # membership question it answers is the one
+        # ``any(row.completes == named for row in self._invocations.values())``
+        # answers, and ``clear()`` empties the two together.
+        self._completed: set[str] = set()
         self._clock = checked_clock(now, owner="FakeAuditTrail")
         self._identifiers: MintsIdentifiers = (
             identifiers if identifiers is not None else FakeIdentifiers()
@@ -1064,6 +1074,7 @@ class FakeAuditTrail:
             removed = len(self._decisions) + len(self._invocations)
             self._decisions.clear()
             self._invocations.clear()
+            self._completed.clear()
         return removed
 
     # --- the ledger: the consume, and the two appends (ADR-0192 §§1-2) ----
@@ -1158,7 +1169,7 @@ class FakeAuditTrail:
             if claim is None or claim.completes is not None:
                 msg = f"the trail holds no open claim {named!r} to complete"
                 raise InvalidCompletionError(msg)
-            if any(row.completes == named for row in self._invocations.values()):
+            if named in self._completed:
                 msg = (
                     f"claim {named!r} is already completed; the trail is append-only, "
                     f"so an outcome cannot be written twice"
@@ -1175,6 +1186,7 @@ class FakeAuditTrail:
                 failure_kind=kind,
             )
             self._invocations[completion.id] = completion
+            self._completed.add(claim.id)
             return completion.model_copy(deep=True)
 
     def _reading(self) -> datetime:
