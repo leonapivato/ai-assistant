@@ -25,6 +25,7 @@ GitHub.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -457,16 +458,23 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     # test can still write the renamed artifact of issue #99 and prove the name
     # claims nothing.
     name = filename or f"{loop_id or 'noloop'}-{persona}-{base_sha}-{tree}.md"
-    # ADR-0209 §5 / issue #1750: `pr_desc` is what codex-review.sh records about
-    # the PR description it saw, and `description` is the snapshot body itself.
-    # The default is an artifact carrying NEITHER — which is every artifact
-    # recorded before the field existed, and the state ship must keep reading as
-    # "this round makes no claim about the description" rather than as a failure.
-    desc_field = f"pr_desc={pr_desc} " if pr_desc else ""
+    # ADR-0209 §5 / issue #1750: `pr_desc` is the HASH of the PR description this
+    # round was taken beside, and `description` is that body. Content-addressed,
+    # so an artifact names the body it saw and can never select another round's
+    # (adversarial review of PR #1755, round 2). The default is an artifact
+    # carrying NEITHER — every artifact recorded before the field existed, and the
+    # state ship must keep reading as "this round makes no claim about the
+    # description" rather than as a failure.
+    #
+    # `pr_desc` is derived from `description` unless the caller overrides it, which
+    # is how a test writes the artifact that names a body nobody can produce.
     if description is not None:
+        body_hash = hashlib.sha1(description.encode()).hexdigest()  # noqa: S324  # not a credential
         snapshots = review_dir / "descriptions"
         snapshots.mkdir(exist_ok=True)
-        (snapshots / name).write_text(description)
+        (snapshots / body_hash).write_text(description)
+        pr_desc = pr_desc or body_hash
+    desc_field = f"pr_desc={pr_desc} " if pr_desc else ""
     (review_dir / name).write_text(
         f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
         f"branch=feature tree={tree} patch_id={patch_id} round=1 "
