@@ -439,8 +439,32 @@ here reaches it.
 > bounded-channel turn, a belief, a record written before this decision — reads exactly
 > what ADR-0204 §1 says.
 
-> **Normative.** `PROTOCOL_VERSION` does not move for this change. Nothing on the wire
-> changes shape, and no client, spoke or gateway learns anything new.
+> **Normative.** `PROTOCOL_VERSION` does not move for this change, and ADR-0124 §9's
+> test is applied rather than asserted past. That rule bumps the version for "any change
+> after which a frame a conforming peer at the new version may send would be refused by a
+> conforming peer at the old version, or would be accepted by it with a different
+> meaning". No frame changes shape or encoding, no member is added or removed, no
+> promoted method's arguments or results change, and every `Provenance` a hub at the new
+> version emits is valid for a peer at the old one and reads every member it names. What
+> changes is a value the hub **computes**, on one class of record.
+
+**The precedent is ADR-0203's, on a larger change of the same kind.** Its §1 subtracts
+from the supply the whole turn runs over, so on a spoken operation `TurnResult.memories`
+— wire-carried inside `TurnOutcome.turn` — went from the whole retrieved set to the
+speakable subset of it. ADR-0203 §5 rules "no wire operation and no `PROTOCOL_VERSION`
+bump" for that, under this same test, and gives the reason in its next clause: "what
+changes is which records the pipeline puts in `memories` on one class of operation, which
+is the pipeline's own decision and was already its own decision." The same sentence is
+true here of one boolean. Reading ADR-0124 §9 as reaching what a hub *decides* to put in
+a wire-carried field would have bumped for ADR-0203 §1, for ADR-0187 §4's floor and for
+ADR-0158's supplement, none of which did; §9's reach is the frame — its encoding, the
+validity of a wire-carried `core` type, and the promoted surface's method set.
+
+**And ADR-0204 §7's second ground is untouched.** The field is hub-authoritative: "No
+client sets it, no component reads it off a wire-received record to decide a placement",
+and the withholding happens in the hub, at supply, inside the turn. There is no direction
+in which a client emits a `Provenance` at all, and no peer at any version acts on the
+value, so there is nothing for a version skew to disagree about.
 
 > **Normative.** Nothing here authorises egress, relaxes any permission floor, widens
 > any grant, or is cited toward a designation, a registration or a destination.
@@ -498,7 +522,9 @@ rule 5). It owes:
 
 1. **The group boundary**, carried from `LearningLoop.respond` to the supply filter
    inside `orchestration`, and the filter evaluating the boolean over the members past
-   it while subtracting over the whole supply. No `core` change, no Protocol change.
+   it while subtracting over the whole supply. No `core` **definition** change and no
+   Protocol change; the two prose edits item 5 names are the whole of this lane's reach
+   into `core/types.py`.
 2. **`UnboundedAudienceSupply` alone.** `BoundedAudienceSupply` keeps the whole-supply
    evaluation, and the module docstring's account of what the two share is extended to
    say where they now differ.
