@@ -9,6 +9,7 @@ The end-to-end half lives in ``test_gateway_streams.py``.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,7 +38,7 @@ from ai_assistant.testing import (
 from ai_assistant.wire.errors import HubUnavailableError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from ai_assistant.core.types import Identifier
 
@@ -765,6 +766,14 @@ async def test_the_keep_alive_is_the_value_carrying_nothing_but_its_own_kind() -
     So the value is ``alive`` and the *next* poll acknowledges nothing on its account:
     §5 acknowledges a delivery written to at least one open stream, and a keep-alive
     is not one.
+
+    One value and not two: the interval's write *is* this interval's "nothing to
+    report", so the empty poll returning behind it adds nothing and is dropped —
+    §8's own promise that a quiet stream sees "exactly what it writes today and at
+    exactly the cadence it writes it at today". This row read two before issue #1769
+    was fixed, which is the defect stated as an expectation; the property it is here
+    for — the value's shape, and that nothing is acknowledged on its account — is
+    unchanged, and the count is pinned in its own right below.
     """
     timers = Timers()
     fan_out, engine, _ = _fan_out([None], timers=timers)
@@ -779,7 +788,7 @@ async def test_the_keep_alive_is_the_value_carrying_nothing_but_its_own_kind() -
     await asyncio.sleep(0)
     await engine.answer_one_poll()
 
-    assert read == [{"kind": "alive"}, {"kind": "alive"}]
+    assert read == [{"kind": "alive"}]
     assert engine.acknowledged == [None, None]
     fan_out.shutdown()
     await reading
@@ -1092,6 +1101,11 @@ async def test_the_acknowledgement_rides_the_next_poll_across_a_keep_alive() -> 
     gateway's own write arriving in between. Playback is not an acknowledgement, and
     an interrupted, dropped, unplayed or undecodable rendering changes nothing about
     what is acknowledged or when.
+
+    The second poll returns nothing behind the keep-alive it was still outstanding
+    for, so it writes nothing (issue #1769) — and acknowledges exactly what it would
+    have acknowledged had it written: the acknowledgement rides the *poll*, and this
+    section moves no part of it.
     """
     timers = Timers()
     delivered = _delivery(1)
@@ -1108,7 +1122,7 @@ async def test_the_acknowledgement_rides_the_next_poll_across_a_keep_alive() -> 
     await engine.answer_one_poll()
 
     assert engine.acknowledged[:2] == [None, delivered.delivery_id]
-    assert [value["kind"] for value in read[:3]] == ["notification", "alive", "alive"]
+    assert [value["kind"] for value in read] == ["notification", "alive"]
     fan_out.shutdown()
     await reading
 
@@ -1167,5 +1181,227 @@ async def test_a_poll_that_returned_in_the_same_turn_wins_the_interval() -> None
     assert [value["kind"] for value in there] == ["notification"]
     assert not one.abandoned.is_set()
     assert not two.abandoned.is_set()
+    fan_out.shutdown()
+    await reading
+
+
+# --- §8: one value per interval on a quiet stream (issue #1769) ---------------
+
+
+@dataclass
+class _Alarm:
+    """One callback deferred against :class:`_Schedule`'s reading."""
+
+    at: float
+    callback: Callable[[], None]
+    spent: bool = False
+
+    def cancel(self) -> None:
+        """Call it off."""
+        self.spent = True
+
+
+class _Schedule:
+    """A virtual clock, and every callback the gateway deferred against it.
+
+    :class:`Timers` fires by hand and holds no reading, which is what a test asking
+    *what* an elapsing interval writes wants. Issue #1769 is about *when*: the QA run
+    measured the keep-alive arriving in pairs 25 ms apart, and the reason is that one
+    figure paces both the poll and the interval (ADR-0175 §8) while the hub holds the
+    poll for the whole of it — so the interval falls due a round trip *before* every
+    empty poll returns. Reproducing that needs the interval and the poll's return
+    ordered against one clock, which is the whole of what this adds.
+    """
+
+    def __init__(self) -> None:
+        """Start at zero with nothing deferred."""
+        self.now = 0.0
+        self.deferred: list[_Alarm] = []
+
+    def __call__(self, delay: float, callback: Callable[[], None]) -> _Alarm:
+        """Take one deferred callback, due ``delay`` from the current reading."""
+        alarm = _Alarm(at=self.now + delay, callback=callback)
+        self.deferred.append(alarm)
+        return alarm
+
+    @property
+    def armed(self) -> list[_Alarm]:
+        """The alarms that have neither fired nor been cancelled."""
+        return [alarm for alarm in self.deferred if not alarm.spent]
+
+    async def advance(self, seconds: float) -> None:
+        """Run the clock forward, firing what falls due in the order it falls due.
+
+        Every coroutine woken by a firing is let run to its next wait before the
+        clock moves again, so an alarm armed by a callback is armed at the reading
+        that callback saw — which is what makes the cadence below a measurement
+        rather than a count.
+        """
+        target = self.now + seconds
+        while True:
+            armed = self.armed
+            due = min((alarm.at for alarm in armed), default=None)
+            if due is None or due > target:
+                break
+            self.now = due
+            for alarm in [one for one in armed if one.at == due]:
+                alarm.spent = True
+                alarm.callback()
+            await _settle()
+        self.now = target
+
+
+class _Budgeted(FakeAssistantEngine):
+    """A hub that holds every poll for the budget and answers a round trip later.
+
+    Which is what a hub with nothing to report does: ADR-0175 §8's one figure is the
+    poll's ``budget``, the hub waits it out, and the response then takes as long as a
+    connection takes. So an empty poll's answer reaches the gateway at
+    ``budget + rtt`` after it was issued — always after the interval armed by the
+    write that preceded it, never before.
+    """
+
+    def __init__(
+        self,
+        schedule: _Schedule,
+        *,
+        rtt: float = 0.025,
+        answers: list[tuple[float, NotificationDelivery | None]] | None = None,
+    ) -> None:
+        """Script ``(hold, answer)`` for the first polls; hold the rest to the budget."""
+        super().__init__()
+        self.schedule = schedule
+        self.rtt = rtt
+        self.answers = list(answers or [])
+        self.acknowledged: list[Identifier | None] = []
+        self.answered_at: list[float] = []
+
+    async def next_notification(
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
+    ) -> NotificationDelivery | None:
+        """Park on the schedule for this poll's hold, then answer it."""
+        self.acknowledged.append(acknowledging)
+        hold, answer = (
+            self.answers.pop(0) if self.answers else (budget.total_seconds() + self.rtt, None)
+        )
+        ready = asyncio.Event()
+        self.schedule(hold, ready.set)
+        await ready.wait()
+        self.answered_at.append(self.schedule.now)
+        return answer
+
+
+async def _settle() -> None:
+    """Let every coroutine the last step woke run on to its next wait."""
+    for _ in range(_TURNS):
+        await asyncio.sleep(0)
+
+
+async def _timed(
+    schedule: _Schedule, stream: DeliveryStream, into: list[tuple[float, Mapping[str, Any]]]
+) -> None:
+    """Read one stream to its end, stamping each value with the clock's reading."""
+    async for value in stream.values():
+        into.append((schedule.now, value))
+
+
+def _quiet(schedule: _Schedule, **kwargs: Any) -> tuple[DeliveryFanOut, _Budgeted]:
+    """A fan-out over a hub that holds its polls, on one virtual clock."""
+    engine = _Budgeted(schedule, **kwargs)
+    slots = _Slots()
+    return (
+        DeliveryFanOut(
+            engine=engine,
+            budget=_BUDGET,
+            acquire=slots.acquire,
+            release=slots.release,
+            defer=schedule,
+        ),
+        engine,
+    )
+
+
+async def test_a_quiet_stream_takes_one_value_per_interval_and_not_two() -> None:
+    """§8: "A write of either kind restarts the interval, so a gateway whose polls
+    complete within their budget writes exactly what it writes today and at exactly
+    the cadence it writes it at today."
+
+    Issue #1769, found by the milestone-20 QA run: a quiet stream took **two** values
+    per ``gateway_notification_budget``, about 25 ms apart, every interval — because
+    the same figure paces the poll and the interval, the hub holds the poll for the
+    whole of it, and the response then takes a round trip. The interval therefore
+    fell due first on every single interval, wrote its keep-alive, and the empty poll
+    landing behind it wrote a second value saying exactly what the first had said.
+
+    Four intervals, and the cadence is the budget to the millisecond: the interval's
+    write is the one that stands, so the reading it lands at is never pushed out by
+    the round trip the way the QA run's measurement drifted (20.149, 40.185, 60.226,
+    80.273 — 20.011, 20.024, 20.017 apart, each pair's second value arriving 25 ms
+    behind its first).
+    """
+    schedule = _Schedule()
+    fan_out, engine = _quiet(schedule)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[tuple[float, Mapping[str, Any]]] = []
+    reading = asyncio.ensure_future(_timed(schedule, stream, read))
+    await _settle()
+
+    await schedule.advance(4 * _BUDGET.total_seconds())
+
+    assert read == [
+        (20.0, {"kind": "alive"}),
+        (40.0, {"kind": "alive"}),
+        (60.0, {"kind": "alive"}),
+        (80.0, {"kind": "alive"}),
+    ]
+    # The loop kept polling across every one of them — the value is dropped, not the
+    # poll, so ADR-0175 §4's "polls while and only while a stream is open" is intact
+    # and the next delivery is picked up the instant the hub has one. Each empty
+    # answer lands a round trip behind the interval that had already written for it.
+    assert engine.answered_at == pytest.approx([20.025, 40.05, 60.075])
+    assert engine.acknowledged == [None, None, None, None]
+
+    # A fifth interval, to show the cadence is not drifting by that round trip: the
+    # next value is due at 100.0 and not at 100.1.
+    await schedule.advance(_BUDGET.total_seconds())
+
+    assert read[-1] == (100.0, {"kind": "alive"})
+    assert engine.answered_at == pytest.approx([20.025, 40.05, 60.075, 80.1])
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_delivery_restarts_the_interval_so_no_keep_alive_follows_inside_it() -> None:
+    """§8: "A write of either kind restarts the interval… a keep-alive is emitted only
+    where a poll has outrun the interval."
+
+    The other half of issue #1769's property, measured on the same clock: a poll that
+    answers a delivery five seconds in writes then, and the next value a browser sees
+    is a whole ``gateway_notification_budget`` later — not fifteen seconds later on
+    the interval the delivery interrupted, and not twice.
+    """
+    schedule = _Schedule()
+    fan_out, engine = _quiet(schedule, answers=[(5.0, _delivery(1))])
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[tuple[float, Mapping[str, Any]]] = []
+    reading = asyncio.ensure_future(_timed(schedule, stream, read))
+    await _settle()
+
+    await schedule.advance(50.0)
+
+    assert [(at, value["kind"]) for at, value in read] == [
+        (5.0, "notification"),
+        (25.0, "alive"),
+        (45.0, "alive"),
+    ]
+    # §5 unchanged: the delivery is acknowledged on the next poll, and the two
+    # keep-alives that follow it are acknowledged by nothing.
+    assert engine.acknowledged == [None, _delivery(1).delivery_id, None, None]
     fan_out.shutdown()
     await reading
