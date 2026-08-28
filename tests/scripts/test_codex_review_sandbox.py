@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import run_review
+from _repo_template import seed_repo
 
 _GIT = shutil.which("git")
 
@@ -37,9 +38,7 @@ def _git(repo: Path, *args: str) -> None:
 def _init_repo(repo: Path) -> str:
     """Create a two-commit repo with the adversarial rubric; return the base SHA."""
     assert _GIT is not None
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
     # .review/ is git-ignored in the real repo, so the driver's own session and

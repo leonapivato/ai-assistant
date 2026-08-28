@@ -31,7 +31,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _repo_template import seed_bare_repo, seed_repo
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "ship.sh"
 _BASH = shutil.which("bash")
@@ -57,14 +61,9 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
     is what should demand the architecture lens.
     """
     origin = repo.parent / "origin.git"
-    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-        [str(_GIT), "init", "-q", "--bare", "-b", "main", str(origin)], check=True
-    )
+    seed_bare_repo(origin)
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "f.txt").write_text("one\n")
     # Mirrors the real repo: .review/ is ignored, so the dirty-tree check does
     # not trip over the artifacts it is about to read.

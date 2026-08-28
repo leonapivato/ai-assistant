@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _repo_template import seed_repo
 from test_ship import _VERDICT, _fake_gh, _git, _init_repo, _record_review, _run_ship
 
 if TYPE_CHECKING:
@@ -172,10 +173,7 @@ def test_the_run_offers_no_way_to_allocate_or_rename() -> None:
 def _adr_repo(repo: Path) -> Path:
     """A repo on a branch carrying one ADR standing ``Proposed``."""
     repo.mkdir(parents=True)
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "docs" / "adr").mkdir(parents=True)
     (repo / "docs" / "adr" / "0100-already-here.md").write_text(
         "# 100. Already here\n\n- Status: Accepted\n- Date: 2026-01-01\n\n## Context\n\nx\n"
