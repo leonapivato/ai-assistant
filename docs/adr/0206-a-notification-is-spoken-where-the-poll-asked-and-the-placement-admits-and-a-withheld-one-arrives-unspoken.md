@@ -414,9 +414,23 @@ tied to the session it admitted" — but prose beside a mark supplies no obligat
 > `frozen=True` — and ADR-0131 §4's reason for the first of those binds unchanged.
 
 > **Normative.** `SpokenRendering` is a new closed `StrEnum` in `core/types.py`
-> with exactly four members: `NOT_REQUESTED`, `RENDERED`, `WITHHELD` and
-> `DEGRADED`. A lane adds a member only with an ADR deciding it; removing one is a
-> change to what was decided and takes a superseding ADR.
+> with exactly four members, whose serialized values are fixed here and are
+> exactly these: `NOT_REQUESTED` is `"not_requested"`, `RENDERED` is
+> `"rendered"`, `WITHHELD` is `"withheld"`, and `DEGRADED` is `"degraded"`. A
+> lane adds a member only with an ADR deciding it; removing one, or changing one's
+> value, is a change to what was decided and takes a superseding ADR.
+
+**The values are named rather than left to the member names, and the reason is
+the same one ADR-0131 §4 gives for spelling out `NotificationDelivery`'s
+fields.** This enumeration crosses the wire inside a delivery, so two
+implementations choosing `"withheld"` and `"WITHHELD"` would both conform to a
+clause that named only the members and would not interoperate — "the
+interoperability failure ADR-0084 §3 made framing and codec normative to
+prevent, arriving one layer up". Fixing the values is also what makes the reserve
+arithmetic below checkable: without them the longest value is unbounded, and a
+conforming implementation could spend the margin ADR-0131 §4 left. The spelling
+is `SpokenAudioFormat`'s and `DataTier`'s — the member name lowercased — so
+nothing new is invented, and adversarial review found the gap on the first round.
 
 > **Normative.** The four members are exhaustive and mutually exclusive, and each
 > names one cause. `NOT_REQUESTED`: `plays` was empty, so no placement was decided
@@ -435,12 +449,23 @@ tied to the session it admitted" — but prose beside a mark supplies no obligat
 > the synthesizer's obligation, discharged in its conformance suite; no component
 > decodes, re-transcribes or otherwise inspects a rendering to check it.
 
-> **Normative.** `spoken_rendering` is `DEGRADED` in exactly four cases and no
+> **Normative.** `spoken_rendering` is `DEGRADED` in exactly five cases and no
 > others: synthesis raised a `SpeechError`; the intersection of `plays` with the
-> synthesizer's `formats` was empty; the rendering breached ADR-0200 §6's
-> `hub_max_spoken_audio_bytes`; or the whole projected `NotificationDelivery`
-> carrying that rendering would breach ADR-0085 §8c's payload limit. In every one
-> the delivery travels without the rendering.
+> synthesizer's `formats` was empty; nothing remained of `budget` when the entry
+> was selected, so no synthesizer was called (§7); the rendering breached
+> ADR-0200 §6's `hub_max_spoken_audio_bytes`; or the whole projected
+> `NotificationDelivery` carrying that rendering would breach ADR-0085 §8c's
+> payload limit. In every one the delivery travels without the rendering.
+
+**Two of the five are discovered before a synthesizer is called rather than
+reported by one**, which is ADR-0200 §4's treatment of the empty intersection —
+"discovered before the call rather than reported by one, which is why nothing is
+spent on it" — reaching a second cause. An exhausted budget is the other, and it
+is a `DEGRADED` case rather than a sixth outcome because the caller's position is
+identical either way: the notification is here and the audio is not. Architecture
+review found on the first round that §7 required this state and §6's exhaustive
+list did not admit it, which is a state with no conforming outcome; naming it is
+the fix rather than relaxing either clause.
 
 > **Normative.** **A withholding is never reported as a degradation and a
 > degradation is never reported as a withholding.** No implementation collapses
@@ -492,8 +517,9 @@ delivering a candidate whose canonical encoding exceeds the contract limit "less
 256-byte delivery reserve", covering a wrapper it computed at "130 bytes at most:
 34 structural… plus at most 96 for the identifier". The two members above add, in
 ADR-0087 §2's canonical form, `,"spoken":null` — 14 bytes — and
-`,"spoken_rendering":"not_requested"` — 35 bytes, taking the longest member value
-of the four. That is 49 bytes, for a worst case of 179 against a reserve of 256,
+`,"spoken_rendering":"not_requested"` — 35 bytes, taking the longest of the four
+values the clause above fixes, which is what makes the figure a bound rather than
+an example. That is 49 bytes, for a worst case of 179 against a reserve of 256,
 with 77 bytes still in hand. **So the reserve stands and is not superseded**, and
 `offer`'s refusal is unchanged.
 
@@ -809,7 +835,8 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §5 | A withheld candidate calls no synthesizer and emits no audio | A test that a `WITHHELD` delivery carries `spoken` `None`, that no synthesizer was called, and that no substitute value of any kind is produced |
 | §5 (delivery) | A withheld notification is still returned and still acknowledgeable | A test that the poll returns it, that it is acknowledged normally, and that the outbox holds nothing after |
 | §6 | The two members, the enumeration, and the validator stating §6's invariant both ways | Tests constructing each admissible shape and rejecting each inadmissible one, `spoken` beside every non-`RENDERED` member included |
-| §6 (degradation) | The four `DEGRADED` cases | Four tests, one per case, each asserting the delivery still travels |
+| §6 (values) | The four serialized values exactly as §6 fixes them | A test enumerating `SpokenRendering` and asserting each member's value; a round-trip through `wire/codec.py` asserting the value on the wire |
+| §6 (degradation) | The five `DEGRADED` cases | Five tests, one per case, each asserting the delivery still travels |
 | §6 (no collapse) | A withholding is never a degradation | A test that a `WITHHELD` delivery is not retried into speech on the next poll |
 | §6 (translation) | `SpeechError` degrades; every other exception propagates | Two tests, one each direction, over a synthesizer made to fail |
 | §6 (ceiling) | The whole projected delivery measured; the rendering dropped | A near-ceiling test: a candidate lawful for `offer` plus a rendering degrades rather than raising |
