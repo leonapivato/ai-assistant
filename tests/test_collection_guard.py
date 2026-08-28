@@ -56,6 +56,30 @@ class TestUnboundWidget(WidgetContract):
     """Implements nothing, so it stays abstract."""
 '''
 
+#: The supported way to write an abstract helper under a collected name: pytest
+#: honours ``__test__ = False`` in ``Class.collect``, so the class contributes no
+#: item whether or not it is abstract, and nothing is lost for a guard to report.
+_OPTED_OUT = '''\
+"""An abstract helper that has said it is not a test class."""
+
+from abc import ABC, abstractmethod
+
+import pytest
+
+
+class TestSharedBase(ABC):
+    __test__ = False
+
+    @pytest.fixture
+    @abstractmethod
+    def widget(self) -> int:
+        """The subject."""
+
+
+def test_something_else() -> None:
+    assert True
+'''
+
 
 def _run_nested(corpus: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Collect and run ``corpus`` in a pytest of its own.
@@ -133,3 +157,23 @@ def test_the_guard_leaves_a_complete_binding_alone(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+def test_an_abstract_helper_that_opted_out_is_not_refused(tmp_path: Path) -> None:
+    """``__test__ = False`` is the explicit opt-out, and it is honoured here too.
+
+    pytest reads it one step later than ``istestclass`` -- in ``Class.collect``,
+    which returns no items for such a class -- so an abstract helper carrying it
+    contributes nothing whether or not it is abstract, and no test is lost.
+    Refusing it would break the one supported way to write an abstract base under
+    a name pytest collects, which is a cost this guard has no reason to impose.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "test_opted_out.py").write_text(_OPTED_OUT)
+
+    result = _run_nested(corpus, "-p", "collection_guard")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    assert "TestSharedBase" not in result.stdout + result.stderr
