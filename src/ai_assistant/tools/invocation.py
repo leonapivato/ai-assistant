@@ -152,8 +152,8 @@ class EgressToolImplementation(Protocol):
 
     **A second shape rather than a wider first one, for the reason ADR-0029 §1
     gives for splitting ``ToolInvoker`` off ``ToolRegistry``**: "the surface should
-    not widen to cover a concern its consumers do not have." ``current_time`` and
-    ``recall_memory`` have no business being handed a
+    not widen to cover a concern its consumers do not have." ``current_time`` has no
+    business being handed a
     :class:`~ai_assistant.core.types.BoundAccount` carrying an account identity —
     Tier 1 personal data (ADR-0149 §3) — merely to satisfy a signature. Widening
     the one shape would hand every tool in the system that value forever, which is

@@ -149,7 +149,10 @@ SEND_EMAIL: Final = tool_declaring(
 )
 
 #: A tool bound to no account and declaring neither keyword: ADR-0152 §8's ``None``.
-NOT_EGRESS: Final = tool_declaring({"query": {"type": "string"}}, tool_id="recall_memory")
+#: A **synthetic** id, not a shipped one: what these cases need is any local tool
+#: with a query-shaped argument, and the id it used to carry (``recall_memory``)
+#: names a tool ADR-0208 §2 deleted, which would send a reader looking for it.
+NOT_EGRESS: Final = tool_declaring({"query": {"type": "string"}}, tool_id="local_lookup")
 
 #: A **well-formed credential literal**, for ADR-0146 §9's case (#1150). It names
 #: nothing this repository holds and unlocks nothing; what the clause needs is a

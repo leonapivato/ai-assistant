@@ -27,18 +27,16 @@ in production that constructs a transport from it.
 **A registration is still a deployment fact rather than a package fact.** One tool
 per connected account (ADR-0148 §6), so ``send_email`` reaches the registry only
 where a deployment has named the account it sends as and the endpoint it submits
-to; where it has not, this subsystem holds the same two local, read-only tools it
-always did.
+to; where it has not, this subsystem holds only the one local, read-only tool
+``current_time`` (ADR-0208 §1).
 """
 
 from __future__ import annotations
 
 from ai_assistant.tools.builtin import (
     CURRENT_TIME,
-    RECALL_MEMORY,
     CurrentTime,
     EgressIntegration,
-    RecallMemory,
     build_default_registry,
     build_send_email_integration,
     egress_registrations,
@@ -48,12 +46,10 @@ from ai_assistant.tools.registry import InMemoryToolRegistry
 
 __all__ = [
     "CURRENT_TIME",
-    "RECALL_MEMORY",
     "CurrentTime",
     "EgressIntegration",
     "EgressToolImplementation",
     "InMemoryToolRegistry",
-    "RecallMemory",
     "ToolImplementation",
     "build_default_registry",
     "build_send_email_integration",

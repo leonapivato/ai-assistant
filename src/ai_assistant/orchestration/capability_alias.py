@@ -60,6 +60,13 @@ _WORD_CATEGORIES = frozenset({"L", "N", "M"})
 #: onto the same entry. This is a hand-maintained table of *deliberate* synonyms,
 #: not a similarity heuristic: adding a tool with a new vocabulary adds entries
 #: here, it does not teach this module to guess.
+#:
+#: **No row targets a memory capability**, and ADR-0208 §2 deleted the eight that
+#: did along with the tool they aimed at. Under ADR-0053's live-registry check a
+#: surviving row would have been inert, so what was removed is the written claim
+#: that this system serves ``search_memory`` — and the eight ready-made synonyms a
+#: later memory tool would have inherited without an ADR. Re-adding any of them is
+#: the registration ADR-0208 §1 forbids without one.
 CAPABILITY_ALIASES: Mapping[str, str] = {
     # report_current_time (current_time, ADR-0048 §2)
     "get_time": "report_current_time",
@@ -71,18 +78,6 @@ CAPABILITY_ALIASES: Mapping[str, str] = {
     "time_now": "report_current_time",
     "get_current_time": "report_current_time",
     "check_time": "report_current_time",
-    # recall_memory (recall_memory, ADR-0048 §2). Retrieval synonyms only: a
-    # *write* synonym like "remember" is deliberately absent — ADR-0048 ships no
-    # writer, and aliasing a store-intent onto a read is the wrong-tool hazard
-    # this layer exists to avoid. It is added when a memory-write tool exists.
-    "recall": "recall_memory",
-    "recall_memories": "recall_memory",
-    "search_memory": "recall_memory",
-    "search_memories": "recall_memory",
-    "retrieve_memory": "recall_memory",
-    "memory_recall": "recall_memory",
-    "memory_search": "recall_memory",
-    "lookup_memory": "recall_memory",
 }
 
 

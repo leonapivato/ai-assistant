@@ -66,13 +66,11 @@ from ai_assistant.orchestration.selection import Preference, eligible_candidates
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeByteChannel,
-    FakeMemoryStore,
     FakeOutboundTransport,
     authorised,
 )
 from ai_assistant.tools import (
     CURRENT_TIME,
-    RECALL_MEMORY,
     build_default_registry,
     build_send_email_integration,
     egress_registrations,
@@ -185,9 +183,7 @@ async def test_a_configured_deployment_registers_the_tool_and_binds_it_to_one_ac
     """
     integration, _ = await _configured()
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
     assert await registry.get(SEND_EMAIL_ID) == SEND_EMAIL
     assert SEND_EMAIL.capability in await registry.capabilities()
@@ -222,10 +218,36 @@ async def test_an_unconfigured_deployment_holds_neither_half() -> None:
     reachable.
     """
     trail = FakeAuditTrail()
-    registry = build_default_registry(memory=FakeMemoryStore(), ledger=trail, gate=trail)
+    registry = build_default_registry(ledger=trail, gate=trail)
 
-    assert {tool.id for tool in await registry.all_tools()} == {CURRENT_TIME.id, RECALL_MEMORY.id}
+    assert {tool.id for tool in await registry.all_tools()} == {CURRENT_TIME.id}
     assert egress_registrations(None).registration(SEND_EMAIL_ID) is None
+
+
+async def test_no_memory_capability_is_advertised_with_an_integration_either() -> None:
+    """The configured half of ADR-0208 §6's registry assertion.
+
+    §6 asks for the property "for a call with an egress integration and for one
+    without". The *without* call is ``test_builtin.py``'s
+    ``test_build_default_registry_advertises_no_memory_capability``; this is the
+    *with* call, here because this file owns the configured branch and the
+    machinery that builds a real integration.
+
+    Asserted over the advertised capabilities and the tool ids, as §6 requires, and
+    exhaustively rather than by naming the absent capability: the registry a
+    configured deployment gets is ``current_time`` and ``send_email`` and nothing
+    else, so a memory tool re-added under **any** id or capability fails this,
+    which a ``not in`` over a list of known synonyms would not.
+    """
+    integration, _ = await _configured()
+    trail = FakeAuditTrail()
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
+
+    capabilities = await registry.capabilities()
+    ids = {tool.id for tool in await registry.all_tools()}
+
+    assert set(capabilities) == {CURRENT_TIME.capability, SEND_EMAIL.capability}
+    assert ids == {CURRENT_TIME.id, SEND_EMAIL_ID}
 
 
 def test_an_endpoint_this_seam_will_not_pin_is_refused_at_wiring_rather_than_at_a_send() -> None:
@@ -266,7 +288,7 @@ async def test_a_send_with_no_connected_account_is_refused_not_answered_none() -
     cannot produce it.
     """
     trail = FakeAuditTrail()
-    registry = build_default_registry(memory=FakeMemoryStore(), ledger=trail, gate=trail)
+    registry = build_default_registry(ledger=trail, gate=trail)
     registry.register(SEND_EMAIL, _never_called)
     seam = _seam(None, registry)
 
@@ -301,9 +323,7 @@ async def test_selection_reaches_the_registered_tool_when_it_is_the_one_capable_
     """
     integration, _ = await _configured()
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
     candidates: Sequence[ToolDefinition] = await registry.find(SEND_EMAIL.capability)
     assert [tool.id for tool in candidates] == [SEND_EMAIL_ID]
@@ -336,9 +356,7 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
     seam = _seam(integration, registry)
 
     parameters = arguments()
@@ -390,9 +408,7 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
     seam = _seam(integration, registry)
     parameters: Mapping[str, FrozenJson] = {
         "to": "Alice@Example.Invalid",
@@ -433,9 +449,7 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
     """
     integration, ring = await _configured()
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
     seam = _seam(integration, registry)
 
     parameters = arguments()
@@ -474,9 +488,7 @@ async def test_an_egress_callable_reached_without_a_binding_is_refused() -> None
     """
     integration, ring = await _configured()
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
     # Deliberately unrecorded: ADR-0192 §1 places this check **above** the claim,
     # so the refusal must not depend on the trail holding the authorisation.
@@ -497,9 +509,7 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
     """
     integration, _ = await _configured()
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(), egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(egress=integration, ledger=trail, gate=trail)
 
     # A binding with no spans, because ``current_time`` takes no arguments and
     # ADR-0150 §4 makes a span name one the call carries. The account and the

@@ -580,9 +580,7 @@ def build_world(
     # through the **same** trail this arm records its rulings into (ADR-0192 §9's
     # wiring clause) and so needs it before the registry is built.
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=store, now=lambda: NOW, egress=integration, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(now=lambda: NOW, egress=integration, ledger=trail, gate=trail)
     binder = EgressBindingSeam(
         definitions=registry,
         registrations=egress_registrations(integration),
