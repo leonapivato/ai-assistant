@@ -145,9 +145,23 @@ about it.
 > "Re-adding it behind a lower risk level" and "re-adding it under another id" are
 > both that registration.
 
-> **Normative.** The retrieval stage is the one read of the assistant's own store a
-> turn makes on the turn path. A component on that path that wants records the
-> supply does not hold does not obtain them by invoking a tool.
+> **Normative.** The retrieval stage is the **sole reader** of the assistant's own
+> store on the turn path. "One read" names one *site*, never a count of calls: the
+> stage's own per-band reads (ADR-0072 §5, ADR-0113) and its episodic supplement
+> (ADR-0158 §1) are unchanged, and nothing in this decision removes, merges or
+> bounds any read those sections require of it.
+
+> **Normative.** A component on the turn path that wants records the supply does
+> not hold does not obtain them by invoking a tool.
+
+**That scoping sentence is in the clause rather than beside it, because the title's
+phrase would otherwise be read as arithmetic.** `assemble_by_band` issues one
+`MemoryStore.search` per band by construction — that is the whole of ADR-0072 §5's
+remedy for a band-neutral single read letting "a flood of low-confidence inferences
+… displace an assertion *below the cut*" — and `ConversationLoop` then makes
+ADR-0158 §1's separate episodic read. A rule counting calls would forbid both. What
+this decision counts is *stages that touch the store on the turn path*, and after §1
+there is one.
 
 **The ground is that the read is already performed, better, one stage earlier.**
 Every property the tool lacks, `assemble_by_band` has: band precedence and per-band
@@ -279,12 +293,22 @@ never realised, because the payload reaches no reply; it is the useful half, and
 > ADR-0053's branch 4 and is what makes the deletion honest rather than merely
 > tidy.
 
-The second test is the one that matters, and it is stated over the *selection path*
-rather than over the alias table for a reason: a lane that deleted the rows but left
-the tool bound would pass a table-shaped assertion and ship the defect. A lane that
-deleted the tool but left the rows would pass an assertion about the registry and
-leave eight dead claims. Only a test that drives a lookup-shaped capability to
-`NO_CAPABLE_TOOL` fails on either mistake.
+> **Normative.** The same lane pins that **no value in `CAPABILITY_ALIASES` is
+> `recall_memory`** — asserted over the table's values, so a surviving row fails
+> the test whatever key it is written under. This clause pins §2's deletion and
+> nothing wider: it is not a rule that the table may hold no inert entry, which is
+> a rule ADR-0053 declined to make and this ADR does not make for it.
+
+**Three tests rather than two, because the first two cannot see a row left behind.**
+The selection-path test is the one that matters for §1: a lane that deleted the rows
+but left the tool bound fails it, where a table-shaped assertion alone would pass.
+But it does not run the other way. If a lane deletes the tool and leaves all eight
+rows, ADR-0053's live-registry check makes every one of them inert — `search_memory`
+folds onto no advertised capability, branch 3's target is not advertised, the name is
+returned unchanged, selection reports `NO_CAPABLE_TOOL` — and every test above it
+passes while §2's deletion is unperformed and eight dead claims stand. Only the
+values assertion fails on that. Neither test subsumes the other, which is why both
+are owed.
 
 ### 7. What the implementing lane owes
 
@@ -405,7 +429,7 @@ obligates, and the prose beside them is read to determine what they mean.
 - **A memory question stops parking.** The most frequent `CONFIRM` on the turn path
   disappears, and with it the spoken-channel silence #1699 measured. The answer is
   composed from the supply, which is where it was composed from all along.
-- **One read of the store per turn, at the site that has the machinery.** Band
+- **One reader of the store per turn, at the site that has the machinery.** Band
   precedence, budgets, the kind filter, the episodic supplement and — on an
   unbounded channel — the withholding all apply to it, because there is no longer a
   second read that bypasses them.
