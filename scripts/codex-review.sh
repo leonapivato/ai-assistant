@@ -823,6 +823,20 @@ _mode_start() {
             # detached into a session of its own, so its pid is not `$$` and its
             # argv is `bash <self> <persona> <base_sha>`.
             #
+            # And the needle is emitted SINGLE-quoted, POSIX-escaped, because
+            # this line is shell source that somebody is about to paste into a
+            # shell. Interpolating a path into `"…"` — which is what this
+            # printed for as long as it printed anything — hands the reader's
+            # shell whatever the path contains: a clone at
+            # `/tmp/$(touch /tmp/pwn)/repo` runs the substitution on paste, a `"`
+            # or a `\` breaks the quoting outright, and either way the check can
+            # also report no child while one is running. Single quotes expand
+            # nothing at all, and the one character they cannot carry — `'`
+            # itself — is closed, backslash-escaped and reopened. This is the same
+            # class as the ERE bug above: a path is data, and every layer that
+            # reads it as syntax has to be closed, not just the one that bit
+            # (adversarial round 8 on PR #1722).
+            #
             # What this does NOT do is let the SCRIPT tell a slow child from a
             # dead one; that needs durable pre-claim state — a launch token and a
             # verifiable pid — and is issue #1730.
@@ -848,8 +862,11 @@ _mode_start() {
             echo "  asking again cannot help. Confirm that, and then relaunching IS" >&2
             echo "  right — the one case in this mode where a second start is the" >&2
             echo "  correct move rather than the forbidden one:" >&2
+            local needle sq_needle
+            needle="${self} ${persona} "
+            sq_needle="'${needle//\'/\'\\\'\'}'"
             echo "    ps -eo pid,args |" \
-                "grep -F -f <(printf '%s\\n' \"${self} ${persona} \") |" \
+                "grep -F -f <(printf '%s\\n' ${sq_needle}) |" \
                 "grep -v \"^ *\$\$ \"   # this clone's round only" >&2
             echo "  no match, and a log that has stopped growing: it died before it" >&2
             echo "  claimed, and nothing will record an artifact." >&2
