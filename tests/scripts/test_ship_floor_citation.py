@@ -1115,25 +1115,97 @@ def test_an_artifact_recording_no_snapshot_makes_no_claim(tmp_path: Path) -> Non
     assert judged.reasons == [_FREE]
 
 
+def test_an_unreadable_pr_file_binds(tmp_path: Path) -> None:
+    """§5's **PR's files** is an input like any other, and §6 reaches it.
+
+    The dotted citation forces the qualifier to be looked for in the complete
+    content of every path the PR's diff touches, and the listing names one no
+    commit carries — so the input §5 asks for exists in the listing and cannot be
+    read. Distinguish that from the endpoint a PR simply does not have, which §5
+    says is not a failed read at all.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo, {_ADR: _adr("Rendering is `Widget.render`.")}, {"src/pkg/w.py": "def render(): ...\n"}
+    )
+    out = _run_floor_test(
+        repo,
+        entries=[("M", _ADR, "")],
+        old=_git(repo, "rev-parse", "main"),
+        new=_git(repo, "rev-parse", "HEAD"),
+        # The member IS touched, so the qualifier lookup runs and reaches for the
+        # complete content of every path the listing names — one of which is not
+        # in any commit.
+        pr_diff=b"+def render(self) -> None: ...\n",
+        pr_listing=b"M\0src/pkg/never-existed.py\0",
+    )
+
+    assert out[0][1] == "bind"
+    assert "§6" in out[0][2]
+
+
+def test_a_cleared_floor_is_necessary_and_not_sufficient(tmp_path: Path) -> None:
+    """ADR-0209 §8: clearing the floor buys nothing on its own.
+
+    The base move here touches a `docs/adr/**` path that no test binds — so the
+    floor clears — and *also* lands inside the reviewed hunks, which moves the
+    patch identity. ADR-0027 §2 refuses that whatever §§1-4 here say, and a
+    narrowed floor must not have quietly become a second acceptance path.
+    """
+    lines = [f"line {i}" for i in range(1, 121)]
+    reviewed = list(lines)
+    reviewed[59] = "line 60 — the reviewed change"
+    moved = list(reviewed)
+    # Two lines above the reviewed edit: inside its three lines of context, so the
+    # identity moves, and far enough apart that the rebase applies cleanly rather
+    # than testing git's merge.
+    moved[57] = "line 58 — the base moved"
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing here names anything."), "src/x.py": "\n".join(lines) + "\n"},
+        {"src/x.py": "\n".join(reviewed) + "\n"},
+    )
+
+    def mutate(r: Path) -> None:
+        (r / _ADR).write_text(_adr("Ratified, still naming nothing."))
+        base_moved = list(lines)
+        base_moved[57] = "line 58 — the base moved"
+        (r / "src" / "x.py").write_text("\n".join(base_moved) + "\n")
+
+    judged = _judge(repo, tmp_path, mutate)
+
+    assert judged.owed
+    # Not a floor verdict at all: no artifact reached §2(b), so nothing was tested
+    # and the drill makes no floor claim either way.
+    assert judged.reasons == []
+    assert "§3 floor              NOT EVALUATED" in judged.stderr
+    assert (
+        "reviewed patch is no longer"
+        in _run_ship(repo, tmp_path, pr_sha=_git(repo, "rev-parse", "HEAD")).stderr
+    )
+
+
 # --- Driving `floor_test.py` directly -----------------------------------------
 
 _FLOOR_TEST = Path(__file__).parents[2] / "scripts" / "floor_test.py"
 
 
-def _floor_test_process(
+def _floor_test_process(  # noqa: PLR0913  # one parameter per input the helper reads
     repo: Path,
     *,
     stdin: bytes,
     old: str,
     new: str,
     pr_listing: bytes | None = None,
+    pr_diff: bytes = b"",
 ) -> subprocess.CompletedProcess[bytes]:
     """Run `floor_test.py` against `repo`, with inputs the caller controls."""
     scratch = repo.parent / "floor-inputs"
     scratch.mkdir(exist_ok=True)
     diff = scratch / "pr.diff"
     listing = scratch / "pr.listing"
-    diff.write_bytes(b"")
+    diff.write_bytes(pr_diff)
     if pr_listing is None:
         pr_listing = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
             [
@@ -1179,17 +1251,20 @@ def _floor_test_process(
     )
 
 
-def _run_floor_test(
+def _run_floor_test(  # noqa: PLR0913  # one parameter per input the helper reads
     repo: Path,
     *,
     entries: list[tuple[str, str, str]],
     old: str,
     new: str,
     pr_listing: bytes | None = None,
+    pr_diff: bytes = b"",
 ) -> list[tuple[str, str, str]]:
     """Return one `(floor, verdict, reason)` triple per entry."""
     stdin = b"".join(b"\0".join(field.encode() for field in entry) + b"\0" for entry in entries)
-    result = _floor_test_process(repo, stdin=stdin, old=old, new=new, pr_listing=pr_listing)
+    result = _floor_test_process(
+        repo, stdin=stdin, old=old, new=new, pr_listing=pr_listing, pr_diff=pr_diff
+    )
     assert result.returncode == 0, result.stderr.decode()
     fields = result.stdout.decode().split("\0")[:-1]
     assert len(fields) == len(entries) * 3
