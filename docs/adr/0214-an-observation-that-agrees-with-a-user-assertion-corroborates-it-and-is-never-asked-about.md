@@ -1,6 +1,6 @@
 # 214. An observation that agrees with a user assertion corroborates it, and is never asked about
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Not a contract change under golden rule 5.** No Protocol in
   `core/protocols.py` gains a member or changes a signature, no type or enum
