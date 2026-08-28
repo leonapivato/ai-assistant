@@ -1,0 +1,127 @@
+"""A round that fails says why, detached as much as in the foreground.
+
+Issues #1674 and #1675 each record the same shape, twice: a detached round whose
+log ends at ``Running Codex '<persona>' review of HEAD vs '…'`` with no error
+line at all, no traceback and no partial output. Both lanes spent time
+diagnosing a ``codex`` that was healthy, and #1674 explicitly checked that a bare
+``codex exec`` with the same flags returned normally.
+
+The mechanism is in the driver, not in Codex. Under ``--json`` the CLI puts its
+whole event stream — the ``error`` and ``turn.failed`` events included — on
+**stdout**, and leaves stderr empty; ``codex-review.sh`` redirects that stdout
+into a ``mktemp`` file the ``EXIT`` trap deletes, and the fresh-session call was a
+bare command under ``set -e``, which exits without a word of its own. The reason
+was written down and then thrown away.
+
+So these tests drive a ``codex`` that fails exactly the way the real one does —
+non-zero, everything on stdout, **nothing on stderr** — and require that the
+reason reaches the operator: on the terminal in the foreground, and in the
+detached log ``--wait`` prints as its evidence for exit 4.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_codex import artifact_for, run_review
+from test_codex_review_start_wait import NOT_IN_FLIGHT, _env, _fields, _git, _init_repo, _run
+
+if TYPE_CHECKING:
+    from subprocess import CompletedProcess
+
+
+def _refused_round(tmp_path: Path) -> tuple[Path, CompletedProcess[str]]:
+    """A round whose fresh session the service refuses, run in the foreground."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    result = run_review(
+        repo, tmp_path, "adversarial", "main", check=False, FAKE_CODEX_START_FAIL="1"
+    )
+    return repo, result
+
+
+def test_a_refused_fresh_session_names_its_status_and_quotes_the_stream(
+    tmp_path: Path,
+) -> None:
+    _repo, result = _refused_round(tmp_path)
+
+    assert result.returncode != 0
+    assert "codex exec (the fresh read-only session) exited 1" in result.stderr
+    assert "the service refused this request" in result.stderr
+
+
+def test_the_reason_is_recovered_from_stdout_where_codex_puts_it(tmp_path: Path) -> None:
+    """The fake writes nothing to stderr, exactly as codex-cli 0.146.0 does not.
+
+    If the driver ever went back to letting ``set -e`` end the round, this is the
+    assertion that fails: there is no other source for the sentence.
+    """
+    _repo, result = _refused_round(tmp_path)
+
+    assert "turn.failed" in result.stderr
+
+
+def test_a_refused_round_still_records_no_artifact(tmp_path: Path) -> None:
+    """Reporting the failure is all that changed; the round still fails closed."""
+    repo, result = _refused_round(tmp_path)
+
+    assert result.returncode != 0
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
+
+
+def test_a_failed_resume_says_why_before_it_degrades(tmp_path: Path) -> None:
+    """The fresh start truncates the stream, so this is the only moment it exists.
+
+    A pruned session and a refused request degrade identically into the fresh
+    start, and telling them apart is the difference between "the ADR-0025 §1
+    fallback worked" and "the service is refusing this loop".
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    first = run_review(repo, tmp_path, "adversarial", "main")
+    assert first.returncode == 0, first.stderr
+    (repo / "f.txt").write_text("three\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "another change")
+
+    result = run_review(repo, tmp_path, "adversarial", "main", FAKE_CODEX_RESUME_FAIL="1")
+
+    assert result.returncode == 0, result.stderr
+    assert "resume unavailable" in result.stderr
+    assert "codex exec (resume " in result.stderr
+
+
+def test_a_detached_round_that_dies_leaves_the_reason_in_its_log(tmp_path: Path) -> None:
+    """The whole point: #1674's and #1675's log ended at "Running Codex …".
+
+    ``--wait`` already prints that log as its evidence for exit 4; what was
+    missing was anything in it to read.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, FAKE_CODEX_START_FAIL="1")
+
+    started = _run(repo, env, "--start", "adversarial", "main")
+    assert started.returncode == 0, started.stderr
+    log = repo / _fields(started.stdout)["log"]
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "30")
+
+    assert waited.returncode == NOT_IN_FLIGHT, waited.stderr
+    assert "recorded no artifact" in waited.stderr
+    assert "the service refused this request" in log.read_text()
+    assert "the service refused this request" in waited.stderr
+
+
+def test_an_empty_review_quotes_the_stream_too(tmp_path: Path) -> None:
+    """The other half: ``--json`` can carry a failure and still exit 0."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = run_review(repo, tmp_path, "adversarial", "main", check=False, FAKE_CODEX_REVIEW="")
+
+    assert result.returncode != 0
+    assert "codex produced an empty review" in result.stderr
+    assert "turn.completed" in result.stderr

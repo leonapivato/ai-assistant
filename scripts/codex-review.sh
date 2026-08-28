@@ -1902,12 +1902,55 @@ diff_bytes="$(printf '%s' "$diff" | wc -c)"
 # resumes it. Empty on the bypass path (no persistence).
 round_thread=""
 
+# What `codex exec --json` said when it failed, and why nothing said it before.
+#
+# Under `--json` the CLI puts its ENTIRE event stream on stdout — `thread.started`,
+# the items, and the `error`/`turn.failed` events that carry a failure — and
+# leaves stderr EMPTY. Both invocations below redirect that stdout into `$stream`,
+# a `mktemp` file the EXIT trap deletes. So a round that failed for a reason Codex
+# stated perfectly clearly wrote the reason into a file nobody reads and then
+# deleted it; and the fresh-start call was a bare command under `set -e`, which
+# left the script with nothing of its own to say either. Detached, the log then
+# ends at "Running Codex …" with no error line at all — which is exactly what
+# issues #1674 and #1675 record, twice each, as a round that "died without saying
+# why", and what sent both lanes to diagnose a Codex that was healthy.
+#
+# Measured, not inferred: on codex-cli 0.146.0, `codex exec --json` given a model
+# the account cannot use exits 1 with **zero bytes on stderr** and the 400 on
+# stdout, as `{"type":"error",…}` and `{"type":"turn.failed",…}`.
+#
+# This diagnoses and does not rescue. A failed round is still a failed round, no
+# retry is attempted, and `--wait` still answers exit 4 about it — what changes is
+# that the log it prints as evidence now names the reason.
+_report_codex_failure() {
+    local what="$1" status="$2"
+    echo "codex exec (${what}) exited ${status}." >&2
+    if [[ -s "$stream" ]]; then
+        echo "  Its --json event stream ends (stdout, where codex puts failures):" >&2
+        tail -n 5 "$stream" | cut -c 1-400 | sed 's/^/  | /' >&2
+    else
+        echo "  It wrote no event stream at all, so it failed before starting a" >&2
+        echo "  turn — an auth or config failure, or a process killed outright." >&2
+    fi
+}
+
 if [[ "$bypass" -eq 1 ]]; then
     _write_prompt ""
     echo "Running Codex '${persona}' review of HEAD vs '${base}' (bypass, cold)…" >&2
     # -o captures just the final review; progress streams to stderr.
+    #
+    # The status is captured rather than left to `set -e` for the reason
+    # `_report_codex_failure` gives: an exit that says nothing is one a detached
+    # round cannot be diagnosed from. This path carries no `--json`, so its output
+    # is already on stderr and there is no stream to quote — only the status is
+    # missing, and only the status is added.
+    bypass_status=0
     codex exec --dangerously-bypass-approvals-and-sandbox "${model_args[@]}" \
-        -o "$out" - <"$prompt" >&2
+        -o "$out" - <"$prompt" >&2 || bypass_status=$?
+    if [[ "$bypass_status" -ne 0 ]]; then
+        echo "codex exec (bypass, cold) exited ${bypass_status}; its output is above." >&2
+        exit 1
+    fi
 else
     # Enforced read-only on every round, proven from Codex's own record below.
     # Resume takes no `-s`, and a widening `$CODEX_HOME/config.toml` is honoured
@@ -1927,16 +1970,26 @@ else
         # `--json` puts the event stream (carrying thread.started) on stdout,
         # captured to $stream; Codex's human progress stays on stderr. `-o` still
         # writes just the final review to $out.
-        if codex exec resume "$recorded_thread" --json "${ro_config[@]}" \
-            "${model_args[@]}" -o "$out" - <"$prompt" >"$stream"; then
+        resume_status=0
+        codex exec resume "$recorded_thread" --json "${ro_config[@]}" \
+            "${model_args[@]}" -o "$out" - <"$prompt" >"$stream" || resume_status=$?
+        if [[ "$resume_status" -eq 0 ]]; then
             used_resume=1
             round_thread="$recorded_thread"
         else
             # Resume is unavailable — a pruned session, an ephemeral host. Not a
             # failure: fall through to a fresh read-only session with the prior
             # dispositions re-injected (mechanism b), the ADR-0025 §1 fallback.
+            #
+            # Reported all the same, and BEFORE the fall-through, because the
+            # fresh start below truncates `$stream` — so this is the only moment
+            # the reason exists. A pruned session and a refused request degrade
+            # identically here, and telling them apart is the difference between
+            # "the fallback worked as designed" and "the service is refusing this
+            # loop", which is the pair issue #1675 could not distinguish.
             echo "resume unavailable; starting a fresh read-only session with prior" \
                 "findings re-injected" >&2
+            _report_codex_failure "resume ${recorded_thread:0:12}" "$resume_status"
         fi
     fi
 
@@ -1962,8 +2015,13 @@ else
         _write_prompt "$inject"
         echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only, fresh" \
             "session)…" >&2
+        fresh_status=0
         codex exec --json -s read-only "${ro_config[@]}" "${model_args[@]}" \
-            -o "$out" - <"$prompt" >"$stream"
+            -o "$out" - <"$prompt" >"$stream" || fresh_status=$?
+        if [[ "$fresh_status" -ne 0 ]]; then
+            _report_codex_failure "the fresh read-only session" "$fresh_status"
+            exit 1
+        fi
         round_thread="$(grep -o '"thread_id":"[^"]*"' "$stream" | head -1 |
             sed 's/.*:"//; s/"$//')"
     fi
@@ -2001,6 +2059,14 @@ fi
 # connection, a refusal); fail loudly instead of recording that.
 if [[ ! -s "$out" ]] || ! grep -q '[^[:space:]]' "$out"; then
     echo "codex produced an empty review; not recording an artifact" >&2
+    # A zero exit with an empty review is the other half of the same illegibility:
+    # `--json` can carry a `turn.failed` and still exit 0, and that event is on the
+    # stdout this script routes into a temp file it is about to delete. Quoted here
+    # for the same reason it is quoted on a non-zero exit.
+    if [[ "$bypass" -eq 0 && -s "$stream" ]]; then
+        echo "its --json event stream ends (stdout, where codex puts failures):" >&2
+        tail -n 5 "$stream" | cut -c 1-400 | sed 's/^/  | /' >&2
+    fi
     echo "re-run: scripts/codex-review.sh ${persona} ${base}" >&2
     exit 1
 fi
