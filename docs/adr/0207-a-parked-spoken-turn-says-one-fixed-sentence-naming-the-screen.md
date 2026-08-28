@@ -313,13 +313,35 @@ the fact the owner asked to be told, and is already on the screen the sentence
 names. The sentence itself is placed as speakable by the clause above, so nothing
 here rests on it being unclassifiable.
 
-**It names the screen unconditionally, and it promises nothing about how long the
-card waits.** ADR-0199 §5 makes naming a bounded channel conditional on one being
-nameable; this ADR does not inherit that condition, because the hub cannot know
-what surfaces its user is looking at and §8 declines to build the instrument that
-would tell it. What the sentence asserts is true at the moment it is spoken: a
-confirmation was minted and is answerable on a screen. It asserts nothing about
-later, and no reader takes it as a durability guarantee.
+**It names the screen unconditionally, and that is a decision taken about a
+promoted-surface operation with the caller that has no screen at all in view.**
+`converse_spoken` is on the promoted engine surface, so its callers are every
+wire client there is or will be — a browser page, a CLI, a room speaker, a later
+spoke with no display of any kind — and the sentence names a screen to all of
+them. ADR-0199 §5's third clause makes naming a bounded channel conditional on
+one being *nameable*, and this ADR deliberately does not inherit that condition.
+The hub cannot know what surfaces its user is looking at, or whether the caller
+has one, and §8 declines to build the instrument that would tell it; a
+conditional naming would therefore have to be decided from an instrument nobody
+has, and on a caller it could not resolve it would say either less than the
+owner's ruling fixed or nothing at all — which is #1699's silence returning on
+precisely the deployments this decision exists for. The corpus has stood at this
+fork before and did not resolve it by neutering the sentence: ADR-0199 §5 kept
+the *stating* unconditional while making only the *naming* conditional, because
+"a room speaker with no browser open and no other enrolled device is the state a
+household kitchen is in most of the day", and its own model sentence — "details
+on your phone" — names, from that same promoted surface, a surface the operation
+neither renders nor can see.
+
+**What the sentence asserts is where the park is answerable, not what the caller
+can draw, and it promises nothing about how long the card waits.** It is true at
+the moment it is spoken: a confirmation was minted, its durable state is written,
+and it is answerable on a screen — reached through the card the same result
+carries and through `resume`, on whatever surface its user next opens. It
+asserts nothing about later, and no reader takes it as a durability guarantee.
+It is equally no claim that `converse_spoken` renders anything: §5 adds no
+presentation capability, no display obligation and no ordering guarantee to the
+promoted surface, and the sentence does not need one to be true.
 
 **The two parks' lifetimes are what the corpus already made them, and this ADR
 moves neither.** A step park's is `confirmation_ttl`, which "defaults to `None`"
@@ -434,6 +456,16 @@ ADR-0203 moved.
 > `pending_confirmations` and ADR-0198's restatement are untouched. Nothing about
 > the routing stage, the permission gate or the planner is decided here.
 
+> **Normative.** One `SpokenTurn` carries both the parked `outcome` — with the
+> `Confirmation` or `OperationConfirmation` a surface renders the card from — and
+> §2's rendering, on the same result of the same call. A caller therefore holds
+> the card before it can play anything, and **the order in which it presents the
+> two is the caller's own**. This ADR creates no ordering obligation between
+> them and adds none to the promoted surface: nothing here requires a client to
+> render before it plays, to play before it renders, to render at all, or to
+> report either act. A surface that plays the sentence and draws nothing, and a
+> surface that draws the card and plays nothing, each satisfy this decision.
+
 > **Normative.** Capture is unchanged. The sentence is not composed, not an answer
 > and not part of the exchange: no episode carries it, no field is added to
 > `EpisodicMemory` or to `Provenance`, and ADR-0074 §4's rendering of a parked
@@ -488,6 +520,20 @@ ADR-0203 moved.
 > composing stage exactly as it supplies any other. Nothing here writes, reads,
 > defaults or infers a delivery state, and nothing reads one to decide what is
 > spoken.
+
+**No ordering guarantee is added, because none is needed and the corpus has
+none to add.** The sentence says where the park is answerable; it does not claim
+that anything has already been drawn, so a client that draws the card after it
+plays the audio, or long after, or never, does not make it false — the card
+travels on the same result and the park is answerable from the moment its
+durable state was written. This is the position ADR-0199 §5's deflection has
+been in since it was ratified: "details on your phone" is spoken on one channel
+about a surface the promoted operation neither renders nor sequences, and
+nothing was added to that surface to support it. Adding one here would mean a
+presentation or ordering capability on the promoted engine surface — a contract
+nobody has ruled, and a far larger decision than the one this ADR makes — which
+is why §8 declines the visual cue on the same ground. What a caller is handed is
+ADR-0200 §4's `SpokenTurn` and nothing more, and that is enough.
 
 **The fake names the constant rather than copying it, and the edge already
 exists.** `ai_assistant.testing`'s engine double imports from
@@ -787,6 +833,18 @@ widened nor narrowed by §2's placement of one constant.
 **ADR-0085 §8c, ADR-0200 §3 and §6 — no record is owed.** The payload limit, the
 format intersection and the two byte bounds govern §2's rendering exactly as they
 govern an answer's, which is §4 above's second clause.
+
+**Where §2's bytes come from, recorded so that no later reader takes them for a
+drafting choice.** The sentence is the owner's product ruling on #1699 of
+2026-08-28 — "a fixed, content-free sentence in the deflection's shape (*I need
+you to confirm something on your screen*)" — carried into this ADR unchanged.
+Everything else here is a technical decision, open to review and to supersession
+in the ordinary way; the string is not one of them. Different words are a
+product decision, and reaching them means a ruling and an ADR that supersedes
+§2, not an editorial pass over this text. What review can properly reach about
+the sentence is answered above rather than left open: the promoted-surface
+generality and the caller with no screen in §2, the ordering and the absence of
+any presentation capability in §5, and the ADR-0199 §3 placement in §2.
 
 **This ADR is marked under ADR-0089**, so its marked clauses are the whole of what
 it obligates and the prose beside them determines what they mean.
