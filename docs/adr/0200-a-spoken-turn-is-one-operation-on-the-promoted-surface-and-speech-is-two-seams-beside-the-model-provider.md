@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members)
+- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members) and ADR-0207 (§4's park clause and the two clauses it controls, only as each reaches a converse_spoken pass whose outcome is a live confirmation park)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §4's second-difference clause,
   only as it reaches an operation whose output channel's audience is unbounded, and
@@ -107,6 +107,61 @@
   `Partially superseded by`, so under ADR-0082 §2 no amendment qualifier is written
   on it and this note is the whole record. Appended per ADR-0070 §1; no ratified
   text below is rewritten. Refs #1700.
+- **Partially superseded: 2026-08-28 by ADR-0207 — §4's park clause and the two
+  clauses it controls, each only as it reaches a `converse_spoken` pass whose
+  outcome is a live confirmation park, and nothing else of §4 or of this ADR.**
+  #1699 measured this operation from a phone: a turn whose planner reached a
+  confirm-owed tool parked, no answer was composed, and the owner heard **nothing**
+  while a card appeared on a screen they were not looking at. That is §4 working as
+  written. The owner ruled on 2026-08-28 that such a turn says a fixed,
+  content-free sentence instead, and ADR-0207 §§1–2 fix it: `I need you to confirm
+  something on your screen.`
+
+  **Replaced — three clauses, on the park shape only.** §4's park clause
+  ("`spoken` is `None` wherever `outcome.reply` is `None`: a park, a recovered
+  resume, and a composition failure each leave nothing to say… On those shapes
+  `spoken_degraded` is `False`") no longer governs the park: `spoken` is the
+  rendering of ADR-0207 §2's sentence. §4's rendering clause ("`spoken` is the
+  rendering of `outcome.reply` and of nothing else… A caller that cannot play audio
+  reads `outcome.reply` and holds exactly what was said") is false of a park in
+  both halves, though what was said there is a constant the caller reconstructs
+  from this decision and the outcome it already holds. And §4's `spoken_degraded`
+  "**exactly when** an answer existed" predicate is satisfied on a park by that
+  sentence instead of by an answer. A reader holding only this ADR would refuse the
+  implementation ADR-0207 requires, which is ADR-0070 §1's test, so this is a
+  supersession and it is **partial** in ADR-0070 §3's sense. ADR-0207 §3 states the
+  whole of the difference it admits and forbids a third.
+
+  **Not replaced — the other two silences.** A recovered resume and a composition
+  failure keep §4's silence word for word: `spoken` `None`, `spoken_degraded`
+  `False`, nothing invented to fill it.
+
+  **Not replaced — the degradation ladder's rules.** The four cases, the
+  implication of `spoken is None` and `outcome is not None`, the clause forbidding
+  `True` beside a rendering, the fourth case measured on the whole result, the second
+  measurement and both `OversizedValueError` arms, the transcription-fails /
+  synthesis-degrades line, the total translation at the orchestration boundary and
+  the cancellation clause all bind on a park exactly as they bind on an answer.
+
+  **Not replaced — anything else in this ADR.** `SpokenTurn`'s member set — §4's
+  four as ADR-0205 made them five — the `heard`/`outcome` pairing and its
+  disclosure, the blank-transcript shape, the
+  local refusals ordered ahead of it, the byte-for-byte transcript, §3's declaration
+  that this operation's audience is unbounded, §7 in full — whose fifth clause
+  ADR-0207 makes more nearly true rather than narrows — §8's retention and capture
+  clauses, and §13's work order, all bind exactly as they did. ADR-0207 §9
+  classifies each record and each ADR against which none is owed.
+
+  **The three pairs on the `Status` line name different scopes.** ADR-0203's is
+  §4's second-difference clause, ADR-0205's is three enumerations of counts, and
+  this one is §4's park clause and the two clauses it controls. None of the three
+  overlaps another, so ADR-0070 §4's precedence rule for overlapping scopes has no
+  subject here, and each pair is read against its own ADR. The line leads with
+  `Partially superseded by`, so under ADR-0082 §2 no amendment qualifier is written
+  on it and this note is the whole record. Appended per ADR-0070 §1; no ratified
+  text below is rewritten, and the note above is left exactly as ADR-0205 wrote it —
+  its "two pairs" was true when written and this note is where the third is
+  recorded. Refs #1699.
 
 ## Context
 
