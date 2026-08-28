@@ -1064,7 +1064,6 @@ def test_a_citation_deleted_from_the_description_after_a_review_still_binds(
         tmp_path,
         _edit(_ADR, _adr("Ratified.")),
         body="No citation here any more.",
-        pr_desc="recorded",
         description="This lane implements ADR-0042.",
     )
 
@@ -1086,7 +1085,6 @@ def test_a_description_edit_that_bound_no_test_still_costs_nothing(tmp_path: Pat
         tmp_path,
         _edit(_ADR, _adr("Ratified.")),
         body="A tidier description.",
-        pr_desc="recorded",
         description="A first draft of the description, citing nothing.",
     )
 
@@ -1094,12 +1092,45 @@ def test_a_description_edit_that_bound_no_test_still_costs_nothing(tmp_path: Pat
     assert judged.reasons == [_FREE]
 
 
-def test_a_recorded_snapshot_that_has_gone_missing_binds(tmp_path: Path) -> None:
-    """An artifact that CLAIMS a snapshot whose file will not open is §6's.
+def test_an_artifact_can_never_select_another_rounds_body(tmp_path: Path) -> None:
+    """The snapshot is content-addressed, so the pairing question does not exist.
 
-    An artifact recording no snapshot at all is a different case and is not a
-    failure — it makes no claim about the description. One that records a snapshot
-    it cannot produce is an input that was read once and cannot be read now.
+    An artifact's name is deliberately reused for a re-review of byte-identical
+    content (ADR-0027 §6), so naming the snapshot after the artifact meant that an
+    interruption between the two writes left one round's artifact beside another
+    round's body — in *either* write order, which is what adversarial review of
+    this PR found in rounds 1 and 2. Here the artifact names the hash of the body
+    it was taken beside; an older body sitting in the same directory is simply a
+    different file, and cannot be reached.
+
+    The state that remains after such an interruption is the artifact naming a
+    hash whose body never landed, and that is the case below.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing.")}, {_PLAN: "an ordinary change\n"})
+    stale = repo / ".review" / "descriptions"
+    stale.mkdir(parents=True)
+    (stale / ("a" * 40)).write_text("an older body, citing nothing at all.")
+
+    judged = _judge(
+        repo,
+        tmp_path,
+        _edit(_ADR, _adr("Ratified.")),
+        body="No citation here any more.",
+        description="This lane implements ADR-0042.",
+    )
+
+    assert judged.owed
+    assert any("§3 — the PR's text cites ADR-0042" in r for r in judged.reasons)
+
+
+def test_a_malformed_snapshot_id_binds(tmp_path: Path) -> None:
+    """`pr_desc` is joined onto a path, so anything but a hash is refused.
+
+    The field is read from a file `ship` does not own. Unvalidated it is a read of
+    whatever a `../..` in it names, and a value that is neither empty, nor
+    `unavailable`, nor a well-formed hash is not a snapshot this script knows how
+    to fetch — so §6 binds rather than guessing which of those it meant.
     """
     repo = tmp_path / "repo"
     _init(repo, {_ADR: _adr("Nothing.")}, {_PLAN: "an ordinary change\n"})
@@ -1112,7 +1143,39 @@ def test_a_recorded_snapshot_that_has_gone_missing_binds(tmp_path: Path) -> None
         "adversarial",
         f"a real finding\n{_VERDICT}\n",
         base_sha=_git(repo, "merge-base", "main", sha),
-        pr_desc="recorded",
+        pr_desc="../../../etc/passwd",
+    )
+    _advance_base(repo, _edit(_ADR, _adr("Ratified.")))
+    rebased = _git(repo, "rev-parse", "HEAD")
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
+
+    assert result.returncode != 0
+    assert "malformed PR-description snapshot id" in result.stderr
+
+
+def test_a_recorded_snapshot_that_has_gone_missing_binds(tmp_path: Path) -> None:
+    """An artifact that CLAIMS a snapshot whose body will not open is §6's.
+
+    This is the one interruption state content-addressing leaves: the snapshot is
+    written before the artifact, so a crash between them leaves an orphan body no
+    artifact names (inert), and the converse — an artifact naming a hash whose
+    body never landed — fails closed here.
+
+    An artifact recording no snapshot at all is a different case and is not a
+    failure: it makes no claim about the description.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing.")}, {_PLAN: "an ordinary change\n"})
+
+    sha = _git(repo, "rev-parse", "HEAD")
+    _fake_gh(tmp_path / "bin")
+    _record_review(
+        repo,
+        sha,
+        "adversarial",
+        f"a real finding\n{_VERDICT}\n",
+        base_sha=_git(repo, "merge-base", "main", sha),
         description="This lane implements ADR-0042.",
     )
     for snapshot in (repo / ".review" / "descriptions").iterdir():
@@ -1123,7 +1186,7 @@ def test_a_recorded_snapshot_that_has_gone_missing_binds(tmp_path: Path) -> None
     result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
 
     assert result.returncode != 0
-    assert "records a PR-description snapshot that is missing" in result.stderr
+    assert "which is missing from .review/descriptions/" in result.stderr
 
 
 def test_an_artifact_recording_no_snapshot_makes_no_claim(tmp_path: Path) -> None:

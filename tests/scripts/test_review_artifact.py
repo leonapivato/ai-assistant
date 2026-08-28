@@ -15,6 +15,8 @@ OpenAI call.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -351,9 +353,16 @@ def test_the_pr_description_is_recorded_beside_the_artifact(tmp_path: Path) -> N
     run_review(repo, tmp_path)
 
     artifact = require_artifact(repo, sha)
-    assert " pr_desc=recorded " in artifact.read_text().splitlines()[0]
-    snapshot = repo / ".review" / "descriptions" / artifact.name
-    assert snapshot.read_text().strip() == "This lane implements ADR-0042."
+    # The field is the HASH of the body, not a flag: an artifact names the body it
+    # was taken beside, so it can never select another round's. An artifact's own
+    # name is deliberately reused for a re-review of byte-identical content
+    # (ADR-0027 §6), which is what made a name-keyed snapshot unpairable.
+    recorded = re.search(r" pr_desc=([0-9a-f]{40}) ", artifact.read_text().splitlines()[0])
+    assert recorded is not None, artifact.read_text().splitlines()[0]
+    body = "This lane implements ADR-0042."
+    assert recorded.group(1) == hashlib.sha1(f"{body}\n".encode()).hexdigest()  # noqa: S324
+    snapshot = repo / ".review" / "descriptions" / recorded.group(1)
+    assert snapshot.read_text().strip() == body
 
 
 def test_a_description_that_cannot_be_read_is_recorded_as_unavailable(tmp_path: Path) -> None:
@@ -375,4 +384,5 @@ def test_a_description_that_cannot_be_read_is_recorded_as_unavailable(tmp_path: 
 
     artifact = require_artifact(repo, sha)
     assert " pr_desc=unavailable " in artifact.read_text().splitlines()[0]
-    assert not (repo / ".review" / "descriptions" / artifact.name).exists()
+    snapshots = repo / ".review" / "descriptions"
+    assert not snapshots.exists() or not any(snapshots.iterdir())

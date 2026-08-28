@@ -1345,8 +1345,16 @@ declare -A covering_drift=()
 # compare and §5's conduct clause is the whole of the answer there. An artifact
 # that CLAIMS a snapshot whose file will not open is the other case, and that one
 # fails closed — a recorded input that cannot be read is §6's.
+#
+# `pr_desc` IS THE HASH OF THE BODY, so an artifact names the body it was taken
+# beside and can never select another round's. It is validated as 40 hex digits
+# before it is used, because it is read from a file this script does not own and
+# is then joined onto a path: an unvalidated field is a read of whatever a
+# `../..` in it names. A field that is neither empty, nor `unavailable`, nor a
+# well-formed hash is not a snapshot this script knows how to fetch, and §6 binds
+# rather than guessing which of those it meant.
 _collect_floor_inputs() {
-    local a line snap
+    local a line snap recorded
     if ! git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff \
         --no-textconv "${expected_base}...${content_sha}" >"${floor_dir}/pr.diff"; then
         floor_args=(--unevaluable "the PR's own diff could not be rendered")
@@ -1366,17 +1374,29 @@ _collect_floor_inputs() {
         return 0
     fi
     floor_args=(--description "${floor_dir}/description")
+    local seen=" "
     shopt -s nullglob
     for a in .review/*.md; do
         line="$(head -n 1 "$a")"
         [[ "$(provenance_field branch "$line")" == "$branch" ]] || continue
-        [[ "$(provenance_field pr_desc "$line")" == "recorded" ]] || continue
-        snap=".review/descriptions/$(basename "$a")"
-        if [[ ! -r "$snap" ]]; then
-            floor_args=(--unevaluable "$(basename "$a") records a PR-description snapshot that is missing from .review/descriptions/")
+        recorded="$(provenance_field pr_desc "$line")"
+        # Absent (an artifact older than the field) or `unavailable` (no PR yet,
+        # or the bypass path): this round asserts nothing about the description.
+        [[ -z "$recorded" || "$recorded" == "unavailable" ]] && continue
+        if [[ ! "$recorded" =~ ^[0-9a-f]{40}$ ]]; then
+            floor_args=(--unevaluable "$(basename "$a") records a malformed PR-description snapshot id")
             shopt -u nullglob
             return 0
         fi
+        snap=".review/descriptions/${recorded}"
+        if [[ ! -r "$snap" ]]; then
+            floor_args=(--unevaluable "$(basename "$a") records PR-description snapshot ${recorded:0:12}, which is missing from .review/descriptions/")
+            shopt -u nullglob
+            return 0
+        fi
+        # Several artifacts of one branch commonly name the same body.
+        case "$seen" in *" ${recorded} "*) continue ;; esac
+        seen="${seen}${recorded} "
         floor_args+=(--description "$snap")
     done
     shopt -u nullglob
