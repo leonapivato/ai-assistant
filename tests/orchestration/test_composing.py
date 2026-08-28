@@ -870,6 +870,57 @@ def test_the_prompts_claim_about_the_conversation_stays_within_what_it_can_promi
     assert "does not reach back far enough to answer, say that plainly" in prompt
 
 
+@pytest.mark.parametrize("base", ["_SYSTEM_PROMPT", "_ROUTED_SYSTEM_PROMPT"])
+def test_the_spoken_register_is_carried_only_where_the_answer_will_be_heard(base: str) -> None:
+    """#1779: the channel's audience decides the register, on every pass that has one.
+
+    The audience is one fact implying two things — what may be said, decided at
+    supply and never reaching this prompt (ADR-0199 §5), and the register it is said
+    in — and both reach the stage from the operation being executed (ADR-0200 §7).
+    So the register is asked for on a spoken pass and on no other, over both bases,
+    because a routed reply is spoken aloud exactly as an ordinary one is (§7).
+
+    **This deliberately pins no wording, and ADR-0176 §4 is why.** That section's
+    implementing-lane clause refuses a test that string-matches a prompt's prose,
+    because such an assertion "fails on every rewording that improves the
+    instruction and passes on every rewording that guts it, so it pins prose and
+    reports nothing about behaviour". What is behaviour here is the *conditioning* —
+    a written answer must not be asked to write for the ear, and a spoken one must
+    be — and reading the register itself is a reviewer's job.
+    """
+    text = getattr(composing, base)
+
+    heard = composing._system_prompt(text, unbounded_audience=True, withheld=False)
+    read = composing._system_prompt(text, unbounded_audience=False, withheld=False)
+
+    assert composing._SPOKEN_REGISTER in heard
+    assert composing._SPOKEN_REGISTER not in read
+    # The pass's own instruction is untouched either way: the register is appended to
+    # what the stage already said and replaces none of it.
+    assert text in heard
+    assert text in read
+
+
+def test_a_deflection_keeps_its_shape_in_the_spoken_register() -> None:
+    """ADR-0199 §5's deflection is not displaced or softened by #1779's register.
+
+    The two only ever arrive together, on exactly one shape: a withholding on a
+    channel of unbounded audience (nothing is withheld from a bounded one at this
+    rung). So this is the combination in which a register clause could have replaced
+    the deflection rather than governing how it is said. Both are present, and the
+    deflection is last — which is what settles the one place the two texts touch,
+    where the register says a long answer stops and §5 says a withheld one names a
+    channel instead.
+    """
+    prompt = composing._system_prompt(
+        composing._SYSTEM_PROMPT, unbounded_audience=True, withheld=True
+    )
+
+    assert composing._SPOKEN_REGISTER in prompt
+    assert composing._WITHHOLDING_PROMPT in prompt
+    assert prompt.index(composing._SPOKEN_REGISTER) < prompt.index(composing._WITHHOLDING_PROMPT)
+
+
 def _grouped(prompt: str) -> dict[str, list[str]]:
     """The record contents the prompt printed, keyed by the heading they fell under.
 
