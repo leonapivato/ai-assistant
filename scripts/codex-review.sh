@@ -746,14 +746,34 @@ _mode_start() {
             # A distinct code would only help a caller that acted differently on
             # it, and the one thing any caller should do here is the one line
             # below.
+            #
+            # And the caveat is stated rather than left for the caller to be
+            # surprised by. In THIS window `--wait` is not conclusive either: a
+            # round publishes its marker and takes the persona lock at the same
+            # moment, and both are what `--wait` reads, so a child that has not
+            # reached that point is invisible to both of its liveness sources and
+            # `--wait` answers exit 4 — "no round in flight, start one" — about a
+            # child that is alive and working. Everywhere else an exit 4 means
+            # stop polling; here it does not, and a message that sent a lane to
+            # `--wait` promising it could tell a slow start from a dead one would
+            # be walking that lane into the relaunch this whole mode exists to
+            # prevent. The log is the evidence that does work, because the child
+            # writes to it as it goes and has already written the aggregate by
+            # the time it starts rendering the diff.
             echo "the detached '${persona}' round has not claimed this loop within" >&2
             echo "  ${start_grace}s. Nothing here has killed it, and nothing here can" >&2
             echo "  see whether it is dead: a round claims the loop only after it has" >&2
             echo "  rendered the whole diff and computed the patch identity, so a" >&2
             echo "  healthy round on a large branch — or on a machine where another" >&2
             echo "  clone is reviewing — is often still short of that point." >&2
-            echo "  Do NOT start a second round; ask --wait, which is the only thing" >&2
-            echo "  that can tell a slow start from a failed one:" >&2
+            echo "  Do NOT start a second round." >&2
+            echo "  Ask --wait next — but read this first, because --wait cannot see" >&2
+            echo "  a round that has not claimed either: it reads the marker and the" >&2
+            echo "  lock, and an unclaimed child has published neither, so it can" >&2
+            echo "  answer exit 4 ('no round in flight') about a child that is alive." >&2
+            echo "  In THIS window an exit 4 is NOT the 'stop polling' it is" >&2
+            echo "  everywhere else. The log below is the evidence that works: while" >&2
+            echo "  it is still growing the round is running." >&2
             echo "    scripts/codex-review.sh --wait ${persona}" >&2
             echo "  Its output so far:" >&2
             _echo_log "$log_file"
