@@ -21,7 +21,18 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import AT, CAPABILITY, PARAMETERS, PATIENT, Harness, NoStepPlanner, tool
+from test_engine import (
+    AT,
+    CAPABILITY,
+    PARAMETERS,
+    PATIENT,
+    Harness,
+    NoStepPlanner,
+    OneStepPlanner,
+    _fresh_facade,
+    confirmable,
+    tool,
+)
 
 from ai_assistant.core.errors import MemoryStoreError, SpeechError
 from ai_assistant.core.types import (
@@ -52,6 +63,7 @@ from ai_assistant.orchestration.disclosure import (
     supply_for_unbounded_audience,
 )
 from ai_assistant.testing import (
+    FakeContextProvider,
     FakeMemoryStore,
     FakeModelProvider,
     FakeRoutingRecorder,
@@ -946,3 +958,385 @@ async def test_the_bounded_channel_still_plans_over_its_whole_supply() -> None:
     assert outcome.turn is not None
     assert {one.id for one in seeded} <= {one.id for one in outcome.turn.memories}
     assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
+
+
+# --- ADR-0204 §8: what a record's warrant held, stamped and read at supply ----
+
+
+def _stamped(records: Sequence[MemoryRecord]) -> set[str]:
+    """The ids among ``records`` whose provenance carries ADR-0204 §1's field."""
+    return {one.id for one in records if one.provenance.supplied_withheld_content}
+
+
+async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
+    """§8 case 1: the bounded channel's turn is untouched and its capture is stamped.
+
+    #1708 at its root. The typed turn runs over everything it retrieved — ADR-0203
+    §1's last clause, which ADR-0204 §4 keeps whole — so the belief about Alice is
+    still in ``turn.memories`` and still in the plan rationale the model authored.
+    What changes is the one field of the episode that rationale is rendered into,
+    because that episode is an input to a channel whose audience is not bounded.
+    """
+    planner = _EchoingPlanner()
+    harness = _wired(FakeModelProvider(_ANSWER), planner=planner)
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert "rec-2" in {one.id for one in outcome.turn.memories}, (
+        "§4: a bounded channel's supply is not narrowed by this ADR"
+    )
+    assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
+    assert captured[0].provenance.supplied_withheld_content is True
+    assert _WITHHELD_CONTENT in captured[0].content, (
+        "the episode's content is unchanged — the stamp is what withholds it, not a filter"
+    )
+
+
+async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode() -> None:
+    """§8 case 2: the negative arm, without which stamping everything would pass case 1.
+
+    ``False`` is a measurement here rather than a default: this turn was supplied
+    the owner's own beliefs, neither of ADR-0204 §1's two routes reached it, and
+    that is what the field says.
+    """
+    harness = _wired(FakeModelProvider(_ANSWER), planner=_EchoingPlanner())
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", "the user prefers short answers", source=MemorySource.USER_ASSERTED),
+    )
+
+    await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is False
+
+
+async def test_the_typed_turns_stamped_episode_is_withheld_from_a_later_spoken_turn() -> None:
+    """§8 case 3: #1708's chain, refused.
+
+    The typed turn's episode is ``OBSERVED`` with ``about_person`` unset, which
+    ADR-0199 §3's third clause places **speakable** — and it carries a model
+    rationale authored over the belief about Alice. ADR-0204 §3 withholds it anyway,
+    which is the supersession scoped to exactly this record: the placement is
+    unchanged and a second reason withholds it.
+
+    The belief is deleted between the two turns so that the episode is the only
+    withholdable thing left, which is what makes the deflection below evidence that
+    the episode was retrieved and removed rather than never retrieved at all.
+    """
+    planner = _EchoingPlanner()
+    model = FakeModelProvider(_ANSWER)
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        model,
+        planner=planner,
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    typed = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert typed.conversation_id is not None
+    # The belief itself is destroyed before the spoken turn, so the **only** thing
+    # left for the subtraction to remove is the episode: the deflection asserted
+    # below cannot come from anything else, and this case cannot pass on a spoken
+    # turn whose retrieval simply never found the episode.
+    await harness.memory.delete("rec-2")
+    spoken = await harness.engine.converse_spoken(
+        _RECORDING, plays=(_MP4,), timeout=PATIENT, conversation_id=typed.conversation_id
+    )
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert not _episodes(spoken.outcome.turn.memories), (
+        "the stamped episode reached no stage of the spoken turn (ADR-0199 §5's first clause)"
+    )
+    assert _WITHHELD_CONTENT not in _prompt(model, 1)
+    assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 1), (
+        "ADR-0199 §5's third clause: the composing stage is told **that** it happened"
+    )
+
+
+async def test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoken_turn() -> None:
+    """§8 case 4: #1703's path, refused.
+
+    The withholding turn's own question is carried unrewritten into its episode
+    (``_exchange_of``), which is why ADR-0203 §4's fifth clause recorded this path as
+    open. It closes on the fact that the turn withheld something at all — a fact
+    about the turn's supply, decided from recorded origin, and not a judgement about
+    what its question said.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(),
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED, _ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    first = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+    assert first.outcome is not None
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is True
+
+    second = await harness.engine.converse_spoken(
+        _RECORDING,
+        plays=(_MP4,),
+        timeout=PATIENT,
+        conversation_id=first.outcome.conversation_id,
+    )
+
+    assert second.outcome is not None
+    assert second.outcome.turn is not None
+    assert not _episodes(second.outcome.turn.memories)
+    assert _SPEAKABLE_CONTENT in {one.content for one in second.outcome.turn.memories}, (
+        "the turn retrieved: without this the case would pass on a turn supplied nothing"
+    )
+    # And the episode is retrieved in this exact shape when it is *not* stamped —
+    # `test_milestone_19s_exit_test_is_unaffected` asserts precisely that — so the
+    # absence above is the withholding rather than a retrieval that found nothing.
+
+
+async def test_a_stamped_episode_still_reaches_a_bounded_channel() -> None:
+    """§8 case 5: §3's third clause, which leaves the bounded channel's supply alone.
+
+    The other half of ADR-0204 §4, and what makes case 14 necessary: a stamped
+    record is deliberately still supplied to a typed turn, so that turn's own
+    capture has to inherit the stamp rather than the rule stopping here.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER), planner=_EchoingPlanner(), loop_id_factory=lambda: next(goals)
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    first = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert first.conversation_id is not None
+    second = await harness.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.turn is not None
+    supplied = _episodes(second.turn.memories)
+    assert supplied, "the first turn's episode reached the second typed turn, unchanged"
+    assert _stamped(supplied) == {one.id for one in supplied}
+
+
+async def test_milestone_19s_exit_test_is_unaffected() -> None:
+    """§8 case 6: the negative arm at the whole-operation level.
+
+    The owner asks aloud about their own life over a store of their own beliefs and
+    a placed calendar facet: nothing is withheld, so nothing is stamped, and the
+    spoken channel's conversational continuity survives (ADR-0074 §5). Without this
+    case an implementation that stamped every episode would pass every case above
+    and empty ADR-0199 §3's speakable set on the day it landed.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(),
+        loop_id_factory=lambda: next(goals),
+        context=FakeContextProvider(
+            CurrentContext(
+                now=_AT,
+                time_of_day=TimeOfDay.AFTERNOON,
+                is_weekend=False,
+                within_working_hours=True,
+                calendar=CalendarFacet(
+                    source=_CALENDAR, read_at=_AT, entries_in_progress=1, covers_until=_AT
+                ),
+            )
+        ),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED, _ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT, source=MemorySource.OBSERVED),
+        _belief("rec-2", "the user prefers short answers", source=MemorySource.USER_ASSERTED),
+        _belief("rec-3", "the user is an early riser", source=MemorySource.INFERRED),
+    )
+
+    first = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+    assert first.outcome is not None
+    assert first.outcome.turn is not None
+    assert first.outcome.turn.context.calendar is not None, "the placed facet reached the turn"
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is False
+
+    second = await harness.engine.converse_spoken(
+        _RECORDING,
+        plays=(_MP4,),
+        timeout=PATIENT,
+        conversation_id=first.outcome.conversation_id,
+    )
+
+    assert second.outcome is not None
+    assert second.outcome.turn is not None
+    assert _episodes(second.outcome.turn.memories), (
+        "an unstamped episode still reaches the next spoken turn — §3 unplaces nothing"
+    )
+
+
+async def test_a_parked_turns_resolution_inherits_its_stamp() -> None:
+    """§8 case 9: both of one turn's episodes carry it, and neither is spoken back.
+
+    ADR-0074 §3 captures a parking turn twice, and the second capture renders the
+    **parked turn's** goal and plan from a pass that retrieves nothing of its own.
+    So the value rides on the parked entry beside the turn it belongs to (ADR-0204
+    §2's fourth clause): an implementation that recomputed it at the resolution
+    would evaluate an empty supply, answer ``False``, and read that turn's own
+    rationale aloud one turn later.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(needs="hikes"),
+        tools=(confirmable(),),
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED, _ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    parked = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+    assert parked.outcome is not None
+    assert parked.outcome.step is not None
+    assert parked.outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+    token = parked.outcome.step.confirmation.token  # type: ignore[union-attr]
+
+    resumed = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 2, "the park and its resolution are two episodes (ADR-0074 §3)"
+    assert _stamped(captured) == {one.id for one in captured}
+
+    third = await harness.engine.converse_spoken(
+        _RECORDING,
+        plays=(_MP4,),
+        timeout=PATIENT,
+        conversation_id=parked.outcome.conversation_id,
+    )
+
+    assert third.outcome is not None
+    assert third.outcome.turn is not None
+    assert not _episodes(third.outcome.turn.memories)
+
+
+async def test_a_recovered_resumption_and_a_routed_pass_carry_false() -> None:
+    """§8 case 10: ``False`` because their episodes hold no turn, not because nothing ran.
+
+    ADR-0204 §2's fifth clause, both halves in one case, with the captured
+    ``content`` read to show why the value is true of each rather than a hole: a
+    recovered resumption renders the bare fact of the resumption, and a routed pass
+    renders the utterance and a phrase for the route's outcome (ADR-0197 §10).
+    Both stores hold a record ADR-0199 §3 withholds, so a pass that had evaluated a
+    supply would have found one.
+    """
+    harness = Harness(tools=(confirmable(),), planner=OneStepPlanner())
+    await _seed(harness, _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+
+    fresh = _fresh_facade(harness)
+    pending = await fresh.pending_confirmations()
+    assert len(pending) == 1
+    recovered = await fresh.resume(pending[0].token, approved=True, timeout=PATIENT)
+    assert recovered.turn is None, "a recovered park has no live turn (ADR-0052 §3)"
+
+    resumption = _episodes(await harness.memory.export())[-1]
+    assert resumption.provenance.supplied_withheld_content is False
+    assert "The user asked:" not in resumption.content
+    assert "The assistant's plan:" not in resumption.content
+
+    routed_harness = Harness(
+        composing=ComposingStage(
+            model=FakeModelProvider("I have forgotten it."), streaming=FakeStreamingCompleter()
+        ),
+        planner=NoStepPlanner(),
+        routing=RoutingStage(
+            model=FakeModelProvider(json.dumps({"operation": "forget", "query": "cardiology"})),
+            recorder=FakeRoutingRecorder(),
+        ),
+    )
+    await _seed(routed_harness, _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"))
+
+    routed = await routed_harness.engine.converse("forget what I said", timeout=PATIENT)
+
+    assert routed.routed is not None
+    episode = _episodes(await routed_harness.memory.export())[-1]
+    assert episode.provenance.supplied_withheld_content is False
+    assert episode.content == "The user asked: forget what I said", (
+        "no goal statement and no plan rationale of any turn — there was no turn"
+    )
+
+
+async def test_a_bounded_turn_supplied_a_stamped_episode_captures_a_stamped_episode() -> None:
+    """§8 case 14: §2's second term, and the hop it closes.
+
+    The direct evaluation alone reads the stamped episode as ``OBSERVED`` with
+    ``about_person`` unset, places it speakable and yields ``False`` — so without
+    the disjunction one typed turn over a stamped episode strips the stamp off the
+    whole warrant, and the next spoken turn reads the laundered rendering aloud.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(),
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    # The stamped episode of case 1, and *only* it: the belief about Alice is gone,
+    # so the second turn's stamp can only have come from §2's second term.
+    await _seed(harness, _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"))
+    first = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert first.conversation_id is not None
+    await harness.memory.delete("rec-2")
+
+    second = await harness.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.turn is not None
+    assert _stamped(second.turn.memories), "the stamped episode was in the second turn's supply"
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 2
+    assert _stamped(captured) == {one.id for one in captured}
+
+    spoken = await harness.engine.converse_spoken(
+        _RECORDING, plays=(_MP4,), timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert not _episodes(spoken.outcome.turn.memories), "neither episode reached the spoken turn"
