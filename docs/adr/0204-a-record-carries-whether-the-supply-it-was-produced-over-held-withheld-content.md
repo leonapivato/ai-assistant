@@ -1,6 +1,6 @@
 # 204. A record carries whether the supply it was produced over held withheld content, and a channel of unbounded audience withholds one that does
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0203](0203-on-a-channel-of-unbounded-audience-the-withholding-binds-the-whole-turn.md)
