@@ -103,16 +103,17 @@ belongs in its own issue.
 artifact answers *coverage* — did a reviewer read this content — and the gate
 answers *currency*, so a base move outside the reviewed hunks does not spend a
 round (ADR-0027 §§1–2). What still does is ADR-0027 §3's floor, and since
-ADR-0209 it has two halves. **`docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`
-and `scripts/codex-review.sh` bind outright**, no test consulted: this document
-is the top of §1's authority hierarchy and `scripts/codex-review.sh` assembles
-the prompt, so a review taken before either moved was conducted under different
-instructions, and its verdict says nothing about the rubric now in force.
-**`docs/adr/**` and the contract surface bind only where the two texts name each
-other** — the PR's diff or description writes the moved ADR's `ADR-NNNN`, or the
-moved ADR names a path the diff touches or a symbol it carries, or the move
-landed new `Protocol` surface, or the PR reaches `src/ai_assistant/core/`. **Any
-test that cannot be evaluated binds** (ADR-0209 §6).
+ADR-0209 it has two halves. **The standing review contracts bind outright** —
+`docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`, `scripts/codex-review.sh` —
+with no test consulted: this document and its rubrics are what a reviewer is
+conducted under, and `scripts/codex-review.sh` assembles the prompt, so a review
+taken before any of them moved ran under different instructions and its verdict
+says nothing about the rubric now in force. **The ADRs and the contract surface
+bind only where the two texts name each other**: the PR's diff or description
+writes the moved ADR's `ADR-NNNN`, or the moved ADR names a path the diff touches
+or a symbol it carries, or the move landed new `Protocol` surface, or the PR
+reaches `src/ai_assistant/core/`. **Any test that cannot be evaluated binds**
+(ADR-0209 §6).
 
 That narrowing is grounded in what a reviewer's authority actually runs
 through — §1 makes the ADRs binding, and a reviewer applies a ratified decision

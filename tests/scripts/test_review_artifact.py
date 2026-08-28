@@ -15,6 +15,7 @@ OpenAI call.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -315,3 +316,63 @@ def test_two_reviews_of_one_sha_against_different_bases_do_not_collide(tmp_path:
     assert len(bases) == 2
     for artifact in recorded:
         assert f" sha={sha} " in artifact.read_text().splitlines()[0]
+
+
+def _fake_gh_body(bin_dir: Path, body: str | None) -> None:
+    """A `gh` answering only the one call the recorder makes.
+
+    ``body=None`` makes it fail, which is the bypass path and the
+    no-PR-yet path: `codex-review.sh` then records `pr_desc=unavailable` and no
+    snapshot, and `ship` falls back to ADR-0209 §5's live body alone.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    if body is None:
+        gh.write_text('#!/usr/bin/env bash\necho "no PR" >&2\nexit 1\n')
+    else:
+        gh.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' {shlex.quote(body)}\nexit 0\n")
+    gh.chmod(0o755)
+
+
+def test_the_pr_description_is_recorded_beside_the_artifact(tmp_path: Path) -> None:
+    """Issue #1750: the round records the description it was taken beside.
+
+    ADR-0209 §5 admits the PR description into the text its floor tests read, and
+    it is the one input an author can change between the recorded review and the
+    ship. Recording it here is what lets `ship` read §5's text as the union of the
+    live body and every snapshot on this branch — so a citation *added* still adds
+    a binding and one *removed* afterwards still binds, which is §5's marked clause
+    computed rather than trusted.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh_body(tmp_path / "bin", "This lane implements ADR-0042.")
+
+    run_review(repo, tmp_path)
+
+    artifact = require_artifact(repo, sha)
+    assert " pr_desc=recorded " in artifact.read_text().splitlines()[0]
+    snapshot = repo / ".review" / "descriptions" / artifact.name
+    assert snapshot.read_text().strip() == "This lane implements ADR-0042."
+
+
+def test_a_description_that_cannot_be_read_is_recorded_as_unavailable(tmp_path: Path) -> None:
+    """No PR yet, or no `gh` — the round is still a round.
+
+    The first round of a lane legitimately runs before the draft PR exists, and
+    the bypass path (CI, no sandbox) has no `gh` to ask. Failing the round over
+    that would make ADR-0209 §5's optional input a precondition of reviewing at
+    all. `pr_desc=unavailable` says "this round asserts nothing about the
+    description", which `ship` reads as no snapshot rather than as a failed read —
+    a distinction that matters, because the *other* case (an artifact claiming a
+    snapshot that has gone) fails closed.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh_body(tmp_path / "bin", None)
+
+    run_review(repo, tmp_path)
+
+    artifact = require_artifact(repo, sha)
+    assert " pr_desc=unavailable " in artifact.read_text().splitlines()[0]
+    assert not (repo / ".review" / "descriptions" / artifact.name).exists()
