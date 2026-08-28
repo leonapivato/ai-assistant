@@ -883,30 +883,53 @@ class TestTheBudget:
         """§7: "It is performed after the selection step, [and] runs to completion
         whatever the state of the budget."
 
-        The poll spends its whole budget waiting, the entry arrives at the end of the
-        window, and the rendering still happens: ADR-0135 §3's "an elapsed budget is
-        no ground for withholding a delivery that selection produced", with the
-        rendering added to the same list.
+        **The engine's own clock is moved past the budget while the poll is parked**,
+        which is what makes this the boundary case rather than a late arrival. The
+        sequence the poll actually runs is: read the start instant, find nothing,
+        park on ``wait_for_arrival``; the clock jumps a minute past a one-second
+        budget and the entry is offered, waking the wait; the loop's next act is
+        ``claim()``, which is reached **before** any budget arithmetic and produces a
+        delivery. ADR-0135 §3's "an elapsed budget is no ground for withholding a
+        delivery that selection produced" therefore governs, and ADR-0206 §7 adds the
+        rendering to the same list.
+
+        A stage that consulted the budget before rendering would see it long gone and
+        degrade, and this is the case that catches it — a fixed clock cannot, because
+        the elapsed time is then zero however long the poll really waits.
         """
         clock = _Advancing()
-        outbox = FakeNotificationOutbox(now=clock, lease=timedelta(seconds=30))
-        engine, seam = _speaking(outbox)
-        assert seam is not None
+        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(seconds=30))
+        seam = FakeSpeechSynthesizer()
+        harness = Harness(transcriber=FakeSpeechTranscriber(), synthesizer=seam)
+        engine = _wired(
+            harness,
+            outbox,
+            now=clock,
+            transcriber=harness.transcriber,
+            synthesizer=seam,
+        )
 
-        async def offer_late() -> None:
+        async def outlive_the_budget() -> None:
             await asyncio.sleep(0.02)
+            clock.advance(timedelta(minutes=1))
             await outbox.offer(_placed())
 
         delivery, _ = await asyncio.gather(
             asyncio.wait_for(
-                engine.next_notification(plays=EVERYTHING, budget=timedelta(seconds=5)), 3
+                engine.next_notification(plays=EVERYTHING, budget=timedelta(seconds=1)), 3
             ),
-            offer_late(),
+            outlive_the_budget(),
         )
 
         assert delivery is not None
         assert delivery.spoken_rendering is SpokenRendering.RENDERED
+        assert delivery.spoken is not None
         assert len(seam.calls) == 1
+        # The ordering is guaranteed rather than raced: the clock is advanced
+        # *before* the entry is offered, and no ``claim()`` can produce it before it
+        # is offered — so the budget really had run out when selection produced this
+        # delivery, by a minute against a one-second budget.
+        assert clock() - NOW > timedelta(seconds=1)
 
     async def test_a_zero_budget_selects_at_once_and_still_renders(self) -> None:
         """§7: "a zero budget renders exactly as any other budget does".

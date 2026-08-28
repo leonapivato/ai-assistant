@@ -74,7 +74,17 @@ def _candidate(key: str = "k1") -> NotificationCandidate:
 
 
 def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: object) -> Engine:
-    """A façade over ``harness``'s durable state, holding a delivery outbox."""
+    """A façade over ``harness``'s durable state, holding a delivery outbox.
+
+    ``now`` is the **engine's** clock, taken out of ``kwargs`` rather than declared,
+    so that every helper forwarding ``**kwargs: object`` into here keeps type-checking
+    unchanged. It is a knob because ADR-0135 §2 measures a poll's remaining wait as
+    elapsed time against the engine's own reading — so a case about a budget that has
+    run out has to be able to move it, and a fixed clock makes the elapsed time zero
+    however long the poll really waited. Defaults to the fixed :data:`AT` every other
+    case here is written against.
+    """
+    clock = kwargs.pop("now", None)
     return Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
@@ -94,7 +104,7 @@ def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: obj
         observation=harness.observation,
         questions=harness.questions,
         notification_outbox=outbox,
-        now=lambda: AT,
+        now=(lambda: AT) if clock is None else clock,  # type: ignore[arg-type]
         **kwargs,  # type: ignore[arg-type]
     )
 
