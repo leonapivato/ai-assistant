@@ -99,6 +99,31 @@ Waiving a `blocker` or `major` is allowed; write the one-line rationale in the P
 or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
 belongs in its own issue.
 
+**A green review survives a rebase unless the base move bears on this PR.** The
+artifact answers *coverage* — did a reviewer read this content — and the gate
+answers *currency*, so a base move outside the reviewed hunks does not spend a
+round (ADR-0027 §§1–2). What still does is ADR-0027 §3's floor, and since
+ADR-0209 it has two halves. **`docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`
+and `scripts/codex-review.sh` bind outright**, no test consulted: this document
+is the top of §1's authority hierarchy and `scripts/codex-review.sh` assembles
+the prompt, so a review taken before either moved was conducted under different
+instructions, and its verdict says nothing about the rubric now in force.
+**`docs/adr/**` and the contract surface bind only where the two texts name each
+other** — the PR's diff or description writes the moved ADR's `ADR-NNNN`, or the
+moved ADR names a path the diff touches or a symbol it carries, or the move
+landed new `Protocol` surface, or the PR reaches `src/ai_assistant/core/`. **Any
+test that cannot be evaluated binds** (ADR-0209 §6).
+
+That narrowing is grounded in what a reviewer's authority actually runs
+through — §1 makes the ADRs binding, and a reviewer applies a ratified decision
+to a diff by reading what it says about the diff's paths and symbols. A floor
+file that neither names nor is named by the PR could change what a reviewer says
+only if the reviewer supplied the connection itself, and a reviewer reads the
+diff against its own base, never two changes side by side. `just drill` prints
+which test bound or cleared each floor path; `CONTRIBUTING.md` → "Report the
+review, then mark it ready" carries the conditions in full. Do not reconstruct
+them from memory, and do not buy a round to find out.
+
 *Operator note, not a rule for the reviewer: a round runs for minutes, and a
 caller that cannot hold one process open that long starts it and polls it instead
 — `just review-codex-start <persona>`, then `just review-codex-wait <persona>`

@@ -540,6 +540,7 @@ _read_base_move() {
     drift_src=()
     drift_dst=()
     drift_floor=0
+    drift_floor_error=""
     local -a rec=()
     # The listing is written to a file whose write is CHECKED, not read through a
     # process substitution, which discards the producer's exit status. `git diff`
@@ -601,6 +602,11 @@ _decide_floor() {
     drift_reason=()
     drift_floor_error=""
     [[ $n -eq 0 ]] && return 0
+    # Assembled on first use, not up front: §5's inputs cost a `gh` round trip and
+    # two renderings of the PR's own diff, and the common ship — an unmoved base,
+    # governed by ADR-0027 §2(a)'s tree comparison — never reaches this function
+    # at all and should pay for none of it.
+    _ensure_floor_inputs
     out="${floor_dir}/verdicts"
     if [[ -z "$_floor_python" || ! -f "$_floor_script" ]]; then
         drift_floor=1
@@ -622,7 +628,8 @@ _decide_floor() {
         --pr-diff "${floor_dir}/pr.diff" --pr-listing "${floor_dir}/pr.listing" \
         "${floor_args[@]}" <"${floor_dir}/entries" >"$out" 2>"${floor_dir}/stderr"; then
         drift_floor=1
-        drift_floor_error="scripts/floor_test.py refused: $(tr -d '\000' <"${floor_dir}/stderr" | tail -n 1)"
+        drift_floor_error="the floor test refused: $(_encode_path \
+            "$(tr -d '\000' <"${floor_dir}/stderr" | tail -n 1)" control-only)"
         return 0
     fi
     local -a verdict=()
@@ -1003,7 +1010,7 @@ _drill_report() {
         # unauditable clear — is easiest to reintroduce by sharing a message.
         if [[ -n "$drift_floor_error" ]]; then
             echo "    §3 floor            NOT DECIDED — ADR-0209's test could not be run:" >&2
-            echo "                        ${drift_floor_error}." >&2
+            echo "                        $(_encode_path "$drift_floor_error" control-only)." >&2
             echo "                        §6 binds anything undecidable, so this base move" >&2
             echo "                        costs a review round. No path is marked, because" >&2
             echo "                        the run that decides which are floor paths is the" >&2
@@ -1364,7 +1371,13 @@ _collect_floor_inputs() {
     shopt -u nullglob
     return 0
 }
-_collect_floor_inputs
+# Called on first use from `_decide_floor`, and at most once.
+_floor_inputs_ready=0
+_ensure_floor_inputs() {
+    [[ "$_floor_inputs_ready" == "1" ]] && return 0
+    _floor_inputs_ready=1
+    _collect_floor_inputs
+}
 
 shopt -s nullglob
 for a in .review/*.md; do
