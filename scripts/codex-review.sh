@@ -2373,6 +2373,48 @@ fi
 # the recorded provenance field, never off the filename.
 mkdir -p "$review_dir"
 artifact="${review_dir}/${loop_id:-noloop}-${persona}-${base_sha}-${tree}.md"
+
+# --- The PR description this round was taken beside (issue #1750) ------------
+#
+# ADR-0209 §5 admits the PR description into the text its floor tests read, and
+# it is the one input that is author-controlled and mutable. §5 prices that
+# asymmetrically: the description may ADD a binding and never remove one. The
+# hazard §5 then names as a lane's obligation rather than a computation is the
+# gap between a recorded review and the ship — a citation to a governing ADR
+# deleted from the body in between, so that `ship` reads a description that no
+# longer states the PR's own grounds and clears a floor the citation would have
+# bound.
+#
+# Recording the body HERE is what lets `ship` compute that instead of trusting
+# it: §5's text becomes the union of the live body and every snapshot recorded
+# on this branch, so a removed citation still binds while an ADDED one still
+# adds, and an edit that bound no test still costs nothing. The snapshot is the
+# body VERBATIM rather than a digest or an extracted token list, for two
+# reasons — §5's tests read raw text (`ADR-NNNN` anywhere, a definition's name
+# as a word), and the extraction must stay in one place (ADR-0209 §6), which is
+# `scripts/floor_test.py`.
+#
+# Recorded beside the artifact under the same name, so the two are selected
+# together and a stale snapshot cannot be picked up by a later round.
+#
+# FAILING TO RECORD IS NOT A FAILED ROUND. There is legitimately no PR yet on
+# the first round of a lane, and the bypass path (CI, no sandbox) has no `gh` to
+# ask. The field then says `unavailable`, `ship` admits no snapshot for this
+# artifact and falls back to §5's live body alone — which is exactly the state
+# ADR-0209 decides for, with §5's marked conduct clause carrying the rest. What
+# does fail closed is the other case, and it is `ship`'s: an artifact recording
+# `pr_desc=recorded` whose snapshot has since gone.
+description_dir="${review_dir}/descriptions"
+description_file="${description_dir}/$(basename "$artifact")"
+pr_desc="unavailable"
+mkdir -p "$description_dir"
+if command -v gh >/dev/null 2>&1 &&
+    gh pr view --json body --jq '.body // ""' >"${description_file}.partial.$$" 2>/dev/null; then
+    mv "${description_file}.partial.$$" "$description_file"
+    pr_desc="recorded"
+else
+    rm -f "${description_file}.partial.$$" "$description_file"
+fi
 # base_sha was pinned before the diff (above), not re-resolved here: ship.sh
 # compares it against the PR's real base, so a review run against a narrower or
 # since-moved base — which still produces a correctly-named artifact — cannot
@@ -2415,7 +2457,7 @@ artifact_tmp="${artifact}.partial.$$"
     # unavailable, and neither may be read as a match.
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha}" \
         "branch=${branch} tree=${tree} patch_id=${patch_id} round=${round}" \
-        "loop_id=${loop_id} thread_id=${round_thread}" \
+        "loop_id=${loop_id} thread_id=${round_thread} pr_desc=${pr_desc}" \
         "net_lines=${net_lines} churn_lines=${churn_lines}" \
         "churn_ratio=${churn_ratio} churn_bound=${churn_bound} commits=${commits}" \
         "${binary_field}${supersedes:+supersedes=${supersedes} }-->"

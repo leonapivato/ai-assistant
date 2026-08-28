@@ -107,11 +107,18 @@ def _land_an_adr_on_main(repo: Path) -> None:
 
     Every ADR merge does this to every lane behind it in the merge order, which
     is why issue #1672 calls the composition reachable rather than exotic.
+
+    The landed decision names the path this PR's diff touches, so it binds under
+    ADR-0209 §3's second test and the round is genuinely owed. That citation is
+    load-bearing rather than decorative: since ADR-0209 a `docs/adr/**` base move
+    the PR neither names nor is named by clears the floor, and this test needs an
+    owed round to have anything to say about where the paid one is anchored.
     """
     _git(repo, "checkout", "-q", "main")
     (repo / "docs" / "adr").mkdir(parents=True, exist_ok=True)
     (repo / "docs" / "adr" / "0100-something-else.md").write_text(
         _PROPOSED.replace("101", "100").replace("- Status: Proposed", "- Status: Accepted")
+        + f"\nThis decision governs `{_ADR_PATH}`.\n"
     )
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "docs(adr): land another decision")

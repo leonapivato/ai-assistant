@@ -72,19 +72,31 @@ _REVIEWED_LINE = 60
 _NEAR_LINE = _REVIEWED_LINE - 2
 _FAR_LINE = 100
 
-# Every path ADR-0027 §3 fixes as the floor, plus one that is deliberately not on
-# it. `scripts/ship.sh` is excluded by name: the boundary is "what the reviewer
-# read", and ship shapes no prompt — it applies whatever version of the
-# acceptance rule is on disk at ship time, so a stale copy cannot exist to be
-# reused.
-_FLOOR = (
-    "src/ai_assistant/core/protocols.py",
-    "src/ai_assistant/core/types.py",
+# ADR-0209 §1's half of ADR-0027 §3's floor: the standing review contracts, which
+# bind every diff by construction and consult no test. `scripts/ship.sh` is
+# excluded by name: the boundary is "what the reviewer read", and ship shapes no
+# prompt — it applies whatever version of the acceptance rule is on disk at ship
+# time, so a stale copy cannot exist to be reused.
+#
+# §2's other half — `docs/adr/**`, `core/protocols.py`, `core/types.py` — is NOT
+# here any more, and its absence is the change ADR-0209 makes: those bind only
+# where one of §§3-4's tests binds, so a case that merely edits one of them says
+# nothing about whether the round is owed. `test_ship_floor_citation.py` carries
+# them, one case per clause.
+_STANDING_CONTRACTS = (
     "docs/review/adversarial.md",
     "docs/review/guide.md",
     "CLAUDE.md",
     "CONTRIBUTING.md",
     "scripts/codex-review.sh",
+)
+_CONTRACT_SURFACE = (
+    "src/ai_assistant/core/protocols.py",
+    "src/ai_assistant/core/types.py",
+)
+_FLOOR = (
+    *_STANDING_CONTRACTS,
+    *_CONTRACT_SURFACE,
     "docs/adr/0001-record-architecture-decisions.md",
 )
 
@@ -489,14 +501,19 @@ def _assert_floor_refusal(repo: Path, tmp_path: Path, mutate: Callable[[Path], o
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_every_floor_path_changed_by_the_base_move_refuses(tmp_path: Path) -> None:
-    """Each floor path in turn: the contract surface, the contracts, the ADRs.
+def test_every_standing_contract_changed_by_the_base_move_refuses(tmp_path: Path) -> None:
+    """Each of ADR-0209 §1's four in turn, with no test consulted.
 
-    Enumerated rather than sampled because the floor is the part of §3 that has
+    Enumerated rather than sampled because this half of §3 is the part that has
     to be sound — a single missing entry fails open on exactly the class of base
-    move the gate cannot see.
+    move the gate cannot see — and ADR-0209 §1 keeps it absolute: a review run
+    against a superseded rubric is not a review under this repository's standard
+    whatever its verdict says, and `scripts/codex-review.sh` assembles the prompt.
+
+    Nothing about this PR is consulted, which is the point: the same PR clears a
+    `docs/adr/**` move in `test_ship_floor_citation.py` and cannot clear these.
     """
-    for i, floor_path in enumerate(_FLOOR):
+    for i, floor_path in enumerate(_STANDING_CONTRACTS):
         # One case per directory: `_init_repo` puts the bare `origin` beside the
         # clone, so sharing a parent would share a remote across cases.
         case = tmp_path / f"case-{i}"
@@ -527,35 +544,55 @@ def test_a_floor_path_renamed_out_of_the_floor_refuses(tmp_path: Path) -> None:
 
 
 def test_a_path_renamed_into_the_floor_refuses(tmp_path: Path) -> None:
-    """The DESTINATION endpoint is read too: a new ADR arriving by rename."""
+    """The DESTINATION endpoint is read too: a rubric arriving by rename.
+
+    ADR-0209 §8 leaves §3's rename-aware both-endpoints reading exactly where it
+    was, and a path arriving *in* `docs/review/` is the destination half of it.
+    (The `docs/adr/**` version of this case is in
+    `test_ship_floor_citation.py`, where the destination's text decides.)
+    """
     repo = tmp_path / "repo"
     _init_repo(repo)
     _assert_floor_refusal(
-        repo, tmp_path, lambda r: _git(r, "mv", "notes/thing.md", "docs/adr/0099-a-decision.md")
+        repo, tmp_path, lambda r: _git(r, "mv", "notes/thing.md", "docs/review/late-rubric.md")
     )
 
 
 def test_the_floor_applies_to_the_architecture_lens_too(tmp_path: Path) -> None:
-    """`docs/adr/**` is in the floor for EVERY persona, not only architecture.
+    """A binding `docs/adr/**` move costs EVERY persona, not only architecture.
 
     A per-persona floor was considered and withdrawn: `guide.md`'s authority
     hierarchy is not scoped by persona, and "adversarial would probably not have
     noticed" is a prediction about a reviewer rather than a property of the
-    content. A floor built on that prediction fails open.
+    content. A floor built on that prediction fails open. ADR-0209 §2 retains
+    that withdrawal verbatim — "a test that binds costs the round for every
+    persona the change requires" — and a test computed from the two texts is a
+    property of the content, which is why it does not reopen it.
+
+    The PR cites the moved ADR by number in its own diff, so §3's first test
+    binds. Only the ARCHITECTURE artifact is left to the floor here — the
+    adversarial one is re-recorded against the post-move base, so it is accepted
+    under §2(a) and cannot be what refuses. The refusal that remains is therefore
+    unambiguously the architecture lens being charged for a `docs/adr/**` move,
+    which is the claim: the binding is persona-agnostic.
     """
     repo = tmp_path / "repo"
     _init_repo(repo, touches_core=True)
+    _edit_line(repo, _REVIEWED, 61, "line 61 — implements ADR-0001")
+    _git(repo, "commit", "-aqm", "cite the decision")
     rebased = _review_then_move(
         repo,
         tmp_path,
         lambda r: _edit_line(r, "docs/adr/0001-record-architecture-decisions.md", 5, "moved"),
-        personas=("adversarial", "architecture"),
+        personas=("architecture",),
     )
+    _record_review(repo, rebased, "adversarial", f"a real finding\n{_VERDICT}\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=rebased)
 
     assert result.returncode != 0
-    assert "floor" in result.stderr
+    assert "needs\n     the architecture lens" in result.stderr
+    assert "floor path the base move" in result.stderr
 
 
 def test_ship_sh_is_not_in_the_floor(tmp_path: Path) -> None:
