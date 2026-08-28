@@ -12633,6 +12633,51 @@ class TurnOutcome(BaseModel):
         return self
 
 
+def is_live_confirmation_park(outcome: TurnOutcome | None) -> bool:
+    """Whether ``outcome`` is one of ADR-0207 §1's two live confirmation parks.
+
+    **Two shapes and no others**: an outcome whose :attr:`TurnOutcome.step` reached
+    :attr:`Disposition.AWAITING_CONFIRMATION`, and an outcome whose
+    :attr:`TurnOutcome.routed` reached :attr:`RouteOutcome.AWAITING_CONFIRMATION`.
+    A step park is the permission gate's ruling (ADR-0037 §4); a routed park is the
+    routing stage's (ADR-0197 §7). Both mint a confirmation the user must answer on
+    a screen, and both leave :attr:`TurnOutcome.reply` ``None``.
+
+    **Decided from those two recorded enum members and from nothing else** — not
+    from ``reply`` being ``None``, not from the confirmation's content, and not from
+    the tool, the operation or the subject. That is what keeps ADR-0199 §2's
+    decision procedure satisfied by construction wherever this predicate is read:
+    the two members are recorded outcomes of stages that already ran, so no caller
+    of this function inspects content to reach its answer.
+
+    **Deciding it here rather than from** ``reply is None`` **is what keeps the
+    other two silences intact.** A composition failure and a resume recovered from
+    durable state both leave ``reply`` ``None``; neither is a park, and ADR-0207 §3
+    keeps ADR-0200 §4's silence over both of them word for word.
+
+    **One definition, read from two sides.** :class:`SpokenTurn`'s validator reads it
+    to decide which shapes the type admits (ADR-0207 §6), and ``orchestration``
+    reads it to decide whether the turn speaks (§1) — the same rule, so a second
+    spelling of it in either place would be a rule that can drift. It is a module
+    function over values the type already carries rather than a member of one: no
+    type, field, enum member, Protocol or method signature moves for it, exactly as
+    :func:`rests_on_recorded_external_content` reads a :class:`Provenance`.
+
+    Args:
+        outcome: The turn, or ``None`` where the call ran none.
+
+    Returns:
+        Whether it is a live confirmation park.
+    """
+    if outcome is None:
+        return False
+    if outcome.step is not None and outcome.step.disposition is Disposition.AWAITING_CONFIRMATION:
+        return True
+    return outcome.routed is not None and outcome.routed.outcome is (
+        RouteOutcome.AWAITING_CONFIRMATION
+    )
+
+
 class ObservedProposal(BaseModel):
     """One belief the observer proposed, and what the write path did with it.
 
@@ -15282,22 +15327,30 @@ class SpokenTurn(BaseModel):
     **Two shapes a reader should be able to name from them alone**: a recording
     that carried no words is ``heard`` ``None``; a turn whose answer could not be
     spoken is ``spoken`` ``None`` with ``spoken_degraded`` ``True`` beside an
-    ``outcome`` whose ``reply`` is present. Neither is reachable from ``converse``,
-    and both are legible without decoding a payload.
+    ``outcome`` whose ``reply`` is present — or beside a live confirmation park,
+    whose sentence is what could not be spoken (ADR-0207 §4). Neither is reachable
+    from ``converse``, and both are legible without decoding a payload.
 
     **``heard`` is ``None`` exactly when ``outcome`` is ``None``**, and that pair
     is the recording that carried no words: nothing was asked, so nothing was
     answered, no turn ran, no episode was captured and no conversation was created.
     It is not an error and no exception is raised for it (ADR-0200 §4).
 
-    **``spoken`` is the rendering of ``outcome.reply`` and of nothing else** — what
+    **``spoken`` is the rendering of ``outcome.reply``, and on a park the rendering
+    of one fixed sentence** — what
     :meth:`~ai_assistant.core.protocols.SpeechSynthesizer.synthesize` returned when
-    handed exactly that value. There is one answer on a spoken call and
-    ``outcome.reply`` is it, so nothing here carries a second copy of the spoken
-    words, and a caller that cannot play audio reads ``outcome.reply`` and holds
-    exactly what was said. That the audio is an *audible* rendering of that text is
-    the synthesizer's obligation, discharged in its conformance suite; no component
-    decodes or re-transcribes a rendering to check it.
+    handed exactly that value. On every pass that composed an answer there is one
+    answer and ``outcome.reply`` is it, so nothing here carries a second copy of the
+    spoken words, and a caller that cannot play audio reads ``outcome.reply`` and
+    holds exactly what was said. **On a live confirmation park that parity does not
+    hold** (ADR-0207 §3): no answer was composed, ``outcome.reply`` stays ``None``,
+    and what was spoken is the sentence ADR-0207 §2 fixes — a project-authored
+    constant that ``ai_assistant.orchestration`` owns, is never written to ``reply``,
+    and is not carried anywhere on this type but as audio. The park is legible from
+    ``outcome`` itself, through :func:`is_live_confirmation_park`. That the audio is
+    an *audible* rendering of the text handed over is the synthesizer's obligation,
+    discharged in its conformance suite; no component decodes or re-transcribes a
+    rendering to check it.
 
     **The answer was composed for a channel of unbounded audience** (ADR-0200 §3,
     §7). Where a class was withheld under ADR-0199 §3, ``outcome.reply`` *is* the
@@ -15317,12 +15370,15 @@ class SpokenTurn(BaseModel):
             ``None``. An ordinary :class:`TurnOutcome` under every clause ADR-0170
             §4, ADR-0173 §6 and ADR-0197 §8 place on one; a spoken call composes a
             turn rather than creating a second kind of one.
-        spoken: The rendering of ``outcome.reply``, or ``None`` where there was
+        spoken: The rendering of ``outcome.reply``, or of ADR-0207 §2's fixed
+            sentence on a live confirmation park, or ``None`` where there was
             nothing to say or saying it did not complete.
-        spoken_degraded: Whether an answer existed and speaking it did not
+        spoken_degraded: Whether something to say existed and speaking it did not
             complete — synthesis raised, the format intersection was empty, the
             rendering breached ADR-0200 §6's bound, or the whole result carrying it
-            would have breached ADR-0085 §8c. It is never ``True`` beside a
+            would have breached ADR-0085 §8c. The four cases are ADR-0200 §4's and
+            ADR-0207 §4 reads them over the wider subject: an answer on every other
+            pass, and §2's sentence on a park. It is never ``True`` beside a
             non-``None`` ``spoken``, because this call streams nothing and so has no
             partial rendering to carry.
         episode_id: The id of the episode recording the turn this call ran, so
@@ -15352,11 +15408,14 @@ class SpokenTurn(BaseModel):
     )
     spoken: SpokenAudio | None = Field(
         default=None,
-        description="The rendering of the outcome's reply, or None where there is none.",
+        description=(
+            "The rendering of the outcome's reply, or of ADR-0207 §2's sentence on a "
+            "park, or None where there is none."
+        ),
     )
     spoken_degraded: bool = Field(
         default=False,
-        description="Whether an answer existed and speaking it did not complete.",
+        description="Whether there was something to say and speaking it did not complete.",
     )
     episode_id: Identifier | None = Field(
         default=None,
@@ -15365,14 +15424,32 @@ class SpokenTurn(BaseModel):
 
     @model_validator(mode="after")
     def _shapes_are_the_ones_adr_0200_admits(self) -> Self:
-        """Refuse every shape ADR-0200 §4 does not describe.
+        """Refuse every shape ADR-0200 §4 and ADR-0207 §6 do not describe.
 
         Stated **both ways**, because each direction rules out a different lie. A
         transcript with no turn would say the engine heard words and answered
         nothing; a turn with no transcript would say it answered a recording that
-        carried none. A rendering beside no answer would be audio of something this
-        type does not hold, and ``spoken_degraded`` beside a rendering would report
-        a partial delivery a call that streams nothing cannot make.
+        carried none. A rendering beside nothing to say would be audio of something
+        this type does not hold, and ``spoken_degraded`` beside a rendering would
+        report a partial delivery a call that streams nothing cannot make.
+
+        **The admissibility test is widened, not deleted** (ADR-0207 §6). What may
+        be spoken is an answer *or* ADR-0207 §2's fixed sentence on a live
+        confirmation park, so the test reads "an answer existed **or** this is a
+        park" — and every other arm stands. A rendering beside a ``reply``-less
+        outcome that is **not** a park, which is a composition failure or a resume
+        recovered from durable state, is refused exactly as before: those two keep
+        ADR-0200 §4's silence in full (§3). The cheap implementation of §1 is to drop
+        the two checks, and it would readmit precisely the shapes they were built to
+        refuse.
+
+        **And a third arm keeps it total in the other direction** (§6). On an outcome
+        that *is* a live confirmation park, the sentence is either rendered (§1) or
+        one of §4's four degradation cases fired, and there is no third state — so
+        ``spoken`` ``None`` beside ``spoken_degraded`` ``False`` is refused there.
+        That pair is the result #1699 measured, and without the arm a regression that
+        skipped the park branch would construct, project and cross the wire as an
+        ordinary result.
 
         **And an ``episode_id`` beside no outcome would name a turn that never ran**
         (ADR-0205 §1). Its "exactly when" is a biconditional about the *call*, and
@@ -15386,8 +15463,9 @@ class SpokenTurn(BaseModel):
         a turn nothing can stamp.
 
         Raises:
-            ValueError: If the five members do not describe one of §4's shapes, or
-                if an ``episode_id`` stands beside no outcome (ADR-0205 §1).
+            ValueError: If the five members do not describe one of §4's shapes as
+                ADR-0207 §6 widened them, or if an ``episode_id`` stands beside no
+                outcome (ADR-0205 §1).
         """
         if (self.heard is None) != (self.outcome is None):
             msg = (
@@ -15397,16 +15475,27 @@ class SpokenTurn(BaseModel):
             )
             raise ValueError(msg)
         answered = self.outcome is not None and self.outcome.reply is not None
-        if not answered and self.spoken is not None:
+        parked = is_live_confirmation_park(self.outcome)
+        speakable = answered or parked
+        if not speakable and self.spoken is not None:
             msg = (
-                "spoken is the rendering of the outcome's reply, so it is None wherever "
-                "there is no reply to render (ADR-0200 §4)"
+                "spoken is the rendering of the outcome's reply, or of ADR-0207 §2's "
+                "sentence on a live confirmation park, so it is None wherever there is "
+                "neither to render (ADR-0200 §4, ADR-0207 §6)"
             )
             raise ValueError(msg)
-        if not answered and self.spoken_degraded:
+        if not speakable and self.spoken_degraded:
             msg = (
-                "spoken_degraded says an answer existed and speaking it did not complete, "
-                "so it is False wherever there was no answer (ADR-0200 §4)"
+                "spoken_degraded says there was something to say and speaking it did not "
+                "complete, so it is False wherever there was neither an answer nor a park "
+                "(ADR-0200 §4, ADR-0207 §6)"
+            )
+            raise ValueError(msg)
+        if parked and self.spoken is None and not self.spoken_degraded:
+            msg = (
+                "a live confirmation park says one fixed sentence: it is either rendered "
+                "or one of the four degradation cases fired, and silence beside a clear "
+                "spoken_degraded is the shape #1699 measured (ADR-0207 §1, §6)"
             )
             raise ValueError(msg)
         if self.spoken_degraded and self.spoken is not None:

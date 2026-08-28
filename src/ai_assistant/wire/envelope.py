@@ -540,7 +540,46 @@ from ai_assistant.wire.errors import (
 #: than merging the two. ADR-0207 §5 reads this member set as settled — "the four
 #: ADR-0200 §4 fixed and the fifth ADR-0205 §1 added" — so nothing here is left open
 #: for it to revisit.
-PROTOCOL_VERSION: Final[int] = 19
+#:
+#: **20 since ADR-0207 §7**, which widens
+#: :class:`~ai_assistant.core.types.SpokenTurn`'s validator: on a **live confirmation
+#: park** — a step at ``AWAITING_CONFIRMATION`` or a routed operation at
+#: ``AWAITING_CONFIRMATION`` — ``spoken`` may carry the rendering of the one fixed
+#: sentence §2 fixes, beside an ``outcome`` whose ``reply`` is ``None``, and
+#: ``spoken_degraded`` follows §4's ladder there instead of being pinned ``False``.
+#: It is ADR-0124 §9's **second** limb, "a change to a wire-carried ``core`` type that
+#: makes a value one peer emits invalid for the other, **whether the change widens or
+#: narrows the type**" — the direction ADR-0122's case caught the corpus by, where
+#: "read as 'narrowing bumps, widening is safe', the rule would have got that case
+#: wrong".
+#:
+#: **A conforming peer at the old version really is refused**, which is what makes
+#: this a bump rather than a widening one side absorbs. ``wire/client.py``'s
+#: ``converse_spoken`` is annotated ``-> SpokenTurn`` and a result payload "takes the
+#: shape of the method's own declared return annotation" (ADR-0085 §10), so a hub at
+#: 20 emitting a parked turn that carries a rendering is reconstructed through a
+#: version-19 client's copy of the *old* validator and raises there. ADR-0084 §3's
+#: exact-match handshake is what turns that into a legible refusal naming both
+#: versions instead of a ``ValueError`` inside a call.
+#:
+#: **The two bumps composed rather than colliding**, which ADR-0207 §7 fixes as the
+#: procedure: "whichever lands second reads the constant as it then stands and adds
+#: one, and each writes its own note." ADR-0205's lane landed first and took 19; this
+#: lane read 19 and wrote 20, and the note above is that decision's alone — the two
+#: are not merged into one.
+#:
+#: **The method set does not move**, and stands at forty; ADR-0177 §1's browser
+#: enumeration does not move either, and stands at thirty-one. ``SpokenTurn`` gains no
+#: member and loses none (ADR-0207 §5): the five are ADR-0200 §4's four and ADR-0205
+#: §1's ``episode_id``, and what moved is which of their shapes the type admits.
+#:
+#: **Nothing else under** ``wire/`` **changes for it** (ADR-0207 §7). The framing, the
+#: connect exchange, the frame kinds, the codec's dispatch, ADR-0087 §2c's scalar
+#: table, the error registry, the method set and both adapters are untouched: no new
+#: type crosses, no member's encoding moves, and the sentence itself is **not**
+#: exported on the wire — it is an ``ai_assistant.orchestration`` constant (§2), and
+#: what crosses is its rendering as the ``SpokenAudio`` ``spoken`` already was.
+PROTOCOL_VERSION: Final[int] = 20
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

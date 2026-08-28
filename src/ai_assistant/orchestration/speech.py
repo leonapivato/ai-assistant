@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_MAX_SPOKEN_AUDIO_BYTES",
+    "SPOKEN_PARK_SENTENCE",
     "classify_speech_failure",
     "synthesize_within",
     "transcribe_within",
@@ -70,6 +71,37 @@ _log = structlog.get_logger(__name__)
 #: ``Settings``. ``tests/orchestration/test_spoken_bounds.py`` pins the two
 #: together, so the duplication cannot drift.
 DEFAULT_MAX_SPOKEN_AUDIO_BYTES: Final[int] = 512 * 1024
+
+#: The one sentence a spoken turn says when it parks on a confirmation, in the
+#: bytes ADR-0207 §2 fixes — that punctuation, that terminal full stop — handed to
+#: :meth:`~ai_assistant.core.protocols.SpeechSynthesizer.synthesize` byte for byte,
+#: exactly as an answer is.
+#:
+#: **Fixed by that ADR's text rather than by a value anything selects.** It is not
+#: composed, not model-authored, not templated, not derived from the park and not
+#: configurable: no ``Settings`` field, no environment variable, no deployment value
+#: and no argument varies it, and another sentence needs an ADR superseding §2. The
+#: text *is* the guarantee — every disclosure property §2 claims, that it names no
+#: tool, no operation, no subject, no step, no reason and no part of what the user
+#: said, is a property of this string and of no rule statable over a family of them.
+#:
+#: **Placed as speakable on a channel of unbounded audience** by ADR-0207 §2, which
+#: is the posture ADR-0199 §3's fourth clause obliges the admitting ADR to state for
+#: a producer of content that can reach an output channel. The placement reaches
+#: this constant and nothing else — not the park's confirmation, its tool, its
+#: recorded reason or its resolved subject, each of which stays withheld. It is
+#: content-free in the sense that matters: a constant is a function of nothing, so
+#: no fact about the user, the park, the plan or the memory store can be recovered
+#: from having heard it.
+#:
+#: **``ai_assistant.orchestration`` owns it** (ADR-0207 §5). No adapter under
+#: ``interfaces/``, no client under ``wire/``, no page and no later spoke declares
+#: it, holds a second copy of it, persists it, displays it or substitutes another
+#: for it. Two things that ownership does not reach: the injected synthesizer
+#: receives it as one-way input, and the canonical ``FakeAssistantEngine`` in
+#: ``ai_assistant.testing`` **names this object** rather than copying its literal, so
+#: the double cannot drift from the engine it stands in for.
+SPOKEN_PARK_SENTENCE: Final[str] = "I need you to confirm something on your screen."
 
 #: One entry per class of the :class:`~ai_assistant.core.errors.SpeechError`
 #: taxonomy ADR-0200 §1 fixes, **nearest first**, frozen at import.
