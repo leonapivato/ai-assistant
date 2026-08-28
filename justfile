@@ -170,10 +170,22 @@ test-fast *args:
     # the kernel when this shell exits, killed or not. The names are not `pt-*`,
     # so the reaper above never sees them.
     slots="${TEST_FAST_SLOTS:-3}"
+    case "$slots" in
+        ''|*[!0-9]*|0*) echo "just test-fast: TEST_FAST_SLOTS must be a positive integer, got '$slots'" >&2; exit 2 ;;
+    esac
+    # The user's private runtime directory where there is one (0700, so no other
+    # user can plant anything there); the slot files are opened for APPEND, which
+    # truncates nothing, and a symlink at a slot path is refused rather than
+    # followed. Per user, not per machine, which is what a wave of clones is.
+    slot_dir="${XDG_RUNTIME_DIR:-/tmp}"
     gate=""
     while :; do
         for ((i = 0; i < slots; i++)); do
-            exec {fd}>"/tmp/ai-assistant-test-fast.slot$i"
+            slot="$slot_dir/ai-assistant-test-fast.slot$i"
+            if [ -L "$slot" ]; then
+                echo "just test-fast: $slot is a symlink; refusing to use it as a lock" >&2; exit 2
+            fi
+            exec {fd}>>"$slot"
             if flock -n "$fd"; then gate="$fd"; break; fi
             exec {fd}>&-
         done
