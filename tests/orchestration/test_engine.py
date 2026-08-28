@@ -437,6 +437,7 @@ class Harness:
         self,
         *,
         planner: object | None = None,
+        context: FakeContextProvider | None = None,
         composing: ComposingStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
@@ -608,7 +609,10 @@ class Harness:
             )
         )
         loop = LearningLoop(
-            context=FakeContextProvider(),
+            # A knob because ADR-0204 §8's sixth case needs a *placed* facet in the
+            # turn's supply — the calendar — to show that a facet ADR-0199 §3 places
+            # leaves the stamp `False`, and the default context carries none at all.
+            context=FakeContextProvider() if context is None else context,
             memory=self.memory,
             writes=self.writes,
             planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
