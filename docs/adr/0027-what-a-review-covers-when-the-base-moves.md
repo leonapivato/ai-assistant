@@ -1,6 +1,6 @@
 # 27. What a review covers when the base moves
 
-- Status: Partially superseded by ADR-0209 (§3's floor clause, narrowed — its `docs/adr/**` and contract-surface entries invalidate an artifact only where one of four citation tests binds; §3's refusal of path disjointness, its rename-aware both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand)
+- Status: Partially superseded by ADR-0209 (§3's floor clause, narrowed — its `docs/adr/**` and contract-surface entries invalidate an artifact only where one of four tests binds; §3's refusal of path disjointness, its rename-aware both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand)
 - Date: 2026-07-21
 - Amends on ratification: ADR-0020 §3, the content anchor — the section
   ADR-0025 §4 already amended once. The edit is **not** made by this change; §7
