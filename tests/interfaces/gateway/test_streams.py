@@ -17,6 +17,9 @@ from ai_assistant.core.types import (
     NotificationCandidate,
     NotificationDelivery,
     ReplyChunk,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenRendering,
 )
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.http import StreamHead, render_stream_head
@@ -29,7 +32,18 @@ _AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 _TOKEN = "7." + "b3" * 16
 
 
-def _delivery(*, detail: str | None = "what else there is to say") -> NotificationDelivery:
+#: A rendering of the summary, in the shape ADR-0200 §9 fixes. Its octets are
+#: nothing in particular — what the projection below is about is which two members
+#: cross and which do not, and the audio is opaque to every one of them.
+_RENDERING = SpokenAudio(content="QUJDRA==", media_type=SpokenAudioFormat.MP4)
+
+
+def _delivery(
+    *,
+    detail: str | None = "what else there is to say",
+    spoken: SpokenAudio | None = None,
+    rendering: SpokenRendering = SpokenRendering.NOT_REQUESTED,
+) -> NotificationDelivery:
     """One delivery, as ``next_notification`` hands it back."""
     return NotificationDelivery(
         delivery_id=_TOKEN,
@@ -44,7 +58,19 @@ def _delivery(*, detail: str | None = "what else there is to say") -> Notificati
             sensitivity=DataTier.PERSONAL,
             references=("event-1",),
         ),
+        spoken=spoken,
+        spoken_rendering=rendering,
     )
+
+
+def _rendered() -> NotificationDelivery:
+    """One delivery carrying a rendering, which is ADR-0206 §6's ``RENDERED``."""
+    return _delivery(spoken=_RENDERING, rendering=SpokenRendering.RENDERED)
+
+
+def _withheld() -> NotificationDelivery:
+    """One ADR-0206 §5 refused to speak: no rendering, and no substitute for one."""
+    return _delivery(rendering=SpokenRendering.WITHHELD)
 
 
 # --- §2: one discriminator, and nothing else claiming what a value is --------
@@ -235,3 +261,90 @@ def test_a_fault_value_carries_its_detail_only_where_there_is_one() -> None:
     on a stream with the words it already has for one that arrived as a response."""
     assert streams.fault("hub-unreachable") == {"kind": "fault", "fault": "hub-unreachable"}
     assert streams.fault("hub-unreachable", detail="no hub")["detail"] == "no hub"
+
+
+# --- ADR-0206 §8: the projection gains `spoken` and nothing else -------------
+
+
+@pytest.mark.parametrize(
+    ("delivery", "identity"),
+    [
+        pytest.param(_rendered(), "rendered", id="rendered"),
+        pytest.param(_withheld(), "withheld", id="withheld"),
+    ],
+)
+def test_the_notification_value_carries_exactly_five_members(
+    delivery: NotificationDelivery, identity: str
+) -> None:
+    """§8: "The value the gateway writes on a delivery stream gains **exactly one
+    member**, ``spoken``, and no other. ``streams.notification``'s enumeration is
+    otherwise unchanged — ``kind``, ``notification_class``, ``summary`` and
+    ``detail`` — and every member it drops today it still drops."
+
+    Enumerated as a whole set rather than asserted member by member, because what §8
+    fixes is a *closed* enumeration: a sixth member added by a later lane is the
+    failure this catches, and a check that only looked for the five would not see it.
+    """
+    assert identity in {"rendered", "withheld"}
+    assert set(streams.notification(delivery)) == {
+        "kind",
+        "notification_class",
+        "summary",
+        "detail",
+        "spoken",
+    }
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [pytest.param(_rendered(), id="rendered"), pytest.param(_withheld(), id="withheld")],
+)
+def test_no_token_no_reason_and_no_evidence_crosses_beside_the_rendering(
+    delivery: NotificationDelivery,
+) -> None:
+    """§8: "``spoken_rendering`` does **not** cross to a browser… a member carrying
+    *why* one did not would be a value nothing on the page acts on"; and
+    "``delivery_id`` still never reaches a browser, and neither do the confidence, the
+    sensitivity or the references that projection drops today".
+
+    Searched over the *encoded* value, so a member that carried one of them under
+    another name fails here too — which is the same discipline the ``delivery_id``
+    case above already applies, extended over the four ADR-0206 §8 names.
+    """
+    framed = streams.encode(streams.notification(delivery))
+
+    assert _TOKEN.encode() not in framed
+    for absent in (b"delivery_id", b"spoken_rendering", b"confidence", b"sensitivity"):
+        assert absent not in framed
+    assert b"event-1" not in framed
+
+
+def test_a_rendering_crosses_as_exactly_its_content_and_its_media_type() -> None:
+    """§8: "``spoken`` is… an object carrying exactly two members, ``content`` and
+    ``media_type``, projected from that value."
+
+    The media type crosses as the string ADR-0200 §9 makes the member's value — "the
+    string value is the media type itself, parameters included, so a value that
+    reaches an HTTP header or a ``MediaRecorder`` constructor is the member rather
+    than a mapping of it" — so the page hands it to a decoder unchanged.
+    """
+    value = streams.notification(_rendered())
+    crossed = json.loads(streams.encode(value))
+
+    assert value["spoken"] == {"content": "QUJDRA==", "media_type": "audio/mp4"}
+    assert crossed["spoken"] == {"content": "QUJDRA==", "media_type": "audio/mp4"}
+
+
+def test_a_delivery_with_no_rendering_carries_the_member_as_null() -> None:
+    """§8: "``spoken`` is ``null`` wherever ``NotificationDelivery.spoken`` is
+    ``None``… There is no third shape and the member is never omitted, so a page reads
+    one key rather than testing for a key's presence."
+
+    Checked on the *encoded* value as well as on the mapping, because "never omitted"
+    is a fact about what the browser receives: a projection that dropped the key would
+    still satisfy a test that only asked what the value at that key was.
+    """
+    value = streams.notification(_withheld())
+
+    assert value["spoken"] is None
+    assert b'"spoken": null' in streams.encode(value)
