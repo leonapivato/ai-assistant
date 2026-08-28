@@ -5841,8 +5841,8 @@ def test_the_page_reports_the_playback_it_last_had_in_the_air() -> None:
 
     # Taken rather than read, and only for the conversation being sent.
     taking = functions["takeDelivery"]
-    assert "pendingDelivery.conversation !== conversation" in taking
-    assert "pendingDelivery = null" in taking
+    assert "pendingDeliveries.get(conversation)" in taking
+    assert "pendingDeliveries.delete(conversation)" in taking
     sending = functions["sendRecording"]
     assert "takeDelivery(conversationId)" in sending
     assert "asked.delivery = played" in sending
@@ -5935,3 +5935,37 @@ def test_an_interruption_the_page_cannot_spell_is_reported_as_nothing() -> None:
     assert "state," in building, "the state sent is the state the caller drew"
     assert '? "complete"' not in building
     assert '"complete" : state' not in building
+
+
+def test_a_report_for_one_conversation_survives_a_playback_in_another() -> None:
+    """ADR-0205 §7: "the playback it last had in the air **for the conversation it is
+    sending**".
+
+    Adversarial review, round 2, ``blocker``. With a single pending slot, letting an
+    answer finish in conversation B overwrote an unsent report for conversation A — so
+    coming back to A sent nothing, and a turn the owner had certainly heard, or
+    certainly cut off, stayed ``UNKNOWN`` for ever. The qualifier in that clause is
+    what makes the store per conversation rather than a filter that usually discards,
+    and the page's own comment already promised the retention the code did not have.
+
+    Read off the shipped script: a keyed store, a take that removes only the key it
+    answers, and a bound with an eviction — because a page left open across many
+    conversations would otherwise grow an entry per conversation for its whole life.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "const pendingDeliveries = new Map()" in script
+    assert "let pendingDelivery " not in script, "the single slot is gone"
+
+    writing = functions["reportDelivery"]
+    assert "pendingDeliveries.set(mine.conversation" in writing
+    assert "pendingDeliveries.delete(mine.conversation)" in writing, (
+        "re-inserted so the freshest report is not the first evicted"
+    )
+    assert "PENDING_DELIVERY_LIMIT" in writing, "the store is bounded"
+    assert "pendingDeliveries.keys().next().value" in writing, "and the oldest goes first"
+
+    taking = functions["takeDelivery"]
+    assert "pendingDeliveries.delete(conversation)" in taking
+    assert "clear()" not in taking, "taking one conversation's report keeps every other"

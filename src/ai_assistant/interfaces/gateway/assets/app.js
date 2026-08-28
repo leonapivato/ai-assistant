@@ -3783,12 +3783,20 @@ let playing = null;
 // keep one.
 let held = null;
 
-// **The report the next spoken request carries**, or `null` where this page holds
-// none (ADR-0205 §7). It says how much of one earlier answer this device played, and
-// it names that answer by the `episode_id` the response carrying it disclosed — never
-// by a position, an ordinal or anything this page counted, which is what makes a
-// report that arrives after another turn has been captured land on the turn it is
-// actually about rather than on whichever turn is newest.
+// **The reports the next spoken request may carry, one per conversation** (ADR-0205
+// §7). Each says how much of one earlier answer this device played, and names that
+// answer by the `episode_id` the response carrying it disclosed — never by a position,
+// an ordinal or anything this page counted, which is what makes a report that arrives
+// after another turn has been captured land on the turn it is actually about rather
+// than on whichever turn is newest.
+//
+// **Keyed by conversation, because §7 says "the playback it last had in the air **for
+// the conversation it is sending**".** Adversarial review, round 2, `blocker`: a single
+// slot let a completed playback in conversation B overwrite an unsent report for
+// conversation A, so returning to A sent nothing and left a turn the owner had
+// certainly heard — or certainly cut off — `UNKNOWN` for ever. A `Map` is what makes
+// the qualifier in that clause mean something rather than describing a filter that
+// usually discards.
 //
 // **Written where a playback ends and nowhere else**: `soundFrom`'s `ended` listener
 // for a source that ran to its end, and `interruptPlayback` for one a press cut short.
@@ -3800,7 +3808,16 @@ let held = null;
 // rides the request that turn already makes. The honest cost is the owner who
 // interrupts and never speaks again — that report is never sent and the hub's record
 // stays `UNKNOWN`, which is the correct account of it rather than a gap.
-let pendingDelivery = null;
+const pendingDeliveries = new Map();
+
+// How many conversations' reports this page will hold at once. A page left open across
+// many conversations would otherwise grow one entry per conversation it ever played an
+// answer in, for the life of the page — small entries, but an unbounded set, which is
+// not a shape to ship. The oldest is dropped when a new one arrives past the bound, and
+// dropping one costs exactly what never sending it costs: that turn stays `UNKNOWN`,
+// which ADR-0205 §1 already names as the correct record of an unreported turn rather
+// than a gap.
+const PENDING_DELIVERY_LIMIT = 32;
 
 // **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
 // iPhone). Pressing to talk over an answer that is still being spoken is the same act as
@@ -3962,41 +3979,45 @@ function reportDelivery(mine, state) {
   if (state === "interrupted" && played >= rendered) {
     return;
   }
-  pendingDelivery = {
-    conversation: mine.conversation,
-    report: {
-      episode_id: mine.episode,
-      delivery: {
-        state,
-        played_microseconds: String(played),
-        rendered_microseconds: String(rendered),
-      },
+  // Re-inserted rather than updated in place, so the eviction below sees this
+  // conversation as the most recent: `Map` keeps insertion order, and a plain `set`
+  // over an existing key would leave it in its old position and drop the freshest
+  // report first.
+  pendingDeliveries.delete(mine.conversation);
+  pendingDeliveries.set(mine.conversation, {
+    episode_id: mine.episode,
+    delivery: {
+      state,
+      played_microseconds: String(played),
+      rendered_microseconds: String(rendered),
     },
-  };
+  });
+  while (pendingDeliveries.size > PENDING_DELIVERY_LIMIT) {
+    pendingDeliveries.delete(pendingDeliveries.keys().next().value);
+  }
 }
 
 // The report to send with a request against `conversation`, or `null` (ADR-0205 §7).
 //
-// **Only where it is about the conversation being sent.** A report names a turn, and
-// the hub discards one naming a turn the conversation does not carry — but sending it
-// there would be this page asserting a pairing it has no reason to assert, and §7 says
-// it reports "the playback it last had in the air **for the conversation it is
-// sending**".
+// **Only the one about the conversation being sent.** A report names a turn, and the
+// hub discards one naming a turn the conversation does not carry — but sending it there
+// would be this page asserting a pairing it has no reason to assert, and §7 says it
+// reports "the playback it last had in the air **for the conversation it is sending**".
 //
 // **Taken rather than read**: a report that goes out is let go of, so a second press
-// does not re-send it. Where it is not about this conversation it is *kept*, because
-// the fact stays true and stays this page's last playback — the next request against
-// the conversation it names carries it, and the hub applies it to the turn it names
-// however many turns have been captured since.
+// does not re-send it. Every *other* conversation's report is left where it is, because
+// the fact stays true and the hub applies it to the turn it names however many turns
+// have been captured since (§1) — so returning to a conversation still carries what was
+// measured there.
 function takeDelivery(conversation) {
-  if (pendingDelivery === null || conversation === null) {
+  if (conversation === null) {
     return null;
   }
-  if (pendingDelivery.conversation !== conversation) {
+  const report = pendingDeliveries.get(conversation);
+  if (report === undefined) {
     return null;
   }
-  const report = pendingDelivery.report;
-  pendingDelivery = null;
+  pendingDeliveries.delete(conversation);
   return report;
 }
 
