@@ -163,11 +163,30 @@ def _await_round(repo: Path, seconds: float = 30.0) -> None:
     raise AssertionError("no round published a tree within the deadline")
 
 
+def _hold_round_until(gate: Path) -> str:
+    """A ``FAKE_CODEX_PRE_CMD`` that parks the round until ``gate`` exists.
+
+    The round is what publishes the artifact, so gating it is what lets a test
+    state *when* publication happens instead of racing a `sleep` against it. It
+    gives up after a minute rather than parking forever, so a test that fails
+    before it opens the gate leaves nothing behind.
+
+    It is how every test here that needs a round *in flight* keeps one, rather
+    than by sleeping for longer than the assertions take. A ``sleep`` is wrong in
+    both directions: too short and the round finishes mid-assertion under load,
+    too long and everything waiting for the round to end -- ``_reap``, a
+    ``--wait`` for the artifact -- waits out the remainder of a sleep nothing
+    needs. That cost the module about 50 s of its 75 s (issue #1752).
+    """
+    return f'for _ in $(seq 600); do [ -e "{gate}" ] && break; sleep 0.1; done'
+
+
 def test_start_returns_while_the_round_runs_and_wait_reports_its_artifact(tmp_path: Path) -> None:
     """The split's whole point, end to end — and the artifact is the round's own."""
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 3")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
 
     started = _run(repo, env, "--start", "adversarial", "main")
 
@@ -176,9 +195,11 @@ def test_start_returns_while_the_round_runs_and_wait_reports_its_artifact(tmp_pa
     assert fields["tree"] == _tree(repo)
     assert fields["sha"] == _git(repo, "rev-parse", "HEAD")
     assert fields["loop_id"] not in ("", "noloop")
-    # It really did return before the round finished: the fake is still sleeping.
+    # It really did return before the round finished: the round is still parked,
+    # by construction rather than by outrunning a sleep.
     assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
 
+    release.touch()
     waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
 
     assert waited.returncode == RECORDED, waited.stderr
@@ -195,7 +216,8 @@ def test_a_wait_that_times_out_says_still_running_and_loses_nothing(tmp_path: Pa
     """Exit 3 is 'ask again'. The round survives the deadline that reported it."""
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 4")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
     _run(repo, env, "--start", "adversarial", "main")
 
     early = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "1")
@@ -204,6 +226,7 @@ def test_a_wait_that_times_out_says_still_running_and_loses_nothing(tmp_path: Pa
     assert "still running" in early.stderr
     assert early.stdout == ""
 
+    release.touch()
     later = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
 
     assert later.returncode == RECORDED, later.stderr
@@ -220,7 +243,8 @@ def test_wait_refuses_a_round_that_is_reviewing_a_different_tree(tmp_path: Path)
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 6")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
     _run(repo, env, "--start", "adversarial", "main")
     reviewed_tree = _tree(repo)
 
@@ -233,6 +257,7 @@ def test_wait_refuses_a_round_that_is_reviewing_a_different_tree(tmp_path: Path)
     assert moved.stdout == ""
     # And the round in flight records nothing for either tree: the driver's own
     # settled-tree check refuses it, which is what makes exit 4 the honest answer.
+    release.touch()
     _reap(repo)
     assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
 
@@ -267,17 +292,6 @@ def test_wait_reports_a_round_that_died_without_recording(tmp_path: Path) -> Non
     assert "is no longer" in result.stderr
     assert "recorded no artifact" in result.stderr
     assert "codex produced an empty review" in result.stderr
-
-
-def _hold_round_until(gate: Path) -> str:
-    """A ``FAKE_CODEX_PRE_CMD`` that parks the round until ``gate`` exists.
-
-    The round is what publishes the artifact, so gating it is what lets a test
-    state *when* publication happens instead of racing a `sleep` against it. It
-    gives up after a minute rather than parking forever, so a test that fails
-    before it opens the gate leaves nothing behind.
-    """
-    return f'for _ in $(seq 600); do [ -e "{gate}" ] && break; sleep 0.1; done'
 
 
 def _attach_to_blocking_artifact(path: Path, seconds: float = 60.0) -> int:
@@ -386,7 +400,8 @@ def test_start_refuses_a_second_round_of_the_same_persona(tmp_path: Path) -> Non
     """ADR-0015 and #142's rule, refused at the start rather than in a log."""
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
     assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
 
     second = _run(repo, env, "--start", "adversarial", "main")
@@ -394,6 +409,7 @@ def test_start_refuses_a_second_round_of_the_same_persona(tmp_path: Path) -> Non
     assert second.returncode == 1
     assert "already running" in second.stderr
     assert "--wait adversarial" in second.stderr
+    release.touch()
     _reap(repo)
 
 
@@ -406,7 +422,8 @@ def test_wait_attributes_a_round_started_in_the_foreground(tmp_path: Path) -> No
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
     foreground = subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script
         [bash(), str(SCRIPT), "adversarial", "main"],
         cwd=repo,
@@ -415,9 +432,13 @@ def test_wait_attributes_a_round_started_in_the_foreground(tmp_path: Path) -> No
         stderr=subprocess.DEVNULL,
     )
     try:
+        # Parked, so the poll below meets a round genuinely in flight; released
+        # only once it has, so the wait is not sitting out the rest of a sleep.
         _await_round(repo)
+        release.touch()
         waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
     finally:
+        release.touch()
         foreground.wait(timeout=60)
 
     assert waited.returncode == RECORDED, waited.stderr
@@ -571,11 +592,12 @@ def test_two_simultaneous_starts_leave_one_round_and_one_success(tmp_path: Path)
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 5")
-    gate = threading.Barrier(2)
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
+    both_ready = threading.Barrier(2)
 
     def start() -> subprocess.CompletedProcess[str]:
-        gate.wait()
+        both_ready.wait()
         return _run(repo, env, "--start", "adversarial", "main")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -588,6 +610,7 @@ def test_two_simultaneous_starts_leave_one_round_and_one_success(tmp_path: Path)
     # The marker belongs to the winner's own child, which is what the token buys.
     assert _round_pids(repo) == [int(_fields(winner.stdout)["pid"])]
 
+    release.touch()
     _reap(repo)
     assert len(list((repo / ".review").glob("*.md"))) == 1
 
@@ -733,7 +756,8 @@ def test_wait_finds_a_round_whose_base_ref_moved_under_it(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     _init_repo(repo)
     _commit(repo, "three\n", "second change")
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 6")
+    release = tmp_path / "let-the-round-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
 
     assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
     started_base = _git(repo, "merge-base", "main", "HEAD")
@@ -748,6 +772,7 @@ def test_wait_finds_a_round_whose_base_ref_moved_under_it(tmp_path: Path) -> Non
 
     # And nothing is lost: the round records an artifact for HEAD's tree under the
     # older base, and `--wait` reports it.
+    release.touch()
     settled = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
     assert settled.returncode == RECORDED, settled.stderr
     assert _fields(settled.stdout)["tree"] == _tree(repo)
@@ -768,7 +793,8 @@ def test_a_newer_round_on_another_tree_does_not_hide_the_one_covering_head(
     _commit(repo, "three\n", "second change")
     covered_sha = _git(repo, "rev-parse", "HEAD")
     covered_tree = _tree(repo)
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 12")
+    release = tmp_path / "let-the-rounds-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
 
     # Round one: HEAD's current tree, against the original base.
     assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
@@ -788,6 +814,7 @@ def test_a_newer_round_on_another_tree_does_not_hide_the_one_covering_head(
 
     assert waited.returncode == STILL_RUNNING, waited.stderr
     assert "still running" in waited.stderr
+    release.touch()
     _reap(repo)
 
 
@@ -808,7 +835,8 @@ def test_another_loops_round_cannot_mask_this_loops_starting_round(
     repo = tmp_path / "repo"
     _init_repo(repo)
     _commit(repo, "three\n", "second change")
-    env = _env(tmp_path, FAKE_CODEX_PRE_CMD="sleep 12")
+    release = tmp_path / "let-the-rounds-finish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(release))
 
     # An unrelated round, on another tree, under an older base key.
     assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
@@ -828,4 +856,5 @@ def test_another_loops_round_cannot_mask_this_loops_starting_round(
 
     assert waited.returncode == STILL_RUNNING, waited.stderr
     assert "still running" in waited.stderr
+    release.touch()
     _reap(repo)
