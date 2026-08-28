@@ -21,9 +21,14 @@ detached log ``--wait`` prints as its evidence for exit 4.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+from hashlib import sha1
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import artifact_for, run_review
@@ -125,3 +130,77 @@ def test_an_empty_review_quotes_the_stream_too(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "codex produced an empty review" in result.stderr
     assert "turn.completed" in result.stderr
+
+
+def _loop_lock(repo: Path, base: str = "main") -> Path:
+    """The review-loop lock file for this repo's current branch and base.
+
+    Computed the way the script computes it — ``sha1(branch)-sha1(base_sha)`` —
+    because a test that guessed the path would silently stop holding anything the
+    day the key changed, and the assertion it supports would still pass.
+    """
+    branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    base_sha = _git(repo, "merge-base", base, "HEAD")
+    key = f"{sha1(branch.encode()).hexdigest()}-{sha1(base_sha.encode()).hexdigest()}"  # noqa: S324
+    session = repo / ".review" / "session"
+    session.mkdir(parents=True, exist_ok=True)
+    return session / f"{key}.lock"
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="the loop lock needs flock")
+def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
+    tmp_path: Path,
+) -> None:
+    """Issue #1670: the message read as "it failed at startup", and it never was.
+
+    Twice reported, and on every reported occasion the round was running and went
+    on to record its artifact. A lane that believes the round is dead is one step
+    from starting a second one, which is the paid-round-thrown-away failure
+    ``--start`` exists to prevent.
+
+    The round is held short of its claim by holding the review-loop lock, which a
+    round takes on the way to publishing the marker ``--start`` polls for. That is
+    the real shape of the slow case: alive, healthy, and not yet claimed.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, CODEX_REVIEW_START_GRACE="1")
+    flock = shutil.which("flock")
+    assert flock is not None
+    holder = subprocess.Popen(  # noqa: S603  # resolved flock, test-controlled path
+        [flock, str(_loop_lock(repo)), "sleep", "20"]
+    )
+    try:
+        started = _run(repo, env, "--start", "adversarial", "main")
+    finally:
+        holder.terminate()
+        holder.wait()
+
+    assert started.returncode == 1
+    assert "failed at startup" not in started.stderr
+    assert "was not started with --start" not in started.stderr
+    assert "Nothing here has killed it" in started.stderr
+    assert "--wait adversarial" in started.stderr
+    # The round it could not confirm is still a real round, and finishes.
+    assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
+
+
+def test_a_foreground_round_is_not_described_as_a_detached_one(tmp_path: Path) -> None:
+    """``--wait`` reads the log path the round itself recorded, or says there is none.
+
+    A round run in the foreground records an empty ``log=`` in its marker, because
+    its output went to the terminal. The replaced fallback said that as "this
+    round was not started with --start" *whenever the file was empty*, which is
+    the sentence issue #1674 read — correctly — as a claim about the wrong round.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    failed = run_review(
+        repo, tmp_path, "adversarial", "main", check=False, FAKE_CODEX_START_FAIL="1"
+    )
+    assert failed.returncode != 0
+
+    waited = _run(repo, _env(tmp_path), "--wait", "adversarial", "main", "--timeout", "5")
+
+    assert waited.returncode == NOT_IN_FLIGHT
+    assert "went to the terminal that ran it" in waited.stderr
