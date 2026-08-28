@@ -798,6 +798,14 @@ that prices this, unchanged, and costs the abandoned browser a reconnect.
 > the cadence it writes it at today; a keep-alive is emitted only where a poll has
 > outrun the interval, which before this ADR could not happen.
 
+> **Normative.** **A delivery and a keep-alive never contend, and the delivery
+> wins.** Restarting the interval discards any keep-alive already due, already
+> scheduled or in flight for it: where a poll returns as the interval elapses, the
+> delivery **is** that interval's write and no keep-alive is written beside it.
+> An implementation serialises the two rather than letting both offer a value, so
+> no stream is ever abandoned under ADR-0175 §4's pending-value clause on account
+> of a keep-alive falling due beside a delivery that did not delay it.
+
 > **Normative.** That write is the gateway's own, on ADR-0175 §4's terms and
 > nothing more: it carries no part of any notification, is not a delivery, is
 > acknowledged by nothing, and leaves ADR-0175 §5's acknowledgement rule and this
@@ -851,6 +859,16 @@ outrun their budget; §7 creates the case where one can, and pacing the keep-ali
 by the same figure is what keeps §8's obligation true in that case rather than
 letting it lapse. A reader holding only ADR-0175 sets the same field to the same
 default and observes the same cadence.
+
+**The two writes are serialised because the abandonment clause is unforgiving and
+correct to be.** ADR-0175 §4 ends a stream whose pending write has not completed
+when the next value is due, and a delivery is up to 683 KiB where a keep-alive is a
+few bytes — so a stale tick arriving behind a delivery would end a healthy stream
+in the instant after it was given the notification it was waiting for, costing a
+reconnect for a liveness signal the delivery had just supplied. The clause above
+removes the contention rather than softening the abandonment: nothing about §4's
+rule changes, and what changes is that the gateway never offers a second value it
+did not need to. Adversarial review found this on the ninth round.
 
 **And the keep-alive matters most in exactly the state this ADR creates.** §4's
 own ground for it is that "a stream that writes nothing for an hour is a stream
@@ -1211,6 +1229,7 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
 | §8 (keep-alive) | The gateway's keep-alive paced by `gateway_notification_budget` and not by the poll's return | A test that with a poll outstanding beyond that interval, every open delivery stream still receives a value within it; a test that the value is the one carrying nothing but its own kind, that it is not a delivery and acknowledges nothing, and that a gateway whose polls complete within budget writes no extra value |
 | §8 (keep-alive, stalled) | A stream stalled behind a rendering is abandoned and ended when the keep-alive falls due | A test asserting the abandonment, that nothing is queued behind the pending value, and that no other stream's cadence is delayed by it |
+| §8 (keep-alive, coincidence) | A delivery returning as the interval elapses writes once, as the delivery | A test over a deterministic clock making the poll's return and the interval's expiry coincide, asserting exactly one value on each open stream, that it is the delivery, that no keep-alive follows it, and that no stream is abandoned |
 | §8 (keep-alive, lifetime) | The keep-alive dropped with the last stream and on shutdown, beside the poll | A test that closes the last stream while a poll is outstanding in synthesis, asserting the poll is cancelled, that whatever carries the keep-alive is cancelled or released with it, that nothing of it is left running, and that no value is written on any stream after; the same over `shutdown` |
 | §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
 | §11 | ADR-0131's record is made in this ADR's own change | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0131 reaches ADR-0206 from its header |
