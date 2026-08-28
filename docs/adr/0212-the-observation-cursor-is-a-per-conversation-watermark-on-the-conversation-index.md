@@ -392,7 +392,7 @@ implementation that "turns that repetition into a skip" — it governs a chunk w
 effects happened and whose cursor did not advance. This clause is about where a walk
 *begins*, and beginning at the tail loses no chunk any run performed.
 
-### 5. The advance: once per pass, and never past a gap on its first reading
+### 5. The advance: one attempt per pass, to the highest turn it handed over
 
 > **Normative.** A pass makes **exactly one** attempt to advance the watermark, after
 > every proposal it produced has been ruled by the write path — one `record_observed`
@@ -400,162 +400,132 @@ effects happened and whose cursor did not advance. This clause is about where a 
 > resolved to no episode, even where the observer was not called, and even where
 > nothing was proposed.
 
-> **Normative.** The position it names is **the highest ordinal in the page that is
-> below the lowest ordinal in the page whose episode did not resolve** — or, where
-> every turn in the page resolved, the page's highest ordinal.
-
-> **Normative.** Where that rule would name no position above the watermark the pass
-> read — because the page's **lowest** turn is itself one whose episode did not
-> resolve — the pass names instead the highest ordinal in the page below the
-> **second**-lowest unresolved ordinal in it, or the page's highest ordinal where the
-> page holds no second unresolved turn.
-
-> **Normative.** A pass that read a non-empty page therefore always names a position
-> **strictly above the watermark that pass read**. Its attempt either advances the
-> watermark, or performs nothing because an overlapping pass has already advanced it
-> to at or above the same position. So **the watermark never stands still across a
-> pass over a non-empty page** and never moves backwards, and **no unresolved turn is
-> passed over on the pass that first reads it** unless it was that page's lowest turn
-> — which requires the watermark to have already stood immediately below it.
-
-> **Normative.** Two passes over one conversation may overlap, and neither the store
-> nor this decision serialises them. Each pass computes its advance from **its own**
-> page and its own resolution of that page's episodes, and the two may legitimately
-> differ — an episode can land, expire or be forgotten between the two reads, and the
-> index and the memory store share no transaction and no snapshot. Overlap safety
-> rests on `record_observed`'s monotonicity (§8) and on nothing else: each call stamps
-> if and only if its ordinal is strictly above the recorded one, so whichever order
-> the calls arrive in, the **higher** of the two positions is what stands and the
-> lower performs nothing. Where the two happen to name the same position, the first
-> to arrive stamps it and the second performs nothing, which is the same rule and not
-> an exception to it: an attempt that loses is an attempt whose position already
-> stands.
-
-> **Normative.** No pass advances the watermark past what that pass itself read, so a
-> position that stands was computed by a pass that read every turn at or below it.
-> The invariant above is therefore a property of the **watermark under any
-> interleaving**, and never a promise that each individual pass is the one that moved
-> it or that two passes agree about where to move it.
-
-The two clauses together give a bounded, checkable invariant rather than a hope: the
-strict rule passes over no unresolved turn at all, and the fallback passes over
-exactly one — the page's lowest, which the previous pass already stopped in front of.
-Advancing to the page's highest in the fallback would break that, and the case is not
-hypothetical: a page carrying two gaps would see the second one passed over on its
-only reading.
+> **Normative.** The position it names is **the highest ordinal in the page whose
+> episode resolved** — the highest turn the pass actually handed to the observer. Where
+> **no** turn in the page resolved, it names the page's highest ordinal instead.
 
 > **Normative.** The watermark never moves backwards. A recorded value is never
 > lowered, and a request to record a value at or below the recorded one performs
 > nothing.
+
+> **Normative.** A pass that read a non-empty page therefore always names a position
+> **strictly above the watermark that pass read** — both branches name an ordinal from
+> the page, and every ordinal in the page is above that watermark. Its attempt either
+> advances the watermark, or performs nothing because an overlapping pass has already
+> advanced it to at or above the same position. So **the watermark never stands still
+> across a pass over a non-empty page**, and a conversation with turns above its
+> watermark cannot be re-read indefinitely.
+
+> **Normative.** Two passes over one conversation may overlap, and neither the store
+> nor this decision serialises them. Each pass computes its position from **its own**
+> page and its own resolution of that page's episodes, and the two may legitimately
+> differ — an episode can land, expire or be forgotten between the two reads, and the
+> index and the memory store share no transaction and no snapshot. Overlap safety
+> rests on `record_observed`'s monotonicity (§8) and on nothing else: each call stamps
+> if and only if its ordinal is strictly above the recorded one, so whichever order the
+> calls arrive in, the **higher** of the two positions stands and the lower performs
+> nothing. Where the two name the same position that is the same rule and not an
+> exception to it: an attempt that loses is an attempt whose position already stands.
+
+> **Normative.** No pass names a position above what that pass itself read. The
+> invariant above is therefore a property of the **watermark under any interleaving**,
+> and never a promise that each individual pass is the one that moved it or that two
+> passes agree about where to move it.
 
 **Advancing once, at the end, is ADR-0111 §3's ordering and not a choice per pass.**
 Its clause: "Where the effects land in a different store from the cursor, the
 effects are made durable first and the cursor is advanced afterwards, never the
 reverse." An observation pass reads the conversation index and the memory store and
 writes to the memory store and the deferral queue; the watermark is on the index. So
-the advance is the last act of the pass, and ADR-0111 §3's asymmetry is the reason:
-"A cursor that lags its effects costs repeated work; a cursor that leads them costs
-coverage, permanently and silently".
+the advance attempt is the last act of the pass, and ADR-0111 §3's asymmetry is the
+reason: "A cursor that lags its effects costs repeated work; a cursor that leads them
+costs coverage, permanently and silently".
 
-**Why an unresolved turn is worth a second reading at all.** A turn whose episode
-does not resolve is ordinarily a settled gap — a capture failure, an expiry, or a
-`forget` — which ADR-0074 §5 rules is "skipped, not an error". But it can also be a
-turn whose episode is still **in flight**, because the index is an intent log:
-`ConversationLifecycle.capture` records "the index entry first, then its episode",
-and "The cost is that a crash between the two writes leaves an index entry with no
-episode, which every reader already renders as a gap." The window between the two is
-not instantaneous — the same docstring notes that "``write_atomic`` awaits an embedder
-before it reaches its own lock" — so a pass can read a row whose episode lands a
-moment later.
+**This is #1737's rule with exactly one fallback added, and the fallback is what stops
+a stall.** Item 3 words it as "the cursor advances to the last turn *handed over*, not
+the last turn that produced a proposal, and advances even when the observer proposes
+nothing". The second and third halves are ratified above word for word, and the first
+is the first branch above. What the note does not consider is a page that hands nothing
+over: the watermark would not move, the next pass would read the same page, and it
+would not move again. A conversation whose unobserved turns have all expired — the
+ordinary state of one the job reaches after a long idle period — would be a permanent
+candidate re-reading one dead page for as long as it lives, which is ADR-0111 §7's own
+diagnosis of the shape it forbids ("permanently and quietly stopped", where "the
+operator gets a permanent, opaque failure instead of a slow success"). The second
+branch closes that in one pass, and it costs nothing: a page that resolved to no
+episode reached no observer at all (§3), so passing over it passes over nothing that
+was ever readable.
 
-**And the in-flight turn is not always the conversation's newest.** Two turns of one
-conversation can be captured concurrently, and `ConversationStore`'s exclusion does
-not close it: that exclusion binds the *index's* mutations, and the episode write is a
-later call on a different store. So an earlier turn's embedder can still be running
-when a later turn's episode has already committed, which leaves an unresolved turn
-**below** a resolved one. Any rule that protected only the highest ordinal would miss
-exactly that case, and any rule that decided "is this the conversation's highest turn"
-from the page's length would be wrong at the exact boundary — a page of exactly
-`observation_batch_size` rows proves there are at least that many turns above the
-watermark, never that there are no more.
-
-**So the second reading is bought for every gap, and it is bought once.** The first
-pass to meet an unresolved turn stops below it and advances no further, which costs
-re-reading that page's *resolved* turns above the gap on the next pass — repeated
-work, in the currency ADR-0111 §3 prices and accepts, made harmless by ADR-0077 §8's
-fold (§6). The next pass then finds that same turn as its page's **lowest**, so the
-fallback fires and the walk moves past it. A gap therefore delays the walk by exactly
-one pass and never more, and a page whose every turn is a settled gap is passed over
-in one pass rather than blocking the conversation forever — ADR-0111 §7's "permanently
-and quietly stopped" made unreachable by construction rather than by argument.
-
-**The overlap is safe, and the reason is the one ADR-0077 §8 already gives.** The two
-passes hand overlapping episodes to the observer, so the second pays a model call for
-proposals the gate folds into `REINFORCE` on the records the first wrote — "the same
-belief on the same support scores the same however many times it is derived, so a fold
-that takes the maximum finds nothing higher". Coverage cannot be lost in either
-direction, and the argument is worth stating because the two passes may disagree:
-suppose one resolves an in-flight turn the other did not, computing 120 where the other
-computes 104. If 104 stamps first, the 120 call is still strictly above it and stamps —
-and the pass that computed 120 is the one that read turns 105 to 120. If 120 stamps
-first, the 104 call performs nothing, and 105 to 120 were read by the pass whose
-position stands. In both orders the position that survives was computed by a pass that
-read everything below it, which is the second clause above. Nothing is engineered to
-prevent the overlap: holding the store's per-conversation
-exclusion across a pass would hold it across a model call, which is a different and
-worse decision than paying for a duplicate one. In the deployment this ADR is a
-precondition for, the overlap is a hand-run `observe` beside a scheduled one and never
-two scheduled passes, because ADR-0083 §7's loop "runs every due job, in a fixed order,
-**one at a time**".
+**A trailing gap is therefore given another reading, and an interior one is not.**
+That asymmetry is deliberate and it is bought where it pays. A turn whose episode does
+not resolve is ordinarily a settled gap — a capture failure, an expiry, or a `forget` —
+which ADR-0074 §5 rules is "skipped, not an error". But it can also be a turn whose
+episode is still **in flight**: the index is an intent log, and
+`ConversationLifecycle.capture` records "the index entry first, then its episode", with
+"The cost is that a crash between the two writes leaves an index entry with no episode,
+which every reader already renders as a gap." That window is not instantaneous — the
+same docstring notes that "``write_atomic`` awaits an embedder before it reaches its
+own lock" — so a pass can read a row whose episode lands a moment later. **Where
+captures of one conversation are sequential, an in-flight turn is always the newest
+turn**, because a later append happens after the earlier capture returned; and the
+newest turn is exactly what the first branch stops below. So the common case is
+covered by the rule itself rather than by a special case for it.
 
 **Worked, because the arithmetic is the decision.** Watermark 100, bound 20:
 
-- Page 101–120, all resolved → advance to **120**.
-- Page 101–120, 105 unresolved → advance to **104**. Next page 105–124: 105 is the
-  page's lowest and unresolved and the page carries no second gap, so the fallback
-  advances to **124**; 106–120 are observed a second time and fold to `REINFORCE`.
-- Page 101–120, **105 and 110** unresolved → advance to **104**. Next page 105–124:
-  105 is the page's lowest, so the fallback stops in front of the second gap and
-  advances to **109** — not to 124, which would pass 110 on its only reading. The
-  page after that begins at 110 and gives it the same treatment.
-- Page 101–120, 120 unresolved → advance to **119**. Next page is 120 alone (or 120
-  with whatever has since arrived); 120 is the page's lowest and, if its episode has
-  landed in the meantime, it resolves and is observed. If it has not, the fallback
-  advances past it.
-- Page 101–120, none resolved → 101 is the page's lowest and unresolved, so the
-  fallback advances to **120**. No model is called, and nothing is re-read.
-
-**Why not "the last turn handed over", which is how #1737 item 3 words it.** Its
-second and third halves — not the last turn that produced a proposal, and advance even
-when nothing was proposed — are ratified above word for word. The first is sharpened
-because "last handed over" has no fallback: a page whose turns all fail to resolve
-hands nothing over, so the watermark does not move, so the next pass reads the same
-page and does not move it again. A conversation whose unobserved turns have all
-expired — the ordinary state of one the job reaches after a long idle period — would be
-a permanent candidate re-reading one dead page for as long as it lives.
+- Page 101–120, all resolved → the highest resolved is 120 → advance to **120**.
+- Page 101–120, 120 unresolved → the highest resolved is 119 → advance to **119**. The
+  next page begins at 120: if its episode has landed in the meantime it resolves and
+  is observed; if it has not, that page resolves nothing and the second branch advances
+  past it.
+- Page 101–120, 105 unresolved → the highest resolved is 120 → advance to **120**. Turn
+  105 is passed over. Nothing is re-read and no model call is repeated.
+- Page 101–120, none resolved → no observer is called, and the second branch advances
+  to **120** in one pass rather than one turn at a time.
 
 **The residual, stated so nobody discovers it as a defect.** A turn is missed when its
-episode is still in flight on **two** consecutive readings, or when it is the page's
-lowest turn on its **first** reading. The second is narrower than it sounds: the
-watermark stands immediately below a turn only where a previous pass's advance landed
-there — which under either clause above means that turn was already read — or where the
-page ended there, or on a conversation's first pass under §4. So the case reduces to a
-page boundary falling exactly in front of an in-flight turn, and to a conversation's
-opening pass. Both are narrow, and the loss is one turn's *distillation*: the episode
-itself is
-unaffected, stays readable by retrieval, and expires on its own horizon. This is the
-limit ADR-0111 §2 already names and accepts for a recurring job — "A row updated in
-place below the cursor keeps its position and is not revisited […] for a *recurring*
-job it is usually correct, because the work is the new material" — and closing it
-entirely would take a durable per-turn "the episode landed" fact, which is a second
-store-written member on `ConversationTurn` and a second write on every capture. That
-is not bought here, and §9 names the condition that would buy it.
+episode is in flight while a *later* turn of the same conversation has already
+committed one — which takes two captures of one conversation overlapping, since
+sequential captures leave the in-flight turn newest — or when it is in flight across
+two consecutive readings at the tail. Both are narrow, and the loss is one turn's
+*distillation*: the episode itself is unaffected, stays readable by retrieval, and
+expires on its own horizon. This is the limit ADR-0111 §2 already names and accepts for
+a recurring job — "A row updated in place below the cursor keeps its position and is
+not revisited […] for a *recurring* job it is usually correct, because the work is the
+new material" — and it is what ADR-0077 §8's skip rule already does today, made
+permanent by the cursor rather than introduced by it. Closing it entirely would take a
+durable per-turn "the episode landed" fact, which is a second store-written member on
+`ConversationTurn` and a second write on every capture. That is not bought here, and §9
+names the conditions that would buy it.
 
-### 6. Failure: a pass that raises leaves the watermark exactly where it was
+**What is deliberately *not* bought is a rule that gives every gap a second reading.**
+Such a rule has to stop the watermark below the lowest unresolved turn, which re-reads
+that page's resolved turns above the gap on every following pass until the gap clears,
+and needs a further fallback for a page whose lowest turn is the gap — and a further
+one again for a page carrying two. Each fallback is another place for the rule to
+disagree with itself, and the coverage it buys is the interior in-flight turn alone.
+The simpler rule pays for that one turn instead.
 
-> **Normative.** A pass that raises at any point — reading the index, resolving an
-> episode, calling the observer, or ingesting a proposal — advances the watermark by
-> nothing. There is no partial advance within a pass.
+### 6. Failure: a pass that raises before its attempt leaves the watermark alone
+
+> **Normative.** A pass that raises **before** its advance attempt — reading the
+> index, resolving an episode, calling the observer, or ingesting a proposal — moves
+> the watermark by nothing. There is no partial advance within a pass, and no pass
+> writes the watermark more than once (§5).
+
+> **Normative.** A pass that raises **at** its attempt leaves the watermark in one of
+> two states, and the ADR does not pretend otherwise: the stamp may have committed
+> before the failure reached the caller, or it may not. Cancellation is the case that
+> makes this unavoidable rather than sloppy — `ConversationStore` is governed by "this
+> module's cancellation clause (ADR-0060)", and a store whose write runs in a worker
+> thread can commit and then have the awaiting task cancelled before the call returns.
+> **Both outcomes are safe and neither is a defect**: if the stamp landed, every
+> proposal of that pass had already been ruled (§5), so the position records work that
+> was done; if it did not, the page is re-read and folds to `REINFORCE` (below). No
+> implementation may add a compensating write, a re-read of the watermark to "confirm"
+> it, or a retry of the attempt inside the same pass — each of those is a second write
+> to the watermark, which §5 forbids, and none of them can distinguish the two states
+> anyway.
 
 > **Normative.** The whole page a failed pass read is re-read by the next pass, and
 > the repetition is safe rather than merely tolerated. No implementation may narrow
@@ -780,9 +750,10 @@ saying so.
 
 > **Normative.** The `orchestration` half owes the selector of §3 in
 > `ObservationStage`, §4's uncursored start, §5's single advance **attempt** — one
-> `record_observed` call per pass, whose position is computed from the
-> lowest unresolved ordinal in the page, with the fallback that stops in front of the
-> second, and **never** from the page's length — and §6's no-partial-advance. It owes the
+> `record_observed` call per pass, at the highest ordinal in the page whose episode
+> resolved, or at the page's highest where none did, and **never** computed from the
+> page's length — and §6's failure disposition including its commit-ambiguous case. It
+> owes the
 > module docstring of `orchestration/observation.py` corrected, which today states
 > "There is no durable cursor either".
 
@@ -794,25 +765,22 @@ Tests the lane owes, named so they are written rather than assumed: a pass over 
 conversation with no watermark reads its tail and records the tail's highest ordinal;
 the next pass over the same conversation with no new turns reads no turns, calls no
 model and records nothing; a pass over a conversation whose page is entirely
-unresolvable calls no observer and still advances to that page's highest ordinal; a
-page whose *last* turn is unresolvable advances to the one below it, and the next pass
-over that turn alone advances past it; a page with an unresolvable turn in the
-**middle** advances to the ordinal below it and re-reads the resolved turns above it
-on the next pass, which fold to `REINFORCE`; **a page carrying two unresolvable turns
-advances to the ordinal below the first, and the next pass — which begins at the first
-— advances to the ordinal below the *second* rather than past it**, so neither is
-passed over on its only reading; a page of exactly `observation_batch_size` rows whose
-last turn is unresolvable behaves the same as a shorter one, so no rule depends on the
-page's length; an episode that lands between two passes is observed on the second;
-**two overlapping passes over one conversation leave one watermark at the position both
-computed, and two overlapping passes that resolve the page differently leave the
-higher position standing whichever order their stamps arrive in**, written as an
-end-to-end
-test over two interleaved passes rather than as two store calls in a row, with the
-duplicate proposals folding to `REINFORCE` and no duplicate record; a pass that raises
-inside the write path
-after one proposal was ruled advances nothing and the next pass re-reads the whole
-page; a second pass over the same page produces `REINFORCE` and no duplicate record,
+unresolvable calls no observer and still advances to that page's highest ordinal **in
+one pass**, not one turn at a time; a page whose *last* turn is unresolvable advances
+to the highest ordinal below it, and the next pass over that turn alone advances past
+it; **an episode that lands between those two passes is observed on the second**; a
+page with an unresolvable turn in the **middle** advances to the page's highest
+resolved ordinal and passes that turn over, pinned as §5's accepted residual rather
+than as a defect, so a later lane changing it has to change this test deliberately; a
+page of exactly `observation_batch_size` rows behaves the same as a shorter one, so no
+rule depends on the page's length; **two overlapping passes that resolve the page
+differently leave the higher position standing whichever order their stamps arrive
+in**, written as an end-to-end test over two interleaved passes rather than as two
+store calls in a row, with the duplicate proposals folding to `REINFORCE` and no
+duplicate record; **a pass cancelled after its `record_observed` commits but before the
+await returns leaves the stamped watermark and adds no compensating write**, injected
+deterministically; a pass that raises inside the write path after one proposal was
+ruled advances nothing and the next pass re-reads the whole page; a second pass over the same page produces `REINFORCE` and no duplicate record,
 pinned end to end and not only at the gate; `record_observed` never lowers a
 watermark and returns `None` when asked to; `record_observed` refuses an ordinal
 above the conversation's highest and stamps nothing; two concurrent `record_observed`
@@ -1020,15 +988,18 @@ constraint.
 - **A repeat `assistant observe` on one conversation now does nothing**, where today
   it re-derives. That is the intended meaning of "what has already been looked at",
   and §9 names what a deliberate re-observation would take.
-- **A gap costs the page above it one repeat.** §5's strict advance stops in front of
-  an unresolved turn, so the resolved turns above it in that page are read again on the
-  next pass and fold to `REINFORCE`. That is repeated work in the currency ADR-0111 §3
-  prices, and it is bounded at one page per gap.
-- **One turn can still be missed in a narrow race**, and §5 states the two shapes
-  rather than leaving them to be discovered. The loss is a distillation, not an
-  episode. Closing it entirely would take a durable "the episode landed" fact on the
-  turn — a second store-written member and a second write on every capture — which
-  §9 names rather than buys.
+- **No page is ever read twice for a gap, and the price of that is one turn.** §5
+  advances to the highest turn the pass handed over, so a settled gap costs nothing and
+  repeats nothing; what it costs instead is the in-flight turn that sits *below* a
+  turn whose episode has already committed, which takes two overlapping captures of one
+  conversation. §5 states that residual and the tail case beside it rather than leaving
+  either to be discovered. The loss is a distillation, not an episode: the turn's
+  content stays readable by retrieval until its own horizon. Closing it entirely would
+  take a durable "the episode landed" fact on the turn — a second store-written member
+  and a second write on every capture — which §9 names rather than buys.
+- **A pass cancelled at its advance attempt leaves an ambiguous watermark**, and §6
+  rules both outcomes safe rather than adding machinery that cannot tell them apart.
+  Either the position records work that was done, or the page is re-read and folds.
 
 **What would trigger revisiting this.**
 
