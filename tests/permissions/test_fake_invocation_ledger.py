@@ -19,6 +19,12 @@ from invocation_ledger_contract import (
     InvocationCompleterContract,
     InvocationLedgerContract,
     LedgerSubject,
+    ScriptedIdentifiers,
+    _claim,
+    _complete,
+    _rows,
+    allowed,
+    natural,
 )
 
 from ai_assistant.testing import FakeAuditTrail
@@ -125,3 +131,41 @@ class TestFakeInvocationCompleterContract(FakeLedgerFixtures, InvocationComplete
 
 class TestFakeInvocationLedgerContract(FakeLedgerFixtures, InvocationLedgerContract):
     """Runs the fake through the wide face's shared conformance suite."""
+
+
+# ---------------------------------------------------------------------------
+# The one piece of derived state this fake keeps beside its rows
+# ---------------------------------------------------------------------------
+
+
+async def test_a_claim_id_reissued_after_an_erasure_can_be_completed() -> None:
+    """``clear()`` empties the completed-claim index with the rows it is derived from.
+
+    ADR-0192 §2's "an outcome cannot be written twice" is answered from an index
+    of the claim ids a completion row already names, because scanning the rows for
+    it makes appending ``n`` completions cost ``n**2`` comparisons — which
+    ADR-0194 §11's ten-thousand-row fixture pays in full (#1752). Derived state
+    that outlived what it was derived from would refuse a legitimate completion,
+    and this is the shape that reaches it: ADR-0192 §6's erasure frees the ids the
+    store held, so a conforming factory may mint one of them again, and the fake's
+    own ``_mint`` draws away only from ids the trail *currently* holds.
+
+    Driven through the seam with an identifier the factory is scripted to force,
+    because an id repeating by chance is not something a case can arrange.
+    """
+    forced = ScriptedIdentifiers(forced=["claim-1"])
+    trail = cast_subject(FakeAuditTrail(identifiers=forced))
+    authorisation = allowed(definition=natural())
+    first = await _claim(trail, authorisation)
+    assert first.id == "claim-1"
+    await _complete(trail, first)
+
+    await trail.clear()
+
+    forced.forced.append("claim-1")
+    again = await _claim(trail, authorisation)
+    assert again.id == "claim-1"
+    completion = await _complete(trail, again)
+
+    assert completion.completes == "claim-1"
+    assert [row.completes for row in await _rows(trail) if row.completes is not None] == ["claim-1"]
