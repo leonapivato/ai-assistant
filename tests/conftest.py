@@ -51,6 +51,15 @@ from ai_assistant.core.config import Settings
 # named `conftest`), makes a narrowed run import the same suite the gate does.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 
+# Registered by being imported: pluggy reads hook implementations off a plugin
+# module's namespace, and this conftest is the only plugin the corpus has. What
+# the guard refuses, and why it has to be a collection hook rather than a test,
+# is in `collection_guard`'s own docstring -- in short, a `Test...` class left
+# abstract is dropped from collection in silence, taking every test it inherits
+# with it and leaving the run green (issue #1757). Its directory is already on
+# `sys.path`: pytest's prepend import mode put it there to import this file.
+from collection_guard import pytest_pycollect_makeitem  # noqa: F401  # a hook, by name
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
