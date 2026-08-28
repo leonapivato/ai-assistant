@@ -879,6 +879,14 @@ and the deployed hub plus the laptop's gateway both move together (ADR-0178 §6)
 **The implementing lane owes these tests, and each is a shape rather than a line of
 coverage.**
 
+> **Normative.** Every obligation in this section is pinned over **both** of §1's
+> shapes — the step park and the routed park — unless the row names one. §1 defines
+> a live confirmation park as exactly two shapes, every clause of this decision
+> ranges over that definition rather than over one member of it, and a suite that
+> exercised only the step park would certify half of §1 while leaving untested the
+> routed half — the operations `track:voice` exists to make reachable by voice, and
+> the half #1699 did not measure.
+
 > **Normative.** The implementing lane pins: (a) a `converse_spoken` pass whose step
 > parks returns `spoken` non-`None`, and the value handed to the synthesizer is §2's
 > sentence byte for byte; (b) the same for a pass whose **routed** operation parks;
@@ -902,11 +910,13 @@ coverage.**
 > than to two, and a double that returned the old silent pair fails the suite it
 > is meant to certify.
 
-> **Normative.** The lane pins **all four** of §4's degradation cases on a park, and
-> not the two an implementation reaches first: synthesis raising; an empty format
+> **Normative.** The lane pins **all four** of §4's degradation cases on a park, on
+> each of §1's two shapes, and not the two an implementation reaches first:
+> synthesis raising; an empty format
 > intersection; a rendering over ADR-0200 §6's bound; and the projected `SpokenTurn`
 > over ADR-0085 §8c's payload limit — each asserting `spoken` `None` with
-> `spoken_degraded` `True`. It pins the second measurement beside them: a parked
+> `spoken_degraded` `True`. It pins the second measurement beside them on each shape
+> too: a parked
 > result still over §8c with no rendering in it raises `OversizedValueError` rather
 > than degrading further, and `heard` is not shortened to make it fit. Two of the
 > four had no subject on a park before this decision, so an implementation that
