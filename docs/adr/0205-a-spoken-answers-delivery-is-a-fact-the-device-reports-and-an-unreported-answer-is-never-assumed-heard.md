@@ -113,6 +113,10 @@ stage.
   say otherwise. §1 below adds a fifth argument and supersedes that count and
   nothing else about the section; the audience clauses bind unchanged, and the
   report is not an audience.
+- **ADR-0200 §4** fixes `SpokenTurn` at four members. §1 below adds a fifth,
+  `episode_id`, so that a report can name the turn it is about; every other clause
+  of §4 binds unchanged, the `heard`/`outcome` biconditional and the degradation
+  ladder included.
 - **ADR-0200 §8** retains no audio anywhere on this path, in either direction, and
   adds no field to `EpisodicMemory` or `Provenance`. This ADR retains no audio
   either (§2) and adds no field to either type (§3).
@@ -130,13 +134,14 @@ stage.
 
 ## Decision
 
-### 1. The report is a fifth keyword-only argument, and its subject is fixed by the surface rather than named by the caller
+### 1. The report is a fifth keyword-only argument, and it names the turn it is about
 
-> **Normative.** `converse_spoken` takes a fifth argument and no others: `delivery`,
-> keyword-only, a `SpokenDelivery | None` defaulting to `None`. Every other clause
-> of ADR-0200 §3 binds unchanged — one positional subject and every other argument
-> keyword-only (ADR-0085 §2), the threaded budget, the declared unbounded audience,
-> and the refusal of any value by which a caller could assert an audience.
+> **Normative.** `converse_spoken` takes a fifth argument and no others:
+> `delivery`, keyword-only, a `SpokenDeliveryReport | None` defaulting to `None`.
+> Every other clause of ADR-0200 §3 binds unchanged — one positional subject and
+> every other argument keyword-only (ADR-0085 §2), the threaded budget, the
+> declared unbounded audience, and the refusal of any value by which a caller could
+> assert an audience.
 
 The signature that describes, shown rather than marked (ADR-0089 §2):
 
@@ -148,37 +153,59 @@ async def converse_spoken(
     plays: tuple[SpokenAudioFormat, ...],
     timeout: timedelta,
     conversation_id: Identifier | None = None,
-    delivery: SpokenDelivery | None = None,
+    delivery: SpokenDeliveryReport | None = None,
 ) -> SpokenTurn
 ```
 
-> **Normative.** The report's subject is **the most recent turn of the conversation
-> `conversation_id` names**, resolved by the `ConversationStore` at the moment of
-> the call. No caller names a turn: no turn id, ordinal or episode id is carried by
-> the report, accepted from a caller, or disclosed on this surface so that a caller
-> could echo one back. A report about some other turn is therefore unrepresentable
-> rather than refused.
+> **Normative.** A report **names the turn it is about**, by the `episode_id` §2
+> puts on it, and the hub applies it to that turn and to no other. No report is
+> resolved from position — not from "the conversation's most recent turn", not from
+> an ordinal the caller counted, and not from anything a caller could get wrong
+> without saying so.
+
+> **Normative.** `SpokenTurn` gains a fifth member so that a caller has such a name
+> to give back: `episode_id`, an `Identifier | None`, the id of the episode
+> recording the turn this call ran. It is `None` **exactly when** the call recorded
+> no turn — a recording that carried no words (ADR-0200 §4's `heard`/`outcome`
+> pair), or a capture whose index entry did not land — and it is not `None` merely
+> because the episode write failed, since the turn's index row exists either way and
+> is what carries the delivery (ADR-0074 §3's intent log).
+
+> **Normative.** That id is disclosed to whoever called, and disclosing it confers
+> nothing. There is one principal on this hub (ADR-0099 §1), no operation of the
+> promoted surface takes an episode id, and this ADR adds none that does — the id
+> reaches the caller so that it can be handed back on the next call and for no other
+> purpose.
 
 > **Normative.** A `delivery` supplied beside a `conversation_id` of `None` is
 > refused **locally, before any I/O**, as a malformed argument — a fresh
-> conversation has no previous turn for the report to be about. That is the local
-> refusal ADR-0200 §3 already binds this method to and ADR-0085 §3's convention for
-> a malformed argument, and it raises `ValueError` as those refusals do.
+> conversation contains no turn a report could name. That is the local refusal
+> ADR-0200 §3 already binds this method to and ADR-0085 §3's convention for a
+> malformed argument, and it raises `ValueError` as those refusals do.
 
-> **Normative.** Where the named conversation exists but has no turn to stamp, the
-> report is **discarded**: nothing is recorded, nothing is raised, and the call
-> proceeds as though no report had been supplied. A conversation whose only turn was
-> deleted or whose index entry was reclaimed is an ordinary state (ADR-0074 §5, §8),
-> not a fault, and a benign race must not cost the owner the turn they just spoke.
+> **Normative.** Where the named conversation carries no turn under the report's
+> `episode_id`, the report is **discarded**: nothing is recorded, nothing is raised,
+> and the call proceeds as though no report had been supplied. A turn whose index
+> entry was deleted or reclaimed, and an id belonging to another conversation, are
+> ordinary states (ADR-0074 §5, §8) rather than faults, and a benign one must not
+> cost the owner the turn they just spoke.
+
+> **Normative.** A report is **not required to be about the previous turn**. It is
+> applied to the turn it names whether or not later turns have since been captured,
+> because what it states — how much of that turn's rendering was played — does not
+> become false when another turn happens. What §5 supplies to the composing stage is
+> a separate question, and is decided there.
 
 > **Normative.** The report is recorded **before the turn plans**, so a failure,
 > degradation, expiry or cancellation later in the call does not lose it. It is a
 > fact about a turn that has already happened and it does not depend on this one.
 
-> **Normative.** A turn's delivery is stamped **once**. A second report reaching a
+> **Normative.** A turn's delivery is stamped **once**. A second report naming a
 > turn whose recorded state is no longer `UNKNOWN` performs nothing: the row is left
-> exactly as it stands and no error is raised. A retry must not overwrite what the
-> first report established, and a later report cannot revise it.
+> exactly as it stands and no error is raised. Because a report names its turn, a
+> resend of one is idempotent in the strong sense — it reaches the same row and
+> either finds it unstamped and stamps it, or finds it stamped and does nothing —
+> and it can never be applied to a turn captured since.
 
 > **Normative.** Adding this argument bumps `PROTOCOL_VERSION`, on ADR-0124 §9's
 > rule — "any change to the promoted surface's method set or to a method's arguments
@@ -207,6 +234,22 @@ value is a turn that never happens; a page closed after an interruption leaves
 nothing that would have read the record it did not send. So the shape loses
 precision exactly where precision has no reader.
 
+**Why the report names its turn instead of taking the tail.** An earlier draft of
+this section resolved every report to "the conversation's most recent turn" and
+carried no subject at all, on the reasoning that a report about any other turn is
+then unrepresentable rather than refused. Adversarial review, round 1, `blocker`,
+found what that costs and it is not a subtlety: a report about turn 1 that reaches
+the hub after turn 2 has been captured — a resent request whose first response was
+lost, or a second page on the same conversation — resolves to turn 2 and records
+delivery of an answer that device never played. The hub cannot tell that report
+from a genuine one, because nothing in it says which turn it is about. Making the
+subject explicit removes the whole class: a late report is applied to the turn it
+names, which is true, and a report naming nothing in this conversation is discarded.
+The `SpokenTurn` member it costs is the price of the report meaning something
+definite, and it is cheaper than the alternatives — an idempotency key would be a
+second identifier for a turn that already has one, and refusing every non-tail
+report would throw away true facts to paper over an ambiguity the subject removes.
+
 **The report is not an audience and cannot become one.** It says how much of a
 rendering a device played, not who was within range of it. ADR-0199 §1's third
 clause — the posture "is not a function of the modality, the transport, the device,
@@ -219,7 +262,17 @@ implementation may.
 
 > **Normative.** `SpokenDelivery` is a frozen `extra="forbid"` pydantic model in
 > `core/types.py` with exactly three members: `state`, a `SpokenDeliveryState`;
-> `played`, a `timedelta | None`; and `rendered`, a `timedelta | None`.
+> `played`, a `timedelta | None`; and `rendered`, a `timedelta | None`. It is the
+> **fact**, and it is what §3 records on a turn.
+
+> **Normative.** `SpokenDeliveryReport` is a frozen `extra="forbid"` pydantic model
+> in `core/types.py` with exactly two members: `episode_id`, an `Identifier` naming
+> the turn the report is about; and `delivery`, a `SpokenDelivery`. It is the
+> **report**, and it exists only as §1's argument. Two types rather than one
+> because the subject is a property of the report and not of the turn: the row §3
+> stamps already names its own episode, so a stored fact carrying that id a second
+> time would be ADR-0084 §3's redundancy — a second answer to a question the record
+> already answers.
 
 > **Normative.** `SpokenDeliveryState` is a closed `StrEnum` in `core/types.py` with
 > exactly three members: `UNKNOWN`, `COMPLETE` and `INTERRUPTED`. Adding a member is
@@ -234,14 +287,14 @@ implementation may.
 > for ADR-0130 §2's stated reason: a value that has already contradicted itself is
 > not a report, it is a defect.
 
-> **Normative.** A `delivery` **argument** whose state is `UNKNOWN` is refused
-> locally as malformed, before any I/O. A device that does not know reports nothing,
-> and the absence of a report is spelled by omitting the argument. `UNKNOWN` is a
-> value the hub writes (§4) and never one a caller supplies.
+> **Normative.** A report whose `delivery.state` is `UNKNOWN` is refused locally as
+> malformed, before any I/O. A device that does not know reports nothing, and the
+> absence of a report is spelled by omitting the argument. `UNKNOWN` is a value the
+> hub writes (§4) and never one a caller supplies.
 
-> **Normative.** The report carries **two durations and a state, and nothing else**.
-> No audio, no fragment of one, no transcript, no span of what was heard, no word
-> count, no character offset, no sample position, no format and no identifier. It is
+> **Normative.** The report carries **a subject, two durations and a state, and
+> nothing else**. No audio, no fragment of one, no transcript, no span of what was
+> heard, no word count, no character offset, no sample position and no format. It is
 > not a rendering and it does not permit one to be reconstructed, so ADR-0200 §8's
 > retention clause binds this path exactly as it binds every other and is not
 > weakened by it.
@@ -292,12 +345,15 @@ why one is refused rather than deferred.
 > such a field for any other purpose.
 
 > **Normative.** `ConversationStore` gains exactly one operation, `record_delivery`,
-> which stamps the named conversation's most recent turn with a `SpokenDelivery` and
-> returns the turn it stamped, or `None` where the conversation has no turn to stamp.
-> The store resolves which turn that is; a caller never supplies an ordinal, exactly
-> as it never supplies one to `append`. It raises `UnknownConversationError` where
-> the conversation is absent or stamped deleted, and `ConversationStoreError` where
-> the store cannot be written — the same two refusals `append` carries.
+> which stamps the turn a given `episode_id` names with a `SpokenDelivery` and
+> returns the turn it stamped, or `None` where the named conversation carries no
+> turn under that id. The turn must belong to the conversation the caller names: a
+> report is never applied across conversations, and the store — which derives every
+> episode id from a conversation and an ordinal (ADR-0074 §3) — is where that is
+> checked, so no caller re-derives the relation. It raises
+> `UnknownConversationError` where the conversation is absent or stamped deleted,
+> and `ConversationStoreError` where the store cannot be written — the same two
+> refusals `append` carries. A caller still supplies no ordinal.
 
 > **Normative.** `ConversationStore.append` gains exactly one keyword-only argument,
 > `delivery`, a `SpokenDelivery | None` defaulting to `None`, written onto the row it
@@ -327,6 +383,12 @@ arrival; this records one on the index and about the departure. A lane that reac
 for `delivery` to answer "what channel was this?" would be answering a different
 question with a value that happens to correlate, which is the reasoning ADR-0130 §2
 refuses when it keeps delivery state off a record that could carry it.
+
+**No lookup operation is added for it.** `ConversationStore.turn_of_episode`
+already resolves an episode id back to the turn that cites it — ADR-0074 §9 puts it
+on the contract precisely because "§10 declines duplicating that relation onto the
+record, so the store owes both directions" — so an implementation has the relation
+it needs and `record_delivery` is one write rather than a read the caller composes.
 
 **Why not a companion record in the `MemoryStore`.** It is the other shape that
 survives ADR-0068's freeze — install a new frozen record naming the episode — and
@@ -464,10 +526,13 @@ every ratified clause true.
 > the caller-owned deadline.
 
 > **Normative.** The page reports the playback it last had in the air for the
-> conversation it is sending, and reports nothing where it has none. It reports
-> `COMPLETE` where the source ended of its own accord and `INTERRUPTED` where a press
-> ended it — a distinction the front end already draws (`playbackInterrupted` against
-> the `ended` listener in `playSpoken`) — and it invents neither.
+> conversation it is sending, **naming that answer's own `episode_id`**, and reports
+> nothing where it holds no such pair. The id it sends is the one the response
+> carrying that rendering disclosed and never one it derived, counted or guessed;
+> where that response disclosed `None`, there is nothing to report. It reports
+> `COMPLETE` where the source ended of its own accord and `INTERRUPTED` where a
+> press ended it — a distinction the front end already draws (`playbackInterrupted`
+> against the `ended` listener in `playSpoken`) — and it invents neither.
 
 > **Normative.** The report is derived from the decoded buffer the page already
 > holds: its `duration` is `rendered`, and the elapsed playback time is `played`. No
@@ -504,9 +569,10 @@ deciding.
 
 ### 9. What the implementing lane owes
 
-> **Normative.** The contract half lands as **one change**: `SpokenDelivery` and
-> `SpokenDeliveryState` in `core/types.py` with §2's validator; the `delivery`
-> argument on `converse_spoken`; the `delivery` member on `ConversationTurn`; the
+> **Normative.** The contract half lands as **one change**: `SpokenDelivery`,
+> `SpokenDeliveryState` and `SpokenDeliveryReport` in `core/types.py` with §2's
+> validator; the `delivery` argument on `converse_spoken` and the `episode_id`
+> member on `SpokenTurn`; the `delivery` member on `ConversationTurn`; the
 > `record_delivery` operation and `append`'s new argument on `ConversationStore`;
 > the `PROTOCOL_VERSION` bump; and — because `ConversationStore` gains a member —
 > that Protocol's shared conformance suite and its canonical fake in
@@ -534,24 +600,39 @@ deciding.
 > **Normative.** The lane records this ADR on ADR-0200 and ADR-0074 only if this
 > change did not — it did (§10), so the lane makes no header record and adds none.
 
-Tests the lane owes, named so they are written rather than assumed: a report
-against a conversation with no turns is discarded and the turn still runs; a second
-report performs nothing; a report beside `conversation_id` `None` is refused before
-any seam is called; an `UNKNOWN` argument is refused; a degraded synthesis leaves
-`UNKNOWN`; the composing stage is told an `UNKNOWN` previous turn is unknown; the
-supply path makes no second store call; and the captured episode's content is
+Tests the lane owes, named so they are written rather than assumed: a report naming
+an episode no turn of this conversation carries is discarded and the turn still
+runs; a report naming a turn of a *different* conversation is likewise discarded and
+stamps nothing there; **a report that arrives after a later turn has been captured
+stamps the turn it names and leaves the later one `UNKNOWN`** — the case
+adversarial review's round-1 `blocker` describes, written as an integration test
+with an intervening captured turn rather than as two writes in a row; a second
+report naming an already-stamped turn performs nothing; a report beside
+`conversation_id` `None` is refused before any seam is called; an `UNKNOWN` report
+is refused; a degraded synthesis leaves `UNKNOWN`; `SpokenTurn.episode_id` is `None`
+exactly on the two shapes §1 names and is otherwise the id `record_delivery` accepts
+back; the composing stage is told an `UNKNOWN` previous turn is unknown; the supply
+path makes no second store call; and the captured episode's content is
 byte-identical to what the same transcript produces with no report.
 
 ### 10. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
 > **Normative.** This ADR **partially supersedes ADR-0200**, in ADR-0070 §3's sense,
-> in exactly two scopes and no others:
+> in exactly three scopes and no others:
 >
 > **(a) §3's argument count.** "It … takes four arguments and no others" becomes
 > **five**, the addition being `delivery` and nothing else. Every other clause of §3
 > binds unchanged, the audience clauses included.
 >
-> **(b) §10's body enumeration.** "carrying the **browser-owned** arguments of §3's
+> **(b) §4's enumeration of `SpokenTurn`'s members.** "a frozen `extra="forbid"`
+> pydantic model in `core/types.py` with four members" becomes **five**, the
+> addition being `episode_id` and nothing else. §4's `heard`/`outcome`
+> biconditional, its blank-transcript shape, its `spoken` and `spoken_degraded`
+> clauses and its degradation ladder bind unchanged — `episode_id` is bounded and is
+> never dropped to make a result fit, so the ladder still has exactly one step before
+> ADR-0085 §8c's `OversizedValueError`.
+>
+> **(c) §10's body enumeration.** "carrying the **browser-owned** arguments of §3's
 > signature and no others — `utterance`, `plays` and `conversation_id`" gains
 > `delivery`, and "reads no fourth" becomes "reads no fifth". §10's `timeout`
 > clauses, its one-route clause and its front-end clauses bind unchanged.
@@ -563,10 +644,10 @@ byte-identical to what the same transcript produces with no report.
 > illustrative by its own words — "the semantics above and below are the contract,
 > the spelling is the lane's" — and nothing else in §9 or in ADR-0074 changes.
 
-> **Normative.** Everything else about this ADR is additive under ADR-0082 §1: two
-> new `core/types.py` names, one new argument on one method, one new operation on a
-> non-promoted Protocol, and one new body member. No other ratified clause is read
-> differently after it.
+> **Normative.** Everything else about this ADR is additive under ADR-0082 §1:
+> three new `core/types.py` names, one new argument on one method, one new member on
+> a non-promoted Protocol's value, one new operation on that Protocol, and one new
+> body member. No other ratified clause is read differently after it.
 
 **Both records are made in this change**, under ADR-0082 §7's settled reading —
 "§1's condition is that the superseding ADR **exists**, not that it is ratified" —
@@ -586,11 +667,13 @@ Four near misses, named so a reviewer can check them rather than take them:
   the gateway supplies no part of the report. §7 states that as satisfaction rather
   than as a supersession, and ADR-0200 §12(a)'s arithmetic — thirty-one operations —
   is unchanged.
-- **ADR-0200 §4 is untouched.** `SpokenTurn` gains no member: the report travels
-  **in**, and nothing about the delivery of the answer this call produces is known
-  by the time it returns. §4's four-member clause and its `spoken_degraded`
-  biconditional stand word for word, and ADR-0203's partial supersession of §4's
-  second-difference clause is neither widened nor narrowed.
+- **ADR-0203's partial supersession of ADR-0200 §4 is neither widened nor
+  narrowed.** Its scope is §4's *second-difference* clause on an operation whose
+  channel audience is unbounded; this ADR's scope on §4 is the member count, which
+  ADR-0203 does not touch and which does not touch it. Under ADR-0070 §4 the two
+  pairs name different scopes and its overlap-precedence rule does not arise. And
+  nothing about *this* answer's delivery is disclosed by the new member: it names
+  the turn, and what became of the rendering is unknown when the call returns.
 - **ADR-0200 §8 is applied, not narrowed.** No audio is retained; two durations are
   not a rendering and permit none to be reconstructed. Its "adds no field to
   `EpisodicMemory`, no field to `Provenance`" clause is a statement about what
@@ -626,12 +709,13 @@ ended it — which is state the front end did not previously keep between reques
 
 **What would trigger revisiting this.** Streamed speech (ADR-0200 §11) changes what
 "played N of M" means, because there is no whole rendering whose duration is known
-in advance; a report shaped for a complete buffer would need restating. A second
-device playing the same conversation's answers would break §1's "the most recent
-turn of this conversation" subject resolution, because two devices could report
-about different turns — ADR-0074 §11's multi-spoke concurrency deferral is where
-that lands, and it would take an explicit subject on the report. And a bounded
-spoken channel (ADR-0200 §11) arrives with its own delivery question.
+in advance; a report shaped for a complete buffer would need restating. A bounded
+spoken channel (ADR-0200 §11) arrives with its own delivery question. What does
+*not* trigger it is a second device on one conversation: because a report names its
+turn (§1), two devices reporting about different turns of the same conversation each
+reach the turn they mean, so ADR-0074 §11's multi-spoke concurrency deferral is not
+load-bearing here — what stays deferred there is a stale *appender*, which this ADR
+neither needs nor helps.
 
 ## Alternatives considered
 
@@ -656,6 +740,16 @@ never speaks again. Declined in §1 for two round trips against one, a second fr
 per press under ADR-0084 §3's serial rule, a second gateway route against ADR-0200
 §10's one, and a second refusal path — bought to make a record whose only reader is
 a turn that never happens.
+
+**A report with no subject, resolved to the conversation's most recent turn.** The
+first draft's shape, and it is genuinely smaller: no member on `SpokenTurn`, no
+identifier crossing the wire, and a report about any other turn unrepresentable
+rather than refused. Declined on adversarial review's round-1 `blocker`, and it is
+the right call rather than a concession: a report that reaches the hub after another
+turn has been captured — a resend, or a second page on the conversation — is applied
+to a turn the device never played, and nothing in the value says so, so the hub
+records a confident falsehood of exactly the kind this ADR exists to remove. §1
+carries the argument.
 
 **Recording the previous turn's delivery on the *next* turn's episode.** Costs no
 new store operation and no frozen-record problem, because the next episode is
