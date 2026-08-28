@@ -813,6 +813,31 @@ that prices this, unchanged, and costs the abandoned browser a reconnect.
 > stream stalled behind a rendering meets that clause exactly as it meets it behind
 > any other value, and this ADR does not soften it.
 
+> **Normative.** **The keep-alive's lifetime is the fan-out's and not the poll's.**
+> It exists while and only while at least one delivery stream is open; it is
+> dropped in the same step that ends the last stream and in the same step that ends
+> them all on the way down; and nothing of it survives that step — no timer, no
+> task, no pending write, and no value written on any stream afterwards. Whatever an
+> implementation schedules it on is released or cancelled there, observably, beside
+> the poll and never instead of it.
+
+**That clause is stated because the mechanism it constrains does not exist yet and
+the one beside it would not cover it.** `DeliveryFanOut._reap()` today cancels one
+thing, the poll, and `close`, `shutdown` and the re-open path all reach the fan-out's
+end through it; an implementation that hung the keep-alive off a second task and
+left `_reap` as it stands would leave that task alive with no stream to write to.
+The two clauses that forbid that outcome already bind the gateway and are not
+weakened here: ADR-0175 §4 holds a poll "**while and only while** at least one
+delivery stream is open" and "holds no poll at any other time", and §5 rules that
+"when the last delivery stream ends, the gateway closes its delivery connection".
+A keep-alive outliving the last stream would be the gateway holding, of its own
+motion, a thing that writes to browsers after the condition for writing to them has
+gone — which is also the shape ADR-0060 §1 names when it lists "a spawned task"
+among what a cancellation must not orphan, stated there for the Protocol surface
+and reached here by the same reasoning rather than by extension of its scope.
+Adversarial review found this on the eighth round, against the clauses above as
+they were first written.
+
 **One figure still paces both, which is the clause a reader will check next.**
 ADR-0175 §8 rules that `gateway_notification_budget` is both the poll's `budget`
 and "the interval within which §4 obliges a write on every open delivery stream",
@@ -1186,6 +1211,7 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
 | §8 (keep-alive) | The gateway's keep-alive paced by `gateway_notification_budget` and not by the poll's return | A test that with a poll outstanding beyond that interval, every open delivery stream still receives a value within it; a test that the value is the one carrying nothing but its own kind, that it is not a delivery and acknowledges nothing, and that a gateway whose polls complete within budget writes no extra value |
 | §8 (keep-alive, stalled) | A stream stalled behind a rendering is abandoned and ended when the keep-alive falls due | A test asserting the abandonment, that nothing is queued behind the pending value, and that no other stream's cadence is delayed by it |
+| §8 (keep-alive, lifetime) | The keep-alive dropped with the last stream and on shutdown, beside the poll | A test that closes the last stream while a poll is outstanding in synthesis, asserting the poll is cancelled, that whatever carries the keep-alive is cancelled or released with it, that nothing of it is left running, and that no value is written on any stream after; the same over `shutdown` |
 | §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
 | §11 | ADR-0131's record is made in this ADR's own change | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0131 reaches ADR-0206 from its header |
 
