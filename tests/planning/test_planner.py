@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.planning.planner import (
     _MAX_EXTRACTION_MISSES,
+    _STATED_FACT_GUIDANCE,
     _extract_object,
     _ExtractionError,
 )
@@ -1327,6 +1328,94 @@ async def test_the_system_prompt_names_the_marker_and_renders_the_decline() -> N
     assert "no_capability_needed" in system
     assert '"steps": []' in system
     assert '"no_capability_needed": true' in system
+
+
+# --- a stated fact is a decline (#1695) ---------------------------------------
+
+
+_STATED_FACT = "Cool, did you know I go to school at Northeastern university in Boston"
+
+_KEPT_RATIONALE = (
+    "The user told me they go to school at Northeastern in Boston and asked for "
+    "nothing to be done; it is kept with this conversation, so no capability is needed."
+)
+
+
+def _stated_fact_goal() -> Goal:
+    """The goal #1695 recorded on the deployed hub, verbatim.
+
+    A statement that asks for nothing. Kept verbatim rather than paraphrased so the
+    text the planner is driven over is the text the owner actually typed.
+    """
+    return Goal(
+        id="g1",
+        statement=_STATED_FACT,
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
+        ),
+        created_at=_WHEN,
+    )
+
+
+async def test_a_stated_fact_declines_and_the_rationale_saying_why_survives() -> None:
+    """#1695: the statement reaches the planner, and the decline over it is accepted.
+
+    On the deployed hub this goal produced a *plan* — a step to store the fact "for
+    future personalization". Nothing carries a memory write (intake is the
+    observer's, ADR-0093; ADR-0048 §1 declines ``remember`` in terms), so the step
+    reached ``NO_CAPABLE_TOOL`` and ADR-0170 §5's honest step account made the
+    composed reply tell the owner it had no way to remember — false, because
+    ADR-0074 §3 captures every turn as an episode.
+
+    What is pinned here is the planner's side of that, deterministically: the goal's
+    own text reaches the model, and a decline over it is accepted **first time**,
+    carrying to the ``ActionPlan`` the rationale that says the fact was heard and
+    kept. That rationale is the whole of a declined plan's content (ADR-0176 §3) and
+    is what ``composing`` renders on a decline (#1355), so it is the span that
+    replaces the "no working tool" sentence. Whether a real model *judges* this
+    direction correctly is not assertable here and ADR-0176 §7 declines to promise
+    it; the prompt that asks for it is pinned by the test below.
+    """
+    model = FakeModelProvider(_decline(rationale=_KEPT_RATIONALE))
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_stated_fact_goal(), context=_context())
+
+    assert plan.steps == (), "a statement asks for nothing, so nothing is planned"
+    assert plan.rationale == _KEPT_RATIONALE
+    assert model.call_count == 1, "a decline is accepted first time, not repaired into one"
+    # The model was shown the statement itself — the request half of the case.
+    request = next(one.content for one in model.calls[0].messages if one.role is Role.USER)
+    assert _STATED_FACT in request
+
+
+async def test_the_system_prompt_works_the_stated_fact_direction_through() -> None:
+    """#1695: the guidance that elicits the shape reaches the model, in the decline half.
+
+    Asserted the way ADR-0176 §4 asks a prompt test to be asserted — that the block
+    *reaches the model at all*, and where it sits — rather than by string-matching
+    its sentences. §4 declines to demand a wording assertion of any lane, and gives
+    the reason: such an assertion "fails on every rewording that improves the
+    instruction and passes on every rewording that guts it". Holding the block in
+    its own constant is what makes the presence assertion possible without the
+    wording one; the emptiness guard is what stops the constant being hollowed out
+    while this test still passes.
+
+    The one ordering assertion is anchored on the rendered envelope — structural
+    JSON, not prose — because the block is the *decline* shape's direction worked
+    through and a reader meeting it above the shape it belongs to has been told what
+    to reply before being told what the reply looks like. Where it sits relative to
+    the surrounding prose is a reviewer's read, which is what §4 leaves it to.
+    """
+    model = FakeModelProvider(_DECLINE_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context())
+
+    assert _STATED_FACT_GUIDANCE.strip(), "the block decides nothing if it is empty"
+    system = next(one.content for one in model.calls[0].messages if one.role is Role.SYSTEM)
+    assert _STATED_FACT_GUIDANCE in system
+    assert system.index('"no_capability_needed": true') < system.index(_STATED_FACT_GUIDANCE)
 
 
 async def test_a_bare_empty_steps_reply_is_repaired_toward_neither_shape() -> None:
