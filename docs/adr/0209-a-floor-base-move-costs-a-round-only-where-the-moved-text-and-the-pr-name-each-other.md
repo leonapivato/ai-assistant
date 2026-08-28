@@ -255,8 +255,9 @@ mention that is not a definition tells a PR nothing it could act on.
 > same range ADR-0027 §2's patch identity is computed on, re-anchored to `HEAD`'s
 > parent where ADR-0165 §3 re-anchors that loop. The **PR's text** is the added
 > and removed lines of that diff together with the PR description as GitHub holds
-> it when the acceptance rule runs. A **moved file's text** is that file's whole
-> content at each endpoint of the move that exists.
+> it when the acceptance rule runs. The **PR's files** are the complete contents,
+> at both endpoints, of every path that diff touches. A **moved file's text** is
+> that file's whole content at each endpoint of the move that exists.
 
 > **Normative.** The extractions are `scripts/brief_check.py`'s, reused and not
 > restated: `ADR-NNNN` by `_ADR_RE`, backticked tokens by `_BACKTICK_RE`, and
@@ -264,43 +265,42 @@ mention that is not a definition tells a PR nothing it could act on.
 > A `path` token names a path the PR's diff touches when it equals, or is a
 > directory prefix of, either endpoint of an entry of that diff; a `file` token
 > when it equals such an endpoint's basename; a `symbol` token when the whole
-> token occurs as a word in an added or removed line of that diff, or when **every
-> one of its dot-separated parts** occurs as a word somewhere in that diff — its
-> context lines included — **and at least one part occurs in an added or removed
-> line.**
+> token occurs as a word in an added or removed line of that diff, or — for a
+> dotted token — when its **last** part occurs as a word in such a line **and**
+> every other part occurs as a word in one of the PR's files.
 
-**A dotted symbol is matched part by part, because a definition never carries
-its own qualification.** ADR-0088 §1's citation form is
-`MemoryStore.ingest` — the class and the member — and `classify` keeps that as a
-single token. A PR adding that member writes `class MemoryStore` on one line and
-`async def ingest(...)` on another, and no line of its diff carries the dotted
-string; matching the whole token would clear the floor on exactly the PR the
-moved ADR is about. Matching the last part alone is the other error: a bare
-`ingest`, `close` or `read` would bind almost every diff and the rule would buy
-nothing. Requiring every part is what separates them — it binds the PR that names
-both the class and the member and leaves the one that names neither. It
-over-binds where a diff happens to carry both parts unrelatedly, which is the
-direction this section already prices.
+**A dotted symbol is split, because a definition never carries its own
+qualification.** ADR-0088 §1's citation form is `MemoryStore.ingest` — the class
+and the member — and `classify` keeps that as a single token. A PR adding or
+changing that member writes `async def ingest(...)`; no line of its diff carries
+the dotted string, and the enclosing `class MemoryStore` may be unchanged and
+therefore absent from the diff entirely. Matching the whole token clears the
+floor on exactly the PR the moved ADR is about. Matching the last part alone is
+the other error: a bare `ingest`, `close` or `read` would bind almost every diff
+and the rule would buy nothing.
 
-**The qualifier is read from the context lines, and this is the load-bearing
-half.** The common case is a PR adding a member to a class that already exists:
-it writes `async def ingest(...)` as an added line while `class MemoryStore` sits
-in the hunk's unchanged context. A rule reading only added and removed lines
-finds `ingest` and not `MemoryStore`, and clears the floor on exactly the PR the
-moved ADR is about — the failure is the same one whole-token matching had, one
-level down. So a part may be found anywhere in the diff, context included, and
-what keeps this from binding on mere proximity is the second half: at least one
-part must be added or removed, so a hunk that merely passes near a class binds
-nothing.
+**So the two parts are asked different questions, and neither is asked of the
+hunk window.** The *member* must be touched: its name occurs in a line the diff
+adds or removes, which is what makes this a statement about the change rather
+than about its neighbourhood. The *qualifier* need only be present: its name
+occurs somewhere in one of the PR's files — the complete content, at either
+endpoint, of a path the diff touches. A PR appending a method to `MemoryStore`
+names `MemoryStore` in that file whether the class header sits three lines above
+the hunk or three hundred, so nothing here turns on how much context `git diff`
+was asked for. A PR adding an unrelated `ingest` to a file that never mentions
+`MemoryStore` binds nothing.
 
-**Resolving the enclosing class instead was considered and is not what is
-decided.** A rule that parsed each hunk to bind a member definition to its
-enclosing class would be more precise, and it would have to parse a *fragment* —
-a diff is not a Python file, its context is truncated at the hunk boundary, and
-the enclosing class can be a hundred lines above the first context line. A
-mechanism that fails to resolve on a large class would clear the floor, which is
-the wrong direction to fail in. Reading the two parts as words costs precision
-this rule already spends and cannot fail open.
+**Two rules were considered and are not what is decided.** Reading the
+qualifier from the diff's *context lines* is the one this section carried for a
+round, and it is wrong for the reason above: the context window is a rendering
+option, and a member appended to a large class clears the floor because its class
+header did not fit. Resolving each definition's enclosing scope from the complete
+endpoint files with a Python parse is sound and more precise, and it is declined
+for cost rather than correctness — it buys precision in the direction this ADR
+already spends (§5 prices over-binding and forbids under-binding), it needs a
+parse where a word search needs none, and a file it cannot parse would have to
+bind anyway. Where the word rule and the scope rule differ, the word rule binds
+more.
 
 **The PR description is admitted because it can only cost rounds.** It is
 author-controlled and mutable, which would be disqualifying for an input that
@@ -508,11 +508,14 @@ documents that restate the rule:
   for nor names (free); a move changing a definition the PR's text names (owed);
   a moved ADR citing `Class.member` against a PR whose diff adds `class Class` on
   one line and `def member` on another (owed), against a PR adding `def member`
-  inside an existing `class Class` that appears only in the hunk's context (owed,
-  which a rule reading added and removed lines alone would clear), against a PR
-  whose diff carries `Class` in context and touches neither part (free, since no
-  part is added or removed), and against a PR whose diff names only one of the two
-  parts (free); an unreadable endpoint and an unretrievable PR description (owed);
+  to an existing `class Class` whose header is **outside** the hunk's context
+  window (owed — the case a context-line reading clears, and the one that must be
+  written with a class long enough to put the header out of any default window),
+  against a PR adding `def member` to a file that never names `Class` (free),
+  against a PR that touches a file naming `Class` without adding or removing
+  `member` (free), and against a PR whose diff names only the qualifier (free);
+  an unreadable PR file, an unreadable endpoint and an unretrievable PR
+  description (owed);
   and every existing ADR-0027 §§2–4 case still refusing exactly as it does today.
 
 ## Alternatives considered
