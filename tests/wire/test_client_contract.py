@@ -81,6 +81,8 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
+    spoken_routed_park_outcome,
+    spoken_step_park_outcome,
 )
 
 from ai_assistant.core.types import (
@@ -386,6 +388,33 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine()
         backing.park("h-1", egress=_binding())
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def spoken_step_park(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose spoken turn parks the step it drove (ADR-0207 §1).
+
+        Arranged hub-side and observed over the wire, which is what this binding adds:
+        ADR-0207 §7 changes nothing under ``wire/`` but the version constant, on the
+        ground that "a result payload takes the shape of the method's own declared
+        return annotation" — so if that holds, a ``SpokenTurn`` carrying a rendering
+        beside a ``reply``-less park crosses with no second declaration, and if it does
+        not, this is where it shows. It is also the one binding where the *widening*
+        bites: ``wire/client.py`` reconstructs the result through ``SpokenTurn``'s own
+        validator, so a client whose copy of the type had not been widened would fail
+        on arrival rather than in the hub.
+        """
+        backing = FakeAssistantEngine()
+        backing.turn_outcome = spoken_step_park_outcome()
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def spoken_routed_park(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose spoken turn parks a confirm-owed route (ADR-0207 §1)."""
+        backing = FakeAssistantEngine()
+        backing.turn_outcome = spoken_routed_park_outcome()
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
 

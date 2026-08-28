@@ -749,6 +749,56 @@ class TestEngineContract(AssistantEngineContract):
             await built.aclose()
 
     @pytest.fixture
+    async def spoken_step_park(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine whose spoken turn parks the step it drove (ADR-0207 §1).
+
+        Reached by driving a **real** spoken pass over a tool the policy confirms, so
+        the park the suite then reads is the one the permission stage recorded and the
+        rendering is the one the engine's own synthesis stage produced — not a
+        fixture's idea of either. It is the same wiring :attr:`parked_engine` uses,
+        because what makes a turn park is a property of the deployment rather than of
+        the call.
+        """
+        built = _wire(parks=True)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def spoken_routed_park(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine whose spoken turn parks a confirm-owed route (ADR-0207 §1).
+
+        The belief is seeded before the pass for :attr:`routed_park`'s reason: ADR-0197
+        §5's lookup reads the store the operation itself reads, so without it the route
+        resolves to nothing and ends in ``NOT_FOUND`` rather than parking.
+        """
+        records = FakeMemoryStore(now=lambda: AT)
+        await records.write_atomic(
+            [
+                MemoryWrite(
+                    record=SemanticMemory(
+                        id="rec-routed-spoken",
+                        content="the user likes jazz",
+                        fact="the user likes jazz",
+                        validity=Validity(),
+                        provenance=Provenance(
+                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                        ),
+                    ),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                )
+            ]
+        )
+        built = _wire(routes="jazz", memory=records)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
     async def settled_park(self) -> AsyncIterator[SettledParkSubject]:
         """One wired engine that has answered its park, and the token that named it.
 
