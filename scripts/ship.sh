@@ -49,14 +49,18 @@ die() {
 # this script's parts, and issue #751 records TWO ways the hand-assembled version
 # returned the PERMISSIVE answer for a base move that in fact breaches §3's floor:
 #
-#   1. `_is_floor_path` is defined below, OUTSIDE the `>>> shared-patch-identity`
+#   1. The floor test is defined OUTSIDE the `>>> shared-patch-identity`
 #      markers. A replica that sources only the marked block — which is what the
 #      instructions emphasise, because the identity is the part that must not be
 #      hand-copied — has no such function. The natural loop shape
-#      `_is_floor_path "$p" && breach=1` then fails with `command not found`, the
-#      `&&` does not fire, no breach is recorded, and the replica concludes
+#      `_is_floor_path "$p" && breach=1` then failed with `command not found`, the
+#      `&&` did not fire, no breach was recorded, and the replica concluded
 #      "floor clear". Every other clause in this area fails CLOSED; that one
 #      failed open, on the clause that decides whether a review round is owed.
+#      (The test now lives in `scripts/floor_test.py` — ADR-0209 §6 requires one
+#      implementation for the acceptance loop and the drill alike — so a replica
+#      would today have to reimplement a Python module rather than miss a shell
+#      function. The hazard is the same one and so is the answer.)
 #   2. Run BEFORE the rebase, `git merge-base FETCH_HEAD HEAD` is still the OLD
 #      base, so `<recorded base>..<that>` is empty, no floor path is in it, and
 #      the replica again concludes "floor clear" — this time with every helper
@@ -65,7 +69,7 @@ die() {
 #
 # `--drill` closes both by construction rather than by instruction. It is this
 # script, so every helper is in scope and the floor is decided by the same
-# `_is_floor_path` the acceptance rule uses; and it REFUSES on an un-rebased HEAD
+# `scripts/floor_test.py` run the acceptance rule reads; and it REFUSES on an un-rebased HEAD
 # rather than answering the question it was not asked. It decides nothing new:
 # ADR-0027 §2 and §3 are applied verbatim, by the same code, and the only
 # differences from a real ship are that the PR head need not yet match HEAD
@@ -468,39 +472,48 @@ patch_identity() {
 
 head_patch_id="$(patch_identity "$expected_base" "$content_sha")"
 
-# --- The §3 floor ------------------------------------------------------------
+# --- The floor, as ADR-0027 §3 wrote it and ADR-0209 narrowed it -------------
 #
 # One class of base move is invisible to the gate AND changes what a reviewer
-# would say. A base move touching any of these invalidates the artifact outright
-# — no patch-identity relief, no drift disclosure:
+# would say. ADR-0027 §3 named it as a path list — the contract surface, the
+# standing review contracts, and `docs/adr/**` — and made every member invalidate
+# the artifact outright. ADR-0209 partially supersedes that: the path list was a
+# proxy for a RELATION ("the moved text bears on this PR") that was not
+# mechanically checkable in July 2026 and is now, so
 #
-#   the contract surface   — a Protocol or type landed on the base breaks no gate,
-#                            and changes what the architecture lens would say
-#                            about a diff that consumes it or now should;
-#   the standing contracts — the rubrics, the guide, the working agreements, and
-#                            the review DRIVER, which assembles the prompt: a base
-#                            move adding a required instruction there conducts
-#                            every later review under different instructions while
-#                            touching no document;
-#   docs/adr/**            — for EVERY persona. docs/review/guide.md §1 puts the
-#                            ADRs at the top of the authority hierarchy for every
-#                            reviewer, so a review conducted before a decision was
-#                            ratified is a review under a different authority.
+#   §1  docs/review/**, CLAUDE.md, CONTRIBUTING.md and scripts/codex-review.sh
+#       still bind outright — they are the instructions the reviewer is
+#       conducted under, so they bind every diff by construction; while
+#   §2  docs/adr/**, core/protocols.py and core/types.py bind only where one of
+#       §§3-4's tests binds, and §6 binds anything undecidable.
 #
-# `scripts/ship.sh` is deliberately NOT here. The boundary is "what the reviewer
-# read", not "what the review loop touches": ship shapes no prompt, it applies
-# the acceptance rule, and it applies whatever version of it is on disk at ship
-# time. A stale copy of ship cannot exist to be reused.
-_is_floor_path() {
-    case "$1" in
-    src/ai_assistant/core/protocols.py | src/ai_assistant/core/types.py) return 0 ;;
-    CLAUDE.md | CONTRIBUTING.md | scripts/codex-review.sh) return 0 ;;
-    # A `case` glob is not pathname expansion, so `*` spans `/` and these cover
-    # the whole subtree at any depth.
-    docs/review/* | docs/adr/*) return 0 ;;
-    esac
-    return 1
-}
+# THE TESTS ARE NOT STATED HERE. `scripts/floor_test.py` is the one
+# implementation ADR-0209 §6 requires, and it owns the path membership too: a
+# second spelling of either half is precisely the shape issue #751 records, where
+# a hand-built replica of this rule answered "floor clear" for a base move that
+# breached the floor. The acceptance loop and `--drill` both read the answer it
+# gives, per entry, with the reason it reached.
+#
+# `scripts/ship.sh` is deliberately NOT on the floor. The boundary is "what the
+# reviewer read", not "what the review loop touches": ship shapes no prompt, it
+# applies the acceptance rule, and it applies whatever version of it is on disk
+# at ship time. A stale copy of ship cannot exist to be reused.
+
+# Everything §5 needs about the PR itself, and #1750's description snapshots,
+# assembled once. Populated by `_collect_floor_inputs` below — after
+# `provenance_field` exists to read an artifact's header — and read by
+# `_decide_floor` at call time.
+declare -a floor_args=()
+floor_dir="$(mktemp -d -t ship-floor.XXXXXX)" || die "could not create a scratch directory"
+trap 'rm -rf "$floor_dir"' EXIT
+_floor_python="$(command -v python3 || command -v python || true)"
+# Resolved against THIS script's own directory, not the repository root: ship and
+# its floor test ship together, so the rule that runs is the one sitting beside
+# the ship that ran — "whatever version of the acceptance rule is on disk at ship
+# time", which is the same reason `scripts/ship.sh` is not itself on the floor.
+# A repository-root path would also be wrong wherever ship is invoked against a
+# checkout that is not its own, which is exactly how its tests drive it.
+_floor_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/floor_test.py"
 
 # The base move, read into parallel arrays plus a floor verdict.
 #
@@ -512,8 +525,16 @@ _is_floor_path() {
 # floor path appearing as either endpoint is a breach, as is its deletion, and the
 # same reading feeds §4's published record: the file set the merge reviewer reads
 # is the file set the floor tested.
+# `drift_is_floor`, `drift_bind` and `drift_reason` are parallel to the other
+# three and come from `scripts/floor_test.py` — ADR-0209 §6's disclosure clause
+# requires the record to name, per floor path, the test that bound it or that
+# every test cleared it, and a per-entry answer is the only shape that can.
+# `drift_floor_error` is set instead when the floor could not be decided at all;
+# `drift_floor` is then 1, because §6 binds anything undecidable.
 declare -a drift_status=() drift_src=() drift_dst=()
+declare -a drift_is_floor=() drift_bind=() drift_reason=()
 drift_floor=0
+drift_floor_error=""
 _read_base_move() {
     drift_status=()
     drift_src=()
@@ -559,10 +580,63 @@ _read_base_move() {
         drift_status+=("$st")
         drift_src+=("$s")
         drift_dst+=("$d")
-        if _is_floor_path "$s"; then
-            drift_floor=1
-        fi
-        if [[ -n "$d" ]] && _is_floor_path "$d"; then
+    done
+    _decide_floor "$1" "$2"
+    return 0
+}
+
+# ADR-0209 §§1-6 over the file set `_read_base_move` just populated. Fills
+# `drift_is_floor`/`drift_bind`/`drift_reason` and sets `drift_floor`.
+#
+# EVERY WAY OF NOT GETTING AN ANSWER SETS `drift_floor=1`, which is §6 as a rule
+# rather than as a list: no interpreter, a helper that is missing or exits
+# non-zero, a reply that is not one record per entry. None of those is reported
+# as a per-path breach, because this script no longer knows which paths are floor
+# paths — `floor_test.py` owns that too, deliberately (issue #751) — so the
+# refusal names the failure instead of inventing a path for it.
+_decide_floor() {
+    local n=${#drift_status[@]} i out
+    drift_is_floor=()
+    drift_bind=()
+    drift_reason=()
+    drift_floor_error=""
+    [[ $n -eq 0 ]] && return 0
+    out="${floor_dir}/verdicts"
+    if [[ -z "$_floor_python" || ! -f "$_floor_script" ]]; then
+        drift_floor=1
+        drift_floor_error="no Python interpreter, or ${_floor_script} is missing"
+        return 0
+    fi
+    {
+        for ((i = 0; i < n; i++)); do
+            printf '%s\0%s\0%s\0' "${drift_status[$i]}" "${drift_src[$i]}" "${drift_dst[$i]}"
+        done
+    } >"${floor_dir}/entries" || {
+        drift_floor=1
+        drift_floor_error="the file set could not be written for the floor test"
+        return 0
+    }
+    if ! "$_floor_python" "$_floor_script" \
+        --repo "$repo_root" --old-base "$1" --new-base "$2" \
+        --pr-base "$expected_base" --pr-head "$content_sha" \
+        --pr-diff "${floor_dir}/pr.diff" --pr-listing "${floor_dir}/pr.listing" \
+        "${floor_args[@]}" <"${floor_dir}/entries" >"$out" 2>"${floor_dir}/stderr"; then
+        drift_floor=1
+        drift_floor_error="scripts/floor_test.py refused: $(tr -d '\000' <"${floor_dir}/stderr" | tail -n 1)"
+        return 0
+    fi
+    local -a verdict=()
+    mapfile -d '' -t verdict <"$out"
+    if [[ ${#verdict[@]} -ne $((n * 3)) ]]; then
+        drift_floor=1
+        drift_floor_error="scripts/floor_test.py answered ${#verdict[@]} field(s) for ${n} entry(s)"
+        return 0
+    fi
+    for ((i = 0; i < n; i++)); do
+        drift_is_floor+=("${verdict[$((i * 3))]}")
+        drift_bind+=("${verdict[$((i * 3 + 1))]}")
+        drift_reason+=("${verdict[$((i * 3 + 2))]}")
+        if [[ "${verdict[$((i * 3 + 1))]}" == "bind" ]]; then
             drift_floor=1
         fi
     done
@@ -646,28 +720,37 @@ _encode_path() {
 # The §4 drift record for a base move from $1 to the PR's merge base, rendered
 # from the arrays `_read_base_move` last populated.
 _render_drift() {
-    local old="$1" i n
+    local old="$1" i n why
     n=${#drift_status[@]}
     echo "<details><summary><strong>base drift — this review is reused across a moved base (ADR-0027 §2b)</strong></summary>"
     echo
     echo "The review was taken against base \`${old:0:12}\`; this ships on base"
-    echo "\`${expected_base:0:12}\`. The reviewed patch identity is unchanged and the base"
-    echo "move touches none of ADR-0027 §3's floor, so the artifact still covers this"
-    echo "content and the move is disclosed here rather than costing a review round."
+    echo "\`${expected_base:0:12}\`. The reviewed patch identity is unchanged and every"
+    echo "floor path the move touched cleared ADR-0209's tests, so the artifact still"
+    echo "covers this content and the move is disclosed here rather than costing a round."
     echo
     echo "**${n} file(s) changed by the base move**, published in full and never"
-    echo "truncated (ADR-0027 §4). No floor covers a base move that clears every listed"
-    echo "path and still bears on the change — that judgement is yours at merge:"
+    echo "truncated (ADR-0027 §4). A floor path carries the test that cleared it"
+    echo "(ADR-0209 §6). No test covers a base move that clears all of them and still"
+    echo "bears on the change — that judgement is yours at merge:"
     echo
     for ((i = 0; i < n; i++)); do
+        # ADR-0209 §6's disclosure clause: for each FLOOR path in the set, the
+        # record names the test that decided it. Narrowing what the floor charges
+        # for narrows nothing about what is shown — the merge reviewer sees the
+        # same whole set, plus the reason, which is strictly more than before.
+        why=""
+        if [[ "${drift_is_floor[$i]:-0}" == "1" ]]; then
+            why=" — _$(_encode_path "${drift_reason[$i]}")_"
+        fi
         if [[ -n "${drift_dst[$i]}" ]]; then
-            printf -- '- `%s` <code>%s</code> → <code>%s</code>\n' \
+            printf -- '- `%s` <code>%s</code> → <code>%s</code>%s\n' \
                 "${drift_status[$i]}" \
                 "$(_encode_path "${drift_src[$i]}")" \
-                "$(_encode_path "${drift_dst[$i]}")"
+                "$(_encode_path "${drift_dst[$i]}")" "$why"
         else
-            printf -- '- `%s` <code>%s</code>\n' \
-                "${drift_status[$i]}" "$(_encode_path "${drift_src[$i]}")"
+            printf -- '- `%s` <code>%s</code>%s\n' \
+                "${drift_status[$i]}" "$(_encode_path "${drift_src[$i]}")" "$why"
         fi
     done
     echo
@@ -871,11 +954,12 @@ _drill_report() {
             s="${drift_src[$i]}"
             d="${drift_dst[$i]}"
             marked="        "
-            # The floor is decided by the same helper the acceptance rule uses,
-            # called from the same process. This is #751's first mechanism: a
-            # replica that sources only the shared block has no `_is_floor_path`
-            # and silently marks nothing.
-            if _is_floor_path "$s" || { [[ -n "$d" ]] && _is_floor_path "$d"; }; then
+            # The mark and the reason are the SAME per-entry answer the
+            # acceptance rule read, from the one `scripts/floor_test.py` run —
+            # not a second opinion computed for the report. This is #751's first
+            # mechanism closed by construction: the replica that marked nothing
+            # marked nothing because it had its own copy of the test.
+            if [[ "${drift_is_floor[$i]:-0}" == "1" ]]; then
                 marked="[FLOOR] "
             fi
             # Encoded for rendering only, and strictly AFTER the floor decision:
@@ -895,6 +979,13 @@ _drill_report() {
             else
                 echo "      ${marked}${drift_status[$i]} ${s_out}" >&2
             fi
+            # ADR-0209 §6: the record names, per floor path, the test that bound
+            # it OR that every test cleared it. "Why did this cost a round" is
+            # the question the drill exists to stop anyone reconstructing by
+            # hand, and a bare `[FLOOR]` mark answered only half of it.
+            if [[ "${drift_is_floor[$i]:-0}" == "1" ]]; then
+                echo "              ${drift_bind[$i]}: $(_encode_path "${drift_reason[$i]}" control-only)" >&2
+            fi
         done
         if [[ "$listed" -gt 0 ]]; then
             echo "    (pathnames above are escaped: \`\\\\\`, \`\\t\`, \`\\n\`, \`\\r\`," \
@@ -910,14 +1001,22 @@ _drill_report() {
         # branches are the whole cross-product of (breached?) × (listed?), spelled
         # out rather than composed, because the one that must not exist — an
         # unauditable clear — is easiest to reintroduce by sharing a message.
-        if [[ "$drift_floor" == "1" && "$listed" -eq "$n" ]]; then
-            echo "    §3 floor            BREACHED by the marked path(s) — this base move" >&2
-            echo "                        costs a review round." >&2
+        if [[ -n "$drift_floor_error" ]]; then
+            echo "    §3 floor            NOT DECIDED — ADR-0209's test could not be run:" >&2
+            echo "                        ${drift_floor_error}." >&2
+            echo "                        §6 binds anything undecidable, so this base move" >&2
+            echo "                        costs a review round. No path is marked, because" >&2
+            echo "                        the run that decides which are floor paths is the" >&2
+            echo "                        run that did not happen." >&2
+        elif [[ "$drift_floor" == "1" && "$listed" -eq "$n" ]]; then
+            echo "    §3 floor            BOUND by the marked path(s) — this base move" >&2
+            echo "                        costs a review round (the reason is on each line)." >&2
         elif [[ "$drift_floor" == "1" ]]; then
-            echo "    §3 floor            BREACHED somewhere in the ${n} path(s) examined" >&2
+            echo "    §3 floor            BOUND somewhere in the ${n} path(s) examined" >&2
             echo "                        (not listed) — this base move costs a review round." >&2
         elif [[ "$listed" -eq "$n" ]]; then
-            echo "    §3 floor            clear over the ${n} path(s) listed above." >&2
+            echo "    §3 floor            clear over the ${n} path(s) listed above — every" >&2
+            echo "                        floor path among them cleared every ADR-0209 test." >&2
         else
             echo "    §3 floor            NOT CLAIMED — no breach was found over all ${n}" >&2
             echo "                        path(s), but the set is not on screen, so this is" >&2
@@ -927,7 +1026,7 @@ _drill_report() {
         fi
         case "${drift_verdict[$old]}" in
         ok) echo "    §2(b) verdict       available — the artifact covers HEAD" >&2 ;;
-        floor) echo "    §2(b) verdict       unavailable — floor breach (§3)" >&2 ;;
+        floor) echo "    §2(b) verdict       unavailable — the floor binds (§3, ADR-0209)" >&2 ;;
         toobig) echo "    §2(b) verdict       unavailable — drift record exceeds §4's budget" >&2 ;;
         unreadable) echo "    §2(b) verdict       unavailable — base or listing unreadable" >&2 ;;
         esac
@@ -1190,6 +1289,83 @@ declare -A covering_rank=()
 # under (b) — empty under (a). This is what §4 publishes.
 declare -A covering_drift=()
 
+# --- §5's two texts, assembled once (ADR-0209 §5, issue #1750) ---------------
+#
+# §5 fixes what the floor test reads about the PR: the diff over the same range
+# ADR-0027 §2's identity is computed on, the added and removed lines of it, the
+# whole content of every path it touches, and **the PR description as GitHub
+# holds it when the acceptance rule runs**. The first two are rendered here, by
+# this script, under the same pinned options the identity uses — the pinning
+# stays in one place, and the helper is handed the bytes rather than a second
+# statement of how to produce them.
+#
+# THE DESCRIPTION IS AN INPUT THAT CAN ONLY ADD BINDINGS. It is author-controlled
+# and mutable, which would disqualify an input that could *clear* the floor; this
+# one cannot, because every test is a reason to charge. So a lane that adds a
+# citation adds a binding, and one that removes a citation loses one — which is
+# the hole issue #1750 records: a lane could delete a citation to a governing ADR
+# between the recorded review and the ship, and §5 answers that with an
+# obligation on the lane rather than a computation.
+#
+# The computation is added HERE, and it is the union rather than a digest. Each
+# artifact recorded on this branch carries a snapshot of the description as it
+# stood when the review ran (`pr_desc=recorded`, body in `.review/descriptions/`),
+# and every snapshot is admitted to §5's text alongside the live body. So:
+#
+#   - text ADDED to the description still adds bindings, exactly as §5 says;
+#   - a citation REMOVED after a review was recorded still binds, because the
+#     snapshot still carries it — which is §5's marked clause computed, not
+#     over-read;
+#   - a removal that bound no test changes nothing, and an edit made before any
+#     artifact existed is outside the window, both of which §5 exempts by name.
+#
+# A digest comparison — #1750's own sketch — was not taken: it refuses on ANY
+# edit, including the two §5 exempts, which would charge rounds the decision does
+# not oblige. An artifact that recorded no snapshot (`pr_desc` absent, or
+# `unavailable` on the bypass path) contributes nothing and is not treated as a
+# failure: it makes no claim about the description, so there is nothing to
+# compare and §5's conduct clause is the whole of the answer there. An artifact
+# that CLAIMS a snapshot whose file will not open is the other case, and that one
+# fails closed — a recorded input that cannot be read is §6's.
+_collect_floor_inputs() {
+    local a line snap
+    if ! git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff \
+        --no-textconv "${expected_base}...${content_sha}" >"${floor_dir}/pr.diff"; then
+        floor_args=(--unevaluable "the PR's own diff could not be rendered")
+        return 0
+    fi
+    if ! git -c core.quotePath=false -c color.ui=false -c diff.renameLimit=4000 \
+        diff --no-color --ignore-submodules=none --no-ext-diff --name-status -M -z \
+        "${expected_base}...${content_sha}" >"${floor_dir}/pr.listing"; then
+        floor_args=(--unevaluable "the PR's own file set could not be read")
+        return 0
+    fi
+    # §5 names the live body, so a body that will not come back leaves §3's first
+    # test and §4's second undecidable and §6 binds. Failing here is cheap and
+    # loud; guessing is neither.
+    if ! gh pr view --json body --jq '.body // ""' >"${floor_dir}/description" 2>/dev/null; then
+        floor_args=(--unevaluable "the PR description could not be retrieved from GitHub")
+        return 0
+    fi
+    floor_args=(--description "${floor_dir}/description")
+    shopt -s nullglob
+    for a in .review/*.md; do
+        line="$(head -n 1 "$a")"
+        [[ "$(provenance_field branch "$line")" == "$branch" ]] || continue
+        [[ "$(provenance_field pr_desc "$line")" == "recorded" ]] || continue
+        snap=".review/descriptions/$(basename "$a")"
+        if [[ ! -r "$snap" ]]; then
+            floor_args=(--unevaluable "$(basename "$a") records a PR-description snapshot that is missing from .review/descriptions/")
+            shopt -u nullglob
+            return 0
+        fi
+        floor_args+=(--description "$snap")
+    done
+    shopt -u nullglob
+    return 0
+}
+_collect_floor_inputs
+
 shopt -s nullglob
 for a in .review/*.md; do
     provenance="$(head -n 1 "$a")"
@@ -1337,11 +1513,13 @@ if [[ "$saw_identity_unhashable" == "1" ]]; then
 fi
 if [[ "$saw_floor_breach" == "1" ]]; then
     why="${why}
-     a review exists against an *earlier base*, and the base move touches
-     ADR-0027 §3's floor — the contract surface, the standing review contracts
-     (docs/review/**, CLAUDE.md, CONTRIBUTING.md, scripts/codex-review.sh), or
-     docs/adr/**. The gate cannot see those and they change what a reviewer would
-     say, so the move costs its round"
+     a review exists against an *earlier base*, and a floor path the base move
+     touches BINDS this PR (ADR-0027 §3 as narrowed by ADR-0209). Either it is one
+     of the standing review contracts — docs/review/**, CLAUDE.md, CONTRIBUTING.md,
+     scripts/codex-review.sh — which bind every diff and consult no test (§1); or
+     a moved ADR and this PR name each other (§3); or the move landed contract
+     surface (§4); or a test could not be evaluated, which binds (§6). The drill
+     prints WHICH, per path: scripts/ship.sh --drill"
 fi
 if [[ "$saw_drift_toobig" == "1" ]]; then
     why="${why}
@@ -1469,7 +1647,7 @@ fi
 
 num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
-trap 'rm -f "$body"' EXIT
+trap 'rm -f "$body"; rm -rf "$floor_dir"' EXIT
 
 # The two lines that identify a ship comment: a hidden marker naming the commit,
 # then the visible header. They lead the body precisely so the lookup below can

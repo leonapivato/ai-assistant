@@ -157,6 +157,11 @@ def _fake_gh(bin_dir: Path) -> None:
         "        fi\n"
         '        touch "$GH_CALL_MARK"; printf "%s\\n" "$GH_PR_SHA"; exit 0 ;;\n'
         "      number) printf '42\\n'; exit 0 ;;\n"
+        # The PR description, ADR-0209 §5's mutable input to the floor test.
+        # ``GH_PR_BODY_FAIL`` makes the read fail instead, which is §6's case.
+        "      body)\n"
+        '        [[ -n "${GH_PR_BODY_FAIL:-}" ]] && { echo "no PR body" >&2; exit 1; }\n'
+        '        printf "%s\\n" "${GH_PR_BODY:-}"; exit 0 ;;\n'
         "      baseRefName) printf 'main\\n'; exit 0 ;;\n"
         # Only fields real `gh pr view` actually supports are answered here.
         # An earlier fake invented `baseRepository`, which does not exist — so
@@ -400,6 +405,8 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     loop_id: str | None = None,
     patch_id: str | None = None,
     filename: str | None = None,
+    pr_desc: str = "",
+    description: str | None = None,
 ) -> None:
     """Write an artifact exactly as codex-review.sh would.
 
@@ -450,10 +457,20 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     # test can still write the renamed artifact of issue #99 and prove the name
     # claims nothing.
     name = filename or f"{loop_id or 'noloop'}-{persona}-{base_sha}-{tree}.md"
+    # ADR-0209 §5 / issue #1750: `pr_desc` is what codex-review.sh records about
+    # the PR description it saw, and `description` is the snapshot body itself.
+    # The default is an artifact carrying NEITHER — which is every artifact
+    # recorded before the field existed, and the state ship must keep reading as
+    # "this round makes no claim about the description" rather than as a failure.
+    desc_field = f"pr_desc={pr_desc} " if pr_desc else ""
+    if description is not None:
+        snapshots = review_dir / "descriptions"
+        snapshots.mkdir(exist_ok=True)
+        (snapshots / name).write_text(description)
     (review_dir / name).write_text(
         f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
         f"branch=feature tree={tree} patch_id={patch_id} round=1 "
-        f"{loop_field}net_lines=2 churn_lines=2 "
+        f"{loop_field}{desc_field}net_lines=2 churn_lines=2 "
         f"churn_ratio=1.0 churn_bound={churn_bound} commits=1 {binary_field}-->\n{body}"
     )
 
@@ -505,6 +522,7 @@ def _run_ship(  # noqa: PLR0913  # one parameter per axis of the run the fake gh
     pr_sha_after: str | None = None,
     gh_env: dict[str, str] | None = None,
     args: tuple[str, ...] = (),
+    script: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ship.sh against the fake gh.
 
@@ -513,6 +531,11 @@ def _run_ship(  # noqa: PLR0913  # one parameter per axis of the run the fake gh
     ``("--drill",)`` for the pre-push coverage check of issue #751. The empty
     default is a real ship, so every test that omits it still exercises the
     posting path with no arguments at all.
+
+    ``script`` runs a COPY of ship.sh from somewhere else, which is how a test
+    reaches the case where `scripts/floor_test.py` is not beside it: ship
+    resolves its floor test against its own directory, so the rule that runs is
+    the one shipped with the ship that ran (ADR-0209 §6).
     """
     assert _BASH is not None
     env = os.environ.copy()
@@ -529,7 +552,7 @@ def _run_ship(  # noqa: PLR0913  # one parameter per axis of the run the fake gh
     comments.mkdir(exist_ok=True)
     env["GH_COMMENTS_DIR"] = str(comments)
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
-        [_BASH, str(_SCRIPT), *args],
+        [_BASH, str(script or _SCRIPT), *args],
         cwd=repo,
         check=False,
         capture_output=True,

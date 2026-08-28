@@ -58,9 +58,16 @@ from test_ship_base_drift import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# One §3 floor path and one ordinary path, so a breaching base move and a
-# clearing one differ in nothing but which file they land in.
-_FLOOR_PATH = "docs/adr/0001-record-architecture-decisions.md"
+# One floor path and one ordinary path, so a binding base move and a clearing one
+# differ in nothing but which file they land in.
+#
+# The floor path is one of ADR-0209 §1's standing review contracts, and
+# deliberately not a `docs/adr/**` one. This module is about the *report* — that
+# a clear is never printed without the file set it was decided over — so it wants
+# a path that binds with no test consulted, whatever the PR happens to say.
+# Whether a moved ADR binds is a different question and has its own module,
+# `test_ship_floor_citation.py`.
+_FLOOR_PATH = "docs/review/adversarial.md"
 _ORDINARY_PATH = "src/ai_assistant/orchestration/loop.py"
 
 
@@ -160,7 +167,7 @@ def test_the_floor_helper_is_still_outside_the_shared_block() -> None:
 
 
 def test_the_drill_marks_the_floor_path_of_a_moved_base(tmp_path: Path) -> None:
-    """#751's first mechanism: the breach is named, not silently skipped.
+    """#751's first mechanism: the binding path is named, not silently skipped.
 
     Everything else about the artifact is in order — proper-ancestor base,
     hashable identities, and the base move nowhere near the reviewed hunk — so
@@ -176,8 +183,11 @@ def test_the_drill_marks_the_floor_path_of_a_moved_base(tmp_path: Path) -> None:
 
     assert result.returncode != 0, result.stderr
     assert f"[FLOOR] M {_FLOOR_PATH}" in result.stderr
-    assert "BREACHED" in result.stderr
-    assert "unavailable — floor breach" in result.stderr
+    assert "BOUND" in result.stderr
+    assert "unavailable — the floor binds" in result.stderr
+    # ADR-0209 §6's disclosure clause: the reason sits beside the path, so "why
+    # did this cost a round" is answered on the page rather than reconstructed.
+    assert "bind: §1 — a standing review contract" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
@@ -198,8 +208,8 @@ def test_the_drill_and_ship_agree_on_a_floor_breach(tmp_path: Path) -> None:
 
     assert drill.returncode != 0
     assert ship.returncode != 0
-    assert "ADR-0027 §3's floor" in drill.stderr
-    assert "ADR-0027 §3's floor" in ship.stderr
+    assert "§3 floor            BOUND" in drill.stderr
+    assert "a floor path the base move\n     touches BINDS this PR" in ship.stderr
 
 
 # --- The listing is the claim, so a pathname may not forge it ----------------
@@ -376,7 +386,7 @@ def test_a_floor_breach_survives_an_omitted_listing(tmp_path: Path) -> None:
     `_read_base_move` sets `drift_floor` over the complete set with no per-path
     rendering at all, so bounding the *display* cannot bound the *decision*. This
     is the assertion that makes the bound safe rather than a third way to reach a
-    false clear: the answer must still be BREACHED with nothing on screen.
+    false clear: the answer must still be BOUND with nothing on screen.
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -387,7 +397,7 @@ def test_a_floor_breach_survives_an_omitted_listing(tmp_path: Path) -> None:
     assert result.returncode != 0, result.stderr
     assert "listing             OMITTED" in result.stderr
     assert _drill_lines(result.stderr) == []
-    assert "BREACHED somewhere in the 2 path(s) examined" in result.stderr
+    assert "BOUND somewhere in the 2 path(s) examined" in result.stderr
     assert "clear" not in result.stderr.split("§3 floor")[1]
 
 
