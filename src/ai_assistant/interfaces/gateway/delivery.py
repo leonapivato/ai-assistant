@@ -268,6 +268,12 @@ class DeliveryFanOut:
         #: while a stream is open. ``None`` where none is armed — which, outside the
         #: instant between a write and its re-arming, means no stream is open.
         self._keep_alive: Cancellable | None = None
+        #: Whether a keep-alive has been written since the poll now outstanding was
+        #: issued — which is to say whether this stream's "nothing to report" has
+        #: already been said for the interval the poll is running in (ADR-0206 §8,
+        #: issue #1769). Reset at each poll's issue, because it is a fact about that
+        #: poll and not about the fan-out.
+        self._kept_alive = False
 
     def open(self) -> DeliveryStream | None:
         """Register a stream, opening the poll where it is the first (§4).
@@ -403,6 +409,10 @@ class DeliveryFanOut:
             # scheduling order rather than by a missing clause.
             return
         self._write(streams.alive())
+        # This interval's "nothing to report" is now said, so the outstanding poll
+        # has nothing left to add by returning nothing — see :attr:`_kept_alive` and
+        # the suppression in :meth:`_poll_while_watched`.
+        self._kept_alive = True
         self._arm_keep_alive()
 
     def _write(self, value: Mapping[str, Any]) -> int:
@@ -503,6 +513,7 @@ class DeliveryFanOut:
             # future has that future cancelled in the same step, so ADR-0175 §5's
             # "cancels an outstanding poll that has not yet selected an entry" is
             # reached exactly as it was when this was a bare ``await``.
+            self._kept_alive = False
             self._answering = answering = asyncio.ensure_future(
                 self._engine.next_notification(
                     acknowledging=acknowledging, plays=GATEWAY_PLAYS, budget=self._budget
@@ -518,12 +529,39 @@ class DeliveryFanOut:
                 return streams.fault(_DECLINED, detail=str(exc))
             finally:
                 self._answering = None
+            if delivery is None and self._kept_alive:
+                # **The keep-alive already was this interval's write** (ADR-0206 §8,
+                # issue #1769). §8 promises that "a gateway whose polls complete
+                # within their budget writes exactly what it writes today and at
+                # exactly the cadence it writes it at today", and today a quiet
+                # stream takes one value per ``gateway_notification_budget``. One
+                # figure paces both the poll and the interval, and the hub holds the
+                # poll for the whole of it — so the interval falls due a round trip
+                # *before* every empty poll returns, and writing on that return as
+                # well put two values carrying nothing but their own kind on every
+                # quiet stream, every interval, for ever. The second says nothing the
+                # first did not; §8 changes "**when** it is written and not **what**",
+                # so the interval's write is kept and this one is dropped.
+                #
+                # It is not a write, so it does not restart the interval: re-arming
+                # here would push the cadence out by that round trip each time and
+                # break §4's "at least once per interval" by the drift.
+                if self._keep_alive is None:
+                    # Except where the arbitration above discarded an interval on the
+                    # promise that this write would restart it. Where the write is the
+                    # redundant one the promise is kept here instead, because §8 holds
+                    # an interval armed while a stream is open and on a quiet stream
+                    # the timer is the only thing that writes at all.
+                    self._arm_keep_alive()
+                acknowledging = None
+                continue
             # A delivery where the poll returned one, and otherwise a value carrying
-            # nothing but its own kind (§4). The keep-alive is not decoration: a
-            # stream that writes nothing for an hour is one nothing can distinguish
-            # from a stream that has died, at either end, and ADR-0168 §9 is explicit
-            # that a browser reaching a running gateway must learn that the hub is
-            # down rather than that nothing is there.
+            # nothing but its own kind (§4) — the first such value of the interval it
+            # falls in, the branch above having dropped the second. The keep-alive is
+            # not decoration: a stream that writes nothing for an hour is one nothing
+            # can distinguish from a stream that has died, at either end, and ADR-0168
+            # §9 is explicit that a browser reaching a running gateway must learn that
+            # the hub is down rather than that nothing is there.
             value = streams.alive() if delivery is None else streams.notification(delivery)
             # **The one arbitration point, and it is before either value is handed to
             # any stream** (ADR-0206 §8). "The gateway decides there which value it
