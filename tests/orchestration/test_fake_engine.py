@@ -51,6 +51,8 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
+    spoken_routed_park_outcome,
+    spoken_step_park_outcome,
 )
 
 from ai_assistant.core.errors import OversizedValueError
@@ -223,6 +225,27 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         """
         engine = FakeAssistantEngine()
         engine.park("h-1", egress=_binding())
+        return engine
+
+    @pytest.fixture
+    def spoken_step_park(self) -> AssistantEngine:
+        """One fake engine whose scripted turn is ADR-0207 §1's step park.
+
+        ``turn_outcome`` is the double's own documented lever for "a consumer that
+        wants the turn to say something else", and the outcome comes from the shared
+        suite rather than being written out here — so this binding and the wire one
+        script the *same* shape and the suite is holding all three implementations to
+        one statement of §1.
+        """
+        engine = FakeAssistantEngine()
+        engine.turn_outcome = spoken_step_park_outcome()
+        return engine
+
+    @pytest.fixture
+    def spoken_routed_park(self) -> AssistantEngine:
+        """One fake engine whose scripted turn is ADR-0207 §1's routed park."""
+        engine = FakeAssistantEngine()
+        engine.turn_outcome = spoken_routed_park_outcome()
         return engine
 
     @pytest.fixture

@@ -96,37 +96,52 @@ from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
+    ActionPlan,
     ActionRequest,
     AnswerKind,
+    Belief,
     BeliefBand,
     BeliefSummary,
     BoundAccount,
+    Confirmation,
     ContinuationToken,
     CostBasis,
+    CurrentContext,
     Disposition,
     EgressBinding,
+    ExecutionState,
     FeedbackEvent,
     FeedbackKind,
+    Goal,
     GrantScope,
     Idempotency,
     MemoryKind,
+    MemorySource,
+    OperationConfirmation,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    Provenance,
     ProvisioningState,
     RecordedInvocation,
     ReplyChunk,
     Reversibility,
     RiskLevel,
+    RoutableOperation,
+    RoutedOperation,
     RouteOutcome,
     SourceReadRecord,
     SpendPeriod,
     SpokenAudio,
     SpokenAudioFormat,
+    StepOutcome,
+    TimeOfDay,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
     TurnOutcome,
+    TurnResult,
+    is_live_confirmation_park,
     secret_value,
 )
 from ai_assistant.testing import (
@@ -174,6 +189,133 @@ _TINY_LIMIT = 512
 _RECORDING = SpokenAudio(
     content=b64encode(b"an utterance").decode("ascii"), media_type=SpokenAudioFormat.MP4
 )
+
+#: An instant every scripted outcome below is stamped at. Nothing here is about a
+#: clock; what these values are for is the *shape* ADR-0207 §1 names.
+_PARK_AT = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+
+
+def _park_turn() -> TurnResult:
+    """One live turn, so a scripted step park is a park and not a recovered one.
+
+    ADR-0207 §1's shapes are reached inside a ``converse_spoken`` pass, which resumes
+    nothing — so the outcome a binding scripts must carry the turn a live park has.
+    A ``turn`` of ``None`` beside a parked step is the *recovered* park (ADR-0052 §3),
+    a shape ADR-0207 explicitly does not reach, and a fixture built that way would
+    certify the wrong thing.
+    """
+    goal = Goal(
+        id="g-park",
+        statement="what do I take in my coffee",
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_PARK_AT
+        ),
+        created_at=_PARK_AT,
+    )
+    return TurnResult(
+        goal=goal,
+        context=CurrentContext(
+            now=_PARK_AT,
+            time_of_day=TimeOfDay.AFTERNOON,
+            is_weekend=False,
+            within_working_hours=True,
+        ),
+        memories=(),
+        plan=ActionPlan(id="p-park", goal_id=goal.id, steps=(), created_at=_PARK_AT),
+    )
+
+
+def spoken_step_park_outcome() -> TurnOutcome:
+    """ADR-0207 §1's first shape, for a binding that scripts its subject's turn.
+
+    A step the permission gate parked (ADR-0037 §4): ``AWAITING_CONFIRMATION``, the
+    card that answers it, and no composed reply. Exposed from this module rather than
+    written out in each binding, so the three implementations are held to **one**
+    statement of the shape — which is the whole reason §1's cases live in the shared
+    suite.
+    """
+    return TurnOutcome(
+        turn=_park_turn(),
+        step=StepOutcome(
+            disposition=Disposition.AWAITING_CONFIRMATION,
+            state=ExecutionState(id="e-park", plan_id="p-park", steps=(), updated_at=_PARK_AT),
+            step_id="s-park",
+            confirmation=Confirmation(
+                tool_id="recall_memory",
+                tool_description="look something up",
+                parameters={},
+                reason="it may disclose personal data off-device",
+                token=ContinuationToken(handle="park-1"),
+                egress=None,
+            ),
+        ),
+        conversation_id="c-park",
+    )
+
+
+def spoken_routed_park_outcome() -> TurnOutcome:
+    """ADR-0207 §1's second shape, for a binding that scripts its subject's turn.
+
+    A confirm-owed route the routing stage parked (ADR-0197 §7): no turn, no step, the
+    operation and its resolved subject on the card, and no composed reply. §1 rules
+    this shape together with the step park "because they are one thing to the person
+    who asked", and a suite exercising only the step park would leave the routed half
+    — the operations ``track:voice`` exists to make reachable by voice — untested.
+    """
+    return TurnOutcome(
+        turn=None,
+        conversation_id="c-park",
+        routed=RoutedOperation(
+            operation=RoutableOperation.FORGET,
+            outcome=RouteOutcome.AWAITING_CONFIRMATION,
+            confirmation=OperationConfirmation(
+                operation=RoutableOperation.FORGET,
+                subject=(
+                    Belief(
+                        id="rec-routed",
+                        band=BeliefBand.ASSERTED,
+                        kind=MemoryKind.SEMANTIC,
+                        content="the user likes jazz",
+                        confidence=1.0,
+                        last_updated=_PARK_AT,
+                    ),
+                ),
+                token=ContinuationToken(handle="routed-park-1"),
+            ),
+        ),
+    )
+
+
+async def assert_a_parked_spoken_pass_speaks(engine: AssistantEngine) -> None:
+    """ADR-0207 §1: the pass is audible, and the card still travels beside the audio.
+
+    The **bytes** of what was said are not asserted here and deliberately cannot be:
+    ADR-0200 §4 makes "the rendering says the text" the synthesizer's obligation and
+    forbids any consumer decoding one, so a shared suite that checked the sentence
+    would be checking a payload no client may read. What it holds all three
+    implementations to is the shape — ``spoken`` present, ``spoken_degraded`` clear,
+    ``outcome.reply`` still ``None``, and the confirmation carried on the same result
+    — and a double that returned the old silent pair fails here. The sentence's bytes
+    are pinned once, against the ``orchestration`` constant the canonical fake names
+    rather than copies (§5), in ``tests/orchestration/test_converse_spoken.py``.
+    """
+    spoken = await engine.converse_spoken(
+        _RECORDING, plays=(SpokenAudioFormat.MP4,), timeout=_PATIENT
+    )
+
+    assert spoken.outcome is not None
+    assert is_live_confirmation_park(spoken.outcome), "the subject's pass reached a park"
+    assert spoken.outcome.reply is None, "a park composes no answer (ADR-0207 §3)"
+    assert spoken.spoken is not None, "a park is spoken, not silent (ADR-0207 §1)"
+    assert spoken.spoken.media_type is SpokenAudioFormat.MP4
+    assert spoken.spoken_degraded is False
+    card = (
+        spoken.outcome.step.confirmation
+        if spoken.outcome.step is not None
+        else (spoken.outcome.routed.confirmation if spoken.outcome.routed is not None else None)
+    )
+    assert card is not None, "the card the user must answer is on the same result (§5)"
+
 
 #: The one grantable identity every ``granting_engine`` fixture holds. A declared
 #: constant, which is what a reader's ``name`` is (ADR-0093 §7) and therefore what
@@ -1276,6 +1418,36 @@ class AssistantEngineContract(ABC):
 
     @pytest.fixture
     @abstractmethod
+    def spoken_step_park(self) -> AssistantEngine:
+        """A subject whose ``converse_spoken`` pass parks the **step** it drove.
+
+        ADR-0207 §1's first shape, and a fixture for :attr:`parked_engine`'s reason:
+        parking is the permission stage's ruling reached inside a turn, so an
+        implementation has to be handed to the suite already arranged to reach it. It
+        differs from :attr:`parked_engine` in what the suite then does — that one holds
+        a park to *answer*, and this one produces a fresh one on a **spoken** call, so
+        the pass under test is the one ADR-0207 makes audible.
+
+        A ``converse_spoken`` on it must return an ``outcome`` whose ``step.disposition``
+        is ``AWAITING_CONFIRMATION``, carrying its confirmation, with ``reply`` ``None``.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def spoken_routed_park(self) -> AssistantEngine:
+        """A subject whose ``converse_spoken`` pass parks a confirm-owed **route**.
+
+        ADR-0207 §1's second shape. §1 defines a live confirmation park as exactly two
+        shapes and no others, and every clause of that decision ranges over the
+        definition rather than over one member of it — so both are fixtures, and the
+        half #1699 never measured is exercised by the same cases as the half it did.
+
+        A ``converse_spoken`` on it must return an ``outcome`` whose ``routed.outcome``
+        is ``AWAITING_CONFIRMATION``, carrying its card, with ``reply`` ``None``.
+        """
+
+    @pytest.fixture
+    @abstractmethod
     def settled_park(self) -> SettledParkSubject:
         """A subject whose park is **settled**, and the token that still names it (§1).
 
@@ -1905,6 +2077,33 @@ class AssistantEngineContract(ABC):
                 timeout=_PATIENT,
                 conversation_id="  ",
             )
+
+    async def test_a_spoken_pass_that_parks_a_step_is_spoken_not_silent(
+        self, spoken_step_park: AssistantEngine
+    ) -> None:
+        """ADR-0207 §1: a ``converse_spoken`` pass that parks says something.
+
+        Here rather than in one implementation's own tests because the decision moved
+        the *contract*: silence on a park was a shape every implementation produced and
+        the type required, and a build that speaks on one side of a socket and not the
+        other is not substitutable. §1's own clause puts both shapes in this suite "so
+        the canonical fake and the concrete engine are held to one statement of §1
+        rather than to two, and a double that returned the old silent pair fails the
+        suite it is meant to certify".
+        """
+        await assert_a_parked_spoken_pass_speaks(spoken_step_park)
+
+    async def test_a_spoken_pass_that_parks_a_route_is_spoken_not_silent(
+        self, spoken_routed_park: AssistantEngine
+    ) -> None:
+        """ADR-0207 §1, the routed half of the same rule.
+
+        Ruling the step park only "matches #1699's measurement and nothing else": the
+        two parks are one event to the person who asked, ``_finish_route`` gives them
+        the same reason for owing no answer, and the asymmetry would land hardest on
+        precisely the operations ``track:voice`` wants reachable by voice.
+        """
+        await assert_a_parked_spoken_pass_speaks(spoken_routed_park)
 
     async def test_an_oversized_spoken_argument_is_refused_by_the_contract_limit(
         self, tiny_engine: AssistantEngine
