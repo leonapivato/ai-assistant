@@ -150,9 +150,13 @@ but actionable records (ADR-0130 §7, no — and §3 below keeps it).
 
 ### 1. A record suppresses its key while the fact it named is still live
 
-> **Normative.** A `HeldNotification` **suppresses** at an instant when it is
-> actionable at that instant, or when it carries a dismissal and its candidate
-> declares an expiry later than that instant. It suppresses at no other instant.
+> **Normative.** A `HeldNotification` **speaks for its key** — equivalently, it
+> **suppresses** candidates carrying that key; the two phrasings name one thing —
+> at an instant when it is actionable at that instant, or when it carries a
+> dismissal, carries **no** reconsideration `DROP`, and its candidate declares an
+> expiry later than that instant. It speaks at no other instant, and where a
+> record carries both stamps the `DROP` decides: such a record speaks for nothing
+> after it ceased.
 
 > **Normative.** The horizon is the candidate's **declared expiry** and nothing
 > else. No new instant is stored, no duration is configured, and no implementation
@@ -171,17 +175,19 @@ declaring a distant expiry — is exactly what ADR-0130 already admitted, and th
 decision adds no case in which a key is suppressed for longer than the producer
 itself said the fact would live.
 
-**The predicate is total, and rests on no ordering assumption.** It reads two
-stamps and a declared expiry and answers at any instant. The tree's store does in
-fact never stamp a dismissal on a record that is not actionable —
-`SqliteNotificationStore.dismiss` reports `False` there, because "the cessation
-instant a retention horizon is measured from may not be moved by a second call" —
-and a reconsideration never reaches a dismissed record, `HeldNotification.is_due_at`
-requiring `dismissed_at is None`. But the clause does not depend on either: a
-dismissal stamped at or after an expiry yields a horizon already past, and a record
-somehow carrying both stamps is governed by the same disjunction.
-`HeldNotification.ceased_at` already takes the earliest of the three cessations, so
-nothing here needs a fourth stamp.
+**The predicate is total, and rests on no assumption about which stamps can
+coexist.** It reads two stamps and a declared expiry and answers at any instant.
+The tree's store does in fact never stamp a dismissal on a record that is not
+actionable — `SqliteNotificationStore.dismiss` reports `False` there, because "the
+cessation instant a retention horizon is measured from may not be moved by a second
+call" — and a reconsideration never reaches a dismissed record,
+`HeldNotification.is_due_at` requiring `dismissed_at is None`. But
+`HeldNotification`'s coherence validator does **not** forbid the pair: it ties
+`dropped_at` to a `DROP` ruling and says nothing about a dismissal beside it. So
+the clause states the precedence rather than relying on the pair being
+unreachable — the `DROP` wins — and a dismissal stamped at or after an expiry
+yields a horizon already past. `HeldNotification.ceased_at` already takes the
+earliest of the three cessations, so nothing here needs a fourth stamp.
 
 **A record that ceased by expiry, or by a reconsideration's `DROP`, suppresses
 nothing after it ceased**, which follows from the clause rather than adding to it:
@@ -196,6 +202,20 @@ owner turns the class back to `interrupt` inside the candidate's lifetime — a 
 changed faster than the fact perishes — and must be reachable. §6 of ADR-0130
 already sweeps held records for that act; this keeps the dropped ones from
 outliving it.
+
+**This shape is not new, and the corpus carries it one store over.** ADR-0130 §8
+says what it reached for: "This is `MemoryUpdateProposal.proposal_fingerprint`'s
+discipline and ADR-0078 §7's dedup-by-question, reached for the same reason and by
+the same means." In `DeferredProposal` that discipline is the predicate
+`speaks_for_its_key_at`, and a **`REJECTED`** row — a question that is over, whose
+actionable life ended — goes on speaking for its key for the whole of its
+retention. `DeferredProposal.is_purgeable_at` keeps it alive expressly for that:
+"A *terminal* row is retained for one further lifetime because something depends on
+it surviving: a `REJECTED` key is read to refuse re-asking, and that is the whole
+retention argument." ADR-0130 §8 borrowed the deduplication and left that half
+behind, and #1372 is the bill. This decision restores it, with the notification's
+own declared horizon in place of the deferral's retention — and the predicate takes
+the same name, because it is the same predicate.
 
 ### 2. §8's duplicate lookup reads the suppressing population
 
@@ -262,11 +282,17 @@ coupling this ADR removes, in the other direction.
 > setting afterwards, and it runs from the instant the record **ceased to be
 > actionable**. `None` still means never purged.
 
-**So a dismissed record is purgeable at the later of its retention horizon and its
-candidate's expiry**, and the boundary directions are the ones already fixed:
-suppression is half-open and ends *at* the expiry instant, purgeability is
-inclusive at its horizon, so at `max(ceased + retention, expiry)` the record is
-both non-suppressing and purgeable, and at no instant before it is it both.
+**So a dismissed record's purge waits for the later of its two conditions, and
+neither boundary direction moves.** `HeldNotification.is_purgeable_at` tests
+retention **strictly** — "at the horizon it is still held, and past it it is not,
+which is the boundary §9's conformance clause states" — and §1's horizon is
+half-open, a record speaking for its key strictly before the declared expiry. This
+ADR changes neither; it adds a second condition that must hold as well. So for a
+record dismissed at `D` with retention `R` and a candidate expiring at `E`: where
+`E` is later than `D + R`, the record is not purgeable before `E` and is purgeable
+at it, because it stops speaking there and retention elapsed strictly earlier;
+where `E` is not later than `D + R`, the record is purgeable exactly where
+ADR-0130 §7 already put it, strictly after `D + R`.
 
 **This is the same correction §7 already made once, applied to the clause that
 moved.** ADR-0130 §7 argued: "Measured from admission, a record whose expiry sits
@@ -349,25 +375,35 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > **Normative.** `core/types.py`'s `HeldNotification` gains exactly one predicate
 > and **no field**:
 >
-> `def suppresses_at(self, moment: datetime) -> bool: ...`
+> `def speaks_for_its_key_at(self, moment: datetime) -> bool: ...`
 >
-> returning whether the record suppresses at `moment` in §1's sense. It is a pure
-> function of the record — the dismissal stamp, the drop stamp, and the candidate's
-> declared expiry — and reads no setting, no clock and no store.
+> returning whether the record speaks for its key at `moment` in §1's sense. It is
+> a pure function of the record — the dismissal stamp, the drop stamp, and the
+> candidate's declared expiry — and reads no setting, no clock and no store. The
+> name is `DeferredProposal.speaks_for_its_key_at`'s, deliberately: it is the same
+> predicate over the other store's records, and two names for it is how the two
+> drift.
 
 > **Normative.** The predicate lives on the type and not in a backend, for the
 > reason `is_actionable_at` does: two conforming stores must not be able to
-> disagree about the instant a key stops suppressing.
+> disagree about the instant a key stops speaking.
 
 > **Normative.** No field is added to any wire-carried type, so no value either
 > peer emits becomes invalid for the other and `PROTOCOL_VERSION` does not move.
 > An implementing lane that finds itself adding a field has left this decision.
 
-> **Normative.** `core/protocols.py` is not touched. `NotificationStore`,
-> `NotificationWriter`, `NotificationPolicy`, `NotificationOutbox` and
-> `AssistantEngine` gain no member and lose none, and no method's signature
-> changes. This decision changes what one existing operation *counts*, not what
-> any seam offers.
+> **Normative.** No Protocol gains or loses a member and no signature changes.
+> **But the behavioural contract of `NotificationStore` does change** — its
+> admission refuses a duplicate over the *speaking* set rather than the actionable
+> one, and its purge no longer releases a record that still speaks for its key — so
+> this is a breaking contract change, flagged as one under golden rule 5. The
+> implementing lane therefore updates `core/protocols.py`'s own statement of those
+> two rules in the same change: `NotificationStore`'s class docstring, which states
+> the cap-and-duplicate population and the purge guard verbatim from ADR-0130 §7,
+> and the members that restate them — `admit`, `purge` and the atomicity paragraph
+> §3 puts on the seam. Leaving those standing would put two contradictory
+> statements of one contract in the tree, which is the failure the shared
+> conformance suite cannot catch.
 
 > **Normative.** The implementing lane changes the duplicate lookup and the purge
 > of **every** `NotificationStore` implementation together with the shared
@@ -378,15 +414,19 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 
 > **Normative.** The shared conformance suite asserts, on every implementation:
 > that a candidate re-offered after its predecessor was **dismissed** is ruled
-> `DROP` as a duplicate while the predecessor's declared expiry is still in the
-> future, and writes no record; that the same candidate re-offered **at or after**
-> that expiry is admitted and is not a duplicate; that a candidate whose
+> `DROP` naming the duplicate while the predecessor's declared expiry is still in
+> the future, and writes no record; that **at or after** that expiry the
+> predecessor speaks for its key no longer, observed both ways — the *same*
+> candidate re-offered there is ruled `DROP` naming the **expiry** and not the
+> duplicate, ADR-0130 §5 evaluating expiry first, and a candidate carrying the same
+> key with an expiry still in the future is **admitted**; that a candidate whose
 > predecessor declared **no** expiry is admitted after a dismissal, exactly as
-> before; that a record dropped by a reconsideration suppresses nothing after the
-> drop; that a dismissal frees the cap at once even while its key still
-> suppresses; and that a dismissed record whose candidate's expiry lies beyond its
-> retention horizon is **not** purged at that horizon, and **is** purged at the
-> expiry.
+> before; that a record dropped by a reconsideration speaks for nothing after the
+> drop, including one carrying a dismissal stamp beside the drop; that a dismissal
+> frees the cap at once even while its key still speaks; and that a dismissed
+> record whose candidate's expiry falls **later** than its retention horizon is not
+> purged before that expiry and is purged at it, while one whose expiry falls at or
+> before that horizon is purged exactly where ADR-0130 §7 already put it.
 
 > **Normative.** Those two of ADR-0130 §9's conformance obligations that state the
 > replaced rules are superseded by the clause above and are removed rather than
@@ -395,8 +435,10 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > the purge obligation "that a record dismissed, expired or dropped by a
 > reconsideration is purged neither before nor at its retention horizon measured
 > from **that** instant but immediately after it", in the case where the record is
-> still suppressing at that horizon. Every other obligation in §9's list stands,
-> the `None`-retention case included.
+> still speaking for its key at that horizon. The boundary that obligation states
+> is **not** superseded and is re-asserted above for every record that speaks for
+> nothing. Every other obligation in §9's list stands, the `None`-retention case
+> included.
 
 > **Normative.** The lane touches `core/types.py`, so it is a contract change: it
 > merges alone, it owes the adversarial **and** architecture review set (ADR-0015
@@ -408,7 +450,8 @@ is `SqliteNotificationStore._is_duplicate`, whose SQL narrows by the module
 constant `_UNCEASED` and whose remaining filter is `is_actionable_at`; the
 narrowing by dismissal is what has to go, and the record's own predicate is what
 replaces it. The purge is `SqliteNotificationStore._purge_sync` by way of the
-module helper `_is_purgeable`. The canonical fake's counterparts are in
+module helper `_is_purgeable`, which wraps `HeldNotification.is_purgeable_at` and
+is where the second condition joins. The canonical fake's counterparts are in
 `ai_assistant.testing`'s notification module, and the shared suite is
 `tests/core/notification_contract.py`. `SqliteNotificationOutbox` needs no change
 at all: every site it reads actionability at still means actionability.
@@ -486,6 +529,23 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
   leading `Partially superseded by` token — dropping `Accepted`, per
   `docs/adr/template.md`, "so a prefix match on 'Accepted' cannot misread the
   replaced part as live" — and carries the dated note ADR-0070 §1 requires.
+- **That record lands in this same change, which is what ADR-0070 §1 permits and
+  what the corpus does.** §1's second permitted header edit is "**recording a
+  supersession that has landed** on the Status line (ADR-0001 already requires
+  this). This presupposes the superseding ADR *exists*: flipping a live decision to
+  `Superseded` with no such ADR is not a status change but an unrecorded decision
+  change, and is not permitted." The presupposition is **existence**, and ADR-0215
+  exists in the commit that writes the record. It is also the route the corpus took
+  most recently: commit `284ae501`, whose subject is "docs(adr): propose ADR-0211,
+  the planner is told which capabilities exist", carries ADR-0211 standing
+  `Proposed` **and** the `Partially superseded by ADR-0211` records on ADR-0014 and
+  ADR-0176 — one commit, one PR, both required lenses. Nothing on `main` ever
+  points at a `Proposed` supersession, because `CONTRIBUTING.md` → "Finishing an
+  ADR PR" flips this ADR to `Accepted` before the merge and `just ready` refuses
+  otherwise (ADR-0165 §5). Deferring the record to a second PR would do the
+  opposite: it would put ADR-0130 on `main` reading an unqualified `Accepted` while
+  six of its clauses had already been replaced — the inaccuracy §1's *third*
+  permitted edit exists to correct, arrived at deliberately.
 - **ADR-0131 — nothing owed, and the test is applied rather than assumed.**
   ADR-0082 §1 asks whether a reader holding only ADR-0131 "would now act
   differently, or read one of its clauses more widely than it now holds", and for
