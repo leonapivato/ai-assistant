@@ -3757,6 +3757,13 @@ function readyToPlay() {
 // answer "how much of this answer sounded" from the record alone, which is what
 // `playedSoFar` reads and what #1705 needs answered in the window a second `ended`
 // listener cannot reach.
+//
+// **And two names, so the report has a subject** (ADR-0205 §1, §7): `episode`, the
+// `episode_id` the response carrying this rendering disclosed, and `conversation`, the
+// conversation that response named. Both are carried on the record rather than read off
+// the page's current selection when the playback ends, because by then the owner may
+// have chosen another conversation — and a report is about the turn it names, which is
+// a fact settled when the answer arrived and not when the sound stopped.
 let playing = null;
 
 // **The playback a press ended that may turn out to have been an accident** (#1701), or
@@ -3766,6 +3773,25 @@ let playing = null;
 // which `interruptPlayback` does at the top of every press, before anything decides to
 // keep one.
 let held = null;
+
+// **The report the next spoken request carries**, or `null` where this page holds
+// none (ADR-0205 §7). It says how much of one earlier answer this device played, and
+// it names that answer by the `episode_id` the response carrying it disclosed — never
+// by a position, an ordinal or anything this page counted, which is what makes a
+// report that arrives after another turn has been captured land on the turn it is
+// actually about rather than on whichever turn is newest.
+//
+// **Written where a playback ends and nowhere else**: `soundFrom`'s `ended` listener
+// for a source that ran to its end, and `interruptPlayback` for one a press cut short.
+// Both readings come off the record `stopPlaying` stamps, so there is one arithmetic
+// for "how much sounded" and not two.
+//
+// **Held rather than sent at once.** There is no route for it and ADR-0205 §1 declines
+// to add one: the fact's only reader is the composing stage of the *next* turn, so it
+// rides the request that turn already makes. The honest cost is the owner who
+// interrupts and never speaks again — that report is never sent and the hub's record
+// stays `UNKNOWN`, which is the correct account of it rather than a gap.
+let pendingDelivery = null;
 
 // **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
 // iPhone). Pressing to talk over an answer that is still being spoken is the same act as
@@ -3803,8 +3829,13 @@ function interruptPlayback() {
   // Decided from where the sound had reached, which `stopPlaying` has just stamped, and
   // not from a second listener: the whole of the window is *before* the queued one runs.
   if (playbackElapsed(ended)) {
+    // It played out, so that is what is reported — the press is not what ended it
+    // (ADR-0205 §7). The `ended` listener cannot do it here: `stopPlaying` has already
+    // cleared the record, so the queued task finds `playing !== mine` and returns.
+    reportDelivery(ended, "complete");
     return;
   }
+  reportDelivery(ended, "interrupted");
   playbackInterrupted(ended.slot);
   // Kept for the release that turns out to have asked nothing (#1701). Nothing here
   // resumes it — this runs inside the press, and whether that press was an accident is
@@ -3877,6 +3908,77 @@ function playedSoFar(mine) {
 function playbackElapsed(mine) {
   return mine.buffer !== null && mine.played >= mine.buffer.duration;
 }
+
+// **Record what this device played of one answer, for the next request to carry**
+// (ADR-0205 §7). `state` is `"complete"` where the source ended of its own accord and
+// `"interrupted"` where a press ended it — a distinction this page already draws, and
+// one it never invents: nothing here guesses at a state from a duration.
+//
+// **Reported only where there is a pair to report**: an answer this page holds an
+// `episode_id` for, in a conversation the hub named, whose buffer it actually decoded.
+// A playback whose decode a press overtook has no measurement to report and produces
+// no report at all, which ADR-0205 §3 names as the ordinary case rather than a gap —
+// and a turn nobody reports on stays `UNKNOWN`, which is the true account of it.
+//
+// **The durations are whole microseconds**, `timedelta`'s own resolution and the
+// spelling this gateway reads every duration in. Where the two round to the same
+// microsecond the report is `complete`: ADR-0205 §2 makes equality the definition of
+// having played the answer out, and a difference below a microsecond is not a
+// difference — sending `interrupted` with two equal numbers would be a value the
+// promoted surface refuses, which is the page reporting nothing at all in place of
+// reporting a rounding.
+function reportDelivery(mine, state) {
+  if (mine.episode === null || mine.conversation === null || mine.buffer === null) {
+    return;
+  }
+  const rendered = Math.round(mine.buffer.duration * MICROSECONDS);
+  if (!Number.isFinite(rendered) || rendered <= 0) {
+    return;
+  }
+  const played = state === "complete" ? rendered : Math.round(mine.played * MICROSECONDS);
+  if (!Number.isFinite(played) || played < 0) {
+    return;
+  }
+  pendingDelivery = {
+    conversation: mine.conversation,
+    report: {
+      episode_id: mine.episode,
+      delivery: {
+        state: played >= rendered ? "complete" : state,
+        played_microseconds: String(Math.min(played, rendered)),
+        rendered_microseconds: String(rendered),
+      },
+    },
+  };
+}
+
+// The report to send with a request against `conversation`, or `null` (ADR-0205 §7).
+//
+// **Only where it is about the conversation being sent.** A report names a turn, and
+// the hub discards one naming a turn the conversation does not carry — but sending it
+// there would be this page asserting a pairing it has no reason to assert, and §7 says
+// it reports "the playback it last had in the air **for the conversation it is
+// sending**".
+//
+// **Taken rather than read**: a report that goes out is let go of, so a second press
+// does not re-send it. Where it is not about this conversation it is *kept*, because
+// the fact stays true and stays this page's last playback — the next request against
+// the conversation it names carries it, and the hub applies it to the turn it names
+// however many turns have been captured since.
+function takeDelivery(conversation) {
+  if (pendingDelivery === null || conversation === null) {
+    return null;
+  }
+  if (pendingDelivery.conversation !== conversation) {
+    return null;
+  }
+  const report = pendingDelivery.report;
+  pendingDelivery = null;
+  return report;
+}
+
+// Microseconds in a second, so the two conversions read as arithmetic.
+const MICROSECONDS = 1000000;
 
 // The press being served, or `null` between presses.
 //
@@ -4197,6 +4299,14 @@ async function sendRecording(mine) {
     if (conversationId !== null) {
       asked.conversation_id = conversationId;
     }
+    // **The report about the answer this press interrupted, or nothing** (ADR-0205
+    // §7). It rides the request this turn already makes: there is no route for it and
+    // ADR-0205 §1 declines to add one, because its only reader is the composing stage
+    // of the very turn this request is asking for.
+    const played = takeDelivery(conversationId);
+    if (played !== null) {
+      asked.delivery = played;
+    }
     // **The way out, armed with nothing awaited between here and the request.**
     // `fetch` carries no deadline of its own, so a socket that dies without settling
     // leaves the `await` below pending for ever and the `finally` never runs: without
@@ -4288,7 +4398,11 @@ function renderSpokenTurn(turn, chosenAt) {
     // the same question about the same panel.
     const slot = line(el("answer-body"), "", "notice");
     slot.hidden = true;
-    void playSpoken(turn.spoken, slot);
+    // The two names the report will need (ADR-0205 §7), taken from **this** response
+    // rather than from the page's current selection: the id is "the one the response
+    // carrying that rendering disclosed and never one it derived, counted or guessed",
+    // and where it disclosed `null` there is nothing to report about this turn.
+    void playSpoken(turn.spoken, slot, turn.episode_id, turn.outcome.conversation_id);
     return;
   }
   // Carried rather than inferred from the `null` above it: §4 gives `spoken` two `null`
@@ -4315,7 +4429,7 @@ function renderSpokenTurn(turn, chosenAt) {
 // **The context is `readyToPlay`'s and is never built here**, because here is after the
 // upload and outside the gesture that led to it — see that function for the defect this
 // arrangement exists to avoid.
-async function playSpoken(spoken, slot) {
+async function playSpoken(spoken, slot, episode, conversation) {
   const context = listeningContext;
   if (context === null) {
     couldNotPlay(slot);
@@ -4328,7 +4442,16 @@ async function playSpoken(spoken, slot) {
   // interrupted; and that is exactly why the invariant is held here rather than left to
   // be inferred from the only caller there happens to be today.
   stopPlaying();
-  const mine = { source: null, slot, buffer: null, offset: 0, startedAt: 0, played: 0 };
+  const mine = {
+    source: null,
+    slot,
+    buffer: null,
+    offset: 0,
+    startedAt: 0,
+    played: 0,
+    episode,
+    conversation,
+  };
   playing = mine;
   try {
     // **The press's resume, awaited rather than assumed** (#1690). `readyToPlay` starts
@@ -4394,6 +4517,10 @@ function soundFrom(context, mine, offset) {
       return;
     }
     mine.played = mine.buffer.duration;
+    // A source that ended of its own accord played the buffer, so the buffer's own
+    // duration is both numbers — which is what ADR-0205 §2's equality requires of
+    // `COMPLETE` and what it costs the device to say it: nothing.
+    reportDelivery(mine, "complete");
     forgetPlaying(mine);
   });
   mine.offset = offset;
@@ -4443,6 +4570,12 @@ function resumeInterrupted() {
     offset: 0,
     startedAt: 0,
     played: mine.played,
+    // The same answer, so the same subject: a resume that runs to its end reports
+    // `COMPLETE` of the turn the press already reported `INTERRUPTED` of, and the hub
+    // performs nothing on the second — a turn is stamped once (ADR-0205 §1), and the
+    // page needs no rule of its own to keep that true.
+    episode: mine.episode,
+    conversation: mine.conversation,
   };
   playing = resumed;
   try {

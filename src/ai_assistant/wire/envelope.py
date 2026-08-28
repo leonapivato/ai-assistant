@@ -492,7 +492,44 @@ from ai_assistant.wire.errors import (
 #: :class:`~ai_assistant.core.errors.SpeechError` reaches the promoted surface, and
 #: ``wire/errors.py`` reads the new type's structured state off its constructor as
 #: it reads every other's.
-PROTOCOL_VERSION: Final[int] = 18
+#: **19 since ADR-0205 §1**, which adds a fifth argument to ``converse_spoken`` —
+#: ``delivery``, the report a device sends saying how much of an earlier answer's
+#: rendering it played — and a fifth member to
+#: :class:`~ai_assistant.core.types.SpokenTurn`, ``episode_id``, so that a caller
+#: has a name to give back. It is the **first** limb of ADR-0124 §9, "any change to
+#: the promoted surface's method set **or to a method's arguments or results**", and
+#: ADR-0205 §1 puts the obligation on the lane that adds the argument, in the same
+#: change.
+#:
+#: **It bites in both directions, which is why it is a bump rather than a widening
+#: one side can absorb.** ``wire.surface``'s argument adapter is derived from the
+#: method's own signature, so a version 19 client sending ``delivery`` to a version
+#: 18 hub is refused there as an argument that method does not declare; and
+#: ``SpokenTurn`` sets ``extra="forbid"`` while ``wire.codec``'s ``project`` renders
+#: a model by ``model_dump()``, which **includes** a ``None`` member rather than
+#: omitting it — so a version 19 hub emits ``episode_id`` on **every** spoken turn
+#: and a version 18 client fails ``extra_forbidden`` on it. That is 13's shape on
+#: the result and 12's on the argument, arriving together.
+#:
+#: **The method set does not move**, and stands at forty; ADR-0177 §1's browser
+#: enumeration does not move either, and stands at thirty-one. ADR-0205 §10 records
+#: the partial supersession of ADR-0200 §3's argument count and §4's member count,
+#: and names ADR-0177 §1 as untouched: its enumeration counts *operations*, and this
+#: decision adds none.
+#:
+#: **Nothing under** ``wire/`` **changes for it but the client's one method**
+#: (ADR-0205 §9). ADR-0087 §2c's scalar table gains no row and ``wire/codec.py``'s
+#: ``project`` gains no branch:
+#: :class:`~ai_assistant.core.types.SpokenDeliveryReport` and the
+#: :class:`~ai_assistant.core.types.SpokenDelivery` it nests are the shape the codec
+#: already carries — a frozen model of scalars, with ``timedelta`` on ADR-0087 §2e's
+#: duration form and a ``StrEnum`` as ``SpokenAudioFormat`` already is — and
+#: ``wire/surface.py`` derives this argument's adapter from the annotation as it
+#: derives every other. The framing, the connect exchange and the frame kinds are
+#: untouched, no existing frame's encoding changes, and the error registry gains no
+#: code: both of §1's refusals are ``ValueError``, which this surface already
+#: carries.
+PROTOCOL_VERSION: Final[int] = 19
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

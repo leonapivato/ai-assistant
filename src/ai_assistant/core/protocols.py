@@ -189,6 +189,8 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenAudioFormat,
+        SpokenDelivery,
+        SpokenDeliveryReport,
         SpokenTurn,
         StepTransition,
         ToolCall,
@@ -5811,7 +5813,8 @@ class ConversationStore(Protocol):
 
     **The mutation exclusion, which is this seam's obligation and not a
     caller's.** Per conversation, an :meth:`append`, a :meth:`mark_active`, a
-    :meth:`stamp_deleted` and a :meth:`drop_if_eligible` **never interleave**;
+    :meth:`record_delivery`, a :meth:`stamp_deleted` and a
+    :meth:`drop_if_eligible` **never interleave**;
     each observes the conversation, decides, and writes as one indivisible step.
     An ``asyncio.Lock`` inside one engine would not discharge this — the engine
     already contemplates "another engine over the same durable stores", so two
@@ -5971,6 +5974,7 @@ class ConversationStore(Protocol):
         *,
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
+        delivery: SpokenDelivery | None = None,
     ) -> ConversationTurn:
         """Record a turn: allocate its ordinal, derive its episode id, return it (§3).
 
@@ -6001,6 +6005,14 @@ class ConversationStore(Protocol):
             parked: Where the turn parked for confirmation, if it did. Unique
                 across the whole index: a second turn claiming one binding is
                 refused **atomically** — no ordinal consumed, nothing left behind.
+            delivery: The delivery fact to write onto the row this allocates
+                (ADR-0205 §3). Capture on ``converse_spoken`` supplies
+                ``SpokenDelivery(state=UNKNOWN)`` — unconditionally on that
+                operation, the park and the degraded synthesis included — and no
+                other caller supplies one. An absent value means **no delivery fact
+                was recorded for this turn**, which on the surface as it stands is a
+                turn that did not run there; it is never read as delivered and never
+                read as heard.
 
         Returns:
             The recorded turn, naming its conversation, its ordinal and the
@@ -6016,6 +6028,74 @@ class ConversationStore(Protocol):
             ValueError: If ``occurred_at`` is not a timezone-aware instant with a
                 determinate offset (ADR-0023 §3): a naive value would be silently
                 localised to the host's zone.
+        """
+        ...
+
+    async def record_delivery(
+        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
+    ) -> ConversationTurn | None:
+        """Stamp what a device played of one turn's spoken answer (ADR-0205 §3).
+
+        The one operation this contract has that writes a fact arriving **after**
+        the turn it is about was recorded. ``ConversationStore.append`` already
+        allocated that turn's ordinal and derived its episode id, and
+        ``MemoryStore`` offers no update — ADR-0068 froze the record graph — so the
+        index row is what can carry a late fact at all.
+
+        **It stamps a row if and only if three conditions hold together**: the row
+        belongs to the conversation the caller named; its ``episode_id`` is the one
+        the caller named; and its recorded ``delivery`` is a
+        :class:`~ai_assistant.core.types.SpokenDelivery` whose state is ``UNKNOWN``.
+        Where any fails the operation **performs nothing and returns ``None``** — no
+        row is written, and no error is raised. A report is never applied across
+        conversations, and this store, which derives every episode id from a
+        conversation and an ordinal (§3), is where that relation is checked so that
+        no caller re-derives it.
+
+        **A row whose ``delivery`` is absent is left exactly as it stands.** Such a
+        row is a turn no delivery fact was recorded for — a turn that did not run on
+        ``converse_spoken`` — and a report naming one is answered by doing nothing:
+        this is not a way to give such a turn a delivery, and no lane reads it as
+        one. A row already carrying ``COMPLETE`` or ``INTERRUPTED`` is likewise left
+        alone, which is ADR-0205 §1's stamped-once rule.
+
+        **Reading the three conditions and writing the row are one indivisible
+        step**, decided by the store under the same per-conversation exclusion its
+        other mutations run under, and never a read a caller composes with a write.
+        That is :meth:`append`'s own posture taken one step further and for the same
+        reason: two reports observing ``UNKNOWN`` and both writing would each
+        believe it had stamped the turn once, and §1's rule would be true of
+        neither. Which of two concurrent reports wins is not decided here and does
+        not need to be; that exactly one does is.
+
+        **No lookup operation is added for the relation.**
+        :meth:`turn_of_episode` already resolves an episode id back to the turn that
+        cites it, so an implementation has what it needs and this is one write
+        rather than a read composed with one.
+
+        Args:
+            conversation_id: The conversation the report is about.
+            episode_id: The episode naming the turn to stamp. A caller still
+                supplies no ordinal.
+            delivery: What the device played. **Never** ``UNKNOWN``: that value is
+                written by capture and only through :meth:`append`, and the refusal
+                below is part of this contract rather than a caller's discipline.
+
+        Returns:
+            The turn as stamped, or ``None`` where no row met all three conditions.
+
+        Raises:
+            ValueError: If ``delivery.state`` is ``UNKNOWN`` — refused locally,
+                before any I/O, as a malformed argument (ADR-0085 §3's convention).
+                Without it a consumer holding this Protocol could stamp ``UNKNOWN``
+                over ``UNKNOWN``, a write the row's own state cannot distinguish
+                from no write, leaving the row eligible afterwards — and ADR-0205
+                §1's stamped-once rule would be a promise this store could not keep
+                against a caller that is not the engine.
+            UnknownConversationError: If ``conversation_id`` names nothing or names
+                a conversation stamped deleted — the same refusal :meth:`append`
+                carries, and for the same reason.
+            ConversationStoreError: If the store cannot be written.
         """
         ...
 
@@ -8311,8 +8391,16 @@ class AssistantEngine(Protocol):
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget for the whole call, threaded to each stage (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
         """Run one turn from a recording and hand back the answer as speech (ADR-0200 §3).
+
+        **Five arguments since ADR-0205 §1**, which partially supersedes ADR-0200
+        §3's count and nothing else about that section: the addition is ``delivery``
+        and the audience clauses below bind unchanged. One positional subject and
+        every other argument keyword-only (ADR-0085 §2), the threaded budget, the
+        declared unbounded audience, and the refusal of any value by which a caller
+        could assert an audience are all as they were.
 
         **A third entry on this surface, not a change to either of the first two.**
         ``converse`` and ``converse_streaming`` are untouched — same names, same
@@ -8348,6 +8436,26 @@ class AssistantEngine(Protocol):
         that admitted the request, or the identity of whoever asked", and a format
         is further from audience than any item on that list. Nothing in the
         disclosure ruling reads ``plays``, and no implementation may.
+
+        **A report names the turn it is about, and reaches that turn and no other**
+        (ADR-0205 §1). ``delivery`` says how much of an *earlier* answer's rendering
+        a device played; it is applied to the turn its ``episode_id`` names, and no
+        report is resolved from position — not from "the conversation's most recent
+        turn", not from an ordinal the caller counted, and not from anything a
+        caller could get wrong without saying so. It is **not required to be about
+        the previous turn**: what it states does not become false because another
+        turn happened since. It is recorded **before the turn plans**, so a failure,
+        degradation, expiry or cancellation later in the call does not lose a fact
+        about a turn that has already happened. And a turn's delivery is stamped
+        **once** — a second report naming a turn already stamped, or one carrying no
+        recorded delivery at all, performs nothing and raises nothing, so a resend is
+        idempotent in the strong sense.
+
+        **The report is not an audience and cannot become one** (ADR-0205 §1). It
+        says how much of a rendering a device played, not who was within range of
+        it. ADR-0199 §1's third clause reaches this value as squarely as it reaches
+        ``plays``: nothing in the disclosure ruling reads ``delivery``, and no
+        implementation may.
 
         **The withholding happens at supply, inside the turn** (ADR-0200 §7,
         ADR-0199 §5). Content withheld from this channel does not reach the
@@ -8427,21 +8535,40 @@ class AssistantEngine(Protocol):
                 reached is that stage's expiry and is not a separate case.
             conversation_id: The conversation to continue, or ``None`` to run in a
                 fresh one — ADR-0173 §8's meaning unchanged.
+            delivery: What a device played of an **earlier** turn's spoken answer,
+                naming that turn by the ``episode_id`` this method disclosed for it
+                (ADR-0205 §1). ``None`` where the device has nothing to report,
+                which is the whole of how "unknown" is spelled by a caller. Where
+                the named conversation carries no turn under that id the report is
+                **discarded**: nothing is recorded, nothing is raised, and the call
+                proceeds as though none had been supplied — a turn whose index entry
+                was deleted or reclaimed, and an id belonging to another
+                conversation, are ordinary states (ADR-0074 §5, §8) rather than
+                faults, and a benign one must not cost the owner the turn they just
+                spoke.
 
         Returns:
             One :class:`~ai_assistant.core.types.SpokenTurn`. A recording that
             carried **no words** is not an error and raises nothing: ``heard`` and
             ``outcome`` are ``None``, ``spoken`` is ``None``,
-            ``spoken_degraded`` is ``False``, no turn ran, no episode was captured
-            and no conversation was created. A transcript that is not blank travels
-            **byte for byte** — nothing on this path strips, trims, case-folds or
-            otherwise normalises it.
+            ``spoken_degraded`` is ``False``, ``episode_id`` is ``None``, no turn
+            ran, no episode was captured and no conversation was created. A
+            transcript that is not blank travels **byte for byte** — nothing on this
+            path strips, trims, case-folds or otherwise normalises it. Its
+            ``episode_id`` names the episode recording the turn this call ran, so
+            that a later call can report what the device played of it (ADR-0205 §1);
+            disclosing it confers nothing, since no operation of this surface takes
+            an episode id.
 
         Raises:
             ValueError: If ``conversation_id`` is present and blank, if ``plays`` is
-                empty, or if the transcriber's ``formats`` does not name the
-                recording's ``media_type`` — each refused locally, before any I/O,
-                and before there is any transcript to be blank.
+                empty, if the transcriber's ``formats`` does not name the
+                recording's ``media_type``, if a ``delivery`` is supplied beside a
+                ``conversation_id`` of ``None`` — a fresh conversation contains no
+                turn a report could name — or if a supplied ``delivery`` carries a
+                ``state`` of ``UNKNOWN``, which is a value the hub writes and never
+                one a caller supplies (ADR-0205 §1, §2). Each refused locally,
+                before any I/O, and before there is any transcript to be blank.
             OversizedValueError: If the recording's decoded length exceeds
                 ``hub_max_spoken_audio_bytes`` (ADR-0200 §6), refused locally and
                 before any I/O; or where the result breaches ADR-0085 §8c's payload

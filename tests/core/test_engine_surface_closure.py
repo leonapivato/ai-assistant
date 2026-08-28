@@ -702,6 +702,25 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     encoding moves. One limb is all ADR-0124 §9 needs, and naming which one is what
     this pin exists to make a lane do.
 
+    **ADR-0205 §1 is under the first limb, and moves only the version, to 19 against
+    the same forty methods.** That limb reaches "any change to the promoted surface's
+    method set **or to a method's arguments or results**", and this decision changes
+    both halves of the second clause on one method: ``converse_spoken`` gains a fifth
+    argument, ``delivery``, and ``SpokenTurn`` gains a fifth member, ``episode_id``.
+    It bites in both directions, which no earlier entry's argument half did.
+    ``wire.surface``'s argument adapter is derived from the method's own signature, so
+    a version 19 client sending ``delivery`` to a version 18 hub is refused there; and
+    ``SpokenTurn`` is ``extra="forbid"`` while ``project`` renders a model by
+    ``model_dump()``, so a version 19 hub emits ``"episode_id": null`` on **every**
+    spoken turn and a version 18 client fails ``extra_forbidden`` on it — 13's reading
+    of the tree, on a result 18 had just added. The method **set** does not move:
+    ADR-0205 §1 adds an argument to an operation that already exists and §10 records
+    ADR-0177 §1 as untouched, since its enumeration counts operations. The
+    **second** limb is deliberately not met and ADR-0205 §9 is why: the report is "a
+    frozen model of scalars, with ``timedelta`` on ADR-0087 §2e's duration form and a
+    ``StrEnum`` as ``SpokenAudioFormat`` already is", so ADR-0087 §2c's scalar table
+    gains no row and ``project`` gains no branch.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -710,7 +729,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 18), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 19), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -89,6 +89,9 @@ from ai_assistant.core.types import (
     SpendTotal,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenDelivery,
+    SpokenDeliveryReport,
+    SpokenDeliveryState,
     SpokenTurn,
     StepExecution,
     StepOutcome,
@@ -302,6 +305,18 @@ class FakeAssistantEngine:
         #: empty intersection degrades the turn, which is how a consumer reaches
         #: that shape without a seam of its own.
         self.spoken_formats: frozenset[SpokenAudioFormat] = frozenset(SpokenAudioFormat)
+        #: What a device has reported playing, by the episode id
+        #: :meth:`converse_spoken` disclosed for that turn (ADR-0205 §3). Written
+        #: **once** per turn: a second report naming a turn already in here performs
+        #: nothing, and a report naming an episode this engine never disclosed is
+        #: discarded — which is §1's rule, kept here so a consumer can drive the page
+        #: against it without a store.
+        self.deliveries: dict[str, SpokenDelivery] = {}
+        #: How many turns :meth:`converse_spoken` has recorded per conversation, so
+        #: that each one's episode id is distinct and in ADR-0074 §3's reserved
+        #: ``conv:`` namespace. A counter rather than the length of anything, for
+        #: :attr:`_written`'s reason one field over.
+        self._spoken_turns: dict[str, int] = {}
         self._ticks = count(1)
         #: Where :meth:`answer` draws the id of the belief an accepted answer writes.
         #: A **counter rather than the store's size**, because the store shrinks: a
@@ -548,6 +563,7 @@ class FakeAssistantEngine:
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
         """Run one spoken turn, scripted by :attr:`spoken_transcript` (ADR-0200 §3).
 
@@ -573,17 +589,27 @@ class FakeAssistantEngine:
             plays: What the caller can render, in preference order.
             timeout: The budget for the whole call.
             conversation_id: The conversation to continue, or ``None``.
+            delivery: What a device played of an earlier turn, naming that turn by
+                the ``episode_id`` this method disclosed for it (ADR-0205 §1). It is
+                applied **before** anything else this call does, so a recording that
+                carried no words still records it; a report naming an episode this
+                engine never disclosed, or one whose turn is already stamped, is
+                discarded and the call proceeds as though none had been given.
 
         Returns:
-            The transcript, the turn it drove, and the rendering of the answer.
+            The transcript, the turn it drove, the rendering of the answer, and the
+            id of the episode recording it.
 
         Raises:
-            ValueError: If ``plays`` is empty or ``conversation_id`` is blank —
+            ValueError: If ``plays`` is empty, ``conversation_id`` is blank, a
+                ``delivery`` was supplied beside a ``conversation_id`` of ``None``,
+                or a supplied ``delivery`` carries a state of ``UNKNOWN`` — each
                 refused locally, before anything else, and before there is any
-                transcript to be blank (ADR-0200 §4).
+                transcript to be blank (ADR-0200 §4, ADR-0205 §1, §2).
             UnknownConversationError: If ``conversation_id`` names no conversation
-                this engine holds — and **only** where a turn actually ran, since a
-                recording with no words creates no conversation.
+                this engine holds — where a turn actually ran, and also where a
+                ``delivery`` was supplied, since the report is recorded against that
+                conversation before the recording is looked at.
         """
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
@@ -591,6 +617,7 @@ class FakeAssistantEngine:
         if not plays:
             msg = "plays must name at least one format the caller can render (ADR-0200 §3)"
             raise ValueError(msg)
+        _refuse_unusable_report(delivery, conversation_id=selected)
         check_arguments(
             "converse_spoken",
             max_bytes=self._max_payload_bytes,
@@ -598,8 +625,20 @@ class FakeAssistantEngine:
             plays=plays,
             timeout=timeout,
             conversation_id=selected,
+            delivery=delivery,
         )
-        self.calls.append(("converse_spoken", {"plays": plays, "conversation_id": selected}))
+        self.calls.append(
+            (
+                "converse_spoken",
+                {"plays": plays, "conversation_id": selected, "delivery": delivery},
+            )
+        )
+        if delivery is not None:
+            # ADR-0205 §1: recorded **before the turn plans**, so a blank recording,
+            # a degradation or a failure later in the call does not lose a fact about
+            # a turn that has already happened. `selected` is not None here, which is
+            # what the refusal above guarantees.
+            self._record_delivery(str(selected), delivery)
         heard = self.spoken_transcript
         if not heard.strip():
             return self._checked(SpokenTurn(), "converse_spoken")
@@ -610,16 +649,61 @@ class FakeAssistantEngine:
             reply=f"This fake engine composed no real answer to {heard.strip()!r}.",
         )
         chosen = next((member for member in plays if member in self.spoken_formats), None)
+        # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,
+        # the park and the degraded synthesis included, so the id is minted before
+        # the rendering is decided and reaches every shape below that recorded one.
+        episode = self._spoken_episode(held)
         if outcome.reply is None:
-            return self._checked(SpokenTurn(heard=heard, outcome=outcome), "converse_spoken")
+            return self._checked(
+                SpokenTurn(heard=heard, outcome=outcome, episode_id=episode), "converse_spoken"
+            )
         if chosen is None:
             return self._checked(
-                SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True), "converse_spoken"
+                SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True, episode_id=episode),
+                "converse_spoken",
             )
         rendering = SpokenAudio(content=_pseudo_audio(outcome.reply, chosen), media_type=chosen)
         return self._checked(
-            SpokenTurn(heard=heard, outcome=outcome, spoken=rendering), "converse_spoken"
+            SpokenTurn(heard=heard, outcome=outcome, spoken=rendering, episode_id=episode),
+            "converse_spoken",
         )
+
+    def _spoken_episode(self, conversation_id: str) -> str:
+        """Mint this turn's episode id, in ADR-0074 §3's reserved namespace.
+
+        Derived from the conversation and a per-conversation counter, exactly as a
+        ``ConversationStore`` derives one from the conversation and the ordinal it
+        allocated — so two turns cannot collide and a consumer can hand the value
+        back on the next call, which is the whole of what ADR-0205 §1 discloses it
+        for. Recorded as ``UNKNOWN`` at once (§4).
+        """
+        ordinal = self._spoken_turns.get(conversation_id, 0) + 1
+        self._spoken_turns[conversation_id] = ordinal
+        episode = f"conv:{conversation_id}:{ordinal}"
+        self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+        return episode
+
+    def _record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> None:
+        """Stamp the turn the report names, if it is this conversation's and unstamped.
+
+        ADR-0205 §3's three conditions, over what this double holds instead of an
+        index: the episode belongs to the conversation named, it is one this engine
+        disclosed, and its recorded delivery is still ``UNKNOWN``. Any of them
+        failing performs nothing and raises nothing.
+
+        Raises:
+            UnknownConversationError: If the conversation is not one this engine
+                holds — the refusal ``ConversationStore.record_delivery`` carries.
+        """
+        if conversation_id not in self.conversations_held:
+            msg = f"no conversation {conversation_id!r}"
+            raise UnknownConversationError(msg)
+        recorded = self.deliveries.get(report.episode_id)
+        if recorded is None or recorded.state is not SpokenDeliveryState.UNKNOWN:
+            return
+        if not report.episode_id.startswith(f"conv:{conversation_id}:"):
+            return
+        self.deliveries[report.episode_id] = report.delivery
 
     async def resume(
         self,
@@ -2129,6 +2213,42 @@ def _pieces_of(reply: str | None) -> tuple[str, ...]:
         pieces[1] = pieces[0] + pieces[1]
         del pieces[0]
     return () if not pieces[0].strip() else tuple(pieces)
+
+
+def _refuse_unusable_report(
+    report: SpokenDeliveryReport | None, *, conversation_id: str | None
+) -> None:
+    """The two local refusals ADR-0205 §1 and §2 place on a supplied report.
+
+    A report beside no conversation names a turn that cannot exist — a fresh
+    conversation contains none — and an ``UNKNOWN`` report is a value the hub writes
+    and never one a caller supplies: a device that does not know reports nothing, and
+    the absence of a report is spelled by omitting the argument.
+
+    Both are before any I/O, which is ADR-0085 §3's convention for a malformed
+    argument, and both are spelled here rather than shared with the engine's twin
+    because ``testing`` depends on ``core`` and what keeps the two agreeing is the
+    shared conformance suite that drives both.
+
+    Raises:
+        ValueError: If either refusal applies.
+    """
+    if report is None:
+        return
+    if conversation_id is None:
+        msg = (
+            "a delivery report names a turn of a conversation, and a fresh conversation "
+            "contains no turn one could name; supply the conversation this report is "
+            "about, or no report (ADR-0205 §1)"
+        )
+        raise ValueError(msg)
+    if report.delivery.state is SpokenDeliveryState.UNKNOWN:
+        msg = (
+            "a device that does not know reports nothing: UNKNOWN is what this hub writes "
+            "for an unreported turn, and the absence of a report is spelled by omitting "
+            "the argument (ADR-0205 §2)"
+        )
+        raise ValueError(msg)
 
 
 def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:

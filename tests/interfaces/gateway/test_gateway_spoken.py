@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenDeliveryReport,
     SpokenTurn,
     TimeOfDay,
     TurnOutcome,
@@ -166,11 +167,16 @@ class _Budgeted(FakeAssistantEngine):
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
         """Record the budget, then answer as the canonical fake answers."""
         self.budgets.append(timeout)
         return await super().converse_spoken(
-            utterance, plays=plays, timeout=timeout, conversation_id=conversation_id
+            utterance,
+            plays=plays,
+            timeout=timeout,
+            conversation_id=conversation_id,
+            delivery=delivery,
         )
 
 
@@ -190,6 +196,7 @@ class _Untranscribable(FakeAssistantEngine):
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
         """Fail the way ADR-0200 §4 fails: classified, and chaining nothing."""
         self.calls.append(("converse_spoken", {"plays": plays}))
@@ -286,6 +293,10 @@ async def test_the_three_browser_owned_members_reach_the_engine() -> None:
                 {
                     "plays": (SpokenAudioFormat.MP4, SpokenAudioFormat.WEBM_OPUS),
                     "conversation_id": "conv-1",
+                    # ADR-0205 §7: the gateway "derives, defaults, composes and
+                    # invents no part" of the report, so a body carrying no
+                    # `delivery` relays none.
+                    "delivery": None,
                 },
             )
         ]
@@ -442,7 +453,7 @@ async def test_a_member_no_clause_names_is_read_by_nothing_and_refuses_nothing(
 
     assert status == 200
     assert [name for name, _ in harness.engine.calls] == ["converse_spoken"]
-    assert set(harness.engine.calls[0][1]) == {"plays", "conversation_id"}
+    assert set(harness.engine.calls[0][1]) == {"plays", "conversation_id", "delivery"}
 
 
 # --- ADR-0200 §9: a refused recording never travels inside the refusal ---------
@@ -580,6 +591,10 @@ async def test_a_recording_that_carried_no_words_is_not_an_error() -> None:
             "outcome": None,
             "spoken": None,
             "spoken_degraded": False,
+            # ADR-0205 §1: `episode_id` is `None` "exactly when the call recorded no
+            # turn", and a recording that carried no words is the first of the two
+            # shapes it names.
+            "episode_id": None,
         }
 
 

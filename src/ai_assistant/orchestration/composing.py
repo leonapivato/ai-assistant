@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -94,13 +95,15 @@ from ai_assistant.core.types import (
     Role,
     RoutableOperation,
     RouteOutcome,
+    SpokenDeliveryState,
     band_of,
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
+    from datetime import timedelta
 
     from ai_assistant.core.protocols import ModelProvider, StreamingCompleter
     from ai_assistant.core.types import (
@@ -111,6 +114,7 @@ if TYPE_CHECKING:
         EmailFacet,
         MemoryRecord,
         PlanStep,
+        SpokenDelivery,
         StepExecution,
         StepOutcome,
         TurnResult,
@@ -171,6 +175,14 @@ can be short, it can have a gap where a turn was deleted, and it is absent entir
 on a conversation's first turn or where reading it failed. Where it is absent, or \
 does not reach back far enough to answer, say that plainly rather than guessing at \
 what was said.
+
+An earlier turn in that block may carry a line in capitals saying how much of it the \
+user actually heard. Some answers are spoken aloud, and a spoken answer can be cut \
+off part-way or never reach anyone at all. Where such a line is there, believe it: do \
+not build on words the user did not hear, do not refer back to them as something you \
+already told them, and where they ask you to carry on or to finish what you were \
+saying, say the rest again in your own words from about where it stopped. A turn with \
+no such line is one you may treat as ordinary.
 
 TELL THE TRUTH ABOUT WHAT WAS DONE. The step account below is the record, and it \
 is shown to the user beside your reply:
@@ -422,7 +434,7 @@ class ComposingStage:
         self._model = model
         self._streaming = streaming
 
-    async def compose(
+    async def compose(  # noqa: PLR0913 — the turn, the step, the undriven steps, the channel's audience, the withholding fact and the tail's delivery facts; each is a distinct input this stage is given
         self,
         *,
         turn: TurnResult,
@@ -430,6 +442,7 @@ class ComposingStage:
         undriven: Sequence[PlanStep],
         unbounded_audience: bool = False,
         withheld: bool = False,
+        deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -469,6 +482,14 @@ class ComposingStage:
                 and never sees a span of it. Only meaningful beside
                 ``unbounded_audience``, since nothing is withheld from a bounded
                 channel at this rung.
+            deliveries: What a device reported playing of the turns in ``turn``'s
+                replay tail, keyed by the episode each fact qualifies (ADR-0205 §5).
+                **Supplied, not looked up**: this stage gains no store, no second
+                context assembly and no second retrieval for it, and a fact whose
+                episode is not among ``turn.memories`` is not here at all — a
+                withheld record takes its delivery with it. Empty on a turn whose
+                tail carries none, which is every turn until one has run on
+                ``converse_spoken``.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -488,7 +509,10 @@ class ComposingStage:
                 ),
             ),
             Message(
-                role=Role.USER, content=_render_request(turn, step, undriven, withheld=withheld)
+                role=Role.USER,
+                content=_render_request(
+                    turn, step, undriven, withheld=withheld, deliveries=deliveries
+                ),
             ),
         )
         try:
@@ -646,6 +670,7 @@ class ComposingStage:
         step: StepOutcome | None,
         undriven: Sequence[PlanStep],
         room: int,
+        deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -695,6 +720,11 @@ class ComposingStage:
                 guessing at a fraction of the frame size"). Zero or negative means
                 no chunk can be yielded at all, which is the pre-commit degradation
                 rather than a truncation.
+            deliveries: The tail's delivery facts, as :meth:`compose` takes them
+                (ADR-0205 §5). A streamed turn's channel audience is bounded, so
+                nothing here is withheld — but its tail can still carry a turn the
+                owner did not hear, and §5 supplies the facts wherever they are
+                known rather than by the channel this turn arrived on.
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -709,7 +739,12 @@ class ComposingStage:
         """
         conversation = (
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
-            Message(role=Role.USER, content=_render_request(turn, step, undriven, withheld=False)),
+            Message(
+                role=Role.USER,
+                content=_render_request(
+                    turn, step, undriven, withheld=False, deliveries=deliveries
+                ),
+            ),
         )
         answer = _Coalescing(room=room)
         stopped = False
@@ -881,6 +916,7 @@ def _render_request(
     undriven: Sequence[PlanStep],
     *,
     withheld: bool,
+    deliveries: Mapping[str, SpokenDelivery],
 ) -> str:
     """Render the whole of what the stage was given into the user-turn prompt.
 
@@ -913,6 +949,8 @@ def _render_request(
         step: What became of the step the turn drove.
         undriven: The plan's steps that were not driven.
         withheld: Whether ADR-0199 §3 held anything back from ``turn``.
+        deliveries: What a device reported playing of each turn of the tail, keyed
+            by the episode it qualifies (ADR-0205 §5).
 
     Returns:
         The user-turn prompt.
@@ -924,7 +962,7 @@ def _render_request(
     ]
     lines += _render_context(turn.context)
     lines.append("")
-    lines += _render_memories(turn.memories, degraded=turn.memory_degraded)
+    lines += _render_memories(turn.memories, degraded=turn.memory_degraded, deliveries=deliveries)
     if withheld:
         lines.append("")
         lines.append(_WITHHELD_LINE)
@@ -1029,7 +1067,12 @@ def _render_facet_stamp(facet: ContextFacet) -> list[str]:
     return lines
 
 
-def _render_memories(memories: Sequence[MemoryRecord], *, degraded: bool) -> list[str]:
+def _render_memories(
+    memories: Sequence[MemoryRecord],
+    *,
+    degraded: bool,
+    deliveries: Mapping[str, SpokenDelivery],
+) -> list[str]:
     """Render the conversation's own turns, then what the turn retrieved.
 
     **Two headings, because ``memories`` carries two things and one heading told the
@@ -1054,12 +1097,22 @@ def _render_memories(memories: Sequence[MemoryRecord], *, degraded: bool) -> lis
     for the same reason ``TurnResult.memory_degraded`` exists as a separate field.
     The note covers both groups, because the flag does: ``TurnResult.memory_degraded``
     folds a failed history read into the same boolean as a failed retrieval.
+
+    **A delivery fact is written under the turn it is about, and only in the tail**
+    (ADR-0205 §5). It is what the device said it played of that turn's spoken
+    answer, and it belongs beside the words it qualifies rather than in a block of
+    its own: a line saying "the listener heard about three seconds of this" three
+    bullets away from the answer it is about is a fact the model has to join up.
+    The retrieved group carries none, because §5 supplies the facts off the replay
+    tail and a record retrieved by relevance is not one of those rows.
     """
     turns, retrieved = _split_conversation_tail(memories)
     lines: list[str] = []
     if turns:
         lines.append(_TAIL_HEADING)
-        lines += [_render_record(record) for record in turns]
+        for record in turns:
+            lines.append(_render_record(record))
+            lines += _render_delivery(deliveries.get(record.id))
         lines.append("")
     lines.append(_RETRIEVED_HEADING)
     if retrieved:
@@ -1074,6 +1127,73 @@ def _render_memories(memories: Sequence[MemoryRecord], *, degraded: bool) -> lis
             "and say that personal memory was unavailable if the question needed it."
         )
     return lines
+
+
+def _render_delivery(delivery: SpokenDelivery | None) -> list[str]:
+    """Say what a device reported playing of one turn's spoken answer (ADR-0205 §5).
+
+    **Bounded by one rule and otherwise this lane's** (§5): a turn whose state is not
+    ``COMPLETE`` is never rendered as heard in full, and a turn carrying **no**
+    delivery is never rendered as heard at all. Both are met by saying nothing where
+    there is nothing to say and by saying what is unknown where it is unknown.
+
+    - **No fact** — a turn that did not run on ``converse_spoken``, or one whose
+      episode came from a channel that reports nothing — contributes no line. Nothing
+      asserts it was heard and nothing asserts it was not; the prompt is exactly what
+      it was before ADR-0205, which is what keeps a text turn's rendering unchanged.
+    - **``COMPLETE``** contributes no line either, which §5 permits in as many words:
+      "a ``COMPLETE`` turn may be rendered as nothing, because a device saying it
+      played the answer out is exactly the state the stage would otherwise assume".
+      Adding a line for it would spend prompt on the null hypothesis and teach the
+      model that the *absence* of one means the opposite.
+    - **``UNKNOWN``** contributes the sentence that is the whole point of the
+      decision: nobody reported, so the answer must not be built on as heard.
+    - **``INTERRUPTED``** contributes the two durations, which is what makes
+      "continue what you were saying" answerable without an intent, a route or a
+      stored rendering (§6).
+
+    **Granularity is time and the durations are rounded to a tenth of a second**
+    (§2). No word, sentence or character position is derived from them and none is
+    promised: the synthesizer gives no word timestamps, and §5 leaves the rounding to
+    this function while §2 forbids inventing a finer unit than the one it has.
+
+    Args:
+        delivery: The fact recorded for this turn, or ``None`` where none was.
+
+    Returns:
+        The continuation lines to write under the turn's own bullet; empty where the
+        turn contributes none.
+    """
+    if delivery is None or delivery.state is SpokenDeliveryState.COMPLETE:
+        return []
+    if delivery.state is SpokenDeliveryState.UNKNOWN:
+        return [
+            "    HOW MUCH OF THIS THE USER HEARD IS UNKNOWN: it was spoken aloud and no "
+            "device has reported playing it. Do not assume they heard it."
+        ]
+    # `INTERRUPTED`, and the validator has already established that both durations are
+    # present and that `played` is strictly below `rendered`.
+    return [
+        f"    THE USER DID NOT HEAR ALL OF THIS: the device played about "
+        f"{_seconds(delivery.played)} of about {_seconds(delivery.rendered)} seconds of "
+        f"it aloud and then stopped. Treat the rest as unsaid, and if they ask you to "
+        f"carry on, take up from about there."
+    ]
+
+
+def _seconds(duration: timedelta | None) -> str:
+    """One duration as seconds to a tenth, for a prompt.
+
+    ``None`` is unreachable from :func:`_render_delivery`'s one caller —
+    :class:`~ai_assistant.core.types.SpokenDelivery`'s validator refuses a
+    ``COMPLETE`` or ``INTERRUPTED`` value carrying either duration absent — and is
+    spelled rather than asserted so that a defect upstream renders a word instead of
+    raising inside prompt assembly, which ADR-0170 §8's closed degradation set would
+    surface as a defect rather than as a composition failure.
+    """
+    if duration is None:  # pragma: no cover — refused by the type's own validator
+        return "an unknown number of"
+    return f"{duration.total_seconds():.1f}"
 
 
 def _split_conversation_tail(

@@ -1280,7 +1280,7 @@ def test_a_late_playback_failure_cannot_land_under_a_later_answer() -> None:
     writing = _functions(script)["couldNotPlay"]
 
     assert 'const slot = line(el("answer-body"), "", "notice")' in rendering
-    assert "void playSpoken(turn.spoken, slot)" in rendering
+    assert "void playSpoken(turn.spoken, slot" in rendering
     assert "if (!slot.isConnected) {" in writing
     # The notice is written through that one function and nowhere else, so a later caller
     # cannot reach the panel around the check.
@@ -1503,12 +1503,16 @@ def test_how_much_of_an_answer_sounded_is_one_value_across_a_resume() -> None:
     # nothing behind it, and what is behind the *playback* is the reading it inherits.
     assert "played: mine.played" in resuming
     assert "offset: 0" in resuming
-    # No report is built here. ADR-0205 §7's fourth body member is its own implementing
-    # lane's, and this one still sends the three the route has always read.
+    # The resumed record keeps the same subject, so a resume that runs to its end
+    # reports `COMPLETE` of the turn the press already reported `INTERRUPTED` of —
+    # which the hub answers by performing nothing, a turn being stamped once
+    # (ADR-0205 §1). The page needs no rule of its own to keep that true.
+    assert "episode: mine.episode" in resuming
+    assert "conversation: mine.conversation" in resuming
     sending = _functions(script)["sendRecording"]
     assert "asked.utterance" in sending
     assert "asked.plays" in sending
-    assert "asked.delivery" not in sending
+    assert "asked.delivery = played" in sending
 
 
 def test_a_recorder_that_would_not_start_is_advised_on_what_the_page_actually_knows() -> None:
