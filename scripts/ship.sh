@@ -689,6 +689,15 @@ _decide_floor() {
 # either way, and one awk process either way — a second encoder would be a second
 # thing to keep correct, and a second process per pathname would double the cost
 # the §4 path already counts.
+#
+# `prose` is the third caller, and it is layer 1 plus `& < >` alone. It renders
+# ADR-0209 §6's per-path REASON into the published record — generated prose whose
+# only variable parts are already inside backticks, where Markdown's emphasis and
+# link characters are literal. What backticks do not neutralise is raw HTML, so
+# those three are entity-encoded and nothing else is; running layer 2 over it
+# would spell every `_` and every backtick as an entity and leave the reader a
+# sentence they have to decode to read, which defeats the clause the reason
+# exists to satisfy.
 _encode_path() {
     _encode_arg="$1" _encode_layers="${2:-all}" LC_ALL=C awk 'BEGIN {
         s = ENVIRON["_encode_arg"]
@@ -711,6 +720,8 @@ _encode_path() {
             gsub(/&/, "\\&amp;", out)
             gsub(/</, "\\&lt;", out)
             gsub(/>/, "\\&gt;", out)
+        }
+        if (ENVIRON["_encode_layers"] == "all") {
             gsub(/\\/, "\\&#92;", out)
             gsub(/`/, "\\&#96;", out)
             gsub(/\*/, "\\&#42;", out)
@@ -748,7 +759,7 @@ _render_drift() {
         # same whole set, plus the reason, which is strictly more than before.
         why=""
         if [[ "${drift_is_floor[$i]:-0}" == "1" ]]; then
-            why=" — _$(_encode_path "${drift_reason[$i]}")_"
+            why=" — _$(_encode_path "${drift_reason[$i]}" prose)_"
         fi
         if [[ -n "${drift_dst[$i]}" ]]; then
             printf -- '- `%s` <code>%s</code> → <code>%s</code>%s\n' \

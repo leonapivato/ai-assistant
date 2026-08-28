@@ -518,6 +518,30 @@ def test_a_dotted_citation_is_free_where_only_the_qualifier_is_named(tmp_path: P
     assert judged.reasons == [_FREE]
 
 
+def test_a_removed_line_beginning_with_two_dashes_is_content_not_a_header(
+    tmp_path: Path,
+) -> None:
+    """`---` at the start of a removed line is only sometimes a file header.
+
+    A removed line whose own content begins with `--` renders as `---…`, so a
+    reader dropping every line starting with three dashes discards content and
+    under-binds — which is the one direction ADR-0209 §5 forbids. The headers are
+    recognised by their whole shape (`--- a/…`, `+++ b/…`, `--- /dev/null`)
+    instead.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing."), "notes/legacy.sql": "-- PROTOCOL_VERSION is pinned here\n"},
+        {"notes/legacy.sql": "\n"},
+    )
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The wire carries `PROTOCOL_VERSION`.")))
+
+    assert judged.owed
+    assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
 def test_a_module_qualified_citation_is_satisfied_by_the_path(tmp_path: Path) -> None:
     """`pkg.mod.Symbol` where the module path, not the contents, carries the words.
 
@@ -727,6 +751,50 @@ def test_an_unresolvable_protocol_base_binds(tmp_path: Path) -> None:
     assert any("resolves neither to typing.Protocol" in r for r in judged.reasons)
 
 
+def test_a_widening_under_a_guarded_protocol_import_binds(tmp_path: Path) -> None:
+    """The import may sit under a `try:`; the resolution has to find it there.
+
+    `try: from typing import Protocol / except ImportError: from typing_extensions
+    import Protocol` is an ordinary spelling, and reading only the module's
+    top-level statements would resolve every base in such a file to nothing. §6
+    would then bind — which is safe, but for a reason belonging to the reader
+    rather than to the file, and it would make §4's unconditional limb
+    unobservable in exactly the files that use it.
+    """
+    before = (
+        "try:\n    from typing import Protocol\nexcept ImportError:\n"
+        "    from typing_extensions import Protocol\n\n\n"
+        "class Reader(Protocol):\n    def read(self) -> str: ...\n"
+    )
+    after = before.replace(
+        "    def read(self) -> str: ...",
+        "    def read(self) -> str: ...\n    def peek(self) -> str: ...",
+    )
+
+    judged = _protocols_case(tmp_path, before, after)
+
+    assert judged.owed
+    assert any("widens Protocol `Reader`" in r and "peek" in r for r in judged.reasons)
+
+
+def test_two_classes_sharing_a_name_in_one_endpoint_bind(tmp_path: Path) -> None:
+    """A base written under an ambiguous name resolves to nothing decidable.
+
+    §6 binds it. This is over-binding on a spelling `core/protocols.py` does not
+    use, which is the asymmetry ADR-0209 §5 states and prices: under-binding is
+    the failure it must not have.
+    """
+    duplicated = (
+        "from typing import Protocol\n\n\nclass Reader(Protocol):\n    def read(self) -> str: ...\n"
+        "\n\nif True:\n    class Reader(Protocol):\n        def read(self) -> bytes: ...\n"
+    )
+
+    judged = _protocols_case(tmp_path, _ONE_PROTOCOL, duplicated)
+
+    assert judged.owed
+    assert any("two classes are named `Reader`" in r for r in judged.reasons)
+
+
 def test_a_protocols_endpoint_that_will_not_parse_binds(tmp_path: Path) -> None:
     """§4 says an endpoint that cannot be parsed binds, on §6's footing."""
     judged = _protocols_case(tmp_path, _ONE_PROTOCOL, "class Reader(Protocol)\n    def read(\n")
@@ -907,6 +975,43 @@ def test_ship_binds_when_the_floor_test_is_not_beside_it(tmp_path: Path) -> None
     assert result.returncode != 0
     assert "§3 floor            NOT DECIDED" in result.stderr
     assert "floor_test.py is missing" in result.stderr
+
+
+# --- §6's disclosure: the record names the test, per floor path ---------------
+
+
+def test_the_published_record_names_the_test_that_cleared_each_floor_path(tmp_path: Path) -> None:
+    """Narrowing what the floor charges for narrows nothing about what is shown.
+
+    ADR-0027 §4 is explicit that the published file set is "not context for a
+    decision, it *is* the decision", and ADR-0209 §6 adds the reason beside each
+    floor path — so the merge reviewer sees the same whole set plus why each floor
+    path was cleared, which is strictly more than they saw before.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing here names anything."), "notes/other.md": "x\n"},
+        {_PLAN: "an ordinary change\n"},
+    )
+
+    def mutate(r: Path) -> None:
+        (r / _ADR).write_text(_adr("Ratified, still naming nothing."))
+        (r / "notes" / "other.md").write_text("y\n")
+
+    judged = _judge(repo, tmp_path, mutate)
+
+    assert not judged.owed
+    posted = (tmp_path / "comment.md").read_text()
+    # The whole set, as §4 has always required.
+    assert "**2 file(s) changed by the base move**" in posted
+    assert "0042-a-decision-about-things.md" in posted
+    assert "notes/other.md" in posted
+    # The reason, on the floor path and only on the floor path.
+    floor_line = next(line for line in posted.splitlines() if "0042-a-decision" in line)
+    other_line = next(line for line in posted.splitlines() if "notes/other.md" in line)
+    assert "every ADR-0209 §3/§4 test cleared this path" in floor_line
+    assert "—" not in other_line.split("</code>")[-1]
 
 
 # --- Issue #1750: the description snapshot ------------------------------------

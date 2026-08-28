@@ -96,6 +96,11 @@ _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 # name — which is what an enum member and an annotated attribute look like.
 # ADR-0209 §4's second limb turns on "a name whose *definition* the move
 # changed", never on every identifier a hunk happens to contain.
+# `--- a/path`, `+++ b/path`, `--- /dev/null`. The prefixes are pinned by the
+# caller's `_diff_opts` (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), so
+# these are the only three shapes the rendered patch can carry.
+_FILE_HEADER_RE = re.compile(r"^(?:\+\+\+|---) (?:a/|b/|/dev/null)")
+
 _DEFINITION_RE = re.compile(
     r"^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)"
     r"|^\s*class\s+(?P<cls>[^\W\d]\w*)"
@@ -235,12 +240,14 @@ class Pr:
         The ``+++``/``---`` file headers are dropped: they carry pathnames, not
         content, and §5's tests about "a symbol an added or removed line
         carries" would otherwise be satisfied by the *filename* of every file
-        the PR touches.
+        the PR touches. They are recognised by their whole shape rather than by
+        their first three characters, because a *removed* line whose own content
+        begins with ``--`` renders as ``---…`` and is content, not a header.
         """
         kept = [
             line
             for line in self.diff_text.splitlines()
-            if line[:1] in {"+", "-"} and not line.startswith(("+++", "---"))
+            if line[:1] in {"+", "-"} and _FILE_HEADER_RE.match(line) is None
         ]
         return "\n".join(kept)
 
@@ -381,7 +388,12 @@ def _typing_bindings(tree: ast.Module) -> _Bases:
     """
     names: set[str] = set()
     modules: set[str] = set()
-    for node in tree.body:
+    # Walked rather than read off `tree.body`, because `from typing import
+    # Protocol` under an `if TYPE_CHECKING:` guard is an ordinary spelling and a
+    # top-level-only reading would resolve every base in such a file to nothing —
+    # which §6 binds on, but for a reason that is this reader's rather than the
+    # file's.
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in {"typing", "typing_extensions"}:
             names.update(
                 alias.asname or alias.name for alias in node.names if alias.name == "Protocol"
@@ -431,14 +443,48 @@ def _declared_members(node: ast.ClassDef) -> set[str]:
     counted here can only ever make a widening more visible.
     """
     members: set[str] = set()
-    for stmt in node.body:
+    # `if TYPE_CHECKING:` and `try:` blocks inside a class body are descended
+    # into: a member declared under a guard is a member. Nothing deeper is —
+    # a name bound inside a method is a local, not surface.
+    pending: list[ast.stmt] = list(node.body)
+    while pending:
+        stmt = pending.pop()
         if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
             members.add(stmt.name)
         elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             members.add(stmt.target.id)
         elif isinstance(stmt, ast.Assign):
             members.update(t.id for t in stmt.targets if isinstance(t, ast.Name))
+        elif isinstance(stmt, ast.If | ast.Try):
+            pending.extend(stmt.body)
+            pending.extend(stmt.orelse)
+            if isinstance(stmt, ast.Try):
+                pending.extend(stmt.finalbody)
+                for handler in stmt.handlers:
+                    pending.extend(handler.body)
     return members
+
+
+def _classes_in(tree: ast.Module) -> dict[str, ast.ClassDef]:
+    """Every ``ClassDef`` in the file, keyed by name.
+
+    Walked rather than read off ``tree.body``, because a Protocol declared inside
+    an ``if TYPE_CHECKING:`` or a ``try:`` block is still surface an
+    implementation must satisfy.
+
+    Raises:
+        UnevaluableError: Two classes share a name. A base written under that name
+            cannot be resolved to one of them, so the endpoint is undecidable and
+            §6 binds — over-binding on a spelling `core/protocols.py` does not use.
+    """
+    classes: dict[str, ast.ClassDef] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if node.name in classes:
+            raise UnevaluableError(f"two classes are named `{node.name}` in one endpoint")
+        classes[node.name] = node
+    return classes
 
 
 def protocol_surfaces(source: str) -> dict[str, frozenset[str]]:
@@ -468,7 +514,7 @@ def protocol_surfaces(source: str) -> dict[str, frozenset[str]]:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as exc:
         raise UnevaluableError(f"the endpoint will not parse ({exc.__class__.__name__})") from exc
-    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    classes = _classes_in(tree)
     bindings = _typing_bindings(tree)
     declared = set(classes)
 
