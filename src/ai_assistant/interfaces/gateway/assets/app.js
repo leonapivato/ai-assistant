@@ -3603,10 +3603,21 @@ const MICROPHONE_UNAVAILABLE =
 // already ended throws `NotSupportedError` out of `start`, and without the guard below
 // that throw escaped `startTalking` and left the control saying "Listening" with no
 // press it would ever accept again.
+//
+// **It advises what is known, and a retry is not it** (#1694). The milestone-19 QA run
+// met this line in a build whose refusal is *permanent* — `chromium_headless_shell`,
+// which recognises both formats and has an encoder for neither — where "holding the
+// button again is the thing to try" is advice an owner follows several times before
+// giving up. Nothing here can tell that browser from the transient case: `start()`
+// throws the same `NotSupportedError` for a track that has just ended and for a build
+// that will never encode anything. So the sentence says which two conditions it cannot
+// distinguish, and offers the one route that works under either.
 const RECORDER_REFUSED =
   "This browser would not start recording, so nothing was recorded and nothing was " +
-  "sent. The microphone was opened and the recorder would not take it. Holding the " +
-  "button again is the thing to try; typing works either way.";
+  "sent. The microphone was opened and the recorder would not take it. Whether that " +
+  "was this press or is this browser, the page cannot tell: pressing again may work, " +
+  "and a browser with no encoder for either format this page records refuses every " +
+  "press the same way. Typing works either way.";
 
 // The press that reached :data:`LONGEST_RECORDING_BYTES`. Said rather than silent,
 // because a recording that stopped while the owner was still speaking is a question with
@@ -3784,9 +3795,17 @@ function stopPlaying() {
 // rather than that some press is in flight.
 let press = null;
 
-// What this browser can encode, or `null` where it can encode none of them. Asked of
-// `MediaRecorder` rather than assumed from the user agent, which is the only honest
-// way to know: `isTypeSupported` is the browser's own answer about its own encoder.
+// What this browser says it can encode, or `null` where it names none of them. Asked of
+// `MediaRecorder` rather than assumed from the user agent, which is as close to an
+// honest answer as the platform offers.
+//
+// **It is an answer about recognition and not about encoding** (#1694). The method
+// promises only that the type is one the browser *recognises*; it does not promise an
+// encoder for it. Driving the page found the gap rather than reasoning to it:
+// `chromium_headless_shell` answers `true` for both members of `TALK_FORMATS`, then
+// throws `NotSupportedError: no encoder` out of `start()` — on a live track, and
+// identically with no options at all. So `start()` is the only real test, which is why
+// `startTalking` guards it and says what happened rather than trusting this call.
 function recordableFormat() {
   if (typeof window.MediaRecorder !== "function") {
     return null;

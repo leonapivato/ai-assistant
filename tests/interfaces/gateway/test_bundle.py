@@ -1373,6 +1373,43 @@ def test_one_playback_is_in_the_air_and_taking_the_record_over_ends_it() -> None
     assert script.count("mine.source.stop()") == 1
 
 
+def test_a_recorder_that_would_not_start_is_advised_on_what_the_page_actually_knows() -> None:
+    """Issue #1694, found by the milestone-19 QA run (#1691) and filed rather than fixed.
+
+    Two claims around a guard that behaves correctly. ``MediaRecorder.isTypeSupported``
+    answers ``true`` for a type the browser *recognises*; it promises no encoder for it.
+    ``chromium_headless_shell`` answers ``true`` for both members of ``TALK_FORMATS`` and
+    then throws ``NotSupportedError: no encoder`` out of ``start()`` — on a live track, and
+    identically with no options at all. The comment calling that method "the browser's own
+    answer about its own encoder" claimed a guarantee the platform does not give, and the
+    claim was load-bearing: it is the stated reason the format is chosen from that call.
+
+    And "holding the button again is the thing to try" is right for a transient refusal and
+    wrong for a browser with no encoder, where every press fails identically. Nothing in
+    the page can tell those apart — ``start()`` throws the same error for both — so the
+    sentence names the two conditions it cannot distinguish instead of advising one of
+    them, and keeps the half that works either way.
+
+    **Read from the shipped file and not from :func:`_code`.** What was wrong here was a
+    *comment*, and the second of the two claims is one — so the check that it no longer
+    stands has to read the text that carries it, which the comment-stripped view by
+    construction cannot. The withdrawn phrase is asserted absent from the whole file for
+    the same reason: a claim moved into prose is a claim the page still makes.
+    """
+    script = _code("app.js")
+    document = _asset("app.js")
+    refused = _constant(script, "RECORDER_REFUSED")
+
+    assert "Holding the button again is the thing to try" not in document
+    assert "the page cannot tell" in refused
+    assert "Typing works either way." in refused
+    # The handling was never what was wrong: both guards stand, and both still say this.
+    assert _functions(script)["startTalking"].count("fault(RECORDER_REFUSED,") == 2
+    assert "the browser's own answer about its own encoder" not in document
+    assert "promises only that the type is one the browser *recognises*" in document
+    assert "`start()` is the only real test" in document
+
+
 def test_the_audio_context_is_resumed_from_every_state_that_is_not_running() -> None:
     """Issue #1690, deferred from PR #1687's adversarial review as a ``minor``.
 
