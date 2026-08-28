@@ -120,16 +120,25 @@ def test_a_detached_round_that_dies_leaves_the_reason_in_its_log(tmp_path: Path)
     assert "the service refused this request" in waited.stderr
 
 
-def test_an_empty_review_quotes_the_stream_too(tmp_path: Path) -> None:
-    """The other half: ``--json`` can carry a failure and still exit 0."""
+def test_a_turn_that_fails_while_the_process_exits_zero_is_quoted(tmp_path: Path) -> None:
+    """The other half: ``--json`` can carry a failure and still exit 0.
+
+    Nothing is written to ``-o`` then, so the empty-review guard is what catches
+    it — and the reason is in the event stream, on the stdout this script routes
+    into a temp file it is about to delete. Asserting on the failure's own
+    message rather than on the stream merely being non-empty: an implementation
+    that quoted only completed streams would satisfy the weaker form.
+    """
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    result = run_review(repo, tmp_path, "adversarial", "main", check=False, FAKE_CODEX_REVIEW="")
+    result = run_review(
+        repo, tmp_path, "adversarial", "main", check=False, FAKE_CODEX_TURN_FAILED="1"
+    )
 
     assert result.returncode != 0
     assert "codex produced an empty review" in result.stderr
-    assert "turn.completed" in result.stderr
+    assert "the turn failed mid-stream" in result.stderr
 
 
 def _loop_lock(repo: Path, base: str = "main") -> Path:

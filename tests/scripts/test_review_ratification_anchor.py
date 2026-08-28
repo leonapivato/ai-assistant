@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import require_artifact, run_review
+from test_codex_review_start_wait import _env, _run
 from test_ship import _fake_gh, _git, _run_ship
 
 _RATIFY = Path(__file__).parents[2] / "scripts" / "adr_ratify.py"
@@ -197,3 +198,50 @@ def test_the_round_owed_after_the_flip_satisfies_ship(tmp_path: Path) -> None:
     posted = (tmp_path / "comment.md").read_text()
     assert "ADR ratification" in posted
     assert _ADR_PATH in posted
+
+
+def _flip_only_repo(tmp_path: Path) -> Path:
+    """A PR carrying nothing but the ratification flip.
+
+    The draft is already on ``main``, so the flip's parent *is* the merge base —
+    and re-anchoring therefore makes the reviewed range empty. This shape is not
+    coverable at all: ADR-0165 §3 anchors ``ship`` on that same parent, so no
+    artifact can name content the PR adds. What is pinned here is that the harness
+    says so, rather than spending the grace and then blaming the round.
+    """
+    repo = _adr_repo(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--ff-only", "feature")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-qb", "flip-only")
+    assert _ratify(repo, "ratify").returncode == 0
+    return repo
+
+
+def test_a_flip_only_branch_is_refused_by_start_rather_than_waited_out(
+    tmp_path: Path,
+) -> None:
+    """Round 1 of PR #1722 found this: the child exits before it can be observed.
+
+    A round exits 0 on an empty range, and it does so *before* publishing the
+    marker ``--start`` polls for — so a detached start would wait out the whole
+    grace and then report a failure naming the wrong thing entirely.
+    """
+    repo = _flip_only_repo(tmp_path)
+
+    started = _run(repo, _env(tmp_path), "--start", "adversarial", "main")
+
+    assert started.returncode == 1
+    assert "nothing to review" in started.stderr
+    assert "ratification flip" in started.stderr
+    assert "No round has been started." in started.stderr
+
+
+def test_the_foreground_round_says_the_same_thing(tmp_path: Path) -> None:
+    """The round's own answer on the same branch, for the same reader."""
+    repo = _flip_only_repo(tmp_path)
+
+    result = run_review(repo, tmp_path, "adversarial", "main", check=False)
+
+    assert "no changes between" in result.stderr
+    assert "nothing but the flip" in result.stderr
