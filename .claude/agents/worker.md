@@ -189,16 +189,18 @@ So when the coordinator sends you back to rebase, that is the plan working. Reba
 
 **Do not run a fresh review to make `ship` accept.** Whether the moved base costs a round is decided by ADR-0027 §2, and `CONTRIBUTING.md` → "Report the review, then mark it ready" carries every condition. Where the base move clears the floor and leaves the reviewed patch untouched, the existing artifact still covers the head and `ship` publishes the drift.
 
+**Since ADR-0209 the floor has two halves, and only one of them binds on sight.** The standing review contracts — `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`, `scripts/codex-review.sh` — invalidate every artifact of every persona outright, because they are the instructions the reviewer is conducted under (§1). `docs/adr/**`, `src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` cost the round only where one of four tests binds (§§2-4): your PR's text cites the moved ADR by number, the moved ADR names a path your diff touches or a symbol its lines carry, the move adds or widens a `Protocol`, or — for any other contract-file move — your diff touches `src/ai_assistant/core/` or names a definition the move changed. Anything undecidable binds (§6). So a merged ADR in your base move is no longer a round by itself, and a `core/types.py` field is not one either. **Do not work out which test applies** — `CONTRIBUTING.md` carries the clauses, and the drill prints the answer per path.
+
 Some base moves genuinely do cost a round, and then the review is owed — the point is not that you never re-review, it is that **you do not decide to spend on your own judgement.** Run the drill below *before* you push, and the two cases separate cleanly:
 
-- **The drill predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry, the recorded base is not an ancestor of the new merge base. The round is really owed. Say so in your report with the drill's own figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
+- **The drill predicts a refusal** — a floor path *bound*, the patch identity changed, the range has a pathless entry, the recorded base is not an ancestor of the new merge base. The round is really owed. Say so in your report with the drill's own figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
 - **The drill said the artifact covers HEAD and `ship` then refuses on coverage anyway.** The drill *is* `ship`, so that is the same code disagreeing with itself across two runs — which makes it more worth surfacing, not less. It is a **STOP**: halt and quote the refusal verbatim. Do not buy a round to make it go away; paying for it silently hides it from everyone.
 
 **Neither bullet applies to a refusal that never reached the coverage question.** `ship` and the drill both check the tree, the branch, the PR and the byte budgets *before* the acceptance loop runs — a dirty tree (untracked files count), `main`, a detached `HEAD`, no PR, a fork, a base fetch that failed, a malformed `CODEX_SHIP_DRIFT_BUDGET`, and for the drill a `HEAD` not yet rebased onto the fetched tip. Every one of those is a condition to fix and rerun; none of them is a statement about whether a round is owed, so an untracked scratch file is not a review round and a `ship` that refuses on one after a clean drill is not the contradiction the STOP above is for. The marker is the drill's own header — `ship: drill — ADR-0027 §2 coverage, computed but not posted` — which prints only once the acceptance loop has run. If it is absent, the run made no coverage claim at all.
 
 ### Prove the moved-base path before you push — run the drill, never a replica
 
-`scripts/ship.sh --drill` answers ADR-0027 §2's question with `ship`'s own code: the same acceptance loop, the same `_is_floor_path`, the same §4 budget. It writes nothing to GitHub, and it tolerates a PR head that still lags `HEAD` — that is its normal state, because it exists to run *before* the push.
+`scripts/ship.sh --drill` answers ADR-0027 §2's question with `ship`'s own code: the same acceptance loop, the same floor test, the same §4 budget. That test is `scripts/floor_test.py`, which `ship` resolves beside itself and which the acceptance loop and `--drill` both read — one implementation of ADR-0209 §§1-5, never two statements of one rule (§6). It writes nothing to GitHub, and it tolerates a PR head that still lags `HEAD` — that is its normal state, because it exists to run *before* the push.
 
 **Rebase first, drill second**, and the drill enforces that order rather than merely asking for it: on a `HEAD` that does not contain the fetched base tip it refuses outright, because the merge base there is still the *old* one. The floor would be tested over the range up to that — a base move you have already accounted for rather than the one you are asking about, and where nothing else has moved, an empty range. Either way the "clear" answers a different question (issue #751).
 
@@ -210,17 +212,29 @@ git fetch origin "$base" && git rebase FETCH_HEAD
 scripts/ship.sh --drill        # or: just drill
 ```
 
-**Do not assemble that check by hand out of `ship.sh`'s parts.** This section used to tell you to, and issue #751 records two ways the hand-built replica returned "floor clear" for a base move that in fact breached the floor: `_is_floor_path` lives *outside* the `>>> shared-patch-identity` markers, so a replica sourcing only that block called a function that did not exist, the `&&` never fired, and no breach was recorded; and run before the rebase it tested the floor over nothing. Both are now closed by construction instead of by instruction — read the report rather than rebuilding the reasoning behind it.
+**Do not assemble that check by hand out of `ship.sh`'s parts.** This section used to tell you to, and issue #751 records two ways the hand-built replica returned "floor clear" for a base move that in fact breached the floor: the floor test of the day, `_is_floor_path`, lived *outside* the `>>> shared-patch-identity` markers, so a replica sourcing only that block called a function that did not exist, the `&&` never fired, and no breach was recorded; and run before the rebase it tested the floor over nothing. Both are now closed by construction instead of by instruction — read the report rather than rebuilding the reasoning behind it. `_is_floor_path` itself is gone: ADR-0209 §6 makes one implementation of the rule normative, and it is `scripts/floor_test.py`. That the replica has one more test to get wrong is a reason not to build one, not a reason to update yours.
 
-**Read what the report declines to claim, not only its verdict.** It prints its inputs — `HEAD` and its tree, the fetched base tip, the merge base, the patch identity — then, per recorded base, the base move's file set with floor paths marked `[FLOOR]`, and the §2(b) verdict. The word `clear` is never printed without the file set it was decided over, and **three distinct sentences mean "no floor claim was made"**. They are not interchangeable, and none of them is a clear:
+**Read what the report declines to claim, not only its verdict.** It prints its inputs — `HEAD` and its tree, the fetched base tip, the merge base, the patch identity — then, per recorded base, the base move's file set with floor paths marked `[FLOOR]`, and the §2(b) verdict. Each marked path carries, on the line under it, the test that bound it or that every test cleared it — ADR-0209 §6's disclosure, so that "why did this cost a round" is never something you reconstruct by hand:
+
+```text
+      [FLOOR] M docs/adr/0209-a-floor-base-move-costs-a-round-....md
+              bind: §3 — the PR's text cites ADR-0209, the decision this move landed
+      [FLOOR] M src/ai_assistant/core/types.py
+              free: every ADR-0209 §3/§4 test cleared this path
+```
+
+A `[FLOOR]` mark says only that the path is *in* the floor; the `bind:`/`free:` line under it is what decides whether it cost you anything, and the summary below repeats which way it went.
+
+The word `clear` is never printed without the file set it was decided over, and **four distinct sentences mean "no floor claim was made"**. They are not interchangeable, and none of them is a clear:
 
 - `§3 floor  NOT EVALUATED` — no artifact reached §2(b) at all: either the base did not move (path (a) governs and the tree comparison is the whole test), or every artifact failed an earlier clause. Nothing was tested, and what follows says which case you are in: a refusal naming the clause that failed, or an acceptance, which means path (a) governed and §2(b) was never needed.
 - `listing  UNREADABLE` — the base move's file set could not be read from this clone, so the floor is untested and §2(b) is unavailable.
 - `§3 floor  NOT CLAIMED` — the floor *was* tested over the complete set and found no breach, but the set is too large to render whole, and §4 forbids a truncated one. So it is not a clear you can check and is not offered as one; §2(b) is unavailable here regardless (the report names the budget variable to raise if you need the set on screen).
+- `§3 floor  NOT DECIDED` — the test could not be *run* at all, and the report names what stopped it. ADR-0209 §6 binds anything undecidable, so the base move costs its round; no path is marked, because the run that decides which paths are floor paths is the run that did not happen.
 
 A breach, by contrast, is stated whether or not the listing fits on screen — that is the conservative direction, and it costs the round either way.
 
-Two real ones. On **PR #765** the base move touched a single non-floor file (`.claude/skills/dispatch-agents/SKILL.md`) — the shape the drill states as `§3 floor  clear over the 1 path(s) listed above.` with `§2(b) verdict  available — the artifact covers HEAD`, and `ship` then published the drift and cost no round. On **PR #760** it printed this (elisions marked), and the round was genuinely owed:
+Two real ones. On **PR #765** the base move touched a single non-floor file (`.claude/skills/dispatch-agents/SKILL.md`) — the shape the drill states today as `§3 floor  clear over the 1 path(s) listed above — every floor path among them cleared every ADR-0209 test.` with `§2(b) verdict  available — the artifact covers HEAD`, and `ship` then published the drift and cost no round. On **PR #760** it printed this (elisions marked), and the round was genuinely owed:
 
 ```text
   §3 floor              NOT EVALUATED — no artifact reached §2(b).

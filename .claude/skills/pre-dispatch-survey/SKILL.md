@@ -181,9 +181,13 @@ mechanisms put the cost there rather than further out.
 
 **What the cut costs, accepted deliberately.** Consumer lanes serialize behind
 the contract lane's merge instead of running beside it, and every additional PR
-pays its own floor rounds out of the same finite review quota. That is the
-price of a contract that has met a real consumer before it hardens, and of
-lanes that finish.
+pays its own floor rounds out of the same finite review quota. ADR-0209's
+narrowing does not relieve this cut in particular, and it is worth saying why: a
+contract lane's merge adds or widens a `Protocol`, which is the one limb that
+binds every open lane unconditionally (§4), and a consumer lane cites the
+contract ADR by number, which binds it under §3. This split is squarely inside
+what the floor still charges for. That is the price of a contract that has met a
+real consumer before it hardens, and of lanes that finish.
 
 **Stated without the batch that prompted it, deliberately** — §2's caution
 applies to this rule as much as to a scope heuristic. The incident rots into a

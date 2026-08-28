@@ -112,8 +112,8 @@ An under-specified brief is the largest source of rework. Each one carries:
 - **Cross-lane interactions** in both directions: what this lane will see if
   another merges first, and what it must not assume. Say **where in the merge
   order it sits and why** (§5). A lane told it merges last plans for the rebase
-  instead of reporting as though it were finished; a lane told it holds a floor
-  path knows its own merge is the expensive one.
+  instead of reporting as though it were finished; a lane told it holds a path the rest of
+  the wave binds across knows its own merge is the expensive one.
 - **The finishing loop** — full gate, `just review-codex`, triage, `just ship`,
   `just ready` — and that the agent owns all of it without asking. Name `just
   ready` rather than bare `gh pr ready`: it is the recipe carrying ADR-0165 §5's
@@ -274,8 +274,17 @@ late.
 `CONTRIBUTING.md` → "Report the review, then mark it ready" holds the floor and
 every condition — read it there rather than from memory. What the *order* turns
 on is this: a base move that clears the floor and leaves the reviewed patch
-untouched costs the rebasing lane **nothing**, while a base move landing in the
-floor invalidates its artifact **outright**, with no patch-identity relief. So:
+untouched costs the rebasing lane **nothing**, while a base move whose floor
+**binds** invalidates its artifact **outright**, with no patch-identity relief.
+
+Since ADR-0209 the floor asks two different questions of its two halves. The
+standing review contracts — `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`,
+`scripts/codex-review.sh` — bind every open lane on sight, because they are the
+instructions every reviewer is conducted under (§1). `docs/adr/**`,
+`src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` bind
+only where the moved text and the rebasing lane's own text name each other
+(§§2-4), with a `Protocol` added or widened the one limb that binds everybody;
+anything undecidable binds (§6). So:
 
 - **Lanes that are outside the floor *and* touch no file in common are free to
   each other**, in any order — sequence them by whatever is ready. Both halves are
@@ -285,17 +294,27 @@ floor invalidates its artifact **outright**, with no patch-identity relief. So:
   so its identity moved. Clearing the floor buys nothing there. §3's overlap check
   is what establishes the second half, and it is worth running at *slice* time and
   not only before merging.
-- **A lane holding a floor path is the expensive merge, so put it last**, when
-  nothing else is open to rebase across it. Merging it first taxes every other
-  lane in the wave a full round each.
-- **Two floor-touching lanes in one wave means one of them pays.** That is a
-  reason to split them across waves, not a cost to absorb quietly — and note
-  `docs/adr/**` is *in* the floor, so an ADR lane and a contract lane are both
-  expensive and each wants its own quiet window.
+- **A lane holding one of the four standing contracts is the expensive merge, so
+  put it last**, when nothing else is open to rebase across it. Merging it first
+  taxes every other lane in the wave a full round each, whatever those lanes are
+  about — that half of the floor consults no test.
+- **An ADR or contract-surface lane is expensive only for the lanes it is
+  connected to.** It taxes a lane whose text cites that ADR by number, a lane
+  whose paths or symbols the moved ADR names, a lane whose diff reaches
+  `src/ai_assistant/core/`, and — where it adds or widens a `Protocol` — every
+  open lane at once. A lane it neither names nor is named by rebases across it
+  for nothing. So the question when you order a wave is no longer "does anything
+  touch `docs/adr/**`" but **who names whom**: an ADR lane and the
+  implementation lane that will cite it still want separate waves, while an ADR
+  lane and an unrelated docs lane no longer do.
+- **Two lanes that bind each other in one wave means one of them pays.** That is
+  a reason to split them across waves, not a cost to absorb quietly.
 
-The corollary for §2: a wave is cheapest when at most one lane touches the floor
-and no two lanes share a file. Fence for both when you slice the work — a
-collision found at merge time has already been paid for.
+The corollary for §2: a wave is cheapest when no lane holds a standing contract,
+no two lanes name each other, and no two lanes share a file. Fence for all three
+when you slice the work — a collision found at merge time has already been paid
+for. Where a pairing is not obvious, the lane can settle it before it pushes:
+`just drill` names the test that bound or cleared each path.
 
 **A contract ADR merges before its implementation** (golden rule 5, ADR-0015 §5).
 Where a lane split into an ADR PR and an implementation PR, the order is
@@ -331,8 +350,9 @@ review to *content*, not to a commit (ADR-0027 §2), so `gh pr update-branch
 leaves the reviewed patch untouched and clears ADR-0027 §3's floor, and costs a
 fresh round where it does not. `CONTRIBUTING.md` → "Report the review, then mark
 it ready" holds the conditions; do not reason them out from memory, and note that
-`docs/adr/**` is inside the floor, so an ADR lane pays a round for a rebase that
-an implementation lane would not.
+since ADR-0209 a merged `docs/adr/**` file costs the rebasing PR a round only
+where the two texts name each other — so the implementation lane that cites that
+ADR pays for the rebase across it and an unrelated lane does not.
 
 Nothing on the PR enforces this — `gate` re-runs green on the new head and
 protection has no opinion about review records — so it is the merger's job to
