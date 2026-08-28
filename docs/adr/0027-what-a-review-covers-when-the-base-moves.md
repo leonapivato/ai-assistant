@@ -27,9 +27,9 @@
   where one of four tests binds: the PR's text names the moved ADR by number
   (§3), the moved ADR's text at either endpoint names a path the PR's diff touches
   or a symbol its diff adds or removes (§3), the move adds a `Protocol` class or
-  any member to one (§4), or the move touches the contract surface and the PR's
-  diff touches `src/ai_assistant/core/` or names a definition the move changed
-  (§4).
+  widens any `Protocol`'s effective member surface (§4), or the move touches the
+  contract surface and the PR's diff touches `src/ai_assistant/core/` or names a
+  definition the move changed (§4).
   Where none binds, the floor here reads **clear** and §2(b) may accept.
 
   **Not replaced.** §3's refusal of path disjointness, and its whole argument for
