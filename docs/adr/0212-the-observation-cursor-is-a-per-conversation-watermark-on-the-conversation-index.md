@@ -405,9 +405,21 @@ effects happened and whose cursor did not advance. This clause is about where a 
 
 > **Normative.** Where that rule would advance the watermark by nothing — because
 > the page's **lowest** turn is itself one whose episode did not resolve — the pass
-> advances to the page's highest ordinal instead. The watermark therefore **strictly
-> increases on every pass whose page is non-empty**, and no page is ever read a third
-> time.
+> advances instead to the highest ordinal in the page below the **second**-lowest
+> unresolved ordinal in it, or to the page's highest ordinal where the page holds no
+> second unresolved turn.
+
+> **Normative.** The watermark therefore **strictly increases on every pass whose
+> page is non-empty**, and **no unresolved turn is passed over on the pass that first
+> reads it** unless it was that page's lowest turn — which requires the watermark to
+> have already stood immediately below it.
+
+The two clauses together give a bounded, checkable invariant rather than a hope: the
+strict rule passes over no unresolved turn at all, and the fallback passes over
+exactly one — the page's lowest, which the previous pass already stopped in front of.
+Advancing to the page's highest in the fallback would break that, and the case is not
+hypothetical: a page carrying two gaps would see the second one passed over on its
+only reading.
 
 > **Normative.** The watermark never moves backwards. A recorded value is never
 > lowered, and a request to record a value at or below the recorded one performs
@@ -458,8 +470,12 @@ and quietly stopped" made unreachable by construction rather than by argument.
 
 - Page 101–120, all resolved → advance to **120**.
 - Page 101–120, 105 unresolved → advance to **104**. Next page 105–124: 105 is the
-  page's lowest and unresolved, so the fallback advances to **124**; 106–120 are
-  observed a second time and fold to `REINFORCE`.
+  page's lowest and unresolved and the page carries no second gap, so the fallback
+  advances to **124**; 106–120 are observed a second time and fold to `REINFORCE`.
+- Page 101–120, **105 and 110** unresolved → advance to **104**. Next page 105–124:
+  105 is the page's lowest, so the fallback stops in front of the second gap and
+  advances to **109** — not to 124, which would pass 110 on its only reading. The
+  page after that begins at 110 and gives it the same treatment.
 - Page 101–120, 120 unresolved → advance to **119**. Next page is 120 alone (or 120
   with whatever has since arrived); 120 is the page's lowest and, if its episode has
   landed in the meantime, it resolves and is observed. If it has not, the fallback
@@ -478,9 +494,13 @@ a permanent candidate re-reading one dead page for as long as it lives.
 
 **The residual, stated so nobody discovers it as a defect.** A turn is missed when its
 episode is still in flight on **two** consecutive readings, or when it is the page's
-lowest turn on its **first** reading — which happens only where the watermark already
-sits immediately below it, at a page boundary or on a conversation's first pass. Both
-are narrow, and the loss is one turn's *distillation*: the episode itself is
+lowest turn on its **first** reading. The second is narrower than it sounds: the
+watermark stands immediately below a turn only where a previous pass's advance landed
+there — which under either clause above means that turn was already read — or where the
+page ended there, or on a conversation's first pass under §4. So the case reduces to a
+page boundary falling exactly in front of an in-flight turn, and to a conversation's
+opening pass. Both are narrow, and the loss is one turn's *distillation*: the episode
+itself is
 unaffected, stays readable by retrieval, and expires on its own horizon. This is the
 limit ADR-0111 §2 already names and accepts for a recurring job — "A row updated in
 place below the cursor keeps its position and is not revisited […] for a *recurring*
@@ -642,7 +662,8 @@ saying so.
      `before_ordinal` and `limit`, refused rather than clamped. It is a presenting
      read, so it raises `UnknownConversationError` for an id that names nothing or
      names a conversation stamped deleted, and `ConversationStoreError` for a store
-     fault. A short page means there is nothing above it (§5).
+     fault. A short page means there is nothing above it — which is a fact about the
+     read and not a discriminator any advance rule may use (§5).
   2. `conversations_with_unobserved_turns(*, limit: int = 50) ->
      list[Conversation]` — every conversation that is not stamped deleted and holds
      at least one turn whose ordinal is strictly above its `observed_through`, or
@@ -716,8 +737,9 @@ saying so.
 > breaking Protocol change and the lane flags it** (golden rule 5).
 
 > **Normative.** The `orchestration` half owes the selector of §3 in
-> `ObservationStage`, §4's uncursored start, §5's single advance with its one
-> exception decided from a short page, and §6's no-partial-advance — and it owes the
+> `ObservationStage`, §4's uncursored start, §5's single advance — computed from the
+> lowest unresolved ordinal in the page, with the fallback that stops in front of the
+> second, and **never** from the page's length — and §6's no-partial-advance. It owes the
 > module docstring of `orchestration/observation.py` corrected, which today states
 > "There is no durable cursor either".
 
@@ -733,9 +755,12 @@ unresolvable calls no observer and still advances to that page's highest ordinal
 page whose *last* turn is unresolvable advances to the one below it, and the next pass
 over that turn alone advances past it; a page with an unresolvable turn in the
 **middle** advances to the ordinal below it and re-reads the resolved turns above it
-on the next pass, which fold to `REINFORCE`; a page of exactly `observation_batch_size`
-rows whose last turn is unresolvable behaves the same as a shorter one, so no rule
-depends on the page's length; a pass that raises inside the write path
+on the next pass, which fold to `REINFORCE`; **a page carrying two unresolvable turns
+advances to the ordinal below the first, and the next pass — which begins at the first
+— advances to the ordinal below the *second* rather than past it**, so neither is
+passed over on its only reading; a page of exactly `observation_batch_size` rows whose
+last turn is unresolvable behaves the same as a shorter one, so no rule depends on the
+page's length; an episode that lands between two passes is observed on the second; a pass that raises inside the write path
 after one proposal was ruled advances nothing and the next pass re-reads the whole
 page; a second pass over the same page produces `REINFORCE` and no duplicate record,
 pinned end to end and not only at the gate; `record_observed` never lowers a
@@ -785,6 +810,15 @@ while a *filtered* export restored into a fresh store leaves it discarded.
   new argument with its own decision about what it costs — never a change to what
   the watermark means, and never a caller resetting one. Tracked as **#1789** rather
   than pre-empted here; the condition that fires it is such a need being reported.
+- **A durable record that a turn's episode landed.** §5's residual exists because the
+  index is an intent log and an unresolved turn is indistinguishable from an in-flight
+  one. A member on `ConversationTurn` stamped after `write_atomic` commits would close
+  it outright, in exactly `ConversationTurn.delivery`'s shape (ADR-0205 §3). It is not
+  bought here: it is a second store-written member and a second write on the capture
+  path — which is the latency a turn *is* waiting on — for a residual §5 bounds to a
+  page boundary and a conversation's opening pass. The condition that fires it is
+  evidence from a deployment that turns are being missed, or a second reader of the
+  index needing the same fact for its own reason.
 - **What a run tells a user about its progress.** `ObservationReport` gains nothing
   here, and ADR-0111 §11 leaves the same question where it was: "**Progress
   reporting to a user.** What a run *tells* somebody is the report surface #494 and
@@ -869,7 +903,13 @@ requires this"; ADR-0082 §7 settles that "§1's condition is that the supersedi
 in one change (ADR-0205 §10: "**Both records are made in this change**"). So the
 record is owed on the day this ADR exists. **This lane's fence forbids touching another
 ADR's text**, which is the operator's instruction to this lane and not a reading of any
-ADR, so the record is deferred rather than declined: each one below is stated verbatim
+ADR — and the instruction has a reason this ADR can see from inside: ADR-0070 §4's
+pairs **accumulate on one physical line**, and "Adding the second pair is a §1 Status
+edit […] and it does **not** drop the first: replacing the whole value would lose the
+earlier dead scope." Two ADR lanes running in parallel against the same `Status` line
+would each rewrite that line, and the one merged second would silently drop the other's
+pair unless the operator sequenced them. Deferring all three records to a single
+follow-up is how that is sequenced. So the record is deferred rather than declined: each one below is stated verbatim
 so the follow-up is a three-line edit, and issue **#1788** tracks all three. A reader
 who finds ADR-0074, ADR-0077 or ADR-0111 silent about this ADR should read that
 silence against #1788 and not as evidence that no supersession was intended. Each is a `Status`-line pair accumulated under
@@ -921,11 +961,15 @@ constraint.
 - **A repeat `assistant observe` on one conversation now does nothing**, where today
   it re-derives. That is the intended meaning of "what has already been looked at",
   and §9 names what a deliberate re-observation would take.
-- **One turn can be missed in a narrow race**, and §5 states the shape rather than
-  leaving it to be discovered. The loss is a distillation, not an episode.
-- **A conversation whose newest turn's episode never lands stays a candidate** until
-  another turn is appended, re-reading a page of at most one turn each pass. That is
-  §5's exception paying ADR-0111 §3's asymmetry in the cheap direction.
+- **A gap costs the page above it one repeat.** §5's strict advance stops in front of
+  an unresolved turn, so the resolved turns above it in that page are read again on the
+  next pass and fold to `REINFORCE`. That is repeated work in the currency ADR-0111 §3
+  prices, and it is bounded at one page per gap.
+- **One turn can still be missed in a narrow race**, and §5 states the two shapes
+  rather than leaving them to be discovered. The loss is a distillation, not an
+  episode. Closing it entirely would take a durable "the episode landed" fact on the
+  turn — a second store-written member and a second write on every capture — which
+  §9 names rather than buys.
 
 **What would trigger revisiting this.**
 
