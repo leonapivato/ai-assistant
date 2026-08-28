@@ -21,9 +21,11 @@ import re
 import string
 import unicodedata
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from functools import lru_cache
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
@@ -6062,6 +6064,91 @@ def _root_type_defect(document: Mapping[str, FrozenJson]) -> str | None:
     return "its root `type` does not admit an object, so no call could satisfy it"
 
 
+_MAX_CACHED_SCHEMAS: Final = 128
+"""How many distinct schema documents :func:`_cached_schema_defect` remembers.
+
+Bounded rather than unbounded, because under ADR-0145 §7's threat model the
+documents are chosen by a server this repository does not control: an unbounded
+memo would let a discovery loop publishing a fresh schema each pass grow `core`'s
+memory without limit. An entry also *retains* the document it answers about for
+as long as it lives, which is why the bound is small rather than generous — a
+registry's whole tool set fits inside it several times over, and the cost of a
+miss is one meta-validation, not a failure.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _SchemaKey:
+    """A candidate ``parameters_schema``, identified by its canonical encoding.
+
+    **Equality and hashing are the canonical bytes alone**; ``document`` rides
+    along excluded from both. That is what lets :func:`_cached_schema_defect` be
+    memoised without ever evaluating a document reconstructed from its own key: a
+    hit answers about a document byte-identical to the one asked about, and a miss
+    runs the checks over the caller's own value. The check exists to be
+    trustworthy about documents from servers this repository does not control
+    (ADR-0145 §6), so the document it reads is the one it was handed.
+
+    **The canonical bytes are the key rather than the frozen value's own hash**,
+    and the difference is not cosmetic. ``FrozenDict`` hashes and compares as
+    Python values, where ``True == 1`` and ``hash(True) == hash(1)``;
+    ``{"minLength": 1}`` is a valid draft 2020-12 schema and
+    ``{"minLength": True}`` is not, because jsonschema's ``integer`` type check
+    excludes ``bool``. A Python-equality key would therefore answer the second
+    from the first's entry and load a schema §6 refuses. ADR-0021 §1's encoding
+    spells them ``1`` and ``true``, which are two keys.
+    """
+
+    canonical: bytes
+    document: Mapping[str, FrozenJson] = field(compare=False)
+
+
+@lru_cache(maxsize=_MAX_CACHED_SCHEMAS)
+def _cached_schema_defect(key: _SchemaKey) -> str | None:
+    """Return :func:`_schema_defect` of ``key``'s document, memoised on its bytes.
+
+    The memo is sound because the checks it caches are a pure function of the
+    document: they read no setting, no clock and no state, and
+    :data:`_MAX_SCHEMA_DEPTH` and the dialect are module constants. Two documents
+    with one canonical encoding are one document, so one answer serves both.
+
+    What it buys is that the answer is *computed* once rather than *given* once.
+    ADR-0145 §6 requires the check to run "wherever a ``ToolDefinition`` is
+    constructed", and it still does — every construction asks and every
+    construction is answered, including the defensive rebuilds ADR-0018 §4,
+    :func:`_detached_tool` and ADR-0029 §2's step 1 perform. §6's clause is about
+    which stages the refusal reaches, not about how many times a metaschema is
+    walked, and a definition mutated through ``object.__setattr__`` is still
+    refused on revalidation: the mutation changes the canonical bytes, so it
+    misses this cache and is meta-validated afresh.
+    """
+    return _schema_defect(key.document)
+
+
+def _schema_defect(schema: Mapping[str, FrozenJson], /) -> str | None:
+    """Return ADR-0145 §6's defect in ``schema`` below the depth bound, or ``None``.
+
+    Split out of :func:`_unreadable_schema_reason` so that everything expensive
+    sits behind one memo and the depth bound, which is the stack guard the memo
+    must not sit in front of, does not. Nothing else moved: the order below and
+    every reason are that function's, unchanged.
+
+    **The order is load-bearing.** The declared dialect comes first, because a
+    draft-07 schema must be *refused* rather than meta-validated as 2020-12 and
+    silently read under semantics its author did not use. Only then is the
+    document meta-validated, which is what lets the reference and root-type checks
+    assume a well-formed ``$ref``, ``$anchor`` and ``type``.
+    """
+    declared = schema.get("$schema")
+    if declared is not None and declared not in (_SCHEMA_DIALECT, f"{_SCHEMA_DIALECT}#"):
+        return "it declares a $schema other than JSON Schema draft 2020-12"
+    try:
+        Draft202012Validator.check_schema(_thaw_json(schema))
+    except SchemaError as exc:
+        return f"it is not a valid draft 2020-12 schema (at {exc.json_path})"
+    return _reference_model_defect(schema) or _root_type_defect(schema)
+
+
 def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None:
     """Return why ``schema`` cannot be read as draft 2020-12, or ``None`` if it can.
 
@@ -6073,11 +6160,17 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
 
     **The order is load-bearing.** Depth is measured first, iteratively, because
     every check after it walks the document recursively and would exhaust the
-    stack on a document deep enough to matter. The declared dialect comes next,
-    because a draft-07 schema must be *refused* rather than meta-validated as
-    2020-12 and silently read under semantics its author did not use. Only then is
-    the document meta-validated, which is what lets the reference and root-type
-    checks assume a well-formed ``$ref``, ``$anchor`` and ``type``.
+    stack on a document deep enough to matter — the canonical encoding below
+    included, which is why the memo begins after the bound rather than in front of
+    it. :func:`_schema_defect` carries the order of everything after.
+
+    **The rest of the answer is memoised on the document's canonical encoding**,
+    because meta-validating the same document again yields the same answer at a
+    price that dominates construction: walking the draft 2020-12 metaschema costs
+    roughly fifty times what encoding the document does, and the shape it is
+    charged for most often is ``{}``, the default every tool that declares no
+    arguments carries. Every construction still asks and still gets §6's answer;
+    :func:`_cached_schema_defect` says why asking twice may be answered once.
 
     Every reason returned describes the *schema*, which is Tier 2 configuration
     authored by the tool's provider; nothing here reads a call's arguments, so
@@ -6091,14 +6184,16 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     """
     if _json_depth(schema, _MAX_SCHEMA_DEPTH) > _MAX_SCHEMA_DEPTH:
         return f"it nests deeper than {_MAX_SCHEMA_DEPTH} levels"
-    declared = schema.get("$schema")
-    if declared is not None and declared not in (_SCHEMA_DIALECT, f"{_SCHEMA_DIALECT}#"):
-        return "it declares a $schema other than JSON Schema draft 2020-12"
     try:
-        Draft202012Validator.check_schema(_thaw_json(schema))
-    except SchemaError as exc:
-        return f"it is not a valid draft 2020-12 schema (at {exc.json_path})"
-    return _reference_model_defect(schema) or _root_type_defect(schema)
+        canonical = _canonical_bytes(_thaw_json(schema))
+    except TypeError, ValueError:
+        # A value with no canonical encoding has no key, so it is answered
+        # uncached rather than answered differently. Pydantic refuses such a
+        # `parameters_schema` before this validator sees it; what reaches here is
+        # the corrupted instance ADR-0145 §6's revalidation clause exists for, and
+        # it must still get the answer it got before there was a cache.
+        return _schema_defect(schema)
+    return _cached_schema_defect(_SchemaKey(canonical, schema))
 
 
 class ParameterViolation(BaseModel):
