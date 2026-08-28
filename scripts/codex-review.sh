@@ -2404,16 +2404,26 @@ artifact="${review_dir}/${loop_id:-noloop}-${persona}-${base_sha}-${tree}.md"
 # ADR-0209 decides for, with §5's marked conduct clause carrying the rest. What
 # does fail closed is the other case, and it is `ship`'s: an artifact recording
 # `pr_desc=recorded` whose snapshot has since gone.
+#
+# FETCHED HERE, PUBLISHED AFTER THE ARTIFACT, and the split is the whole point of
+# doing it in two steps. `pr_desc` has to be known before the provenance line is
+# written; the snapshot must not replace an EARLIER round's until this round's
+# artifact is on disk. A re-review of byte-identical content produces the same
+# artifact name, so a single-step write that lost the artifact rename — an
+# interrupt, a full disk — would leave the earlier artifact still saying
+# `pr_desc=recorded` beside a body it was never taken beside, and a citation that
+# body carried would be gone with no round charged for it. Split, the same
+# failure leaves `recorded` with no snapshot at all, which `ship` binds on.
 description_dir="${review_dir}/descriptions"
 description_file="${description_dir}/$(basename "$artifact")"
+description_tmp="${description_file}.partial.$$"
 pr_desc="unavailable"
 mkdir -p "$description_dir"
 if command -v gh >/dev/null 2>&1 &&
-    gh pr view --json body --jq '.body // ""' >"${description_file}.partial.$$" 2>/dev/null; then
-    mv "${description_file}.partial.$$" "$description_file"
+    gh pr view --json body --jq '.body // ""' >"$description_tmp" 2>/dev/null; then
     pr_desc="recorded"
 else
-    rm -f "${description_file}.partial.$$" "$description_file"
+    rm -f "$description_tmp"
 fi
 # base_sha was pinned before the diff (above), not re-resolved here: ship.sh
 # compares it against the PR's real base, so a review run against a narrower or
@@ -2464,6 +2474,15 @@ artifact_tmp="${artifact}.partial.$$"
     cat "$out"
 } >"$artifact_tmp"
 mv "$artifact_tmp" "$artifact"
+
+# The description snapshot goes in only now, once the artifact naming it exists
+# (issue #1750). `unavailable` clears any snapshot an earlier round left under
+# this name, so the field and the directory never disagree.
+if [[ "$pr_desc" == "recorded" ]]; then
+    mv "$description_tmp" "$description_file"
+else
+    rm -f "$description_file"
+fi
 
 # Persist the session and dispositions only on the persistent path — the bypass
 # path keeps no thread. Written last, after every validation has passed, so a
