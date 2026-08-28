@@ -21,6 +21,9 @@ every case:
 - ``FAKE_CODEX_START_FAIL`` — when ``1``, a *fresh* session exits non-zero with
   its whole failure on stdout as ``--json`` events and **nothing on stderr**,
   which is what real ``codex exec --json`` does (issues #1674, #1675).
+- ``FAKE_CODEX_TURN_FAILED`` — when ``1``, the turn fails while the process
+  still exits **0**: a ``turn.failed`` event on stdout, no review written. The
+  other half of the same illegibility.
 - ``FAKE_CODEX_PROMPT_COPY`` — a path to copy the prompt (stdin) to, so a test
   can assert on what the reviewer was told.
 - ``FAKE_CODEX_PRE_CMD``    — a shell snippet ``eval``'d before output is
@@ -113,10 +116,19 @@ fi
 
 if [[ "$want_json" -eq 1 ]]; then
     printf '{"type":"thread.started","thread_id":"%s"}\n' "$tid"
-    printf '{"type":"turn.completed"}\n'
+    if [[ "${FAKE_CODEX_TURN_FAILED:-}" == "1" ]]; then
+        printf '{"type":"turn.failed","error":{"message":"%s"}}\n' \
+            "fake codex: the turn failed mid-stream"
+    else
+        printf '{"type":"turn.completed"}\n'
+    fi
 fi
 
-if [[ -n "$ofile" ]]; then
+# A turn that fails while the process still exits 0 writes no review, so `-o` is
+# left untouched and the driver's empty-review guard is what catches it. The
+# rollout is still written, because the read-only proof runs first and would
+# otherwise be the refusal a test attributed to the wrong thing.
+if [[ -n "$ofile" && "${FAKE_CODEX_TURN_FAILED:-}" != "1" ]]; then
     if [[ -n "${FAKE_CODEX_REVIEW+set}" ]]; then
         printf '%s' "${FAKE_CODEX_REVIEW}" >"$ofile"
     else

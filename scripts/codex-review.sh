@@ -573,6 +573,41 @@ _mode_start() {
         exit 2
     fi
 
+    # An empty reviewed range, refused HERE rather than in the child.
+    #
+    # The round exits 0 on an empty range with "no changes … to review", and it
+    # does so BEFORE it publishes the marker `--start` polls for — deliberately,
+    # since a marker whose round is already gone is what tells `--wait` a round
+    # died. Launched detached, that combination is the worst of both: the child
+    # ends immediately and correctly, and the parent then waits out the whole
+    # grace before reporting a failure that names the wrong thing entirely.
+    #
+    # The range is `base_sha..content_sha` — `base_sha` is already the merge base,
+    # so `A...B` and `A..B` coincide — and it is empty exactly when the two trees
+    # are equal. That is one `rev-parse`, where rendering the diff to find out
+    # would be the work the child is about to do anyway.
+    #
+    # Reachable two ways, and the second is why this is here now. A branch whose
+    # every change has been reverted or already merged is the old one. The new one
+    # is a PR carrying nothing but the ratification flip: re-anchoring makes the
+    # reviewed range the parent's, and the parent of a flip-only PR *is* the merge
+    # base. Note what that PR's real problem is — ADR-0165 §3 anchors `ship` on
+    # that same parent, so no artifact can cover it and no round can be run to
+    # produce one. This message says so rather than spending 120 seconds first.
+    if [[ "$tree" == "$(git rev-parse "${base_sha}^{tree}")" ]]; then
+        echo "nothing to review: HEAD's reviewed content is identical to the base" >&2
+        echo "  ${base_sha:0:12}, so there is no diff for a round to read." >&2
+        echo "  No round has been started." >&2
+        if [[ -n "$ratify_adr" ]]; then
+            echo "  HEAD is the ratification flip of ${ratify_adr}, so the reviewed" >&2
+            echo "  content is its parent's (ADR-0165 §3) — and this PR carries" >&2
+            echo "  nothing but the flip. 'just ship' anchors on that same parent," >&2
+            echo "  so no round could satisfy it either; this is a PR shape ADR-0165" >&2
+            echo "  does not cover, not a round waiting to be paid." >&2
+        fi
+        exit 1
+    fi
+
     mkdir -p "$session_dir"
 
     # `--start` is itself a read-modify-write — it READS whether a round is in
