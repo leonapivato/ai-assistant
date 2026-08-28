@@ -1340,3 +1340,49 @@ async def test_a_bounded_turn_supplied_a_stamped_episode_captures_a_stamped_epis
     assert spoken.outcome is not None
     assert spoken.outcome.turn is not None
     assert not _episodes(spoken.outcome.turn.memories), "neither episode reached the spoken turn"
+
+
+async def test_a_belief_derived_from_a_stamped_episode_is_stamped_and_withheld() -> None:
+    """§8 case 11: §5's inheritance clause, pinned end to end.
+
+    The observer distils a belief from the stamped episode a typed turn captured,
+    and what it produces is ``OBSERVED`` with ``about_person`` unset — a class
+    ADR-0199 §3's third clause places **speakable**. Without §5's derivation rule
+    the stage writes that belief unstamped and #1708's laundering simply moves one
+    distillation along; with it, the belief carries the stamp and §3 withholds it
+    from the spoken channel like the episode it came from.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        FakeModelProvider(_ANSWER),
+        planner=_EchoingPlanner(),
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(harness, _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"))
+    typed = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert typed.conversation_id is not None
+    # Only the episode is left to derive from, and only it can be the stamp's source.
+    await harness.memory.delete("rec-2")
+
+    report = await harness.engine.observe(conversation_id=typed.conversation_id)
+
+    assert report.proposals, "the observer distilled something from the episode"
+    distilled = tuple(
+        one
+        for one in await harness.memory.export()
+        if not isinstance(one, EpisodicMemory) and one.id != "rec-2"
+    )
+    assert distilled, "the distilled belief was written"
+    assert _stamped(distilled) == {one.id for one in distilled}
+
+    spoken = await harness.engine.converse_spoken(
+        _RECORDING, plays=(_MP4,), timeout=PATIENT, conversation_id=typed.conversation_id
+    )
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    supplied = {one.id for one in spoken.outcome.turn.memories}
+    assert not supplied & {one.id for one in distilled}, (
+        "a belief derived from a stamped record is withheld from this channel too"
+    )
