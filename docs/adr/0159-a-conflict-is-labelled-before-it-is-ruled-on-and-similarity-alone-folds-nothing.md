@@ -1,7 +1,38 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that ADR-0079 §3's retirement obligation is narrowed a second time)
+- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that ADR-0079 §3's retirement obligation is narrowed a second time) and ADR-0214 (§4's fourth normative clause, the unconditional precedence of the prior-assertion deferral, only as it reaches a non-asserted proposal every asserted member of whose conflict set agrees with it)
 - Date: 2026-08-16
+- Partially superseded: 2026-08-29 by ADR-0214 — **§4's fourth normative clause,
+  the unconditional precedence of the prior-assertion deferral, only as it reaches
+  a non-asserted proposal every asserted member of whose conflict set agrees with
+  it; §4's three ruling arms and everything else here stand.** That clause reads
+  "The `ASK_USER` ruling for a non-asserted proposal whose conflict set holds a
+  `USER_ASSERTED` member is unchanged and continues to precede this arm. Nothing
+  in this ADR reaches it."
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §1 places an arm **ahead** of that deferral for an `OBSERVED` or `INFERRED`
+  proposal when every `USER_ASSERTED` member of the conflict set **agrees** with
+  it under ADR-0121 §1, ruling `REINFORCE` at the best-ranked member of the
+  foldable agreeing set. A reader holding only this ADR defers where ADR-0214
+  reinforces, so they act differently, and ADR-0070 §1 makes that a supersession
+  rather than an amendment — ADR-0214 §7 argues why this clause is superseded
+  where the refusals it narrows elsewhere are merely amended: this one carries no
+  justification an agreeing observation could escape, its whole content being that
+  a ruling continues to precede an arm.
+
+  **It is partial and narrow.** The clause stands whole for every conflict set
+  holding an asserted member that *disagrees* with the proposal, which is every
+  set ADR-0214 §1's condition fails on, and its second sentence stays a true
+  statement about **this** ADR's reach. **What stands is the rest of §4 and every
+  other section**: §4(a), §4(b) and §4(c) rule exactly what they ruled, because
+  ADR-0214 §1 is scoped to a conflict set holding an assertion and §4's arms are
+  scoped to one holding none; the purity conditions, the target classes
+  (`_RELATION_TARGETS`), the non-empty-set clause and the reads-no-score clause
+  are untouched; and so are §2's reconciler invocation condition — which ADR-0214
+  §5 restates and relies on, no reconciler being invoked on this population — §3,
+  §5's retirement narrowing and §6's degraded-path parity. Under ADR-0082 §2 the
+  record goes in this note beside the pair added to the `Status` line. Refs #869,
+  #1782.
 - Partially superseded: 2026-08-21 by ADR-0171 — **§3's default is no longer three,
   and §5's second clause no longer leaves ADR-0079 §3's obligation "otherwise
   unchanged"; the bound itself, its rank order, its response half, and the whole of
@@ -533,6 +564,17 @@ statement — one request under one deadline, rather than up to
 `reconciler_max_conflicts` of them under `model_max_attempts` retries each.
 
 ### 4. The non-asserted arm: three outcomes, each with a purity condition
+
+> **Partially superseded by ADR-0214 (2026-08-29).** The **fourth** normative
+> clause below — that the `ASK_USER` ruling for a non-asserted proposal whose
+> conflict set holds a `USER_ASSERTED` member "is unchanged and continues to
+> precede this arm" — no longer holds where that proposal is `OBSERVED` or
+> `INFERRED` and **every** asserted member of the set *agrees* with it under
+> ADR-0121 §1. ADR-0214 §1 places an arm ahead of the deferral there and rules
+> `REINFORCE`. The clause stands whole wherever an asserted member disagrees, and
+> the three ruling arms below, their purity conditions and their target classes
+> are untouched — ADR-0214 §1 is scoped to a set holding an assertion, which they
+> are scoped to exclude.
 
 > **Normative.** For a proposal whose `provenance.source` is not `USER_ASSERTED`,
 > and whose conflict set holds no `USER_ASSERTED` member, `DefaultMemoryPolicy`

@@ -16,8 +16,19 @@
   §2a and §3, [ADR-0040](0040-reinforcement-and-supersession-are-different-rulings.md)
   §5b, [ADR-0045](0045-memory-records-carry-a-validity-window.md) §5 (clause 1)
   and [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md)
-  §5. It supersedes nothing. §7 applies ADR-0070 §1's test clause by clause,
-  including the places a record looks owed and is not.
+  §5. §7 applies ADR-0070 §1's test clause by clause, including the places a
+  record looks owed and is not.
+- **This ADR partially supersedes**
+  [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
+  §4 — its **fourth** normative clause, "The `ASK_USER` ruling for a non-asserted
+  proposal whose conflict set holds a `USER_ASSERTED` member is unchanged and
+  continues to precede this arm", in the scope named in §7 and no wider. §4's
+  three ruling arms, its purity conditions, its target classes, its
+  reads-no-score clause and its non-empty-set clause are all untouched, as is
+  every other section of ADR-0159. The clause fixes a ruling's precedence and
+  offers no justification an agreeing observation could escape, so ADR-0070 §1
+  makes it a supersession rather than an amendment — §7 argues that line against
+  the clauses this ADR does merely amend.
 - **Follow-up to** ADR-0121 §11, whose second deferral it discharges, and to
   ADR-0103 §6, whose corroboration rule it applies to a third pairing. Refs
   #869, #862, #863, #1782.
@@ -153,11 +164,17 @@ it is scoped to exactly the population the prior-assertion deferral owns.
 > to the prior-assertion deferral exactly as it stands, with no change to it.
 
 > **Normative.** Where the conflict set holds no `USER_ASSERTED` member, this
-> arm is not evaluated, no rule of ADR-0159 §4 is reached differently, and no
-> clause of ADR-0159 changes.
+> arm is not evaluated and no rule of ADR-0159 §4 is reached differently. The one
+> clause of ADR-0159 this ADR reaches is §4's **fourth**, which fixes the
+> precedence of the very deferral this arm precedes; it is partially superseded
+> in this arm's scope (§7) and stands whole outside it.
 
-**The scope clause is the decision that keeps ADR-0159 whole**, and it is worth
-more than the generality it gives up. Stated over every non-asserted proposal,
+**The scope clause is what confines this ADR to one clause of ADR-0159**, and it
+is worth more than the generality it gives up. §4's fourth normative clause is
+reached either way — it is the clause fixing this deferral's precedence, and
+placing an arm ahead of the deferral is what this ADR does. What the scope clause
+buys is that **nothing else** of ADR-0159 is reached. Stated over every
+non-asserted proposal,
 this arm would fire ahead of ADR-0159 §4(a) on sets holding no assertion at all
 — a population §4 rules today with a purity condition this arm does not carry
 ("**no** member is labelled `CONTRADICTS`") and a target class this arm does not
@@ -599,11 +616,42 @@ unchanged in scope, wording and effect; §4's fourth clause states that the two
 are disjoint. Nothing §6 says becomes false or over-wide. ADR-0121 §9 recorded
 the same about the same clause, and this is the second stacked addition to it.
 
-**ADR-0159 — nothing**, and this is the section's most load-bearing entry. §1's
-scope clause confines the arm to a population §2 excludes from reconciliation
-and §4 never rules on, so §2's invocation condition, §4's two exceptions, §4's
-purity conditions, `_RELATION_TARGETS` and §6's degraded-path parity all stand
-exactly as written and rule exactly what they ruled. ADR-0161 is likewise
+**ADR-0159 §4's fourth normative clause — partially superseded**, and this is the
+section's most load-bearing entry. The clause reads:
+
+> **Normative.** The `ASK_USER` ruling for a non-asserted proposal whose conflict
+> set holds a `USER_ASSERTED` member is unchanged and continues to precede this
+> arm. Nothing in this ADR reaches it.
+
+A reader holding only ADR-0159 rules `ASK_USER` where §1 above rules `REINFORCE`,
+so they act differently, and under ADR-0070 §1 that is a change to what was
+decided rather than an amendment. It is **partial** and narrow: the clause stands
+whole for every conflict set holding an asserted member that *disagrees* with the
+proposal — which is every set §1's one condition fails on — and its second
+sentence, "Nothing in this ADR reaches it", stays a true statement about
+ADR-0159's own reach.
+
+**Why this clause is superseded where §2a, §3 and the rest above are amended.**
+ADR-0082 §1 requires the line to be argued rather than declared, and the test is
+ADR-0070 §1's applied to the clause's own text. Every clause this ADR *amends* is
+a **refusal or a deferral carrying a stated justification**, and in each case the
+justification does not reach the permitted fold — the clause was over-wide
+relative to its own reason, and every sentence of that reason survives. This
+clause carries no justification at all. Its whole content is that a ruling
+**continues to precede** an arm, and §1 places an arm ahead of it; there is
+nothing in it for the permitted case to be an exception *to*, so it is replaced
+in scope rather than narrowed by exception. That is the reading ADR-0121 §9 gave
+ADR-0050 §2, whose rule was likewise "stated unconditionally over the conflict
+set and positioned first".
+
+**What stands, and it is the rest of ADR-0159.** §1's scope clause confines this
+arm to a population §2 excludes from reconciliation and §4's three ruling arms
+never rule on, so §2's invocation condition, §4(a), §4(b) and §4(c), §4's purity
+conditions, `_RELATION_TARGETS`, §4's non-empty-set and reads-no-score clauses,
+§5's retirement narrowing and §6's degraded-path parity all stand exactly as
+written and rule exactly what they ruled. ADR-0159's `Status` line already leads
+with `Partially superseded by`, so under ADR-0082 §2 this ADR's pair joins that
+line and the record itself goes in the appended dated note. ADR-0161 is likewise
 untouched: its clause (ii) requires an `EXTERNAL` proposal, which §1's arm
 excludes by its own scope.
 
@@ -667,10 +715,19 @@ and it is one subsystem's change.
 - `tests/memory/test_policy.py`: the three cases that pin §1 by its shape — an
   agreeing `OBSERVED` proposal whose conflict set holds an agreeing assertion
   rules `REINFORCE` and does not ask; the same proposal where a *second*
-  assertion in the set disagrees still rules `ASK_USER`; and an agreeing
-  proposal whose only agreeing member is `EXTERNAL` still rules `ASK_USER`.
-  Plus one pinning §1's scope clause: with no asserted member in the set, the
-  ruling is whatever ADR-0159 §4 gives and this arm is not consulted.
+  assertion in the set disagrees still rules `ASK_USER`; and an `OBSERVED`
+  proposal whose only agreeing member is `EXTERNAL` still rules `ASK_USER` (§2's
+  target class). Two more pin the arm's boundaries, and the first is the case an
+  implementation is likeliest to get wrong. **The incoming-source boundary**: an
+  `EXTERNAL` proposal agreeing exactly with a `USER_ASSERTED` conflict still
+  rules `ASK_USER`. The branch this arm is added to is keyed on `not
+  is_asserted`, which admits `EXTERNAL`; widening *that* branch instead of naming
+  `OBSERVED` and `INFERRED` would rule `REINFORCE` on a fold §3 does not permit,
+  and `_refuse_unsafe_fold` would then turn a deferral into a `MemoryStoreError`
+  — a failure the writer-side conformance cases cannot catch, because the ruling
+  never reaches them from a conforming policy. **The scope boundary**: with no
+  asserted member in the set, the ruling is whatever ADR-0159 §4 gives and this
+  arm is not consulted.
 - `tests/memory/test_currency_fold.py`, `test_taint_fold.py` and
   `test_withheld_fold.py`: the composed `last_confirmed_at` and the two
   disjunctions exercised on the widened pairing, in the direction that can fail
