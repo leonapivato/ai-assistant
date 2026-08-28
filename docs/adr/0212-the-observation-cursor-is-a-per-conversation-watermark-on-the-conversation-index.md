@@ -23,7 +23,9 @@
   it owes **both** lenses: adversarial and architecture, on ADR-0015 §1 and
   `CONTRIBUTING.md` → "Stop when the required reviews are green". It adds no
   Protocol, no new `core` type, no `Settings` field, no member of the promoted
-  engine surface, no wire operation and — §8 — no `PROTOCOL_VERSION` bump.
+  engine surface and no wire operation. It moves
+  `ConversationExport.schema_version` to `Literal[2]` and — §8 — does **not** move
+  `PROTOCOL_VERSION`, because no frame carries that document.
 - **The reciprocal `Status` records this decision owes on ADR-0077, ADR-0074 and
   ADR-0111 are not made in this change**, because this lane's fence forbids
   touching another ADR's text. §10 states each of them verbatim so the follow-up
@@ -287,9 +289,26 @@ conversation the user has stopped using would never be reached — which is ADR-
 the cursor, and #1737's item 3 directs it closed. Ascending has three properties
 worth stating together:
 
-- **It cannot starve a candidate.** A conversation leaves the candidate set by being
-  served; one that keeps receiving turns keeps moving to the *back* of the order, so
-  every candidate is reached in a bounded number of passes.
+- **It excludes no candidate, and under a monotonic clock it starves none.** A
+  conversation leaves the candidate set once its watermark reaches its highest turn
+  — which takes as many passes as it has pages of unobserved turns, not one — and one
+  that keeps receiving turns keeps having its key moved to the *back* of the order.
+  Where the clock advances monotonically, every candidate is therefore reached in a
+  bounded number of passes.
+
+  **The bound is a property of the clock, and this ADR does not promise more than the
+  clock gives it.** `Conversation` states that "`started_at`, `last_active_at` and
+  `last_turn_at` all come from an injected clock, which this project never promises is
+  monotonic (`core/clock.py`)". A clock that is stopped or stepped back can therefore
+  leave a busy conversation's `last_active_at` at or below an idle one's, and where
+  the tie is broken by an `id` that also sorts first, the busy conversation can be
+  served ahead of the idle one indefinitely. That is **accepted and named**, not
+  closed: closing it would take a durable service-order position, which is a second
+  cursor with its own upgrade discipline and its own `core` surface, bought against a
+  clock adjustment rather than against anything the walk does. What this order
+  guarantees unconditionally is the property the descending order lacks — that a
+  conversation is a candidate on its own terms and is never excluded because a
+  different conversation is more active.
 - **It serves the material nearest its expiry first**, which is the ordering that
   maximises coverage under a finite horizon. ADR-0074 §7 reclaims a conversation on
   `last_active_at` — "Eligibility reads *activity*, not `last_turn_at`" — so the
@@ -373,17 +392,22 @@ implementation that "turns that repetition into a skip" — it governs a chunk w
 effects happened and whose cursor did not advance. This clause is about where a walk
 *begins*, and beginning at the tail loses no chunk any run performed.
 
-### 5. The advance: once per pass, to the page's highest ordinal
+### 5. The advance: once per pass, and never past a gap on its first reading
 
 > **Normative.** A pass advances the watermark **exactly once**, after every
-> proposal it produced has been ruled by the write path, to the **highest ordinal in
-> the page it read**. It advances even where the page resolved to no episode, even
-> where the observer was not called, and even where nothing was proposed.
+> proposal it produced has been ruled by the write path. It advances even where the
+> page resolved to no episode, even where the observer was not called, and even
+> where nothing was proposed.
 
-> **Normative.** One exception, and it is the only one: where the page's
-> highest-ordinal turn is **the conversation's own highest** and its episode did not
-> resolve, the watermark advances to the next-highest ordinal in the page instead,
-> and does not advance at all where the page holds no other turn.
+> **Normative.** It advances to **the highest ordinal in the page that is below the
+> lowest ordinal in the page whose episode did not resolve** — or, where every turn
+> in the page resolved, to the page's highest ordinal.
+
+> **Normative.** Where that rule would advance the watermark by nothing — because
+> the page's **lowest** turn is itself one whose episode did not resolve — the pass
+> advances to the page's highest ordinal instead. The watermark therefore **strictly
+> increases on every pass whose page is non-empty**, and no page is ever read a third
+> time.
 
 > **Normative.** The watermark never moves backwards. A recorded value is never
 > lowered, and a request to record a value at or below the recorded one performs
@@ -398,61 +422,72 @@ the advance is the last act of the pass, and ADR-0111 §3's asymmetry is the rea
 "A cursor that lags its effects costs repeated work; a cursor that leads them costs
 coverage, permanently and silently".
 
-**Why the page's highest ordinal, and not the last turn handed to the observer.**
-#1737's item 3 says "the cursor advances to the last turn *handed over*, not the last
-turn that produced a proposal, and advances even when the observer proposes nothing".
-The second and third halves of that are ratified above word for word. The first is
-sharpened, because "last handed over" has a failure the note does not consider: a
-page whose turns all fail to resolve hands nothing over, so the watermark would not
-move, so the next pass reads the same page, hands nothing over, and does not move it
-again. A conversation whose unobserved turns have all expired — the ordinary state of
-a conversation the job reaches after a long idle period — would then be a permanent
-candidate re-reading one dead page on every pass for as long as the conversation
-lives. That is ADR-0111 §7's own diagnosis of the shape it forbids: a job "permanently
-and quietly stopped", where "the operator gets a permanent, opaque failure instead of
-a slow success". Advancing to the page's highest ordinal cannot stall, and it re-pays
-no model call, because a turn it passes over is a turn no observer could have read.
+**Why an unresolved turn is worth a second reading at all.** A turn whose episode
+does not resolve is ordinarily a settled gap — a capture failure, an expiry, or a
+`forget` — which ADR-0074 §5 rules is "skipped, not an error". But it can also be a
+turn whose episode is still **in flight**, because the index is an intent log:
+`ConversationLifecycle.capture` records "the index entry first, then its episode",
+and "The cost is that a crash between the two writes leaves an index entry with no
+episode, which every reader already renders as a gap." The window between the two is
+not instantaneous — the same docstring notes that "``write_atomic`` awaits an embedder
+before it reaches its own lock" — so a pass can read a row whose episode lands a
+moment later.
 
-**Why the exception is exactly the conversation's last turn, and why one turn is
-enough.** The index is an intent log: "the index entry lands **first** and names the
-episode before the episode exists, so no episode can exist for a conversation without
-its id having been recorded here" (`ConversationStore`). So a turn's episode can be
-*in flight* — recorded in the index, not yet in the memory store. That state is
-reachable for **only** the conversation's highest-ordinal turn: a later append proves
-the earlier capture's episode write already completed or failed for good, because
-appending is what capture does before writing the episode. Every unresolved turn
-below the highest is therefore a settled gap — a capture failure, an expiry, or a
-`forget` — which ADR-0074 §5 already rules is "skipped, not an error", and passing
-over it costs nothing that was ever reachable. Holding the watermark below the
-highest turn while its episode may still be landing is the cheap half of ADR-0111
-§3's asymmetry, paid for one turn.
+**And the in-flight turn is not always the conversation's newest.** Two turns of one
+conversation can be captured concurrently, and `ConversationStore`'s exclusion does
+not close it: that exclusion binds the *index's* mutations, and the episode write is a
+later call on a different store. So an earlier turn's embedder can still be running
+when a later turn's episode has already committed, which leaves an unresolved turn
+**below** a resolved one. Any rule that protected only the highest ordinal would miss
+exactly that case, and any rule that decided "is this the conversation's highest turn"
+from the page's length would be wrong at the exact boundary — a page of exactly
+`observation_batch_size` rows proves there are at least that many turns above the
+watermark, never that there are no more.
 
-> **Normative.** A pass distinguishes "the page's highest turn is the conversation's
-> highest" from "there are more turns above the page" by the page being **shorter
-> than the bound it asked for**. It performs no extra read to decide it.
+**So the second reading is bought for every gap, and it is bought once.** The first
+pass to meet an unresolved turn stops below it and advances no further, which costs
+re-reading that page's *resolved* turns above the gap on the next pass — repeated
+work, in the currency ADR-0111 §3 prices and accepts, made harmless by ADR-0077 §8's
+fold (§6). The next pass then finds that same turn as its page's **lowest**, so the
+fallback fires and the walk moves past it. A gap therefore delays the walk by exactly
+one pass and never more, and a page whose every turn is a settled gap is passed over
+in one pass rather than blocking the conversation forever — ADR-0111 §7's "permanently
+and quietly stopped" made unreachable by construction rather than by argument.
 
-A short page is a complete answer because the forward read returns the *lowest*
-`limit` turns above the watermark: fewer than `limit` means there are no more.
+**Worked, because the arithmetic is the decision.** Watermark 100, bound 20:
 
-**What the exception costs when the last turn's episode never lands.** The watermark
-sits one turn back until another turn is appended, at which point the dead turn is no
-longer the conversation's highest and the next pass advances past it. Until then the
-conversation stays a candidate and each pass re-reads a page of at most one turn,
-resolving no episode and calling no model. That is bounded, cheap, and self-healing,
-and it is the direction ADR-0111 §3 requires the residual error to fall in.
+- Page 101–120, all resolved → advance to **120**.
+- Page 101–120, 105 unresolved → advance to **104**. Next page 105–124: 105 is the
+  page's lowest and unresolved, so the fallback advances to **124**; 106–120 are
+  observed a second time and fold to `REINFORCE`.
+- Page 101–120, 120 unresolved → advance to **119**. Next page is 120 alone (or 120
+  with whatever has since arrived); 120 is the page's lowest and, if its episode has
+  landed in the meantime, it resolves and is observed. If it has not, the fallback
+  advances past it.
+- Page 101–120, none resolved → 101 is the page's lowest and unresolved, so the
+  fallback advances to **120**. No model is called, and nothing is re-read.
 
-**The residual, stated so nobody discovers it as a defect.** One turn can still be
-missed: a pass whose page is short, whose every turn below the highest is a settled
-gap, and whose highest turn's episode is mid-write, advances to no ordinal at all —
-correct — but a pass in which some lower turn resolved advances to that turn and the
-next pass reads the in-flight one, which is also correct. The genuinely lossy shape
-is narrower still: a *later* pass whose page contains only the previously in-flight
-turn plus resolved turns above it advances past everything, and the in-flight turn was
-observed if its episode had landed by then. Because a pass interval is minutes and an
-episode write follows its index row within one engine operation, the window in which
-this loses a turn is the one ADR-0111 §2 already names and accepts for a recurring
-job. The loss is one turn's *distillation*; the episode itself is unaffected and stays
-readable by retrieval until its own horizon.
+**Why not "the last turn handed over", which is how #1737 item 3 words it.** Its
+second and third halves — not the last turn that produced a proposal, and advance even
+when nothing was proposed — are ratified above word for word. The first is sharpened
+because "last handed over" has no fallback: a page whose turns all fail to resolve
+hands nothing over, so the watermark does not move, so the next pass reads the same
+page and does not move it again. A conversation whose unobserved turns have all
+expired — the ordinary state of one the job reaches after a long idle period — would be
+a permanent candidate re-reading one dead page for as long as it lives.
+
+**The residual, stated so nobody discovers it as a defect.** A turn is missed when its
+episode is still in flight on **two** consecutive readings, or when it is the page's
+lowest turn on its **first** reading — which happens only where the watermark already
+sits immediately below it, at a page boundary or on a conversation's first pass. Both
+are narrow, and the loss is one turn's *distillation*: the episode itself is
+unaffected, stays readable by retrieval, and expires on its own horizon. This is the
+limit ADR-0111 §2 already names and accepts for a recurring job — "A row updated in
+place below the cursor keeps its position and is not revisited […] for a *recurring*
+job it is usually correct, because the work is the new material" — and closing it
+entirely would take a durable per-turn "the episode landed" fact, which is a second
+store-written member on `ConversationTurn` and a second write on every capture. That
+is not bought here, and §9 names the condition that would buy it.
 
 ### 6. Failure: a pass that raises leaves the watermark exactly where it was
 
@@ -569,9 +604,30 @@ which is the direction ADR-0111 §3 requires.
   `ge=FIRST_TURN_ORDINAL`, described as the highest turn ordinal an observation pass
   has recorded for this conversation and unset until one has. No new type, no member
   on `ConversationTurn`, no member on `ConversationSummary`, no member on
-  `ConversationDigest`, no member on `ObservationReport`, and no change to
-  `ConversationExport.schema_version`, which stays `Literal[1]` exactly as it did
-  when ADR-0205 §3 added `ConversationTurn.delivery`.
+  `ConversationDigest`, and no member on `ObservationReport`.
+
+> **Normative.** `ConversationExport.schema_version` becomes **exactly 2** —
+> `Literal[2]`, refusing every other value — because `ConversationExport` carries
+> `tuple[Conversation, ...]` and this member changes the shape of the portable
+> document. ADR-0014 §5 states why the field exists — "an export outlives the code
+> that wrote it … a reader must be able to tell which shape it is holding" — and
+> ADR-0039 §10 applied it to the sibling export in this exact shape: "`StepExecution`
+> is inside the export, so its shape changing is exactly what the version exists to
+> announce", pinned rather than defaulted so that "the advertised version is a fact
+> about the document rather than an unchecked producer's claim". **No migration is
+> owed**, and for ADR-0039 §10's reason rather than because no v1 document exists:
+> `ConversationStore` offers `export` and no import, restore or load, so nothing in
+> this system ever validates a `ConversationExport` it did not just construct.
+
+**One thing this bump does not do, and it is worth naming rather than leaving to be
+found.** ADR-0205 §3 added `ConversationTurn.delivery` — also inside this export —
+without moving the version, so the shape that ships today is a v2-shaped document
+labelled v1 by ADR-0039 §10's reasoning. This ADR does not relabel it: ADR-0001's
+append-only rule is not the obstacle (a label is not decision text) but there is no
+read path to relabel *for*, and rewriting the meaning of a version nobody can read
+buys nothing. Moving to 2 here announces the shape that ships next. The gap is
+recorded as **#1793** rather than absorbed, and it is not this ADR's to decide beyond
+saying so.
 - **`core/protocols.py`** gains **exactly three operations on `ConversationStore`**,
   and no new Protocol:
 
@@ -594,10 +650,15 @@ which is the direction ADR-0111 §3 requires.
      `id` ascending as the tie-break; bounded by default at **50**, the figure
      `ConversationStore.recent` already sets and ADR-0073 §2 already argues, with
      `0` returning an empty page and a `ValueError` outside `[0, 2**63)`. It takes
-     **no cursor and no offset**: a row leaves this set by being served, so an
-     offset would skip, which is the argument
-     `ConversationStore.stamped_conversation_ids` already makes about a walk whose
-     rows are removed by the walk itself.
+     **no cursor and no offset**, and the reason is that no consumer pages it: the
+     stage takes the head of a freshly-read listing on each pass and never asks for a
+     second page, because a pass serves one conversation (§3). Offering an offset
+     would offer a position over a set whose membership and whose ordering key both
+     move between passes — a row leaves once its watermark reaches its highest turn,
+     and `last_active_at` moves under every turn — which is the hazard
+     `ConversationStore.recent` already names for offset paging ("may skip or repeat
+     a row") and `ConversationStore.stamped_conversation_ids` already refuses for a
+     walk whose rows leave under it.
   3. `record_observed(conversation_id, *, through_ordinal: int) -> Conversation |
      None` — stamps the watermark and returns the conversation as stamped, or
      `None` where it stamped nothing. It stamps if and only if `through_ordinal` is
@@ -633,7 +694,12 @@ which is the direction ADR-0111 §3 requires.
 > argument to one, and no member to any wire-carried `core` type: the conversation
 > listing crosses the wire as `ConversationSummary`, which gains nothing, and
 > `Conversation` itself is not a wire-carried type. `ObservationReport` is unchanged,
-> so the observation call's result is byte-identical in shape.
+> so the observation call's result is byte-identical in shape. **The export version
+> move above does not reach the wire either**: no operation on the promoted engine
+> surface returns a `ConversationExport` — `ConversationStore.export` is the only
+> declaration of it in `core/protocols.py` — and `wire/surface.py` derives its method
+> set from that promoted surface, so no frame carries the document whose label
+> moves.
 
 > **Normative.** No `Settings` field is added, and no default changes. In
 > particular `observation_interval` keeps its `None` default: ADR-0083 §7's job
@@ -663,10 +729,13 @@ Tests the lane owes, named so they are written rather than assumed: a pass over 
 conversation with no watermark reads its tail and records the tail's highest ordinal;
 the next pass over the same conversation with no new turns reads no turns, calls no
 model and records nothing; a pass over a conversation whose page is entirely
-unresolvable calls no observer and still advances; a page whose *last* turn is the
-conversation's highest and unresolvable advances to the next-highest and, where there
-is none, advances to nothing; the same page one turn later, after another turn has
-been appended, advances past the dead turn; a pass that raises inside the write path
+unresolvable calls no observer and still advances to that page's highest ordinal; a
+page whose *last* turn is unresolvable advances to the one below it, and the next pass
+over that turn alone advances past it; a page with an unresolvable turn in the
+**middle** advances to the ordinal below it and re-reads the resolved turns above it
+on the next pass, which fold to `REINFORCE`; a page of exactly `observation_batch_size`
+rows whose last turn is unresolvable behaves the same as a shorter one, so no rule
+depends on the page's length; a pass that raises inside the write path
 after one proposal was ruled advances nothing and the next pass re-reads the whole
 page; a second pass over the same page produces `REINFORCE` and no duplicate record,
 pinned end to end and not only at the gate; `record_observed` never lowers a
@@ -681,7 +750,9 @@ arguments; `conversations_with_unobserved_turns` excludes a conversation whose e
 turn is at or below its watermark, excludes a stamped conversation, includes one with
 no watermark and at least one turn, excludes one with no turns at all, and returns
 its rows `last_active_at` ascending with `id` ascending as the tie-break; a
-conversation served by a pass leaves that set; a watermark that is not an integer,
+conversation with more unobserved turns than one page **stays** in that set after a
+pass and leaves it only once its watermark reaches its highest turn; a watermark that
+is not an integer,
 below `FIRST_TURN_ORDINAL`, or above the conversation's highest ordinal is read as
 absent and no read of that conversation raises; a store whose watermark column is
 missing entirely opens, serves and starts; and an export round-trips a watermark
@@ -790,12 +861,18 @@ differently, or read one of its clauses more widely than it now holds?"
 > its disabled default are unchanged, and §13's deferral is discharged, which is
 > what a deferral is for.
 
-**The three reciprocal records are owed and are not made here.** ADR-0082 §7 settles
-that "§1's condition is that the superseding ADR **exists**, not that it is
-ratified", and the corpus practice is to make both records in one change (ADR-0205
-§10: "**Both records are made in this change**"). This lane's fence forbids touching
-another ADR's text, so each record below is stated for a follow-up that makes it, and
-issue **#1788** tracks all three. Each is a `Status`-line pair accumulated under
+**The three reciprocal records are owed and are not made here, and that is a
+departure rather than a discretion.** ADR-0070 §1 lists "recording a supersession that
+has landed" among the permitted in-place header edits and notes that "ADR-0001 already
+requires this"; ADR-0082 §7 settles that "§1's condition is that the superseding ADR
+**exists**, not that it is ratified"; and the corpus practice is to make both records
+in one change (ADR-0205 §10: "**Both records are made in this change**"). So the
+record is owed on the day this ADR exists. **This lane's fence forbids touching another
+ADR's text**, which is the operator's instruction to this lane and not a reading of any
+ADR, so the record is deferred rather than declined: each one below is stated verbatim
+so the follow-up is a three-line edit, and issue **#1788** tracks all three. A reader
+who finds ADR-0074, ADR-0077 or ADR-0111 silent about this ADR should read that
+silence against #1788 and not as evidence that no supersession was intended. Each is a `Status`-line pair accumulated under
 ADR-0070 §4 without dropping the pairs already there, plus the appended dated note
 ADR-0070 §1 requires in every case; under ADR-0082 §2 no amendment qualifier goes on
 a leading-token line, so on ADR-0074, ADR-0077 and ADR-0111 alike the note is the
@@ -855,10 +932,13 @@ constraint.
 - **A producer of episodes that no `ConversationTurn` names.** The per-conversation
   watermark has nothing to be a position in for such an episode, and ADR-0077 §8
   already says reaching them "needs a second selection rule in the stage".
-- **A candidate order that starves in practice.** §3's ascending order cannot starve
-  by construction, but if the pass rate is far below the rate at which conversations
-  become candidates, the *newest* material waits longest. If that is what the
-  deployment shows, the order is the thing to revisit and the watermark is unaffected.
+- **A candidate order that starves in practice.** §3's ascending order starves
+  nothing under a monotonic clock and names the case a non-monotonic one admits. Two
+  things would make it worth revisiting: a deployment whose clock adjustments are
+  frequent enough that the named case is observed, or a pass rate so far below the
+  rate at which conversations become candidates that the *newest* material waits
+  longest. Either is an argument about the order, and the watermark is unaffected by
+  both.
 - **A second job walking the same index.** ADR-0111 §1's "per walked order and per
   job" would then require a second position, and `observed_through` is named for its
   one consumer rather than as a general "progress" field.
