@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that its producing turn's supply held content §3 withholds from a channel of unbounded audience)
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
   reaches an operation whose output channel's audience is unbounded, and nothing
@@ -40,9 +40,11 @@
   supply site moves one stage earlier and the ruling stays on the input side.
   ADR-0203 places no class and unplaces none.
 - **Partially superseded: 2026-08-28 by ADR-0204 — §3's third clause, only as it
-  reaches a record whose provenance records that the supply its producing turn ran
-  over held content §3 withholds from a channel of unbounded audience, and nothing
-  else of §3 or of this ADR.** §3's third clause places as speakable "a belief
+  reaches a record whose provenance records that content §3 withholds from a
+  channel of unbounded audience stood in its warrant, and nothing else of §3 or of
+  this ADR.** ADR-0204 §1 gives that record two routes and no third: the supply the
+  turn producing it ran over held such content, or it was derived from a record
+  whose own field is set. §3's third clause places as speakable "a belief
   whose `Provenance.source` is `USER_ASSERTED`, `OBSERVED` or `INFERRED` and whose
   `about_person` is not stated", and a captured episode is that by construction
   (ADR-0074 §4). The milestone-19 QA run and its re-drive filed **#1703** and
