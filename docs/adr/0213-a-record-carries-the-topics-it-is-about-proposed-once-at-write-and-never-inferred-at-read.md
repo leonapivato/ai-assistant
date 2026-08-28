@@ -406,6 +406,13 @@ knobs for the opposite one — they bound a *run*, not the shape of what is stor
 > ordered by the number of records carrying each label descending and then by the
 > label ascending, at most `limit` of them. It writes nothing and creates nothing.
 
+> **Normative.** An implementation answers `topics` **without reading or decoding a
+> record**, from storage it maintains for this read as records are written. Its cost
+> is a function of how many topic labels the store carries, not of how many records it
+> holds, and an implementation that answers it by walking and decoding the store's
+> records does not conform. That storage is owed by the implementing lane (§11, §13),
+> and it is what makes the read bounded rather than merely small today.
+
 > **Normative.** `limit` is refused with `ValueError` unless it is **exactly** an
 > `int` satisfying `1 <= limit < 2**63`; `bool` is refused with the rest. Every
 > implementation checks on entry, before the value reaches a query, so the refusal is
@@ -436,8 +443,16 @@ prevent while looking like a store that had nothing to say.
 > chunk performs it, and no implementation moves it inside the walk. A run's chunks
 > therefore perform exactly the operations they performed before this decision, and
 > ADR-0111 §4's clause that "A job may be chunked only if every operation it performs
-> inside one chunk is itself bounded by a deadline" is answered by the read not being
-> one of them.
+> inside one chunk is itself bounded by a deadline" is satisfied twice over: the read
+> is not one of them, and by the clause above it is bounded anyway.
+
+> **Normative.** What a run holds is therefore a **snapshot**, and it may be stale
+> before the run ends. A write, fold or owner act that changes the store's labels
+> during a run reaches the **next** run's vocabulary and not this one's; no clause of
+> this ADR obliges a run to re-read, invalidate or coordinate, and none permits a
+> chunk to be delayed waiting for one. Staleness is affordable exactly because the
+> supply is a hint: a stale vocabulary steers a producer toward a label that was
+> current a minute ago, which is a worse suggestion and never a wrong record.
 
 > **Normative.** A vocabulary read that fails or is unavailable yields **no
 > vocabulary**, and the run proceeds without one. A `MemoryStoreError` from
@@ -478,18 +493,29 @@ the same way. **Supplying it anyway would be a change to ADR-0077 §3 requiring 
 record under ADR-0070 §1 and ADR-0082 §1, and this ADR makes none** (§16): a reader
 holding only ADR-0077 sends the same payload after this decision as before.
 
-**Once per run, not once per chunk, and that is a cost bound rather than a
-convenience.** An exact global ordering by usage cannot be computed from one chunk:
-ADR-0111's walk shows each run a slice, so a chunk-local count would rank the labels
-of fifty records as though they were the store's. Computing it per chunk would then
-pay a store-wide aggregate for every chunk of every run — quadratic in the store
-against a walk that is already linear — inside the one place ADR-0111 §4 requires
-bounded operations. Reading it once, before the first chunk, makes it a prefix of the
-run in the same order of cost as the run's own walk, and leaves the chunk exactly as
-bounded as it was. What that costs the store is the implementing lane's to make cheap:
-§11 requires no particular storage and forbids none, so an implementation is free to
-serve this read from an index rather than a scan, which is the reason §11 is worded as
-a requirement rather than a prohibition.
+**Once per run, and bounded — two separate obligations, because either alone is
+insufficient.** An exact global ordering by usage cannot be computed from one chunk:
+ADR-0111's walk shows each run a slice, so a chunk-local count would rank the labels of
+fifty records as though they were the store's. But moving a *scan* out of the chunk
+would not bound anything either — it would only move the unbounded work to a place
+ADR-0111 §4's clause does not name, and a run that cannot return is a run that starves
+its siblings on the serial loop whichever side of the first chunk boundary the delay
+sits on. So the read is both taken once per run **and** required to be answerable
+without decoding a record: its cost is the store's label count, which is bounded by the
+number of distinct labels the owner's world has, not by how long they have been using
+the assistant. ADR-0201 §3 makes the same distinction for the same reason —
+"Projection is not free … Filtering after the read would pay that read for every
+captured turn in the store and then throw the result away" — and the answer here is
+the same answer: do not make a bounded question walk an unbounded set.
+
+**What that obliges the store to keep is real work, and §11 owes it rather than
+permitting it.** The sqlite store already maintains derived storage on write for
+exactly this kind of read — `about_person` is a column beside the record's blob, and
+ADR-0100 §8 added it by `ALTER TABLE ... ADD COLUMN` for the filtered read that was
+coming. This read wants the same treatment one level over, and the shape is the lane's:
+a child table with an index, a maintained count, or a column the aggregate can group
+on. What is *not* available is answering it by walking the store, because that is the
+cost this clause exists to refuse.
 
 **The consolidation prompt is a different payload, and that is why the supply lands
 there.** `ConsolidationStage` already prompts with a whole chunk of stored records —
@@ -714,8 +740,15 @@ preference §9 captures, not a second belief id.
 > rejected-to-corrected mapping — and no implementation may read a preference into it,
 > because the labels it carries are the store's distinct labels and nothing else. What
 > steers the next proposal is the **merge act above**: after it, the abandoned label
-> is in no live record and therefore in no supplied vocabulary, and the corrected one
-> is.
+> is in no live record and therefore in no vocabulary **read after it**, and the
+> corrected one is. A run holding an earlier snapshot (§5) keeps it to its end.
+
+> **Normative.** A merge is an edit of the store and **not a prohibition on a label**.
+> No clause of this ADR forbids any producer from minting an admissible label the owner
+> once merged away, on this record or a later one; the owner's remedy is to merge
+> again, and the deterministic instrument for one record is the relabel act. No
+> implementation maintains a list of forbidden labels, and no lane adds one without an
+> ADR deciding it.
 
 > **Normative.** A supply that carries the preference's own semantics is deferred
 > (§15) and belongs to the surface ADR below, which is the instrument that knows what
@@ -824,12 +857,13 @@ about a case that does not arise.
 > gain no topic argument, and no surface, consumer or later lane may add one without
 > the ADR that decides it.
 
-> **Normative.** This ADR **requires** no column, index or migration for the field,
-> and **forbids** none. The storage that serves `MemoryStore.topics` is the
-> implementing lane's choice, index included; the storage a *filtered record read*
-> would need is the consumer lane's, decided in its own ADR alongside the read it
-> serves. A record's tuple round-trips through whatever the store already persists a
-> record's fields with, and no clause here obliges a schema change.
+> **Normative.** This ADR requires exactly the storage `MemoryStore.topics` needs to
+> satisfy §5's no-decode bound — a column, a child table, an index, a maintained count,
+> or whatever the implementation chooses — and the choice of shape is the implementing
+> lane's. It requires no storage for a **filtered record read**, because it adds none;
+> that shape is the consumer lane's, decided in its own ADR alongside the read it
+> serves. A record's own tuple round-trips through whatever the store already persists
+> a record's fields with.
 
 > **Normative.** Nothing here authorises egress, relaxes a permission floor, widens
 > a grant, or is cited toward a designation, a registration or a destination.
@@ -852,14 +886,15 @@ model that sets `extra="forbid"`.
 seam the composition root wires; no client calls it, and the vocabulary never leaves
 the hub except inside the consolidation prompt §5 bounds.
 
-**No column is *required*, because no record read filters on the field yet.**
-ADR-0100 §8 gave `about_person` a nullable column because a filtered read was the
-axis's first consumer; here every record-filtering consumer is deferred, so mandating
-a shape now would fix it before the read that has to use it exists — and the lane that
-adds that read is the one that knows whether it needs a column, a child table or an
-index. What is *not* deferred is whatever `MemoryStore.topics` needs to be cheap,
-which is why the clause above requires nothing rather than forbidding everything: a
-prohibition would have made §5's run-prefix aggregate a mandatory full scan. ADR-0201 §3's reasoning is what that lane will owe — "the
+**Two storage questions, and only one of them is answered here.** ADR-0100 §8 gave
+`about_person` a nullable column because a filtered read was that axis's first
+consumer, and the same reasoning splits this one in two. The read this ADR *adds* —
+`MemoryStore.topics` — is owed storage now, because §5's bound is unmeetable without
+it and a contract nothing can satisfy cheaply is a contract that will be satisfied
+expensively. The read this ADR *does not* add — a record listing filtered by label —
+is owed nothing, because fixing its shape before the read that uses it exists is how
+a schema gets chosen for the wrong query. §15's deferral is that second question and
+only that one. ADR-0201 §3's reasoning is what that lane will owe — "the
 exclusion is expressed as the `kinds` argument of the `MemoryStore.list_beliefs` read
 behind the lookup, so it is applied by the store before the page cut" — and it cannot
 be discharged by a decision taken before the read exists.
@@ -914,26 +949,33 @@ layout. Each names an input and the outcome it fixes.
     `MemoryStoreError` yields a run that commits its chunks with no vocabulary in the
     prompt, and a report indistinguishable in its rulings from a run over a store with
     no labels.
-13. **The fold takes the union, on both arms.** A target carrying `("health",)`
+13. **A change committed mid-run reaches the next run.** A label removed from the
+    store after a run's first chunk still appears in that run's remaining prompts, and
+    is absent from the next run's first prompt — the snapshot stated rather than an
+    invalidation nobody implemented.
+14. **`topics` decodes no record.** In the sqlite store's own tests, answering
+    `topics` over a store of many records issues no read of the column a record's
+    fields are serialised into, which is the observable form of §5's bound.
+15. **The fold takes the union, on both arms.** A target carrying `("health",)`
     reinforced by an incoming record carrying `("sleep",)` survives with
     `("health", "sleep")`. The direction that must be exercised is the one an
     implementation copying the incoming tuple would pass: a **labelled target
     reinforced by an unlabelled incoming**, whose survivor keeps `("health",)`.
-14. **A `SUPERSEDE` carries nothing across.** A correction proposed with
+16. **A `SUPERSEDE` carries nothing across.** A correction proposed with
     `("sleep",)` against a target carrying `("health",)` writes `("sleep",)`, and the
     retired target still reads `("health",)`.
-15. **Capture writes the empty tuple** on every episode it records, on both the
+17. **Capture writes the empty tuple** on every episode it records, on both the
     ordinary and the resumption path.
-16. **A reader's proposal carries the empty tuple**, whatever the source entry
+18. **A reader's proposal carries the empty tuple**, whatever the source entry
     contains — including a source entry whose own fields are named like labels.
-17. **Two proposals differing only in `topics` share a `proposal_fingerprint`**, and
+19. **Two proposals differing only in `topics` share a `proposal_fingerprint`**, and
     therefore one `question_key` against one conflict set.
-18. **A relabel writes at the same id.** The record's id, `content`, `provenance`
+20. **A relabel writes at the same id.** The record's id, `content`, `provenance`
     and `validity` are unchanged and every citation naming it still resolves.
-19. **A merge is all-or-nothing and destroys nothing.** A record whose only label was
+21. **A merge is all-or-nothing and destroys nothing.** A record whose only label was
     the merged-away one carries the survivor label, not the empty tuple; a merge that
     fails part-way leaves no record carrying the new label.
-20. **A merge leaves a retired record alone.** A target retired with a closed validity
+22. **A merge leaves a retired record alone.** A target retired with a closed validity
     window that carries the merged-away label still carries it afterwards, and the
     merge reports having reached only the live records.
 
@@ -955,19 +997,23 @@ rule 5). It owes:
    `ConsolidationStage`'s, ignored rather than counted where it cannot be used (§4),
    with the canonical form applied by the producer before construction.
 4. **The vocabulary read** in `ConsolidationStage` alone, taken once before the chunk
-   walk and reused across chunks, with its `MemoryStoreError` caught (§5); and the
-   sqlite implementation of `MemoryStore.topics`, given whatever storage makes it cheap
-   at the run's scale.
-5. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
+   walk and reused across chunks, with its `MemoryStoreError` caught (§5).
+5. **The storage `MemoryStore.topics` is answered from**, maintained as records are
+   written so the read decodes none, with the sqlite migration that adds it on
+   ADR-0100 §8's own pattern — additive, applied on open, and leaving existing rows
+   correct without a backfill, since a record written before the field carries no
+   labels to index.
+6. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
    computations that already take a disjunction there.
-6. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
+7. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
    projection.
-7. **The twenty tests of §12.**
+8. **The twenty-two tests of §12.**
 
 > **Normative.** The owner's acts of §9 are **not** in the implementing lane above.
 > They need a surface, the surface is a promoted-surface change, and it is therefore
-> its own ADR and its own lane (golden rule 5, ADR-0015 §5). A lane implementing §§1–8
-> and adding an owner-facing relabel or merge operation has exceeded this decision.
+> its own ADR and its own lane (golden rule 5, ADR-0015 §5). A lane implementing the
+> eight items above and adding an owner-facing relabel or merge operation has exceeded
+> this decision.
 
 ### 14. What a topic is not
 
@@ -1065,9 +1111,11 @@ noticing it was a decision.
   is dropped and a recorded count of the loss. §1 above says why neither is available
   for this field today, so a lane taking this on owes an answer to both rather than a
   `max_length`.
-- **A store column, index or migration for the field.** §11 leaves the tuple in the
-  serialised form. **Fires** with the lane that adds the first filtered read, which
-  is the lane that knows what shape the read needs.
+- **The storage a filtered record read needs.** §11 owes storage for
+  `MemoryStore.topics` now and owes none for a record listing selected by label, which
+  no read in this ADR performs. **Fires** with the lane that adds that read, which is
+  the lane that knows whether it wants a column, a child table or an index — and which
+  is free to reuse whatever §11's storage turned out to be.
 
 ### 16. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
