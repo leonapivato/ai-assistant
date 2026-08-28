@@ -1,6 +1,6 @@
 # 131. A notification travels as an answer the device asked for, on a connection it keeps for that alone
 
-- Status: Partially superseded by ADR-0134 (§5a's Default column for `hub_notification_outbox_bytes`)
+- Status: Partially superseded by ADR-0134 (§5a's Default column for `hub_notification_outbox_bytes`) and ADR-0206 (§4's `next_notification` declaration, which gains a `plays` argument, and §4's `NotificationDelivery` declaration, which gains a `spoken` member and a `spoken_rendering` member)
 - Date: 2026-08-10
 - Partially superseded: 2026-08-11 by ADR-0134 — **one cell of one table, and the
   two columns it sat between could not both be obeyed.** §5a gives
@@ -86,6 +86,43 @@
   this clone's `-0400` frame, the convention ADR-0112, ADR-0113 and ADR-0129 state
   for their own; the base named here is the anchor that does not move under either
   frame.
+- Partially superseded: 2026-08-28 by ADR-0206 — **two declarations of §4, and
+  nothing else in this ADR.** ADR-0206 decides how a disposed notification is
+  rendered as speech on a device that asked for a rendering, and the seam this ADR
+  fixed is where the asking and the answering both live.
+
+  **Replaced — §4's method declaration**, which gains one keyword-only argument,
+  `plays`, a `tuple[SpokenAudioFormat, ...]` defaulting to the empty tuple, and
+  gains nothing else. **And §4's `NotificationDelivery` declaration**, which gains
+  exactly two members, `spoken` and `spoken_rendering`, and gains nothing else. Both
+  are supersessions rather than amendments because §4 declares closed shapes and
+  says so — the method is what `AssistantEngine` "gains exactly one method for this
+  seam", the model is "declared exactly as below" — so a peer built from this ADR
+  alone and a peer built from ADR-0206 do not interoperate, which is ADR-0070 §1's
+  first limb.
+
+  **Not replaced — everything else in §4, which is most of it.** The keyword-only
+  convention, `budget`'s closed range and its refusal rather than a clamp, the
+  immediate poll at zero, the ordering of argument validation before any outbox
+  effect, the rule that no argument carries a device identity and the loopback
+  clause beside it, `delivery_id`'s minting, uniqueness, exhaustion and 96-byte
+  bound, `extra="forbid"` and the measuring-order reason for it, the 256-byte
+  delivery reserve and `NotificationEnqueue.TOO_LARGE`, and ADR-0130 as a
+  prerequisite of the implementing lane — every one of them stands as written and
+  binds the amended shapes exactly as it bound the originals. ADR-0206 §6's
+  arithmetic checks the reserve against the two new members and finds 49 bytes
+  spent against 77 in hand, so that figure does not move. **No other section of
+  this ADR is touched**: §1's answer-shaped delivery, §2 and §2a's delivery
+  connection, §3, §3a and §3b's outbox, §5 and §5a's budgets and figures, §6 and §7
+  all stand unchanged, and ADR-0206 §11 states each of them as read and used rather
+  than altered.
+
+  The record lands with ADR-0206 in one change, written while that ADR still stands
+  `Proposed`: ADR-0070 §1's condition is that the superseding ADR **exists**, not
+  that it is ratified, which ADR-0082 §7 states in terms, which ADR-0201 §8 draws
+  the consequence from — "a lane whose fence admits both files may make it
+  atomically" — and which this ADR's own header already applied to ADR-0134. Not one
+  word of §4 is edited. Refs #1709.
 
 ## Context
 
