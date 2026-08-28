@@ -933,8 +933,13 @@ to know, and the shape ADR-0200 §10 already uses for `/ask/spoken`, where `play
 is a browser-owned argument. Rejected twice: ADR-0177 §1's second clause forbids a
 browser argument reaching this poll, and ADR-0175 §4's fan-out gives the gateway
 one answer for every open stream, so two browsers with different capabilities
-would have no single value to be served by. Naming the whole enumeration is what
-one answer for many readers actually looks like.
+have no single value to be served by. **What replaces it is narrower than the
+rejected shape and §2 says so**: naming the whole enumeration keeps the caller
+from narrowing what the synthesizer may produce, and one rendering then serves
+only the browsers that decode the format the engine picked. A browser that
+decodes only the other member is silent, which is the cost of a carrier that
+answers once for every reader rather than an argument this alternative would have
+bought back.
 
 **Speak a marker where a class was withheld — a chime, or "there is something on
 your phone".** The most requested-sounding behaviour, and the one that makes the
