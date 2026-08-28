@@ -406,13 +406,25 @@ supersession, which retires the record" is a statement about ADR-0204 §5, which
 and about the mirror of the residue ADR-0204 §6's third clause already declines. Nothing
 here reaches it.
 
-### 8. Scope: no `core` edit and no Protocol, and the one meaning this does narrow
+### 8. Scope: no `core` definition moves, no Protocol, and the one meaning this narrows
 
-> **Normative.** This ADR's implementation edits no file under `src/ai_assistant/core/`.
-> It adds no Protocol and no member to one, adds no `core` type and no member to one, and
-> moves no member's type, default or wire shape: `Provenance`, `MemoryRecord` and
-> `CurrentContext` all keep the shape they have, and the change §10 describes is confined
-> to `orchestration`.
+> **Normative.** This ADR's implementation changes no **definition** under
+> `src/ai_assistant/core/`. It adds no Protocol and no member to one, adds no `core` type
+> and no member to one, removes none, and moves no member's type, default, validator or
+> wire shape: `Provenance`, `MemoryRecord` and `CurrentContext` all keep the shape they
+> have, and the conduct §10 describes is confined to `orchestration`.
+
+> **Normative.** It does require **one prose edit inside `core/types.py`**, and that edit
+> is owed rather than merely permitted. `Provenance`'s class docstring says the field is
+> `True` "directly, where the supply the turn that produced this record ran over held
+> content ADR-0199 §3 withholds from a channel of unbounded audience — whether or not a
+> subtraction then kept that content from the stages that produced it", and
+> `supplied_withheld_content`'s own `Field` description says the same in shorter form.
+> Both sentences stop being true of an episode captured from an operation whose output
+> channel's audience is unbounded, and a `core` type whose documentation describes a rule
+> the system no longer follows is worse than the narrowing it hides. The implementing lane
+> states the exception in both places, cites this ADR beside ADR-0204 §1, and changes
+> nothing else in that file.
 
 > **Normative.** It does, on **one class of record**, narrow what
 > `Provenance.supplied_withheld_content` *means*. ADR-0204 §1 defines the field as
@@ -421,8 +433,8 @@ here reaches it.
 > warrant of an episode captured from an operation whose output channel's audience is
 > unbounded. That is the partial supersession of ADR-0204 §2's second clause this ADR's
 > header states; it is why this decision is a **contract-surface change** owing both the
-> adversarial and the architecture lens (ADR-0015 §1) although it edits no `core` file;
-> and it is why the implementation is a lane of its own, merged after this ADR (ADR-0015
+> adversarial and the architecture lens (ADR-0015 §1) although it moves no `core`
+> definition; and it is why the implementation is a lane of its own, merged after this ADR (ADR-0015
 > §5, golden rule 5). A reader of the field on any **other** record — an episode of a
 > bounded-channel turn, a belief, a record written before this decision — reads exactly
 > what ADR-0204 §1 says.
@@ -494,7 +506,11 @@ rule 5). It owes:
 4. **The docstring records**: `supply_for_unbounded_audience`'s Returns section states
    what its third value is now taken over, and `orchestration/disclosure.py`'s module
    docstring gains the group distinction beside its account of the three groups.
-5. **Closing #1775** on the half this decision reaches, with #1785 left open for the
+5. **The two prose edits in `core/types.py`** §8's second clause requires — `Provenance`'s
+   class docstring and `supplied_withheld_content`'s `Field` description — and nothing
+   else in that file. They put the lane's diff on `core/types.py`, so ADR-0209 §4 governs
+   its merge and it is scheduled when the dispatcher can afford that.
+6. **Closing #1775** on the half this decision reaches, with #1785 left open for the
    half it does not.
 
 > **Normative.** The records this decision owes on ADR-0204 and on ADR-0199 are owed by
