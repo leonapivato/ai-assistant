@@ -159,14 +159,16 @@ it ran over held content ADR-0199 §3 withholds from a channel of unbounded
 audience**, and we will withhold a record carrying that stamp from any supply site
 for such a channel.
 
-### 1. One additive field on `Provenance`, recording what the producing turn was supplied
+### 1. One additive field on `Provenance`, recording what stood in a record's warrant
 
 > **Normative.** `Provenance` (`core/types.py`) gains exactly one
 > field, `supplied_withheld_content`, a `bool` defaulting to `False`. It records
-> whether the supply the turn producing this record ran over held content ADR-0199
-> §3 withholds from a channel of unbounded audience — whether or not a subtraction
-> then kept that content from the stages that produced it, and whether or not the
-> produced text drew on it.
+> whether content ADR-0199 §3 withholds from a channel of unbounded audience stood
+> anywhere in this record's warrant, by either of exactly two routes: **directly**,
+> where the supply the turn that produced it ran over held such content (§2) —
+> whether or not a subtraction then kept that content from the stages that produced
+> it, and whether or not the produced text drew on it — or **inherited**, where the
+> record was derived from another record whose own field is set (§5).
 
 > **Normative.** The field is on `Provenance` and not on
 > `EpisodicMemory`. No `core` type other than
@@ -174,11 +176,12 @@ for such a channel.
 > its type, its default or its meaning.
 
 > **Normative.** `False` is the field's meaning and not merely its default: it
-> states that the producing turn's supply held no such content, which is true of
-> every record not produced over a supply at all — a user's own assertion, a
-> calendar import, a reader's proposal, a record written before this field existed.
-> No producer sets it `True` on any ground other than §2's, and no consumer reads
-> `False` as "not recorded".
+> states that neither route reached this record, which is true of every record no
+> turn produced and nothing was derived from — a user's own assertion, a calendar
+> import, a reader's proposal, a record written before this field existed. §2 and
+> §5 are the only two grounds on which any producer sets it `True`, and they are
+> exhaustive: no implementation invents a third, and no consumer reads `False` as
+> "not recorded".
 
 **On `Provenance` because that is the question it answers**, which is
 `MemoryBase`'s own placement rule: "a field is placed by which question it answers,
