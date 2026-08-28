@@ -579,7 +579,54 @@ from ai_assistant.wire.errors import (
 #: type crosses, no member's encoding moves, and the sentence itself is **not**
 #: exported on the wire — it is an ``ai_assistant.orchestration`` constant (§2), and
 #: what crosses is its rendering as the ``SpokenAudio`` ``spoken`` already was.
-PROTOCOL_VERSION: Final[int] = 20
+#: **21 since ADR-0206 §1 and §6**, which is under ADR-0124 §9's **first** limb and
+#: its **second** at once — the fourth bump with two grounds, after 9, 15 and 16.
+#: ``next_notification`` gains a keyword-only ``plays`` (§1), and
+#: :class:`~ai_assistant.core.types.NotificationDelivery` gains ``spoken`` and
+#: ``spoken_rendering`` beside the new closed
+#: :class:`~ai_assistant.core.types.SpokenRendering` (§6). The first limb reaches
+#: "any change to the promoted surface's method set **or to a method's arguments or
+#: results**", which ADR-0205 §1's entry at 19 is the precedent for, and this
+#: decision changes both halves of that second clause on one method exactly as that
+#: one did.
+#:
+#: **It bites in both directions.** ``wire.surface``'s argument adapter is derived
+#: from the method's own signature, so a version 21 client sending ``plays`` to a
+#: version 20 hub is refused there as an argument that method does not declare; and
+#: ``NotificationDelivery`` sets ``extra="forbid"`` while ``wire.codec``'s
+#: ``project`` renders a model by ``model_dump()``, which **includes** a ``None``
+#: member rather than omitting it — so a version 21 hub emits ``"spoken": null`` and
+#: ``"spoken_rendering": "not_requested"`` on **every** delivery, and a version 20
+#: client fails ``extra_forbidden`` on them. That is 19's shape on the argument and
+#: 13's on the result, arriving together. The reverse direction decodes to the
+#: defaults rather than failing ``missing``, and one direction biting is all
+#: ADR-0124 §9 asks for.
+#:
+#: **The method set does not move**, and stands at forty: ADR-0206 §1 adds an
+#: argument to an operation that already exists and deliberately declines a sibling
+#: operation, because "a spoken notification and a written one are the **same**
+#: ``NotificationCandidate``". ADR-0177 §1's browser enumeration does not move
+#: either, and stands at thirty-one — ``next_notification`` "is not one" of those
+#: thirty-one, and ADR-0206 §2 keeps it that way: ``plays`` is a value the *gateway*
+#: supplies of its own, and no browser argument reaches this poll.
+#:
+#: **ADR-0131 §4's 256-byte delivery reserve is not superseded**, which is what lets
+#: this bump touch no other figure. ADR-0206 §6 does the arithmetic: the two members
+#: add at most 49 bytes in ADR-0087 §2's canonical form — 14 for ``,"spoken":null``
+#: and 35 for ``,"spoken_rendering":"not_requested"``, the longest of the four
+#: values §6 fixes — for a worst case of 179 against 256. The *rendering* is what no
+#: reserve accommodates, so §6 measures the whole projected delivery and degrades
+#: instead of widening the reserve.
+#:
+#: **Nothing else under** ``wire/`` **changes for it but the client's one method**
+#: (ADR-0205 §9's shape at 19, and ADR-0186 §5's at 12). ADR-0087 §2c's scalar table
+#: gains no row and ``project`` gains no branch: ``SpokenRendering`` is a ``StrEnum``
+#: as ``SpokenAudioFormat`` already is, and ``SpokenAudio`` is a frozen model of
+#: scalars that ``converse_spoken``'s result has carried since 18. The framing, the
+#: connect exchange, the frame kinds and the error registry are untouched, and
+#: ``METHODS``, ``STREAMING_METHODS`` and both adapters are derived from the
+#: Protocol.
+PROTOCOL_VERSION: Final[int] = 21
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

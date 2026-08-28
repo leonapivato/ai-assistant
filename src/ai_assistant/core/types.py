@@ -5055,6 +5055,197 @@ class SpokenDeliveryReport(BaseModel):
     )
 
 
+# --- speech: the recording and the rendering (ADR-0200 §9) -------------------
+# The one shape audio takes on a boundary-crossing type, and the one place the
+# base64 convention is written down. Nothing here knows what a codec is:
+# `models/` decodes the container and encodes the rendering, and this module
+# holds only what is intrinsic to the value (ADR-0016 §2).
+#
+# **Declared here rather than at the foot of this module** (ADR-0206 §6). It used
+# to sit last, "because nothing above it depends on it", and something above it now
+# does: §6 gives `NotificationDelivery` a `SpokenAudio | None`, so the type that
+# member is spelled with has to exist by the time that model is built. This is
+# ADR-0205's split repeated one block up — these six declarations depend on nothing
+# but `NonBlankEncodableText`, and what stays at the foot stays there because
+# `SpokenTurn` depends on `TurnOutcome` and these do not.
+
+
+class SpokenAudioFormat(StrEnum):
+    """A container-and-codec one recording or rendering is carried in (ADR-0200 §9).
+
+    **A closed vocabulary of IANA media types a browser can produce with
+    ``MediaRecorder`` without transcoding**, which is what ties the two members
+    to a measurement rather than to taste: between them they cover the browsers
+    milestone 19's exit test can be run on. ADR-0200 §9 permits a lane to add a
+    member "only on a measurement it records"; removing one is a change to what
+    was decided and takes a superseding ADR.
+
+    **It carries no sample rate, no channel count, no bitrate and no duration.**
+    The first three are stated by the container, and a second answer to a
+    question the payload already answers is the redundancy ADR-0084 §3 refuses. A
+    duration would be worse than redundant: the hub cannot verify one without
+    decoding the audio, so a declared duration is an unverified claim — which is
+    why ADR-0200 §6's bound is on bytes, the thing a hub can measure.
+
+    **The string value is the media type itself**, parameters included, so a
+    value that reaches an HTTP header or a ``MediaRecorder`` constructor is the
+    member rather than a mapping of it. ``"audio/webm;codecs=opus"`` carries its
+    codec parameter for the reason ``MediaRecorder`` requires one: ``audio/webm``
+    alone names a container two codecs can fill, and a transcriber that decoded
+    only Opus would be declaring support for recordings it cannot read.
+    """
+
+    WEBM_OPUS = "audio/webm;codecs=opus"
+    MP4 = "audio/mp4"
+
+
+#: The base64 alphabet RFC 4648 §4 fixes, without its padding character — which
+#: is admitted separately below, because where it may appear is positional and
+#: membership alone would accept ``"=QQ="``.
+_BASE64_ALPHABET: Final = frozenset(string.ascii_letters + string.digits + "+/")
+
+#: How many base64 characters encode one group of three octets. A padded encoding
+#: is a whole number of these, which is the first thing a malformed value fails.
+_BASE64_GROUP: Final = 4
+
+
+def _base64_audio(value: str) -> str:
+    """Require standard, padded, canonical base64 (ADR-0200 §9).
+
+    Four properties, checked in the order that lets each message name a defect
+    the reader can act on: the value is over RFC 4648 §4's 64-character alphabet
+    plus ``=``; its length is a whole number of four-character groups; it decodes
+    without error; and re-encoding what it decodes to **reproduces it byte for
+    byte**.
+
+    **Canonicality is not decoration.** Base64 admits distinct spellings of one
+    byte string — a final group whose unused bits are non-zero, and RFC 4648 §5's
+    URL-safe alphabet among them. Without this clause :class:`SpokenAudio` would
+    have two values for one recording, ``wire/codec.py``'s canonical encoding
+    would faithfully preserve the difference, and ADR-0087 §4's normalises-nothing
+    rule would make them two values all the way down. Refusing the non-canonical
+    spelling is what makes one recording one value. It is also what makes a
+    decoder that quietly ignores stray characters unable to admit a payload a
+    stricter peer refuses.
+
+    **The value is never normalised**: what a caller passed is what crosses the
+    wire and what :meth:`SpokenAudio.decoded` reverses. That is
+    :data:`NonBlankEncodableText`'s own posture and ADR-0096 §2's rule for a value
+    a later comparison may be made against — and here it is stronger than a
+    convention, because a rewritten spelling would be a *different recording's*
+    encoding of the same octets.
+
+    **The message names the class of defect and the position, and never echoes
+    the value** (ADR-0200 §9). This is :func:`encodable_text`'s stated ground and
+    it bites harder here: the value is a recording of the owner's voice, and an
+    error message is the one place ADR-0200 §8's retention rule cannot see.
+
+    Raises:
+        ValueError: If the value is not padded, canonical, standard base64.
+    """
+    offender = next(
+        (
+            index
+            for index, character in enumerate(value)
+            if character not in _BASE64_ALPHABET and character != "="
+        ),
+        None,
+    )
+    if offender is not None:
+        msg = (
+            f"base64 audio must use RFC 4648 §4's alphabet with padding; "
+            f"the character at position {offender} is outside it"
+        )
+        raise ValueError(msg)
+    if len(value) % _BASE64_GROUP:
+        msg = (
+            f"base64 audio must be padded to a multiple of {_BASE64_GROUP} characters, "
+            f"and this value is {len(value)} long"
+        )
+        raise ValueError(msg)
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        msg = "base64 audio must decode; this value does not"
+        raise ValueError(msg) from exc
+    if base64.b64encode(decoded).decode("ascii") != value:
+        msg = (
+            "base64 audio must be canonical, so that one recording has one spelling; "
+            "re-encoding this value's octets does not reproduce it"
+        )
+        raise ValueError(msg)
+    return value
+
+
+type Base64Audio = Annotated[NonBlankEncodableText, AfterValidator(_base64_audio)]
+"""Standard, padded, canonical RFC 4648 §4 base64, never normalised (ADR-0200 §9).
+
+Layered on :data:`NonBlankEncodableText` rather than on :data:`EncodableText`,
+and the blank half is not redundant with the group-length check: ``""`` has a
+length that is a multiple of four and decodes to ``b""``, so without the
+non-blank refinement an empty recording would be a well-formed value. A
+recording carrying no octets is not a recording.
+
+**Why base64 text rather than a ``bytes`` field.** ``bytes`` is the more truthful
+Python type and ADR-0200 §9 declines it deliberately: ADR-0087 §2c's scalar table
+has no ``bytes`` row, ``wire/codec.py``'s ``project`` has no branch for one, and
+adding both would put the base64 convention in two places that must agree
+forever — a hand-written projection branch and a far-side decoder — where a
+silent disagreement corrupts audio rather than failing. Here the convention is
+one validator on one type. The row stays available under ADR-0200 §11's named
+condition.
+"""
+
+
+class SpokenAudio(BaseModel):
+    """One recording or one rendering, and the container it is in (ADR-0200 §9).
+
+    **Exactly two members.** What the octets are, and what they are encoded as —
+    the second being what tells a decoder how to read the first, and what
+    ADR-0200 §1 makes a transcriber and a synthesizer declare their support for
+    before either is called.
+
+    Frozen, because it is the value ADR-0200 §6's bound is measured on and
+    ADR-0200 §1's ``formats`` check is made against: a holder that could reassign
+    ``media_type`` after the check would be holding a different recording from
+    the one that was admitted.
+
+    **Nothing here retains it and nothing here logs it** (ADR-0200 §8). The type
+    carries no rendering of itself for a log: ``BaseModel.__repr__`` would put a
+    recording into any message that interpolated the model, so a component on
+    this path writes ``media_type`` and a length, or nothing.
+
+    Attributes:
+        content: The octets, base64 as :data:`Base64Audio` fixes it. Never
+            normalised, so what a caller passed is what :meth:`decoded` reverses.
+        media_type: The container-and-codec ``content`` is encoded in. Refused by
+            a transcriber or a synthesizer whose ``formats`` does not name it,
+            rather than guessed at (ADR-0200 §1, §9).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content: Base64Audio = Field(
+        description="The audio's octets, as padded canonical RFC 4648 §4 base64.",
+    )
+    media_type: SpokenAudioFormat = Field(
+        description="The container-and-codec the octets are encoded in.",
+    )
+
+    def decoded(self) -> bytes:
+        """Return the octets :attr:`content` encodes.
+
+        The decoding convention is written **once**, here, so no consumer
+        re-derives it and no two consumers can disagree about it (ADR-0200 §9).
+        Validation already established that this succeeds and that it round-trips,
+        so this raises nothing a caller must handle.
+
+        Returns:
+            The decoded audio.
+        """
+        return base64.b64decode(self.content, validate=True)
+
+
 # --- conversations: the durable thread, and the turns indexed under it -------
 # ADR-0074's four values. A conversation is durable, server-side state with an
 # identity of its own; a turn is the *index entry* that names the episode
@@ -14713,7 +14904,78 @@ class NotificationEnqueue(StrEnum):
 #: member names, the two colons and the comma in ADR-0087 §2's canonical form, plus
 #: at most 96 for the identifier. The margin is what stops a later member on this
 #: model from being a silent overflow instead of a recomputation.
+#:
+#: **ADR-0206 §6's two members spend part of that margin and the reserve stands.**
+#: In ADR-0087 §2's canonical form they add ``,"spoken":null`` — 14 bytes — and
+#: ``,"spoken_rendering":"not_requested"`` — 35 bytes, taking the longest of the
+#: four values :class:`SpokenRendering` fixes, which is what makes the figure a
+#: bound rather than an example. That is 49, for a worst case of 179 against 256,
+#: with 77 bytes still in hand; so this constant is **not** superseded and
+#: ``offer``'s refusal is unchanged. What does not fit in a reserve of any size is
+#: the rendering itself — ``hub_max_spoken_audio_bytes`` defaults to 512 KiB of
+#: decoded audio, about 683 KiB base64-encoded — which is why ADR-0206 §6 measures
+#: the whole projected delivery and **degrades** rather than widening this figure.
 DELIVERY_RESERVE_BYTES: Final[int] = 256
+
+
+class SpokenRendering(StrEnum):
+    """Why a delivery does or does not carry audio (ADR-0206 §6).
+
+    **A closed vocabulary of exactly four, whose serialized values ADR-0206 §6
+    fixes here rather than leaving to the member names.** This enumeration crosses
+    the wire inside a :class:`NotificationDelivery`, so two implementations
+    choosing ``"withheld"`` and ``"WITHHELD"`` would both conform to a clause that
+    named only the members and would not interoperate — "the interoperability
+    failure ADR-0084 §3 made framing and codec normative to prevent, arriving one
+    layer up". Fixing them is also what makes §6's reserve arithmetic checkable:
+    without them the longest value is unbounded, and a conforming implementation
+    could spend the margin ADR-0131 §4 left. The spelling is
+    :class:`SpokenAudioFormat`'s and :class:`DataTier`'s — the member name
+    lowercased — so nothing new is invented. A lane adds a member only with an ADR
+    deciding it; removing one, or changing one's value, is a change to what was
+    decided and takes a superseding ADR.
+
+    **The four are exhaustive and mutually exclusive, and each names one cause**
+    (§6). They are read together with :attr:`NotificationDelivery.spoken`, which is
+    not ``None`` **exactly when** this is :attr:`RENDERED`.
+
+    **A withholding is never reported as a degradation and a degradation is never
+    reported as a withholding** (§6). No implementation collapses the two, and none
+    retries a :attr:`WITHHELD` delivery into speech on a later poll: the placement
+    ADR-0206 §3 decides is a property of the candidate and not of the attempt. A
+    fault invites a retry, and a withholding retried is a disclosure rule defeated
+    by a loop — which is why this is a closed enumeration rather than the boolean
+    pair ADR-0200 §4 carries one surface over.
+
+    **It is not** :class:`SpokenDeliveryState`, **and no lane merges them**
+    (ADR-0205 §2, ADR-0206 §6). That one is what a *device reports* about a spoken
+    answer it played; this is what the *hub produced* for a delivery nobody asked
+    for. Neither is derivable from the other and the two never appear on one value:
+    :attr:`RENDERED` says the audio left the hub and says nothing about whether it
+    was heard.
+
+    Attributes:
+        NOT_REQUESTED: ``plays`` was empty, so no placement was decided and no
+            synthesizer was called. What a caller that cannot play audio gets, and
+            the state in which nothing about the poll's behaviour differs from what
+            ADR-0131 §4 already fixes (ADR-0206 §1).
+        RENDERED: The rendering is in :attr:`NotificationDelivery.spoken`.
+        WITHHELD: ``plays`` was non-empty and ADR-0206 §3 withheld the candidate, so
+            no synthesizer was called and nothing was spent. The delivery still
+            travels and is still acknowledgeable, and nothing audible marks it (§5).
+        DEGRADED: ``plays`` was non-empty and §3 placed the candidate, and speaking
+            it did not complete — in exactly the four cases §6 fixes: synthesis
+            raised a ``SpeechError``; the intersection of ``plays`` with the
+            synthesizer's ``formats`` was empty; the rendering breached ADR-0200
+            §6's ``hub_max_spoken_audio_bytes``; or the whole projected delivery
+            carrying it would have breached ADR-0085 §8c. **An elapsed budget is not
+            among them** (§7).
+    """
+
+    NOT_REQUESTED = "not_requested"
+    RENDERED = "rendered"
+    WITHHELD = "withheld"
+    DEGRADED = "degraded"
 
 
 class NotificationDelivery(BaseModel):
@@ -14745,6 +15007,13 @@ class NotificationDelivery(BaseModel):
     peer could send a conforming delivery plus a large unknown member, under the
     frame ceiling and over the contract limit. Forbidding extras makes the frame
     refuse at validation instead.
+
+    **Four members since ADR-0206 §6**, which adds ``spoken`` and
+    ``spoken_rendering`` and adds no more. The rendering is produced **inside the
+    call that answers the poll** and is retained nowhere: no store, index, trail,
+    trace, audit trail or log holds one, in either tier, and a redelivery of the
+    same entry renders afresh (ADR-0206 §1). ``model_config`` is unchanged, and
+    ADR-0131 §4's reason for ``extra="forbid"`` binds unchanged.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -14764,6 +15033,49 @@ class NotificationDelivery(BaseModel):
             "decides nothing about its meaning (ADR-0131 §8)."
         ),
     )
+    spoken: SpokenAudio | None = Field(
+        default=None,
+        description=(
+            "The rendering of the candidate's summary, or None where there is none. "
+            "Not None exactly when spoken_rendering is RENDERED (ADR-0206 §6)."
+        ),
+    )
+    spoken_rendering: SpokenRendering = Field(
+        default=SpokenRendering.NOT_REQUESTED,
+        description="Why this delivery does or does not carry audio (ADR-0206 §6).",
+    )
+
+    @model_validator(mode="after")
+    def _audio_is_present_exactly_when_it_was_rendered(self) -> Self:
+        """State ADR-0206 §6's invariant **in both directions**.
+
+        "``spoken`` is not ``None`` **exactly when** ``spoken_rendering`` is
+        ``RENDERED``, and a validator states that invariant in both directions."
+        Each direction rules out a different lie. A rendering beside
+        :attr:`SpokenRendering.WITHHELD` would be audio of a candidate a disclosure
+        rule refused to speak — the one shape ADR-0206 §5 exists to make
+        unconstructible — and it would say the same of :attr:`SpokenRendering.DEGRADED`
+        and :attr:`SpokenRendering.NOT_REQUESTED`. A :attr:`SpokenRendering.RENDERED`
+        with no audio would report a rendering that is not there, which is the state
+        §6 keeps separate from all three of the others.
+
+        Returns:
+            This delivery, where its two members agree.
+
+        Raises:
+            ValueError: If they do not.
+        """
+        rendered = self.spoken_rendering is SpokenRendering.RENDERED
+        if (self.spoken is not None) != rendered:
+            msg = (
+                f"a delivery carries audio exactly when its rendering is "
+                f"{SpokenRendering.RENDERED.value!r}: this one is "
+                f"{self.spoken_rendering.value!r} and "
+                f"{'carries' if self.spoken is not None else 'carries no'} audio "
+                f"(ADR-0206 §6)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -15094,188 +15406,10 @@ class TransportEndpoint(BaseModel):
     )
 
 
-# --- speech: the recording and the rendering (ADR-0200 §9) -------------------
-# The one shape audio takes on a boundary-crossing type, and the one place the
-# base64 convention is written down. Nothing here knows what a codec is:
-# `models/` decodes the container and encodes the rendering, and this module
-# holds only what is intrinsic to the value (ADR-0016 §2). Declared last because
-# nothing above it depends on it.
-
-
-class SpokenAudioFormat(StrEnum):
-    """A container-and-codec one recording or rendering is carried in (ADR-0200 §9).
-
-    **A closed vocabulary of IANA media types a browser can produce with
-    ``MediaRecorder`` without transcoding**, which is what ties the two members
-    to a measurement rather than to taste: between them they cover the browsers
-    milestone 19's exit test can be run on. ADR-0200 §9 permits a lane to add a
-    member "only on a measurement it records"; removing one is a change to what
-    was decided and takes a superseding ADR.
-
-    **It carries no sample rate, no channel count, no bitrate and no duration.**
-    The first three are stated by the container, and a second answer to a
-    question the payload already answers is the redundancy ADR-0084 §3 refuses. A
-    duration would be worse than redundant: the hub cannot verify one without
-    decoding the audio, so a declared duration is an unverified claim — which is
-    why ADR-0200 §6's bound is on bytes, the thing a hub can measure.
-
-    **The string value is the media type itself**, parameters included, so a
-    value that reaches an HTTP header or a ``MediaRecorder`` constructor is the
-    member rather than a mapping of it. ``"audio/webm;codecs=opus"`` carries its
-    codec parameter for the reason ``MediaRecorder`` requires one: ``audio/webm``
-    alone names a container two codecs can fill, and a transcriber that decoded
-    only Opus would be declaring support for recordings it cannot read.
-    """
-
-    WEBM_OPUS = "audio/webm;codecs=opus"
-    MP4 = "audio/mp4"
-
-
-#: The base64 alphabet RFC 4648 §4 fixes, without its padding character — which
-#: is admitted separately below, because where it may appear is positional and
-#: membership alone would accept ``"=QQ="``.
-_BASE64_ALPHABET: Final = frozenset(string.ascii_letters + string.digits + "+/")
-
-#: How many base64 characters encode one group of three octets. A padded encoding
-#: is a whole number of these, which is the first thing a malformed value fails.
-_BASE64_GROUP: Final = 4
-
-
-def _base64_audio(value: str) -> str:
-    """Require standard, padded, canonical base64 (ADR-0200 §9).
-
-    Four properties, checked in the order that lets each message name a defect
-    the reader can act on: the value is over RFC 4648 §4's 64-character alphabet
-    plus ``=``; its length is a whole number of four-character groups; it decodes
-    without error; and re-encoding what it decodes to **reproduces it byte for
-    byte**.
-
-    **Canonicality is not decoration.** Base64 admits distinct spellings of one
-    byte string — a final group whose unused bits are non-zero, and RFC 4648 §5's
-    URL-safe alphabet among them. Without this clause :class:`SpokenAudio` would
-    have two values for one recording, ``wire/codec.py``'s canonical encoding
-    would faithfully preserve the difference, and ADR-0087 §4's normalises-nothing
-    rule would make them two values all the way down. Refusing the non-canonical
-    spelling is what makes one recording one value. It is also what makes a
-    decoder that quietly ignores stray characters unable to admit a payload a
-    stricter peer refuses.
-
-    **The value is never normalised**: what a caller passed is what crosses the
-    wire and what :meth:`SpokenAudio.decoded` reverses. That is
-    :data:`NonBlankEncodableText`'s own posture and ADR-0096 §2's rule for a value
-    a later comparison may be made against — and here it is stronger than a
-    convention, because a rewritten spelling would be a *different recording's*
-    encoding of the same octets.
-
-    **The message names the class of defect and the position, and never echoes
-    the value** (ADR-0200 §9). This is :func:`encodable_text`'s stated ground and
-    it bites harder here: the value is a recording of the owner's voice, and an
-    error message is the one place ADR-0200 §8's retention rule cannot see.
-
-    Raises:
-        ValueError: If the value is not padded, canonical, standard base64.
-    """
-    offender = next(
-        (
-            index
-            for index, character in enumerate(value)
-            if character not in _BASE64_ALPHABET and character != "="
-        ),
-        None,
-    )
-    if offender is not None:
-        msg = (
-            f"base64 audio must use RFC 4648 §4's alphabet with padding; "
-            f"the character at position {offender} is outside it"
-        )
-        raise ValueError(msg)
-    if len(value) % _BASE64_GROUP:
-        msg = (
-            f"base64 audio must be padded to a multiple of {_BASE64_GROUP} characters, "
-            f"and this value is {len(value)} long"
-        )
-        raise ValueError(msg)
-    try:
-        decoded = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        msg = "base64 audio must decode; this value does not"
-        raise ValueError(msg) from exc
-    if base64.b64encode(decoded).decode("ascii") != value:
-        msg = (
-            "base64 audio must be canonical, so that one recording has one spelling; "
-            "re-encoding this value's octets does not reproduce it"
-        )
-        raise ValueError(msg)
-    return value
-
-
-type Base64Audio = Annotated[NonBlankEncodableText, AfterValidator(_base64_audio)]
-"""Standard, padded, canonical RFC 4648 §4 base64, never normalised (ADR-0200 §9).
-
-Layered on :data:`NonBlankEncodableText` rather than on :data:`EncodableText`,
-and the blank half is not redundant with the group-length check: ``""`` has a
-length that is a multiple of four and decodes to ``b""``, so without the
-non-blank refinement an empty recording would be a well-formed value. A
-recording carrying no octets is not a recording.
-
-**Why base64 text rather than a ``bytes`` field.** ``bytes`` is the more truthful
-Python type and ADR-0200 §9 declines it deliberately: ADR-0087 §2c's scalar table
-has no ``bytes`` row, ``wire/codec.py``'s ``project`` has no branch for one, and
-adding both would put the base64 convention in two places that must agree
-forever — a hand-written projection branch and a far-side decoder — where a
-silent disagreement corrupts audio rather than failing. Here the convention is
-one validator on one type. The row stays available under ADR-0200 §11's named
-condition.
-"""
-
-
-class SpokenAudio(BaseModel):
-    """One recording or one rendering, and the container it is in (ADR-0200 §9).
-
-    **Exactly two members.** What the octets are, and what they are encoded as —
-    the second being what tells a decoder how to read the first, and what
-    ADR-0200 §1 makes a transcriber and a synthesizer declare their support for
-    before either is called.
-
-    Frozen, because it is the value ADR-0200 §6's bound is measured on and
-    ADR-0200 §1's ``formats`` check is made against: a holder that could reassign
-    ``media_type`` after the check would be holding a different recording from
-    the one that was admitted.
-
-    **Nothing here retains it and nothing here logs it** (ADR-0200 §8). The type
-    carries no rendering of itself for a log: ``BaseModel.__repr__`` would put a
-    recording into any message that interpolated the model, so a component on
-    this path writes ``media_type`` and a length, or nothing.
-
-    Attributes:
-        content: The octets, base64 as :data:`Base64Audio` fixes it. Never
-            normalised, so what a caller passed is what :meth:`decoded` reverses.
-        media_type: The container-and-codec ``content`` is encoded in. Refused by
-            a transcriber or a synthesizer whose ``formats`` does not name it,
-            rather than guessed at (ADR-0200 §1, §9).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    content: Base64Audio = Field(
-        description="The audio's octets, as padded canonical RFC 4648 §4 base64.",
-    )
-    media_type: SpokenAudioFormat = Field(
-        description="The container-and-codec the octets are encoded in.",
-    )
-
-    def decoded(self) -> bytes:
-        """Return the octets :attr:`content` encodes.
-
-        The decoding convention is written **once**, here, so no consumer
-        re-derives it and no two consumers can disagree about it (ADR-0200 §9).
-        Validation already established that this succeeds and that it round-trips,
-        so this raises nothing a caller must handle.
-
-        Returns:
-            The decoded audio.
-        """
-        return base64.b64decode(self.content, validate=True)
+# --- speech: what a failure is called, and what one spoken turn produced ------
+# The half of ADR-0200 §9's block that stays at the foot of this module, because
+# `SpokenTurn` depends on `TurnOutcome` (ADR-0206 §6). The recording and the
+# rendering themselves moved up to the speech block above.
 
 
 class SpeechFailure(StrEnum):

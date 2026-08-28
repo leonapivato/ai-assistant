@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from ai_assistant.core.errors import NotificationBudgetError, NotificationOutboxError
-from ai_assistant.core.types import DataTier, NotificationCandidate, NotificationDelivery
+from ai_assistant.core.types import (
+    DataTier,
+    NotificationCandidate,
+    NotificationDelivery,
+    SpokenAudioFormat,
+)
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
@@ -62,11 +67,20 @@ class _Scripted(FakeAssistantEngine):
         self.polling = asyncio.Event()
 
     async def next_notification(
-        self, *, acknowledging: Identifier | None = None, budget: timedelta
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
     ) -> NotificationDelivery | None:
         """Answer the next scripted poll once the test releases it."""
         self.acknowledged.append(acknowledging)
-        self.calls.append(("next_notification", {"acknowledging": acknowledging, "budget": budget}))
+        self.calls.append(
+            (
+                "next_notification",
+                {"acknowledging": acknowledging, "plays": plays, "budget": budget},
+            )
+        )
         self.polling.set()
         try:
             await self.released.wait()
