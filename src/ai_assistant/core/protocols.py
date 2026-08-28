@@ -9138,7 +9138,11 @@ class AssistantEngine(Protocol):
     # --- the delivery surface (ADR-0131 §1, §4) ---------------------------
 
     async def next_notification(
-        self, *, acknowledging: Identifier | None = None, budget: timedelta
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
     ) -> NotificationDelivery | None:
         """Wait up to ``budget`` for a notification, and acknowledge the last one.
 
@@ -9190,6 +9194,64 @@ class AssistantEngine(Protocol):
         an operation that unsends one. What a departure guarantees is that no
         *later* poll selects the entry.
 
+        **A caller that can play audio asks for a rendering here, and the rendering
+        is produced inside the call that answers the poll** (ADR-0206 §1). ``plays``
+        is the whole of what that ADR adds to these arguments: an empty one asks for
+        nothing, and none is produced — no placement is decided, no synthesizer is
+        called, and nothing about the poll's behaviour differs from what §4 already
+        fixes. A caller that cannot play audio omits it and is unaffected by every
+        other clause of ADR-0206.
+
+        **A rendering is produced after the entry has been selected, and never
+        before.** No entry is rendered in advance of a poll that asked for one, no
+        rendering is retained between polls, and a redelivery of the same entry
+        renders afresh. No rendering is written to the outbox, to any store, index,
+        trail, trace, audit trail or log, in either tier: ADR-0200 §8's first clause
+        binds this path in the terms it is already written in, and ADR-0206 adds no
+        exception to it.
+
+        **Exactly one triple is placed as speakable** (ADR-0206 §3), on a channel
+        whose audience is unbounded — a rendering is played out of a device into a
+        room. It is a candidate whose ``producer`` is ``"calendar-upcoming"``, whose
+        ``notification_class`` is ``"upcoming_event"`` and whose ``sensitivity`` is
+        :attr:`~ai_assistant.core.types.DataTier.PERSONAL`. **Every other triple is
+        withheld** — the same producer and class at any other sensitivity, every
+        class of a producer that ADR is silent about, and every producer that does
+        not exist yet — and no implementation reads the placement as reaching a
+        tier, a class or a producer it did not name. The decision is made from those
+        three recorded fields and from **nothing else**: not from ``summary``,
+        ``detail``, ``references``, ``goal_id`` or ``confidence``, not by keyword,
+        pattern or classifier, and not by asking a model (ADR-0199 §2).
+
+        **A withheld notification arrives unspoken and nothing audible marks it**
+        (ADR-0206 §5). No synthesizer is called, nothing is spent, the delivery
+        carries no audio, and no chime, tone or spoken notice substitutes for it.
+        The delivery is still returned by this poll and is still acknowledged
+        normally: one poll serves both of that device's channels, so the rendered
+        surface — a channel of bounded audience — gets it at once rather than
+        waiting for a second request.
+
+        **What is spoken is ``summary``, byte for byte** (ADR-0206 §4). No prefix,
+        no announcement, no salutation, no punctuation added or removed, no case
+        folding, no trimming and no second value composed from it; ``detail`` is
+        **not** spoken on any candidate under any placement. No model is called on
+        this path and no stage composes anything.
+
+        **Speaking never fails the poll** (ADR-0206 §6). A ``SpeechError`` out of
+        ``synthesize`` — and nothing else — degrades; every other exception
+        propagates unchanged, and a delivered cancellation is neither a withholding
+        nor a degradation. ``spoken`` is not ``None`` **exactly when**
+        ``spoken_rendering`` is
+        :attr:`~ai_assistant.core.types.SpokenRendering.RENDERED`, and the delivery
+        travels in every degradation.
+
+        **``budget`` bounds the waiting and nothing else, and the rendering is the
+        request's own work** (ADR-0206 §7, ADR-0135 §3). It is performed whatever the
+        state of the budget, runs to completion, and is never declined, shortened or
+        degraded because the budget has elapsed — so a poll that renders answers
+        later than ``budget`` by construction. Its bound is the deadline decorator
+        the composition root wires over the synthesizer and nothing else.
+
         Args:
             acknowledging: The ``delivery_id`` this caller is confirming, or
                 ``None``. It retires the entry **only** where it is that entry's
@@ -9198,16 +9260,36 @@ class AssistantEngine(Protocol):
                 superseded — is accepted and does nothing. That idempotent no-op
                 is what lets a client reconnect after any failure and acknowledge
                 blindly rather than reason about what the hub remembers.
+            plays: The formats this caller can render, in preference order
+                (ADR-0206 §1). Empty — the default — asks for no rendering. Where
+                it is non-empty and ADR-0206 §3 places the candidate, the format
+                rendered is the **first** member this hub's synthesizer's
+                ``formats`` also names (ADR-0200 §3), and an empty intersection
+                degrades rather than substituting a format the caller did not name.
+                It says what the caller can render and never who can hear: omitting
+                it declines to open a channel of unbounded audience rather than
+                declaring a bounded one, and no implementation reads a ``plays``, a
+                transport, a session or a device as making that channel bounded
+                (ADR-0199 §8).
             budget: How long the hub may hold this request before answering with
                 nothing. Honoured over the closed range from zero to
                 ``hub_max_notification_budget``; **zero is an immediate poll**,
-                answered at once with whatever is available, which may be nothing.
+                answered at once with whatever is available, which may be nothing —
+                and which, under ADR-0135 §3, still does the request's own work, so
+                a zero budget renders exactly as any other does.
 
         Returns:
             The notification to show and the token that retires it, or ``None``
-            where the budget elapsed with nothing available.
+            where the budget elapsed with nothing available. Where ``plays`` asked
+            for a rendering, ``spoken`` carries it and ``spoken_rendering`` says why
+            it is there or is not (ADR-0206 §6).
 
         Raises:
+            ValueError: If ``acknowledging`` is blank, or ``plays`` names something
+                that is not a :class:`~ai_assistant.core.types.SpokenAudioFormat`.
+                A malformed argument is refused before any outbox state changes,
+                exactly as an out-of-range ``budget`` is, and no rendering is
+                attempted on a request whose arguments were refused (ADR-0206 §7).
             NotificationBudgetError: If ``budget`` is negative or above
                 ``hub_max_notification_budget``. The request then has **no effect
                 on the outbox**: arguments are validated before the

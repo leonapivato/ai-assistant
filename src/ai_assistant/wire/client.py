@@ -679,7 +679,11 @@ class HubClient:
         return await self._call("set_notification_preferences", preferences=preferences)  # type: ignore[no-any-return]
 
     async def next_notification(
-        self, *, acknowledging: Identifier | None = None, budget: timedelta
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
     ) -> NotificationDelivery | None:
         """Park on the hub until a notification is due, or ``budget`` elapses.
 
@@ -702,20 +706,30 @@ class HubClient:
             acknowledging: The ``delivery_id`` this device is confirming, or
                 ``None``. Naming a superseded or unknown one is accepted and does
                 nothing, so a device that reconnected may acknowledge blindly.
+            plays: What this caller can render, in preference order (ADR-0206 §1).
+                Empty — the default — asks for no rendering, so a device that
+                cannot play audio omits it and this poll behaves exactly as it did
+                before that ADR. Refused by the hub where it names something that
+                is not a format, and refused **before** the acknowledgement is
+                applied, so a poll carrying one retires nothing.
             budget: How long the hub may hold the request. Zero is an immediate
                 poll. A value outside the hub's range comes back as
                 :class:`~ai_assistant.core.errors.NotificationBudgetError`,
                 reconstructed here from the hub's own refusal rather than guessed
                 at locally — the ceiling is the hub's figure and this client is not
-                told it.
+                told it. It bounds the hub's **waiting** and nothing else
+                (ADR-0135 §3), so a poll that renders answers later than ``budget``
+                — which is why nothing about the read deadline is derived from it.
 
         Returns:
             The notification to show and the token that retires it, or ``None``
-            where the budget elapsed with nothing waiting.
+            where the budget elapsed with nothing waiting. Where ``plays`` asked
+            for a rendering, ``spoken`` carries it and ``spoken_rendering`` says
+            why it is there or is not (ADR-0206 §6).
         """
         named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
         return await self._call(  # type: ignore[no-any-return]
-            "next_notification", acknowledging=named, budget=budget
+            "next_notification", acknowledging=named, plays=plays, budget=budget
         )
 
     async def recent_conversations(

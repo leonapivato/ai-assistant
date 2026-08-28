@@ -25,7 +25,12 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.core.types import DataTier, NotificationCandidate, NotificationDelivery
+from ai_assistant.core.types import (
+    DataTier,
+    NotificationCandidate,
+    NotificationDelivery,
+    SpokenAudioFormat,
+)
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.framing import read_frame, write_frame
@@ -91,10 +96,14 @@ class _PollingEngine(FakeAssistantEngine):
         self.cancelled = False
 
     async def next_notification(
-        self, *, acknowledging: object = None, budget: timedelta = timedelta(0)
+        self,
+        *,
+        acknowledging: object = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta = timedelta(0),
     ) -> NotificationDelivery | None:
         """Park until released, so a case can act while a poll is outstanding."""
-        del acknowledging, budget
+        del acknowledging, plays, budget
         self.poll_entered.set()
         try:
             await self.release_poll.wait()

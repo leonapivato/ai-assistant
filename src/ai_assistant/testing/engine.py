@@ -73,6 +73,7 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryKind,
     MemorySource,
+    NotificationDelivery,
     ObservationReport,
     OperationConfirmation,
     Provenance,
@@ -92,6 +93,7 @@ from ai_assistant.core.types import (
     SpokenDelivery,
     SpokenDeliveryReport,
     SpokenDeliveryState,
+    SpokenRendering,
     SpokenTurn,
     StepExecution,
     StepOutcome,
@@ -105,6 +107,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.disclosure import notification_is_speakable
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
@@ -139,7 +142,6 @@ if TYPE_CHECKING:
         HeldNotification,
         Identifier,
         NonBlankEncodableText,
-        NotificationDelivery,
         NotificationPreferences,
         PermissionDecision,
         RoutedListing,
@@ -1143,9 +1145,13 @@ class FakeAssistantEngine:
         return self._checked(dismissed, "dismiss_notification")
 
     async def next_notification(
-        self, *, acknowledging: Identifier | None = None, budget: timedelta
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
     ) -> NotificationDelivery | None:
-        """Answer ADR-0131 §1's long poll from the fake outbox.
+        """Answer ADR-0131 §1's long poll from the fake outbox, rendering as asked.
 
         **It does not sleep, and that is deliberate.** A fake that waited out a
         five-minute budget would make every client's delivery test slow or flaky;
@@ -1153,29 +1159,110 @@ class FakeAssistantEngine:
         acknowledge, then select — so this takes one pass and answers ``None``
         where nothing is available. A test that wants the waiting drives
         :attr:`notification_outbox` directly.
+
+        **The rendering is ADR-0206's, applied here rather than approximated**, so a
+        consumer testing against this double meets the contract's four states and not
+        a subset of them. An empty ``plays`` asks for nothing and gets
+        ``NOT_REQUESTED``; a candidate ADR-0206 §3 does not place gets ``WITHHELD``
+        with no rendering attempted; an empty intersection of ``plays`` with
+        :attr:`spoken_formats` gets ``DEGRADED``; and anything else gets
+        ``RENDERED``, whose octets are a hash of the **summary** — deterministic,
+        opaque, and not to be decoded by anything. The placement predicate is
+        :func:`~ai_assistant.orchestration.disclosure.notification_is_speakable`
+        itself, imported and never re-declared: a copy of §3's triple here would be
+        exactly the drift golden rule 1 exists to prevent, arriving through the
+        package whose job is to make the contract testable.
+
+        **No rendering is retained** (ADR-0206 §1). Nothing here writes one to
+        :attr:`notification_outbox`, to :attr:`notification_store` or to
+        :attr:`calls`, and a redelivery of the same entry renders afresh because the
+        rendering is computed from the summary on each pass.
+
+        Args:
+            acknowledging: The ``delivery_id`` being confirmed, or ``None``.
+            plays: What the caller can render, in preference order. Empty asks for
+                no rendering.
+            budget: How long the hub may hold the request. Never waited out here.
+
+        Returns:
+            The delivery, or ``None`` where nothing is available.
+
+        Raises:
+            ValueError: If ``acknowledging`` is blank, or ``plays`` names something
+                that is not a
+                :class:`~ai_assistant.core.types.SpokenAudioFormat` — refused
+                before the acknowledgement is applied, as ADR-0206 §7 requires.
+            NotificationBudgetError: If ``budget`` is outside ADR-0131 §4's range.
         """
         named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
         # ADR-0131 §4's ordering: a refused request retires nothing, leases nothing
         # and mints nothing, so the budget is judged before the acknowledgement is
         # applied. A fake that acknowledged first would certify a client against a
-        # hub that does not exist.
+        # hub that does not exist. ADR-0206 §7 puts `plays` under the same rule.
         if budget < timedelta(0) or budget > self.max_notification_budget:
             msg = (
                 f"budget must be between 0 and {self.max_notification_budget} inclusive, "
                 f"got {budget} (ADR-0131 §4)"
             )
             raise NotificationBudgetError(msg)
+        offender = next(
+            (member for member in plays if not isinstance(member, SpokenAudioFormat)), None
+        )
+        if offender is not None:
+            msg = (
+                f"plays names the formats the caller can render, and {offender!r} is not "
+                f"one of them (ADR-0206 §1, §7)"
+            )
+            raise ValueError(msg)
         check_arguments(
             "next_notification",
             max_bytes=self._max_payload_bytes,
             acknowledging=named,
+            plays=plays,
             budget=budget,
         )
-        self.calls.append(("next_notification", {"acknowledging": named, "budget": budget}))
+        self.calls.append(
+            ("next_notification", {"acknowledging": named, "plays": plays, "budget": budget})
+        )
         if named is not None:
             await self.notification_outbox.acknowledge(named)
         delivery = await self.notification_outbox.claim()
-        return None if delivery is None else self._checked(delivery, "next_notification")
+        if delivery is None:
+            return None
+        return self._checked(self._spoken_delivery(delivery, plays), "next_notification")
+
+    def _spoken_delivery(
+        self, delivery: NotificationDelivery, plays: tuple[SpokenAudioFormat, ...]
+    ) -> NotificationDelivery:
+        """Apply ADR-0206 §3, §5 and §6 to one selected delivery.
+
+        Args:
+            delivery: What the fake outbox minted.
+            plays: The caller's preference order.
+
+        Returns:
+            The delivery, carrying a rendering or the member naming why it carries
+            none.
+        """
+        if not plays:
+            return delivery
+        rendering = SpokenRendering.WITHHELD
+        spoken: SpokenAudio | None = None
+        if notification_is_speakable(delivery.notification):
+            chosen = next((member for member in plays if member in self.spoken_formats), None)
+            if chosen is None:
+                rendering = SpokenRendering.DEGRADED
+            else:
+                spoken = SpokenAudio(
+                    content=_pseudo_audio(delivery.notification.summary, chosen), media_type=chosen
+                )
+                rendering = SpokenRendering.RENDERED
+        return NotificationDelivery(
+            delivery_id=delivery.delivery_id,
+            notification=delivery.notification,
+            spoken=spoken,
+            spoken_rendering=rendering,
+        )
 
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification, reporting whether there was one to destroy."""

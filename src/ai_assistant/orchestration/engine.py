@@ -120,6 +120,7 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
+    NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
     ParkedBinding,
@@ -132,8 +133,10 @@ from ai_assistant.core.types import (
     RoutedOperationRecord,
     RouteOutcome,
     SpeechFailure,
+    SpokenAudioFormat,
     SpokenDelivery,
     SpokenDeliveryState,
+    SpokenRendering,
     SpokenTurn,
     StepOutcome,
     StepStatus,
@@ -148,6 +151,7 @@ from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
     UnboundedAudienceSupply,
+    notification_is_speakable,
 )
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
@@ -222,7 +226,6 @@ if TYPE_CHECKING:
         MemoryRecord,
         NonBlankEncodableText,
         NotificationCandidate,
-        NotificationDelivery,
         NotificationDisposition,
         NotificationPreferences,
         ObservationReport,
@@ -235,7 +238,6 @@ if TYPE_CHECKING:
         SourceReadRecord,
         SpendTotal,
         SpokenAudio,
-        SpokenAudioFormat,
         SpokenDeliveryReport,
         TurnResult,
     )
@@ -4931,7 +4933,11 @@ class Engine:
     # --- the delivery surface (ADR-0131 §1, §4) ----------------------------
 
     async def next_notification(
-        self, *, acknowledging: Identifier | None = None, budget: timedelta
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
     ) -> NotificationDelivery | None:
         """Wait up to ``budget`` for a notification, acknowledging the last one.
 
@@ -4953,10 +4959,36 @@ class Engine:
         §4's immediate poll — "the same request with the waiting removed" — rather
         than a case of its own.
 
+        **A fourth step follows the three, and only where the caller asked for one**
+        (ADR-0206 §1): the rendering, produced *inside this call*, after the entry
+        has been selected and never before. Nothing is pre-rendered at ``offer``, at
+        disposition or at reconsideration; nothing is retained between polls; and a
+        redelivery of the same entry renders afresh, because a rendering is not a
+        property of an entry at all. It goes to no store, index, trail, trace, audit
+        trail or log, in either tier (ADR-0200 §8).
+
+        **The ordering rule reaches ``plays`` unchanged** (ADR-0131 §4, ADR-0206 §7).
+        A malformed ``plays`` is an argument, so it is refused before the
+        acknowledgement is applied, before any entry is selected and before any other
+        outbox state changes — and no rendering is attempted on a request whose
+        arguments were refused.
+
+        **This method holds no** ``MemoryStore`` **and no** ``ContextProvider``
+        **while answering** (ADR-0206 §3). The placement is decided from three
+        recorded fields of the candidate the outbox handed over, and nothing on this
+        path issues a store query of any kind, resolves ``references``, or reads a
+        record — which is what keeps ADR-0204 §3's test where ADR-0204 §5 puts it,
+        on the producer, rather than on a delivery that has nothing in hand.
+
         Args:
             acknowledging: The ``delivery_id`` being confirmed, or ``None``.
+            plays: The formats the caller can render, in preference order. Empty —
+                the default — asks for no rendering, and none is produced: no
+                placement is decided, no synthesizer is called, and nothing about
+                this poll's behaviour differs from what ADR-0131 §4 fixes.
             budget: How long the hub may hold this request before answering with
-                nothing.
+                nothing. It bounds the **waiting** and nothing else (ADR-0135 §3), so
+                a poll that renders answers later than ``budget`` by construction.
 
         Returns:
             The delivery to show, or ``None`` where the budget elapsed with
@@ -4964,7 +4996,9 @@ class Engine:
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ValueError: If ``acknowledging`` is blank.
+            ValueError: If ``acknowledging`` is blank, or ``plays`` names something
+                that is not a
+                :class:`~ai_assistant.core.types.SpokenAudioFormat`.
             NotificationBudgetError: If ``budget`` is negative or above the
                 configured ceiling.
             ConfigurationError: If no delivery outbox is wired.
@@ -4974,20 +5008,66 @@ class Engine:
         self._reject_if_closing()
         named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
         self._check_budget(budget)
+        self._check_plays(plays)
         check_arguments(
             "next_notification",
             max_bytes=self._max_payload_bytes,
             acknowledging=named,
+            plays=plays,
             budget=budget,
         )
         outbox = self._delivery_surface()
         # **Unshielded, alone on this surface** (ADR-0131 §2a): a poll whose
         # connection has gone must stop and take no entry, so the wire's cancel of
         # its dispatch task has to reach the work. The mutating steps inside are
-        # scope-shielded instead — see :meth:`_poll`.
+        # scope-shielded instead — see :meth:`_poll`. The rendering is deliberately
+        # *not* shielded either: ADR-0206 §6 makes a cancellation delivered while a
+        # synthesis is outstanding neither a withholding nor a degradation, so it
+        # propagates and sets no ``spoken_rendering`` at all.
         return await self._tracked(
-            self._poll(outbox, named, budget), "next_notification", checked=True, shielded=False
+            self._poll(outbox, named, plays, budget),
+            "next_notification",
+            checked=True,
+            shielded=False,
         )
+
+    @staticmethod
+    def _check_plays(plays: tuple[SpokenAudioFormat, ...]) -> None:
+        """Refuse a ``plays`` that names something this hub cannot mean.
+
+        **An empty one is admitted rather than refused**, unlike ``converse_spoken``'s
+        (ADR-0200 §3), and the asymmetry is ADR-0206 §1's: there, an empty preference
+        order is a call that could not be answered whatever the synthesizer produces;
+        here it is the ordinary state of every caller that cannot play audio, and it
+        asks for no rendering rather than for an impossible one.
+
+        **What is refused is a member that is not a format.** In-process there is no
+        adapter between a caller and this method — over the wire ``wire.surface``
+        derives one from this signature and refuses there — so without this check a
+        string that merely looks like a media type would reach the placement, be
+        compared against a synthesizer's ``formats``, never match, and arrive as a
+        silent degradation instead of the malformed argument it is. Refused **before
+        any outbox effect**, which is ADR-0131 §4's ordering reaching ADR-0206 §7's
+        third clause.
+
+        Args:
+            plays: What the caller says it can render.
+
+        Raises:
+            ValueError: If any member is not a
+                :class:`~ai_assistant.core.types.SpokenAudioFormat`.
+        """
+        offender = next(
+            (member for member in plays if not isinstance(member, SpokenAudioFormat)), None
+        )
+        if offender is not None:
+            msg = (
+                f"plays names the formats the caller can render, and {offender!r} is not "
+                f"one of them; a malformed argument is refused before the "
+                f"acknowledgement is applied and before any entry is selected "
+                f"(ADR-0131 §4, ADR-0206 §7)"
+            )
+            raise ValueError(msg)
 
     def _check_budget(self, budget: timedelta) -> None:
         """Refuse a budget outside ADR-0131 §4's closed range, before any effect.
@@ -5034,9 +5114,13 @@ class Engine:
         return self._notification_outbox
 
     async def _poll(
-        self, outbox: DeliveryOutbox, acknowledging: Identifier | None, budget: timedelta
+        self,
+        outbox: DeliveryOutbox,
+        acknowledging: Identifier | None,
+        plays: tuple[SpokenAudioFormat, ...],
+        budget: timedelta,
     ) -> NotificationDelivery | None:
-        """Apply the acknowledgement, then wait out the budget for an entry.
+        """Apply the acknowledgement, wait out the budget, then render (ADR-0206 §1).
 
         The deadline is computed **once**, from this engine's guarded clock, so a
         poll's length is fixed at its start rather than recomputed against a clock
@@ -5087,7 +5171,14 @@ class Engine:
             # carry".
             delivery = await self._uninterruptibly(outbox.claim())
             if delivery is not None:
-                return delivery
+                # **The request's own work, and it is not shielded** (ADR-0135 §3,
+                # ADR-0206 §7). It runs to completion whatever the state of the
+                # budget — a poll that renders answers later than ``budget`` by
+                # construction, and an elapsed budget is no ground for degrading —
+                # while a *cancellation* still reaches it, which is what makes
+                # ADR-0206 §6's cancellation clause true: the lease stands, the
+                # entry returns on expiry, and no ``spoken_rendering`` is set.
+                return await self._rendered(delivery, plays=plays)
             remaining = budget - _elapsed_since(started, self._now())
             if remaining <= timedelta(0):
                 return None
@@ -5101,6 +5192,182 @@ class Engine:
                 # the wait can be trusted for, so it is what ends the poll; a wake
                 # sends us back for the re-read that correctness actually rests on.
                 return None
+
+    async def _rendered(
+        self, delivery: NotificationDelivery, *, plays: tuple[SpokenAudioFormat, ...]
+    ) -> NotificationDelivery:
+        """Speak the summary where ADR-0206 §3 places it, or say why it is unspoken.
+
+        The whole of ADR-0206's rendering, in the order its clauses fall.
+
+        **An empty ``plays`` asks for nothing and gets nothing** (§1). No placement is
+        decided, no synthesizer is called, and the delivery is returned exactly as the
+        outbox minted it — ``NOT_REQUESTED``, which is
+        :class:`~ai_assistant.core.types.NotificationDelivery`'s own default, so a
+        caller that cannot play audio meets ADR-0131 §4's poll unchanged.
+
+        **The placement is decided before anything is spent** (§3, §5). A withheld
+        candidate calls no synthesizer, and the delivery still travels and is still
+        acknowledgeable, with nothing audible marking it — no chime, no tone, no
+        spoken notice, and no substitute value of any kind. A withholding is never
+        reported as a degradation and is never retried into speech on a later poll,
+        because the placement is a property of the candidate and not of the attempt.
+
+        **What is handed to the seam is** ``summary`` **byte for byte** (§4): no
+        prefix, no announcement, no salutation, no punctuation added or removed, no
+        case folding, no trimming and no second value composed from it. ``detail`` is
+        never spoken, on any candidate, under any placement — the page stays strictly
+        more informative than the room. It is a
+        :data:`~ai_assistant.core.types.NonBlankEncodableText` already, which is
+        exactly what ``synthesize`` requires, so nothing here constructs a text at all.
+
+        **The four degradation cases are §6's four and no others**, and in every one
+        the delivery travels without the rendering: an empty format intersection,
+        discovered *before* the call rather than reported by one and the only one that
+        spends nothing; a ``SpeechError`` out of ``synthesize``; a rendering over
+        ADR-0200 §6's ``hub_max_spoken_audio_bytes``; and the whole projected delivery
+        over ADR-0085 §8c. **An elapsed budget is not among them** (§7) — this stage is
+        never handed one and cannot degrade on it — and a synthesis that outlives the
+        decorator's own deadline raises ``SpeechTimeoutError``, which is a
+        ``SpeechError`` and is the second case.
+
+        **A hub with no synthesizer wired reaches the empty intersection.** ADR-0206 §6
+        fixes the four causes; a deployment that composed no speech seams can produce
+        no format, so the intersection of ``plays`` with what it can produce is empty
+        and this degrades rather than raising. Raising would fail every poll of a
+        speech-less hub the moment a caller that *can* play audio asked — losing the
+        notification to a deployment choice, which is what ADR-0131 §3's durability and
+        §6's "a failure to speak never fails the poll" both refuse.
+
+        **The bound on the synthesis is the composition root's decorator and nothing
+        else** (§7). ``synthesize`` is called directly rather than through
+        :func:`~ai_assistant.orchestration.speech.synthesize_within`, because that
+        helper exists to thread a *caller's* budget into a stage and this stage has no
+        caller's budget to thread: ADR-0135 §3 gives the poll's ``budget`` to the
+        waiting alone.
+
+        **Only ``SpeechError`` is caught** (§6). Every other exception propagates
+        unchanged, so a stage that was wholly broken could not report the same
+        classified-looking degradation on every call, and a delivered cancellation
+        propagates as a cancellation rather than as either outcome.
+
+        Args:
+            delivery: What the outbox selected, leased and minted an identifier for.
+            plays: The caller's preference order.
+
+        Returns:
+            The delivery, carrying the rendering and ``RENDERED``, or carrying none
+            and the member naming why.
+
+        Raises:
+            Exception: Anything out of ``synthesize`` that is not a ``SpeechError``.
+        """
+        if not plays:
+            return delivery
+        if not notification_is_speakable(delivery.notification):
+            # Nothing is spent and nothing audible marks it (ADR-0206 §5). The class
+            # is logged, never the summary: what a producer wrote is content, and
+            # ADR-0199 §2's "no content is read to decide this" is weaker than a rule
+            # that also never writes it down.
+            _log.info(
+                "notification_rendering_withheld",
+                producer=delivery.notification.producer,
+                notification_class=delivery.notification.notification_class,
+            )
+            return self._delivery_with(delivery, None, SpokenRendering.WITHHELD)
+        rendering = await self._notification_audio(delivery.notification.summary, plays=plays)
+        if rendering is None:
+            return self._delivery_with(delivery, None, SpokenRendering.DEGRADED)
+        spoken = self._delivery_with(delivery, rendering, SpokenRendering.RENDERED)
+        try:
+            check_payload(
+                spoken,
+                max_bytes=self._max_payload_bytes,
+                subject="the result of next_notification()",
+            )
+        except OversizedValueError:
+            # ADR-0206 §6's fourth case, and it has **no second step**: a delivery
+            # carrying no rendering is the value ADR-0131 §4's 256-byte reserve
+            # already guarantees fits, so there is nothing further to drop and no
+            # re-measurement to make.
+            _log.warning("notification_rendering_degraded", reason="over_payload_limit")
+            return self._delivery_with(delivery, None, SpokenRendering.DEGRADED)
+        return spoken
+
+    async def _notification_audio(
+        self, summary: NonBlankEncodableText, *, plays: tuple[SpokenAudioFormat, ...]
+    ) -> SpokenAudio | None:
+        """Render one summary, or return ``None`` for §6's first three degradations.
+
+        Split from :meth:`_rendered` because the three causes that can be decided
+        without the whole delivery in hand are one question — "did the seam give us
+        audio we may send?" — and the fourth is a measurement of the value the answer
+        goes into. Each of the three is logged with its own reason and none of them
+        carries the summary, the seam's message or the audio (ADR-0200 §8).
+
+        Args:
+            summary: The candidate's summary, handed to the seam byte for byte.
+            plays: The caller's preference order.
+
+        Returns:
+            The rendering, or ``None`` where speaking it did not complete.
+
+        Raises:
+            Exception: Anything out of ``synthesize`` that is not a ``SpeechError``.
+        """
+        synthesizer = self._synthesizer
+        produces: frozenset[SpokenAudioFormat] = (
+            frozenset() if synthesizer is None else synthesizer.formats
+        )
+        chosen = next((member for member in plays if member in produces), None)
+        if synthesizer is None or chosen is None:
+            _log.warning("notification_rendering_degraded", reason="no_shared_format")
+            return None
+        try:
+            rendering = await synthesizer.synthesize(summary, format=chosen)
+        except SpeechError as exc:
+            # The classification is logged; the seam's own message is not, to either
+            # tier, on ADR-0200 §8's authorship clause.
+            _log.warning(
+                "notification_rendering_degraded",
+                reason="synthesis_failed",
+                failure=classify_speech_failure(exc).value,
+            )
+            return None
+        size = len(rendering.decoded())
+        if size > self._max_spoken_audio_bytes:
+            _log.warning("notification_rendering_degraded", reason="over_audio_bound", size=size)
+            return None
+        return rendering
+
+    @staticmethod
+    def _delivery_with(
+        delivery: NotificationDelivery,
+        spoken: SpokenAudio | None,
+        rendering: SpokenRendering,
+    ) -> NotificationDelivery:
+        """Rebuild one delivery around its rendering, through the validator.
+
+        Constructed rather than :meth:`~pydantic.BaseModel.model_copy`-updated, so
+        ADR-0206 §6's biconditional is *checked* on every value this path produces
+        rather than trusted — ``model_copy`` skips validation, and the one invariant
+        worth having here is the one that makes "audio beside a withholding"
+        unconstructible.
+
+        Args:
+            delivery: What the outbox minted.
+            spoken: The rendering, or ``None``.
+            rendering: Why it is there or is not.
+
+        Returns:
+            The delivery this poll answers with.
+        """
+        return NotificationDelivery(
+            delivery_id=delivery.delivery_id,
+            notification=delivery.notification,
+            spoken=spoken,
+            spoken_rendering=rendering,
+        )
 
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 

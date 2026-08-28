@@ -92,19 +92,23 @@ from ai_assistant.core.types import (
     BeliefBand,
     CalendarFacet,
     ContextFacet,
+    DataTier,
     EmailFacet,
     MemorySource,
     band_of,
 )
+from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import CurrentContext, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, NotificationCandidate
 
 __all__ = [
     "BoundedAudienceSupply",
     "TurnSupply",
     "UnboundedAudienceSupply",
+    "notification_is_speakable",
     "placed_facet_kinds",
+    "speakable_notification_triple",
     "speakable_sources",
     "supply_for_unbounded_audience",
 ]
@@ -391,3 +395,92 @@ def speakable_sources() -> frozenset[MemorySource]:
         The placed sources.
     """
     return _PLACED_SOURCES
+
+
+# --- a notification's placement on a channel of unbounded audience -----------
+# ADR-0206 §3, which is the ADR ADR-0199 §3's fourth clause names — "an ADR
+# admitting a delivery channel of unbounded audience places what it places on the
+# whole of §2's recorded origin for a notification". The placement lives here
+# beside §3's other two because it is the same ruling on a third kind of subject,
+# and a reader auditing what this hub will say aloud reads one module.
+
+
+#: The one triple ADR-0206 §3 places as speakable: a candidate's ``producer``, its
+#: ``notification_class`` and its ``sensitivity``, in that order.
+#:
+#: **The producer and the class are named rather than copied**, so this set and the
+#: producer it places cannot drift apart — ADR-0206 §3's argument is that the
+#: placement "is exactly the set ``orchestration/upcoming.py`` produces: three
+#: constants, none of them derived from an entry's title, location or duration".
+#: ``tests/orchestration/test_spoken_disclosure.py`` pins the literal strings, so a
+#: lane that renamed either constant fails a test rather than silently moving what
+#: this hub speaks aloud.
+#:
+#: **The tier is stated and it is ``PERSONAL``**, which reads backwards against
+#: ADR-0199 §3's own worked example of a producer whose tier varies with content.
+#: ``calendar-upcoming`` is not such a producer: its sensitivity is a module
+#: constant, identical on every candidate, so there is no narrower sibling whose
+#: placement could be borrowed — and a candidate from this producer at any other
+#: tier did not come from the producer as built and is withheld, which is the
+#: fail-closed answer rather than an inversion of the example.
+_PLACED_NOTIFICATION: Final[tuple[str, str, DataTier]] = (
+    PRODUCER,
+    NOTIFICATION_CLASS,
+    DataTier.PERSONAL,
+)
+
+
+def notification_is_speakable(candidate: NotificationCandidate) -> bool:
+    """Whether ADR-0206 §3 places this candidate as speakable into a room.
+
+    **Decided from three recorded fields and from nothing else** (ADR-0206 §3,
+    ADR-0199 §2). Not from ``summary``, ``detail``, ``references``, ``goal_id`` or
+    ``confidence``; not by keyword, not by pattern, not by a classifier, and not by
+    asking a model. A candidate whose ``summary`` names a subject no ADR has placed
+    still renders where its triple is placed, and one whose ``summary`` is
+    innocuous is still withheld where its triple is not — which is the whole point
+    of keying on origin rather than on content.
+
+    **Every other triple is withheld** (§3's second clause): the same producer and
+    the same class at any other ``sensitivity``, every class of a producer ADR-0206
+    does not name, and every producer that does not exist yet. Nothing here reads
+    the placement as reaching a tier, a class or a producer it did not name, and no
+    lane widens it by resemblance — an equality against one tuple is what makes
+    that structural rather than remembered.
+
+    **No placement names** :attr:`~ai_assistant.core.types.DataTier.SECRET`, which
+    ADR-0199 §3's fifth clause forbids and which ADR-0130 §2 already refuses at
+    validation, so no candidate carrying one reaches this path in any case.
+
+    **A candidate whose producer recorded no origin has no class and is withheld**
+    (ADR-0199 §2's third clause). No route reaches this function without those three
+    fields, because
+    :class:`~ai_assistant.core.types.NotificationCandidate` requires all three; the
+    clause is honoured here so that a later producer cannot be admitted by a
+    default.
+
+    Args:
+        candidate: The candidate a poll selected.
+
+    Returns:
+        Whether it may be spoken into a room.
+    """
+    return (
+        candidate.producer,
+        candidate.notification_class,
+        candidate.sensitivity,
+    ) == _PLACED_NOTIFICATION
+
+
+def speakable_notification_triple() -> tuple[str, str, DataTier]:
+    """The one triple ADR-0206 §3 places as speakable, for a test to pin.
+
+    Exposed for the same reason :func:`placed_facet_kinds` is: a lane that widened
+    the placement, or that renamed the producer constant this set is built from,
+    fails a test naming ADR-0206 §3 rather than quietly changing what this hub says
+    out loud.
+
+    Returns:
+        The producer, the notification class and the sensitivity.
+    """
+    return _PLACED_NOTIFICATION
