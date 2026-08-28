@@ -764,13 +764,24 @@ _mode_start() {
             # a line, or die before writing any. What ENDS this window is the
             # claim itself, after which `--wait` is conclusive exactly as it is
             # everywhere else, so asking it again is the terminating move.
+            #
+            # Unless the child has GONE, in which case no claim will ever arrive
+            # and "ask again" is an instruction to poll forever. So the exit from
+            # that is named too, and it is the one case in this whole mode where
+            # a second start is the RIGHT move rather than the forbidden one:
+            # confirm no process of this round exists, and relaunch. Confirming
+            # it is a `pgrep`, not an inference — the child's argv is this script
+            # followed by the persona, which no other invocation shares (a
+            # `--start` has `--start` before it). What this does not do is let the
+            # SCRIPT tell the two apart; that needs durable pre-claim state and is
+            # issue #1730.
             echo "the detached '${persona}' round has not claimed this loop within" >&2
             echo "  ${start_grace}s. Nothing here has killed it, and nothing here can" >&2
             echo "  see whether it is dead: a round claims the loop only after it has" >&2
             echo "  rendered the whole diff and computed the patch identity, so a" >&2
             echo "  healthy round on a large branch — or on a machine where another" >&2
             echo "  clone is reviewing — is often still short of that point." >&2
-            echo "  Do NOT start a second round." >&2
+            echo "  Do not start a second round yet." >&2
             echo "  Ask --wait next — but read this first, because --wait cannot see" >&2
             echo "  a round that has not claimed either: it reads the marker and the" >&2
             echo "  lock, and an unclaimed child has published neither, so it can" >&2
@@ -782,6 +793,13 @@ _mode_start() {
             echo "  before writing a line). What ends the window is the claim, and" >&2
             echo "  once it lands --wait is conclusive as usual (issue #1730)." >&2
             echo "    scripts/codex-review.sh --wait ${persona}" >&2
+            echo "  If the child has GONE, though, no claim will ever arrive and" >&2
+            echo "  asking again cannot help. Confirm that, and then relaunching IS" >&2
+            echo "  right — the one case in this mode where a second start is the" >&2
+            echo "  correct move rather than the forbidden one:" >&2
+            echo "    pgrep -fa \"codex-review.sh ${persona} \"" >&2
+            echo "  no match, and a log that has stopped growing: it died before it" >&2
+            echo "  claimed, and nothing will record an artifact." >&2
             echo "  Its output so far:" >&2
             _echo_log "$log_file"
             exit 1

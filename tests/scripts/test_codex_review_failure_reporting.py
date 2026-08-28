@@ -203,6 +203,11 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     # (adversarial round 4 on PR #1722; the gap itself is issue #1730).
     assert "Nothing here is conclusive" in started.stderr
     assert "says nothing either way" in started.stderr
+    # And "ask again" is not an instruction to poll forever: a child that has
+    # gone will never claim, so the exit from the window is named, with the check
+    # that confirms it (adversarial round 5 on PR #1722).
+    assert 'pgrep -fa "codex-review.sh adversarial "' in started.stderr
+    assert "relaunching IS" in started.stderr
     # The round it could not confirm is still a real round, and finishes.
     assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
 
