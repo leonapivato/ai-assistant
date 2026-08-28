@@ -66,17 +66,20 @@ _LIVENESS_SECONDS = 10.0
 _SPOKEN_SENTENCE = "The dentist appointment is on Thursday afternoon."
 
 #: The content words of that sentence, and how many of them the transcript must
-#: carry. Not all four (#1717): int8 inference is not bit-reproducible, and the
-#: engine deletes a single word often enough for the stricter form to have blocked
-#: two merges in one day on changes that touched nothing near this seam — gate
-#: runs 33165593987 (PR #1710, docs-only) and 33207357743 (PR #1754). The rate is
-#: not vanishing: 2 of 20 consecutive local runs on this branch's base dropped one
-#: word. Three of four keeps what ADR-0200 §13's second normative clause asks of
-#: this case — audio in, *this* transcript out, over the real engines, with the
-#: network denied — while tolerating the one deletion that clause never claimed to
-#: measure. A wired seam that has actually regressed does not come back one word
-#: short of the sentence it was given, and the whole transcript is in the failure
-#: message either way, so a real regression stays legible.
+#: carry. Not all four (#1717): int8 inference is not bit-reproducible, and asking
+#: for all four blocked two merges in one day on changes that touched nothing near
+#: this seam — gate run 33165593987 (PR #1710, docs-only) lost `dentist`, gate run
+#: 33207357743 (PR #1754) lost `appointment`, and each tree then passed a rerun of
+#: the very same bytes. 2 of 20 consecutive local runs on this branch's base failed
+#: the same way. So the loss is sporadic and lands on a different word each time:
+#: noise, not an engine that has stopped hearing a word. One transcription cannot
+#: tell those two apart, which is why requiring all four bought no detection here,
+#: only a false alarm every ten-or-so runs. Three of four keeps what ADR-0200 §13's
+#: second normative clause asks of this case — audio in, *this* transcript out,
+#: over the real engines, with the network denied — while tolerating the one loss
+#: that clause never claimed to measure. The full transcript is in the failure
+#: message either way, so a genuine regression stays legible and reopens #1717 with
+#: the evidence these two runs could not carry.
 _HEARD_CONTENT_WORDS = frozenset({"dentist", "appointment", "thursday", "afternoon"})
 _HEARD_CONTENT_WORDS_REQUIRED = 3
 
