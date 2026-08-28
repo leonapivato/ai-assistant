@@ -198,6 +198,11 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     # (adversarial round 3 on PR #1722).
     assert "the only thing" not in started.stderr
     assert "NOT the 'stop polling'" in started.stderr
+    # Nor is the log offered as conclusive: growth is positive evidence, a static
+    # log says nothing either way, and the claim is what ends the window
+    # (adversarial round 4 on PR #1722; the gap itself is issue #1730).
+    assert "Nothing here is conclusive" in started.stderr
+    assert "says nothing either way" in started.stderr
     # The round it could not confirm is still a real round, and finishes.
     assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
 
