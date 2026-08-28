@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -319,7 +320,7 @@ def _counting_defect(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         return real(schema)
 
     monkeypatch.setattr(core_types, "_schema_defect", counted)
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
     return tally
 
 
@@ -347,13 +348,18 @@ def test_a_second_construction_of_one_schema_is_meta_validated_once(
     assert tally == [2]
 
 
-def test_a_memoised_refusal_is_raised_again_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A remembered *defect* is still a refusal, with the message it had the first time.
+def test_a_refusal_is_recomputed_every_time_and_is_verbatim_every_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memo remembers a *readable* answer only, and a refusal is unchanged by it.
 
-    The memo remembers the reason, not merely that there was one, so the second
-    construction of an unreadable schema fails exactly as the first did. A memo
-    that kept only the boolean would pass every "does it refuse" case and lose the
-    sentence a tool author reads.
+    A reason is rendered from the document — ``SchemaError.json_path`` names where
+    the metaschema failed — so it is not a bounded string and remembering it would
+    bound entries without bounding memory. Recomputing it costs nothing that
+    matters, because a schema that refuses builds no definition and so has no
+    repeat construction to be a hot path for, and it keeps the memo's one
+    direction fail-closed: it can say a document was readable and can never say
+    one was refused.
     """
     tally = _counting_defect(monkeypatch)
     schema = {"type": "not-a-json-type"}
@@ -364,7 +370,27 @@ def test_a_memoised_refusal_is_raised_again_verbatim(monkeypatch: pytest.MonkeyP
         _definition(parameters_schema=dict(schema))
 
     assert str(first.value) == str(second.value)
-    assert tally == [1]
+    assert tally == [2]
+    assert core_types._readable_schemas == set()
+
+
+def test_a_provider_authored_reason_is_never_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason a refusal renders is unbounded, so nothing keeps one (§6, §7).
+
+    ``SchemaError.json_path`` carries the failing keyword's location, so a
+    property name a provider made 200 kB long comes back inside the reason. The
+    message is unchanged — it is the diagnostic a tool author needs — and it is
+    simply not remembered.
+    """
+    _counting_defect(monkeypatch)
+    sprawling = "x" * 200_000
+    schema: Mapping[str, Any] = {"properties": {sprawling: {"type": "not-a-json-type"}}}
+
+    reason = core_types._unreadable_schema_reason(schema)
+
+    assert reason is not None
+    assert sprawling in reason  # the diagnostic still names where it failed
+    assert core_types._readable_schemas == set()
 
 
 def test_a_bool_and_the_int_it_equals_are_two_schemas_and_not_one() -> None:
@@ -384,12 +410,12 @@ def test_a_bool_and_the_int_it_equals_are_two_schemas_and_not_one() -> None:
     unreadable: Mapping[str, Any] = {"type": "object", "properties": {"n": {"minLength": True}}}
     assert readable == unreadable  # the Python-value equality a hash key would use
 
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
     assert _definition(parameters_schema=readable).parameters_schema
     with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
         _definition(parameters_schema=unreadable)
 
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
     with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
         _definition(parameters_schema=unreadable)
     assert _definition(parameters_schema=readable).parameters_schema
@@ -422,21 +448,55 @@ def test_a_schema_with_no_canonical_encoding_is_answered_unmemoised() -> None:
     that could not be computed.
     """
     corrupted: Mapping[str, Any] = {"unknown-keyword": object()}
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
 
     assert core_types._unreadable_schema_reason(corrupted) is None
-    assert core_types._schema_defects == {}
+    assert core_types._readable_schemas == set()
 
 
 def test_the_memo_is_bounded_so_a_stream_of_schemas_cannot_grow_it() -> None:
     """The documents are provider-authored, so the memo holds a fixed number (§6, §7)."""
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
     for index in range(core_types._MAX_CACHED_SCHEMAS + 20):
         assert _definition(
             parameters_schema={"type": "object", "properties": {f"p{index}": {}}}
         ).parameters_schema
 
-    assert 0 < len(core_types._schema_defects) <= core_types._MAX_CACHED_SCHEMAS
+    assert 0 < len(core_types._readable_schemas) <= core_types._MAX_CACHED_SCHEMAS
+
+
+def test_the_memo_is_read_and_written_only_under_its_lock() -> None:
+    """What makes the bound a bound rather than a typical outcome (§6, §7).
+
+    Testing the capacity and adding are one critical section because separately
+    they are not: several threads observing one short of the bound each add a
+    distinct digest and the memo ends above it. This repository runs store work in
+    threads (``_run_to_completion``), so the single-threaded reading is not the one
+    to hold the claim to.
+
+    Asserted by holding the lock and watching a construction fail to finish: with
+    the lock taken, no construction can reach either the lookup or the insert, so
+    the wait times out and the memo is still empty. Verified to discriminate —
+    with both critical sections removed this case fails, and it fails in the safe
+    direction, since a box slow enough to take a quarter-second over one
+    meta-validation would stop it discriminating rather than start it flaking.
+    """
+    core_types._readable_schemas.clear()
+    finished = threading.Event()
+
+    def build() -> None:
+        _definition(parameters_schema={"type": "object", "properties": {"locked": {}}})
+        finished.set()
+
+    worker = threading.Thread(target=build)
+    with core_types._schema_memo_lock:
+        worker.start()
+        assert not finished.wait(0.25)
+        assert core_types._readable_schemas == set()
+
+    worker.join(timeout=10)
+    assert finished.is_set()
+    assert len(core_types._readable_schemas) == 1
 
 
 def test_the_memo_retains_no_part_of_the_document_it_answers_about() -> None:
@@ -445,17 +505,15 @@ def test_the_memo_retains_no_part_of_the_document_it_answers_about() -> None:
     A ``parameters_schema`` is bounded in depth and in neither breadth nor bytes,
     so a memo holding documents would bound entries without bounding memory and
     would keep a provider's schemas alive past the definitions that carried them.
-    The key is a ``sha256`` digest and the value is one short sentence or
-    ``None`` — asserted, because "we do not retain it" is exactly the kind of
-    claim a later refactor reintroducing a document-shaped key would silently
-    break.
+    What is held is a ``sha256`` digest and nothing else — asserted, because "we
+    do not retain it" is exactly the kind of claim a later refactor reintroducing
+    a document-shaped key would silently break.
     """
-    core_types._schema_defects.clear()
+    core_types._readable_schemas.clear()
     bulky = {"type": "object", "$comment": "x" * 100_000}
     assert _definition(parameters_schema=bulky).parameters_schema
 
-    assert [len(key) for key in core_types._schema_defects] == [sha256().digest_size]
-    assert list(core_types._schema_defects.values()) == [(None,)]
+    assert [len(digest) for digest in core_types._readable_schemas] == [sha256().digest_size]
 
 
 # --- §6: the depth bound, measured rather than asserted ----------------------
