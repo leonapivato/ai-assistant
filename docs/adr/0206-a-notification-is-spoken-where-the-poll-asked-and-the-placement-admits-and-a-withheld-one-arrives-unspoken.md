@@ -428,13 +428,33 @@ clause of ADR-0199 §5 pushes and the direction a mistake here should fail in.
 > device as raising this channel's audience from unbounded to bounded (ADR-0199 §8's
 > third clause).
 
-> **Normative.** Because the two channels differ in audience, the component that
-> fans one delivery out satisfies ADR-0199 §5's last clause by construction: the
-> rendering is written only where it will be played, the delivery's own text only
-> where it will be rendered, and neither is emitted on the other's channel.
-> ADR-0175 §4's "filters nothing… withholds nothing" binds unchanged — the gateway
-> re-judges nothing and withholds nothing the hub gave it, because the hub gives it
-> no rendering to withhold.
+> **Normative.** ADR-0199 §5's last clause is satisfied on this path because
+> **nothing here is composed for a channel of bounded audience.** A notification is
+> not composed at all — ADR-0130 decides the artifact long before any device asks —
+> so there is no value composed for a bounded channel that a fan-out could emit on
+> an unbounded one. The rendering is produced for the unbounded channel and is the
+> only value on this path produced for a channel at all.
+
+> **Normative.** **A rendering carried to a page that does not play it is emitted
+> on no channel.** Reaching a device is not an emission: the unbounded channel is
+> the loudspeaker, and it carries the rendering exactly when the page plays it
+> (§8). No implementation reads the fan-out itself as an emission.
+
+> **Normative.** ADR-0175 §4's "filters nothing… withholds nothing" therefore binds
+> unchanged, and **this ADR requires no per-stream routing**: no browser-specific
+> state at the gateway, no knowledge there of a page's decoder or its playback, and
+> no stream selected over another. One delivery, one rendering, every open stream,
+> unchanged.
+
+**An earlier draft of these three clauses was one clause and it was
+unsatisfiable.** It said the fan-out emitted "the rendering only where it will be
+played" — which the gateway cannot do, because ADR-0175 §4 obliges it to write one
+value to every open stream and forbids it filtering, and §2 and §8 between them
+forbid it holding the per-browser state it would need to filter on. Architecture
+review found it on the fifth round, and the repair is to say what is actually true
+rather than to weaken ADR-0175 §4: the emission happens at the loudspeaker, not at
+the socket, so the clause the fan-out has to satisfy is about what was *composed*
+for a bounded channel, and on this path nothing is.
 
 > **Normative.** No signal about who is present enters this path. No occupancy,
 > presence, diarization, speaker identification or paired-device evidence is read,
@@ -573,8 +593,8 @@ at all, because ADR-0200 §7 makes
 them — the withholding — must never be confusable with a fault. A fault invites a
 retry, and a withholding retried is a disclosure rule defeated by a loop. Two
 booleans would admit two combinations a validator would then have to forbid; an
-enumeration admits none, and the member names are what a page renders its own
-behaviour from.
+enumeration admits none, and the member names are what the gateway logs and what a
+hub-side test reads — the page is given the rendering alone (§8).
 
 **`SpokenRendering` is not `SpokenDeliveryState`, and no lane merges them.**
 ADR-0205 §2 mints a closed `SpokenDeliveryState` — `UNKNOWN`, `COMPLETE`,
@@ -649,6 +669,47 @@ immediate poll and ADR-0175 §4's cadence, two clauses in two ADRs, for a
 convenience.
 
 ### 8. An idle device is a fact about the device, and the page queues no rendering
+
+> **Normative.** The value the gateway writes on a delivery stream gains **exactly
+> one member**, `spoken`, and no other. `streams.notification`'s enumeration is
+> otherwise unchanged — `kind`, `notification_class`, `summary` and `detail` — and
+> every member it drops today it still drops.
+
+> **Normative.** `spoken` is `null` wherever `NotificationDelivery.spoken` is
+> `None`, and otherwise an object carrying exactly two members, `content` and
+> `media_type`, projected from that value. There is no third shape and the member
+> is never omitted, so a page reads one key rather than testing for a key's
+> presence.
+
+> **Normative.** `spoken_rendering` does **not** cross to a browser. The page's
+> behaviour turns only on whether a rendering arrived and on the two device facts
+> below, so a member carrying *why* one did not would be a value nothing on the
+> page acts on, and `streams.notification`'s enumeration is closed against exactly
+> that. It stays on `NotificationDelivery`, where the gateway logs it and a
+> hub-side test reads it.
+
+> **Normative.** `delivery_id` still never reaches a browser, and neither do the
+> confidence, the sensitivity or the references that projection drops today.
+> ADR-0175 §5's third clause binds unchanged, and this ADR adds no member by which
+> a browser could acknowledge, retire, withdraw or dismiss anything.
+
+**The projection had to be decided here because it is a closed enumeration and a
+lane may not widen it on its own.** `streams.notification`'s own docstring says
+"**The enumeration is the point** … what may reach the page is decided here rather
+than by whatever a `NotificationCandidate` happens to carry", and §12's last
+clause forbids a lane adding a deliverable this ADR does not name. So a rendering
+the page never receives is a page that cannot play, and adversarial review found on
+the fifth round that §8 required a behaviour no clause supplied the input for.
+Naming one member rather than two is the same discipline that enumeration already
+applies to `confidence`, `sensitivity` and `references`.
+
+**And the value on a stream gets much larger, which ADR-0175 §4 already absorbs.**
+A rendering is up to `hub_max_spoken_audio_bytes` of audio, about 683 KiB base64
+on ADR-0200 §6's arithmetic, where a delivery value today is a few hundred bytes.
+ADR-0175 §4 already holds "at most one value pending per stream" and already ends
+a stream whose write has not completed when the next value is due, "so a browser
+that stops reading cannot delay another browser's delivery" — which is the clause
+that prices this, unchanged, and costs the abandoned browser a reconnect.
 
 > **Normative.** "Idle", for the browser this milestone speaks from, is a
 > conjunction of facts about the **device** and never about the room: the page
@@ -962,6 +1023,8 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §6 (ceiling) | The whole projected delivery measured; the rendering dropped | A near-ceiling test: a candidate lawful for `offer` plus a rendering degrades rather than raising |
 | §7 | The budget threaded; the answer inside `budget` | A test that a poll answers within `budget` where synthesis would outlast it, with `DEGRADED`; a test that a zero budget answers at once |
 | §7 (ordering) | A malformed `plays` refused before any outbox effect | A test that such a poll retires nothing, leases nothing and mints nothing |
+| §8 (projection) | `streams.notification` gains `spoken` and nothing else | A test enumerating the value's keys for a rendered and for a withheld delivery; a test that `delivery_id`, `spoken_rendering`, confidence, sensitivity and references appear in neither |
+| §8 (shape) | `spoken` is `null` or an object of exactly `content` and `media_type` | A test per shape, asserting the member is present in both |
 | §8 | The page plays only with a running context and nothing in the air | A test that a delivery arriving during a playback is rendered and not queued; a test that a page with no context renders and does not play |
 | §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
 | §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
