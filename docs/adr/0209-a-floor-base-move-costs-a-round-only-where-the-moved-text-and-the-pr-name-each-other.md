@@ -1,6 +1,6 @@
 # 209. A floor base move costs a review round only where the moved text and the PR name each other
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-28
 - **Partially supersedes:** ADR-0027 §3's floor clause — the enumeration whose
   every entry "invalidates the artifact outright". The scope, written verbatim on
