@@ -5994,9 +5994,24 @@ def test_a_report_whose_request_the_hub_never_saw_is_put_back() -> None:
 
     assert "let played = null" in sending, "declared where the catch can reach it"
     assert sending.count("restoreDelivery(asked.conversation_id, played)") == 3
-    assert 'body.fault === "hub-unreachable"' in sending, (
-        "and only that refusal, because every other one is the gateway's own and repeats"
+    assert "!DELIVERY_SETTLED.has(body.fault)" in sending, (
+        "kept unless the answer shows the report is settled, rather than the reverse"
     )
+    # Adversarial review, round 5, `major`. The first cut named the one refusal after
+    # which to keep it, which threw the measurement away on every refusal the gateway
+    # decides *before* it relays — an unusable recording, a body the halves disagree
+    # about, a request over the size bound. None reaches `converse_spoken`, none can
+    # have stamped the turn, and each is answered by pressing again.
+    settled = script[
+        script.index("const DELIVERY_SETTLED") : script.index(
+            "]);", script.index("const DELIVERY_SETTLED")
+        )
+    ]
+    assert {"transcription-failed", "assistant-declined", "rejected", "delivery-unusable"} == set(
+        re.findall(r'"([a-z-]+)"', settled)
+    )
+    for kept in ("recording-unusable", "malformed-request", "request-too-large"):
+        assert kept not in settled, f"a pre-relay refusal keeps the report: {kept}"
 
     # A newer measurement wins: §7 asks for the playback last in the air.
     restoring = functions["restoreDelivery"]
