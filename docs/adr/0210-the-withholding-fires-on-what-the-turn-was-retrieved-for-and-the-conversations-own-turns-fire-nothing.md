@@ -526,11 +526,20 @@ a `Provenance` at all, and no peer at any version acts on the value.
 > any grant, or is cited toward a designation, a registration or a destination.
 > ADR-0017 §1 and §3, ADR-0154 §2 and ADR-0155 §1 and §3 are untouched.
 
-**The boundary a spoken turn's supply already carries is enough to implement this.**
-`LearningLoop.respond` builds `memories` as `recent + retrieved + supplement` and knows
-`len(recent)` before it calls the filter, so the group boundary is a number the loop
-already holds. Carrying it to `orchestration/disclosure.py` is a change inside one
-subsystem, over the `SupplyFilter` alias `orchestration/loop.py` owns.
+**The set §1 evaluates over is the loop's own, and carrying it stays inside one
+subsystem.** `LearningLoop.respond` builds `memories` as `recent + retrieved + supplement`
+and takes both relevance reads itself: `_retrieve` returns the belief composition's
+records, and `_supplement` performs the second read before dropping from it what the tail
+or the composition already holds. So what those reads returned — the composition's records,
+and `_supplement`'s `found.records` as read, prior to its
+`held = {record.id for record in preceding}` — is available where the filter is called,
+once `_supplement` surfaces it; both are private methods of one class. A group boundary
+index is deliberately *not* what is carried, and §1's second clause says why: a record
+that both the tail and the supplement's read carry stands in the supply at the tail's
+position alone, where `len(recent)` cannot see it. Carrying the read set to
+`orchestration/disclosure.py` is a change inside one subsystem, over the `SupplyFilter`
+alias `orchestration/loop.py` owns, and §10 item 1 states it as the implementing lane's
+first obligation.
 
 ### 9. The representative-input tests this decision owes
 
@@ -696,10 +705,13 @@ tail and "records retrieved as relevant" is §5's own.
 
 **Harder.**
 
-- **The supply filter now needs to know something about the shape of the supply.** It is
-  handed a group boundary rather than a flat sequence, and a future group added between
-  the tail and the retrieved records would have to say which side of the line it is on.
-  §1 names the groups by ADR-0074 §5's own vocabulary so that the question is asked
+- **The supply filter now needs to be told more than the supply.** Beside the flat
+  sequence it is handed what this turn's relevance reads returned, and the loop has to
+  keep that set across ADR-0158 §4's deduplication in order to hand it over — a boundary
+  index would have been cheaper and §1's second clause is why it is not enough. A future
+  group added to the supply would have to say whether a relevance read taken with this
+  turn's own goal statement is what put it there. §1 names the groups by ADR-0074 §5's
+  own vocabulary and states the criterion over the reads, so that the question is asked
   rather than answered by accident.
 - **A spoken turn can be diminished without being told so.** Where the only thing
   withheld was in the conversation tail, the owner is not told, and the answer is quietly
