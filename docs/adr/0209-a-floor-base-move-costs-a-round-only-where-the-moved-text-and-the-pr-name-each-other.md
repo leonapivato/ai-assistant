@@ -283,6 +283,13 @@ mention that is not a definition tells a PR nothing it could act on.
 > of a path that diff touches — a directory name, or a filename with its
 > extension removed.
 
+> **Normative.** The PR description is admitted to the PR's text so that it can
+> add a binding, never so that it can remove one. A lane that deletes from its
+> description a citation which would bind a test owes that round whatever the
+> acceptance rule then computes over the description it left behind. The
+> acceptance rule cannot detect this and §6 does not reach it; the obligation is
+> the lane's, and the review and the coordinator are what read it.
+
 **Each input is its own clause, because each moves separately.** ADR-0089 §2 is
 explicit that a passage stating two separable obligations is two clauses, and
 these four are separable in the sharpest way available: the PR description is the
@@ -349,6 +356,19 @@ lose bindings the diff may still supply. A lane that deletes a citation to a
 governing ADR in order to avoid a round has written a PR whose description no
 longer states its own grounds, which the review reads and the coordinator
 verifies; that is a conduct failure this rule does not need to price.
+
+**That conduct rule is marked, because otherwise it is not a rule.** The floor
+test is computed once, when the acceptance rule runs, so a description edited
+between the recorded review and `ship` is simply the description the test reads
+— and a lane could edit out a citation that a base move has since made binding.
+The clause above is the answer this ADR gives, and it is an obligation on the
+lane rather than a computation: under ADR-0089 §3 the paragraph alone would have
+obligated nothing at all. Binding the description *mechanically* to the recorded
+artifact — snapshotting the retrieved body and refusing a cleared floor when it
+has changed — is the stronger answer and is deliberately not taken here: it
+would put a second input into every review artifact, which is a change to what
+`scripts/codex-review.sh` records rather than to what the floor test decides. It
+is filed as #1750 against the implementation.
 
 **The extraction reads fenced blocks too.** `brief_check` strips them for its own
 purpose — reporting a brief's broken citations — where a false positive is the
