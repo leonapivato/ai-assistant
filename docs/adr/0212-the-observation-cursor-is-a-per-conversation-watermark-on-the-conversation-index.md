@@ -415,13 +415,20 @@ effects happened and whose cursor did not advance. This clause is about where a 
 > have already stood immediately below it.
 
 > **Normative.** Two passes over one conversation may overlap, and neither the store
-> nor this decision serialises them. Where they do, both read the same page and both
-> compute the same advance; the first `record_observed` to reach the store stamps it,
-> and the second **performs nothing and returns `None`** because its ordinal is no
-> longer strictly above the recorded one (§8). The watermark still moved, and it moved
-> to the position both passes computed — so the invariant above is a property of the
-> **watermark under any interleaving**, and never a promise that each individual pass
-> is the one that moved it.
+> nor this decision serialises them. Each pass computes its advance from **its own**
+> page and its own resolution of that page's episodes, and the two may legitimately
+> differ — an episode can land, expire or be forgotten between the two reads, and the
+> index and the memory store share no transaction and no snapshot. Overlap safety
+> rests on `record_observed`'s monotonicity (§8) and on nothing else: each call stamps
+> if and only if its ordinal is strictly above the recorded one, so whichever order
+> the calls arrive in, the **higher** of the two positions is what stands and the
+> lower performs nothing.
+
+> **Normative.** No pass advances the watermark past what that pass itself read, so a
+> position that stands was computed by a pass that read every turn at or below it.
+> The invariant above is therefore a property of the **watermark under any
+> interleaving**, and never a promise that each individual pass is the one that moved
+> it or that two passes agree about where to move it.
 
 The two clauses together give a bounded, checkable invariant rather than a hope: the
 strict rule passes over no unresolved turn at all, and the fallback passes over
@@ -475,13 +482,19 @@ one pass and never more, and a page whose every turn is a settled gap is passed 
 in one pass rather than blocking the conversation forever — ADR-0111 §7's "permanently
 and quietly stopped" made unreachable by construction rather than by argument.
 
-**The overlap is safe, and the reason is the one ADR-0077 §8 already gives.** Both
-passes hand the same episodes to the observer, so the second pays a model call for
+**The overlap is safe, and the reason is the one ADR-0077 §8 already gives.** The two
+passes hand overlapping episodes to the observer, so the second pays a model call for
 proposals the gate folds into `REINFORCE` on the records the first wrote — "the same
 belief on the same support scores the same however many times it is derived, so a fold
-that takes the maximum finds nothing higher". Neither pass can lower the watermark and
-neither can advance it past what it read, so no coverage is lost in either direction.
-Nothing is engineered to prevent the overlap: holding the store's per-conversation
+that takes the maximum finds nothing higher". Coverage cannot be lost in either
+direction, and the argument is worth stating because the two passes may disagree:
+suppose one resolves an in-flight turn the other did not, computing 120 where the other
+computes 104. If 104 stamps first, the 120 call is still strictly above it and stamps —
+and the pass that computed 120 is the one that read turns 105 to 120. If 120 stamps
+first, the 104 call performs nothing, and 105 to 120 were read by the pass whose
+position stands. In both orders the position that survives was computed by a pass that
+read everything below it, which is the second clause above. Nothing is engineered to
+prevent the overlap: holding the store's per-conversation
 exclusion across a pass would hold it across a model call, which is a different and
 worse decision than paying for a duplicate one. In the deployment this ADR is a
 precondition for, the overlap is a hand-run `observe` beside a scheduled one and never
@@ -784,7 +797,9 @@ passed over on its only reading; a page of exactly `observation_batch_size` rows
 last turn is unresolvable behaves the same as a shorter one, so no rule depends on the
 page's length; an episode that lands between two passes is observed on the second;
 **two overlapping passes over one conversation leave one watermark at the position both
-computed, the second `record_observed` returning `None`**, written as an end-to-end
+computed, and two overlapping passes that resolve the page differently leave the
+higher position standing whichever order their stamps arrive in**, written as an
+end-to-end
 test over two interleaved passes rather than as two store calls in a row, with the
 duplicate proposals folding to `REINFORCE` and no duplicate record; a pass that raises
 inside the write path
@@ -803,7 +818,10 @@ turn is at or below its watermark, excludes a stamped conversation, includes one
 no watermark and at least one turn, excludes one with no turns at all, and returns
 its rows `last_active_at` ascending with `id` ascending as the tie-break; a
 conversation with more unobserved turns than one page **stays** in that set after a
-pass and leaves it only once its watermark reaches its highest turn; a watermark that
+pass and leaves it only once its watermark reaches its highest turn; **under a stopped
+clock a candidate that keeps receiving turns stays first and an idle candidate is not
+reached** — pinned as §3's accepted behaviour rather than as a defect, so that a later
+lane changing the order has to change this test deliberately; a watermark that
 is not an integer,
 below `FIRST_TURN_ORDINAL`, or above the conversation's highest ordinal is read as
 absent and no read of that conversation raises; a store whose watermark column is
@@ -966,11 +984,17 @@ constraint.
   ADR's act (§9), but the reason `core/config.py` gives for holding it off — "buys
   repeated cost and no new coverage" — stops being true.
 - **Both of ADR-0077 §8's named coverage gaps close for everything recorded after
-  the cursor lands.** A conversation the user never names is reached, because
-  candidacy is not restricted to the most recently active one; and turns older than
-  the tail are reached, because the walk moves forward instead of re-reading the
-  tail. For conversations that existed before, §4 keeps the second gap exactly as
-  wide as it is today and says so.
+  the cursor lands, under the fairness §3 states and no more widely.** A conversation
+  the user never names becomes reachable, because candidacy is not restricted to the
+  most recently active one; and turns older than the tail become reachable, because
+  the walk moves forward instead of re-reading the tail. Two qualifications are part
+  of the claim rather than footnotes to it: for conversations that existed before the
+  cursor, §4 keeps the second gap exactly as wide as it is today; and "reachable"
+  becomes "reached in a bounded number of passes" only where the clock advances
+  monotonically, since §3 accepts that a stopped or stepped-back clock can leave one
+  candidate served ahead of another indefinitely. Under that clock a conversation can
+  still expire unobserved — the coverage this closes is real but conditional, and the
+  condition is named where the order is chosen rather than assumed away here.
 - **#785 and #632 are answered rather than restated.** #785's three questions have
   the answers in §2 and §3; #632's deferral has an ADR.
 - **The selector becomes testable at the seam.** Candidacy, the candidate order and
