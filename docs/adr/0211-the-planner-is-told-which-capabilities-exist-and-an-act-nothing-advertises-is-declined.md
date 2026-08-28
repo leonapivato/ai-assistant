@@ -1,6 +1,6 @@
 # 211. The planner is told which capabilities exist, and an act nothing advertises is declined rather than planned
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0014](0014-planning-model.md) — §6's `Planner` Protocol block, and only the
