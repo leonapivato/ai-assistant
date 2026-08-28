@@ -770,16 +770,62 @@ _mode_start() {
             # that is named too, and it is the one case in this whole mode where
             # a second start is the RIGHT move rather than the forbidden one:
             # confirm no process of this round exists, and relaunch. Confirming
-            # it is a `pgrep`, not an inference, and the pattern is the child's
-            # OWN argv: this script's absolute path followed by the persona. The
-            # path is what scopes it to this clone — a sibling clone's round of
-            # the same persona runs a different `scripts/codex-review.sh` and does
-            # not match, which a bare `codex-review.sh <persona>` would have
-            # matched and reported as this round still running. A second `--start`
-            # in this clone does not match either, since it carries `--start`
-            # before the persona. What this does NOT do is let the SCRIPT tell a
-            # slow child from a dead one; that needs durable pre-claim state —
-            # a launch token and a verifiable pid — and is issue #1730.
+            # it is a process listing, not an inference, and the needle is the
+            # child's OWN argv: this script's absolute path followed by the
+            # persona. The path is what scopes it to this clone — a sibling
+            # clone's round of the same persona runs a different
+            # `scripts/codex-review.sh` and does not match, which a bare
+            # `codex-review.sh <persona>` would have matched and reported as this
+            # round still running. A second `--start` in this clone does not
+            # match either, since it carries `--start` before the persona.
+            #
+            # The match is FIXED-STRING, and that is the whole reason this no
+            # longer prints the `pgrep -fa "<path> <persona> "` it used to.
+            # `pgrep -f` reads its argument as an ERE, so a clone path holding
+            # `[`, `(`, `+` or `?` is a *different* pattern from the path —
+            # `…/repo+[1]/…` asks for a repeated `o` followed by the single
+            # character `1` — and an unbalanced `[` or `(` makes it invalid
+            # outright. Either way a live child produces NO match, and the
+            # message would then be sending a lane to relaunch over a round that
+            # is still running: the paid-round-thrown-away failure this whole
+            # mode exists to prevent (adversarial round 7 on PR #1722). Measured,
+            # not reasoned: with a child alive under a clone at `…/repo+[1]/…`,
+            # `pgrep -fa "<self> adversarial "` exits 1 and prints nothing.
+            #
+            # Escaping the path back into the ERE would also work, and is not
+            # what this does: it would leave a reader checking an escape function
+            # instead of checking their own path, and leave the pattern language
+            # applied to something that is not a pattern. `grep -F` removes the
+            # pattern language instead, and the needle is printed as the literal
+            # path so an operator can eyeball it against their clone.
+            #
+            # Both of the trailing pieces exist so that "no match" is
+            # REACHABLE, which the sentence below depends on completely: a check
+            # that always printed a line could never say the child was gone.
+            # `pgrep` excluded its own process from the listing; `grep` does not,
+            # and neither tool ever excluded the shell that was asked to run the
+            # command. So two argvs can hold the needle and match it:
+            #
+            #   * `grep`'s own. Answered by passing the needle on `-f`, from a
+            #     file, so it is never in an argv at all. The usual `| grep -v
+            #     grep` is not robust here — it assumes what the matcher's argv
+            #     looks like, and on a machine whose `grep` is a wrapper (an
+            #     agent harness shim, say) it silently stops matching.
+            #   * The invoking shell's, whenever the command is run as
+            #     `bash -c '<the whole thing>'` rather than typed at a prompt —
+            #     which is how an agent runs it, and how this project's lanes
+            #     will. Answered by dropping the caller's own pid, `$$`, which is
+            #     printed unexpanded for the reader's shell to fill in. At an
+            #     interactive prompt `$$` is the prompt's own pid and matches
+            #     nothing, so the filter costs that case nothing.
+            #
+            # The round itself is never dropped by either: it is `setsid --fork`
+            # detached into a session of its own, so its pid is not `$$` and its
+            # argv is `bash <self> <persona> <base_sha>`.
+            #
+            # What this does NOT do is let the SCRIPT tell a slow child from a
+            # dead one; that needs durable pre-claim state — a launch token and a
+            # verifiable pid — and is issue #1730.
             echo "the detached '${persona}' round has not claimed this loop within" >&2
             echo "  ${start_grace}s. Nothing here has killed it, and nothing here can" >&2
             echo "  see whether it is dead: a round claims the loop only after it has" >&2
@@ -802,7 +848,9 @@ _mode_start() {
             echo "  asking again cannot help. Confirm that, and then relaunching IS" >&2
             echo "  right — the one case in this mode where a second start is the" >&2
             echo "  correct move rather than the forbidden one:" >&2
-            echo "    pgrep -fa \"${self} ${persona} \"   # this clone's round only" >&2
+            echo "    ps -eo pid,args |" \
+                "grep -F -f <(printf '%s\\n' \"${self} ${persona} \") |" \
+                "grep -v \"^ *\$\$ \"   # this clone's round only" >&2
             echo "  no match, and a log that has stopped growing: it died before it" >&2
             echo "  claimed, and nothing will record an artifact." >&2
             echo "  Its output so far:" >&2

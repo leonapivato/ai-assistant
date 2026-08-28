@@ -119,15 +119,19 @@ the "stop polling" it is everywhere else — ask again. Nothing in that window i
 conclusive: a log that is still growing says the round is alive, a static one says
 nothing either way, and what ends the window is the claim itself, after which
 `--wait` is conclusive as usual. If the child has *gone*, no claim will ever
-arrive and asking again cannot help — confirm it with the `pgrep` the message
-prints, which matches this clone's script path and persona (a sibling clone's
-round of the same persona runs a different path and must not count), and then
-relaunch, which is the one case in this mode where a second start is right rather
-than forbidden. Issue #1730 is the gap: the script cannot
-yet tell those two apart for you. And when `--wait` answers exit 4 about a round that failed,
-read the log it prints: `codex exec --json` puts its failures on **stdout**, so
-until issue #1674 that log ended at "Running Codex …" with nothing after it and
-the reason was discarded unread.*
+arrive and asking again cannot help — confirm it with the process listing the
+message prints, which matches this clone's script path and persona (a sibling
+clone's round of the same persona runs a different path and must not count), and
+then relaunch, which is the one case in this mode where a second start is right
+rather than forbidden. That check is a **fixed-string** `grep -F` over `ps`, and
+deliberately not the `pgrep -f` it used to be: `pgrep -f` reads its argument as
+an ERE, so a clone path holding `[`, `(`, `+` or `?` stops matching the live
+child and the check would say "gone" about a round that is still running. Issue
+#1730 is the gap: the script cannot yet tell those two apart for you. And when
+`--wait` answers exit 4 about a round that failed, read the log it prints:
+`codex exec --json` puts its failures on **stdout**, so until issue #1674 that
+log ended at "Running Codex …" with nothing after it and the reason was
+discarded unread.*
 
 *One more, for an ADR lane. Where `HEAD` is the one-line ratification flip, a
 round reviews and records `HEAD`'s **parent** — the content `ship` judges

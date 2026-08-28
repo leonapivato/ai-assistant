@@ -24,6 +24,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from hashlib import sha1
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,7 +32,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import SCRIPT, artifact_for, run_review
+from _fake_codex import SCRIPT, artifact_for, bash, run_review
 from test_codex_review_start_wait import NOT_IN_FLIGHT, _env, _fields, _git, _init_repo, _run
 
 if TYPE_CHECKING:
@@ -208,8 +209,15 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     # that confirms it (adversarial round 5 on PR #1722).
     # Scoped to THIS clone by the script's own absolute path: a sibling clone
     # running the same persona must not read as this round still being alive
-    # (adversarial round 6 on PR #1722).
-    assert f'pgrep -fa "{SCRIPT} adversarial "' in started.stderr
+    # (adversarial round 6 on PR #1722). Matched as a FIXED STRING, because a
+    # path is not a pattern (adversarial round 7; pinned end-to-end by
+    # ``test_the_liveness_check_matches_a_clone_path_that_looks_like_a_pattern``).
+    assert _confirm_command(started.stderr) == (
+        "ps -eo pid,args | "
+        f"""grep -F -f <(printf '%s\\n' "{SCRIPT} adversarial ") | """
+        'grep -v "^ *$$ "   # this clone\'s round only'
+    )
+    assert "pgrep" not in started.stderr
     assert "relaunching IS" in started.stderr
     # The round it could not confirm is still a real round, and finishes.
     assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
@@ -234,3 +242,96 @@ def test_a_foreground_round_is_not_described_as_a_detached_one(tmp_path: Path) -
 
     assert waited.returncode == NOT_IN_FLIGHT
     assert "went to the terminal that ran it" in waited.stderr
+
+
+def _confirm_command(stderr: str) -> str:
+    """The one command the grace-expiry message offers as a liveness check.
+
+    Located by its own first words rather than by line number, so a reworded
+    paragraph around it does not quietly turn this into an assertion about
+    nothing.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip().startswith("ps ")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def _shell(command: str) -> subprocess.CompletedProcess[str]:
+    """Run exactly what the message printed, the way an operator would paste it."""
+    return subprocess.run(  # noqa: S603  # resolved bash, running this repo's own message
+        [bash(), "-c", command], check=False, capture_output=True, text=True
+    )
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="the loop lock needs flock")
+@pytest.mark.skipif(shutil.which("ps") is None, reason="the liveness check needs ps")
+def test_the_liveness_check_matches_a_clone_path_that_looks_like_a_pattern(
+    tmp_path: Path,
+) -> None:
+    """A path is not a pattern (adversarial round 7 on PR #1722).
+
+    The grace-expiry message names the one case in ``--start``'s mode where a
+    second round is the right move: the child has *gone*, so no claim will ever
+    arrive. It used to have the operator confirm that with
+    ``pgrep -fa "<script> <persona> "``, and ``pgrep -f`` reads its argument as an
+    **ERE** — so under a clone at ``…/clone+[1]/…`` the ``+`` repeats an ``e`` and
+    ``[1]`` is a character class, the live child does not match, and the message
+    walks a lane into relaunching a round that is still running. That is the
+    paid-round-thrown-away failure the whole mode exists to prevent.
+
+    So this drives the printed command for real, from a clone path carrying ERE
+    metacharacters, against a round that is alive at that moment — held short of
+    its claim by the review-loop lock, exactly as the slow case is.
+
+    The second half is the reason the check is ``grep -F -f`` and not a bare
+    ``grep -F``: ``pgrep`` excludes its own process from the listing and ``grep``
+    does not, so a needle sitting in ``grep``'s argv matches itself and the
+    command can never print nothing. "No match" is the entire signal here, so it
+    has to be reachable.
+    """
+    clone = tmp_path / "clone+[1]" / "scripts"
+    clone.mkdir(parents=True)
+    script = clone / "codex-review.sh"
+    shutil.copy(SCRIPT, script)
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    env = _env(tmp_path, CODEX_REVIEW_START_GRACE="1")
+    flock = shutil.which("flock")
+    assert flock is not None
+    holder = subprocess.Popen(  # noqa: S603  # resolved flock, test-controlled path
+        [flock, str(_loop_lock(repo)), "sleep", "20"]
+    )
+    try:
+        started = subprocess.run(  # noqa: S603  # resolved bash, test-controlled copy
+            [bash(), str(script), "--start", "adversarial", "main"],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert started.returncode == 1
+        command = _confirm_command(started.stderr)
+
+        # The clone path reaches the operator verbatim — brackets, plus and all —
+        # rather than as something they would have to unescape to check.
+        assert f'"{script} adversarial "' in command
+
+        # And it finds the round that is alive right now, blocked on the loop
+        # lock. This is the assertion the replaced `pgrep -f` form failed.
+        assert f"{script} adversarial" in _shell(command).stdout
+    finally:
+        holder.terminate()
+        holder.wait()
+
+    assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
+
+    # Once the round is genuinely gone the same command says so, by printing
+    # nothing at all. Polled rather than asserted once: `--wait` returns when the
+    # artifact is recorded, which is a moment before the child has finished
+    # exiting.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and _shell(command).stdout != "":
+        time.sleep(0.2)
+    assert _shell(command).stdout == ""
