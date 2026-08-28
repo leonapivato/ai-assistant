@@ -1335,9 +1335,9 @@ async def test_the_system_prompt_names_the_marker_and_renders_the_decline() -> N
 
 _STATED_FACT = "Cool, did you know I go to school at Northeastern university in Boston"
 
-_KEPT_RATIONALE = (
+_HEARD_RATIONALE = (
     "The user told me they go to school at Northeastern in Boston and asked for "
-    "nothing to be done; it is kept with this conversation, so no capability is needed."
+    "nothing to be done; hearing it needs no capability, so there is nothing to plan."
 )
 
 
@@ -1369,20 +1369,23 @@ async def test_a_stated_fact_declines_and_the_rationale_saying_why_survives() ->
 
     What is pinned here is the planner's side of that, deterministically: the goal's
     own text reaches the model, and a decline over it is accepted **first time**,
-    carrying to the ``ActionPlan`` the rationale that says the fact was heard and
-    kept. That rationale is the whole of a declined plan's content (ADR-0176 §3) and
-    is what ``composing`` renders on a decline (#1355), so it is the span that
-    replaces the "no working tool" sentence. Whether a real model *judges* this
-    direction correctly is not assertable here and ADR-0176 §7 declines to promise
-    it; the prompt that asks for it is pinned by the test below.
+    carrying to the ``ActionPlan`` the rationale that says the statement was heard
+    and wants no capability. That rationale is the whole of a declined plan's
+    content (ADR-0176 §3) and is what ``composing`` renders on a decline (#1355), so
+    it is the span that replaces the "no working tool" sentence. It acknowledges
+    rather than promising retention — this stage runs before the exchange is
+    recorded, and ADR-0074 §3 makes that write fallible — which is why the scripted
+    rationale here claims nothing about what becomes of the fact. Whether a real
+    model *judges* this direction correctly is not assertable here and ADR-0176 §7
+    declines to promise it; the prompt that asks for it is pinned by the test below.
     """
-    model = FakeModelProvider(_decline(rationale=_KEPT_RATIONALE))
+    model = FakeModelProvider(_decline(rationale=_HEARD_RATIONALE))
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
 
     plan = await planner.plan(_stated_fact_goal(), context=_context())
 
     assert plan.steps == (), "a statement asks for nothing, so nothing is planned"
-    assert plan.rationale == _KEPT_RATIONALE
+    assert plan.rationale == _HEARD_RATIONALE
     assert model.call_count == 1, "a decline is accepted first time, not repaired into one"
     # The model was shown the statement itself — the request half of the case.
     request = next(one.content for one in model.calls[0].messages if one.role is Role.USER)

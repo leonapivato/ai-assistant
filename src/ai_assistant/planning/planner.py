@@ -34,7 +34,9 @@ subsystem boundary carrying empty ``steps`` and a ``rationale`` saying why
 capability, and the prompt works that direction of ADR-0176 §4's test through
 explicitly — including what the rationale should say, since on a decline the
 rationale is the whole of the plan's content (ADR-0176 §3) and it is what the
-composing stage renders (#1355).
+composing stage renders (#1355). It is an acknowledgement and not a receipt: this
+stage runs before the exchange is recorded, and that write can fail (ADR-0074 §3),
+so the rationale claims nothing about retention in either direction.
 """
 
 from __future__ import annotations
@@ -129,9 +131,21 @@ _STANCE: Final[Mapping[BeliefBand, str]] = {
 #: This block is the decline's *rationale* as much as its shape: ADR-0176 §3 makes
 #: the rationale the whole of a declined plan's content, and ``composing``'s
 #: ``_render_plan`` renders it on a decline (#1355), so what this asks the model to
-#: say is what reaches the composed reply. It asks for "heard and kept with this
-#: conversation" and refuses "now in long-term memory", because the observer's run
-#: is not this turn's (ADR-0093).
+#: say is what reaches the composed reply.
+#:
+#: **It asks the model to acknowledge, never to promise retention**, and the
+#: distinction is load-bearing rather than fastidious. Planning runs *before* the
+#: exchange is recorded — ``Engine`` composes and only then captures — and ADR-0074
+#: §3 makes that write fallible in terms: "a memory-store failure — an embedder
+#: fault, a locked database — leaves a turn recorded with **no** episode … and the
+#: failure is **reported on the outcome**". A rationale asserting the statement *is*
+#: kept would therefore be a claim about something that has not happened yet and
+#: can fail, contradicted in the same turn by the outcome that reports the failure.
+#: That is the very defect this block exists to remove, pointed the other way. So
+#: the rationale says the statement was heard and that taking it in wants no
+#: capability — both true at planning time — and asserts nothing about what becomes
+#: of it, long-term memory included, since the observer's run is not this turn's
+#: (ADR-0093).
 #:
 #: It is a separate constant so the prompt test can assert it **reaches the model**
 #: without string-matching its wording, which ADR-0176 §4 declines to demand of any
@@ -140,15 +154,16 @@ _STANCE: Final[Mapping[BeliefBand, str]] = {
 _STATED_FACT_GUIDANCE = """\
 Telling you something is not asking you to do something. Where the user states a \
 fact about themselves, corrects one, or passes on news, and asks for nothing to be \
-done with it, the goal requires no act: what was said is already in the \
-conversation set out in the next message, and this system records that \
-conversation as it happens, so it is kept without any step being taken. Reply with \
-a DECLINE, and let the rationale say that you heard it and that it is kept with \
-this conversation. Do not name a capability for storing, saving or remembering it: \
-no capability does that, and a step naming one finds no tool, which makes the \
-answer tell the user there is no way to remember what they just said. Do not claim \
-in the rationale that it is now in long-term memory either — that is taken up \
-separately, and not in this turn."""
+done with it, the goal requires no act: what was said is part of the conversation \
+set out in the next message, and taking it in is not work a step performs. Reply \
+with a DECLINE, and let the rationale say that you heard what the user told you \
+and that no capability is needed for it. Do not name a capability for storing, \
+saving or remembering it: no capability does that, and a step naming one finds no \
+tool, which makes the answer tell the user there is no way to remember what they \
+just said — which is false and is the mistake to avoid here. Do not go the other \
+way either: recording this exchange happens after you, and separately, so the \
+rationale must not say that what you were told has been saved, stored, or put into \
+long-term memory."""
 
 #: The two legal envelope shapes and the test between them (ADR-0176 §4).
 #:
