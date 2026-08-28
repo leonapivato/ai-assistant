@@ -434,11 +434,66 @@ says.
 > planner raises nothing, refuses nothing and enters no repair round on account of
 > it.
 
-> **Normative.** Under an empty vocabulary no plan envelope is available, because
-> §4's test admits a step only where a listed capability can carry it and no
-> capability is listed. Every goal is therefore answered by a decline: on ADR-0176
-> §4's original ground where the turn's supply answers it, and on §4's second ground
-> otherwise.
+> **Normative.** Under an empty vocabulary §4's test admits no plan step, because it
+> admits a step only where a listed capability can carry it and no capability is
+> listed. The prompt therefore states that the decline is the only shape available
+> for this turn — on ADR-0176 §4's original ground where the turn's supply answers
+> the goal, and on §4's second ground otherwise.
+
+> **Normative.** That clause obliges what the prompt is given and what it states,
+> and is not a guarantee about the envelope a model returns. ADR-0170 §5's final
+> clause — "No clause of this ADR is a guarantee about the content of model output,
+> and none is read as one" — is general, and no clause of this ADR claims an
+> exemption from it. A model handed an empty vocabulary may still return a plan
+> envelope naming a capability; where it does, the step is planned, reaches selection
+> and is reported `NO_CAPABLE_TOOL`, exactly as §7 preserves.
+
+> **Normative.** Neither the planner nor any later stage rejects a plan envelope, or
+> a step of one, on the ground that its capability is outside the stated vocabulary.
+> The implementing lane adds no post-parse vocabulary check anywhere, and no stage
+> converts a returned plan into a decline. An emitted name is resolved exactly as it
+> is today: through ADR-0053's alias layer at selection time, and failing that
+> through ADR-0037 §1's `NO_CAPABLE_TOOL`.
+
+**The refusal to enforce deterministically is a decision, not an omission, and it
+has three grounds.** Post-parse rejection inside `planning/` is the obvious way to
+make §4's test binding rather than merely stated, and it is wrong here.
+
+**First, it would reject plans the system can in fact satisfy.** ADR-0053's alias
+layer resolves an *emitted* capability onto an advertised one at **selection** time,
+through four branches — exact, surface variant, curated synonym, unknown. A
+vocabulary check in the planner runs before that resolution, so it would refuse
+`send_mail` on a hub advertising `send_email` — a plan the alias layer would have
+resolved and the tool would have performed. And the planner cannot consult the alias
+layer to avoid it: the layer lives in `orchestration/capability_alias.py`, and
+`planning` importing `orchestration` is an architecture violation `uv run
+lint-imports` fails.
+
+**Second, moving the check downstream of `plan` has no good remedy available.** In
+`orchestration`, after the plan is returned, the only two moves are to discard the
+plan and synthesise a decline — which would put a `rationale` the planner never
+stated into a persisted audit record, against ADR-0176 §3's whole reason for
+requiring one — or to enter a re-planning loop this ADR does not design and whose
+termination it cannot state. `NO_CAPABLE_TOOL` is already the ruled, recorded,
+composable outcome for that case (ADR-0037 §1, ADR-0208 §3), and replacing a ruled
+outcome with an undesigned one is the worse trade.
+
+**Third, it would close #60's other half by construction.** #60 values that "the plan
+named something we cannot do yet" is *signal*; a planner mechanically unable to name
+what is not advertised cannot record having been asked for it. This decision moves
+the default answer from a plan to a decline by *instruction*, and leaves the
+system able to record the residue.
+
+**What is guaranteed, then, is narrower than §4 reads and worth stating plainly.**
+The planner is no longer ignorant: on every turn it holds the vocabulary and an
+instruction naming the alternative, which is the whole of what a prompt-level
+decision can buy. #1772's rows were not a model disobeying that instruction; they
+were a model complying with a prompt that offered `search_calendar` as an example
+and supplied no vocabulary at all. Where the instruction is disobeyed the behaviour
+degrades to exactly today's — one honest disclaimer about a step that skipped — on
+the residual fraction rather than on every turn. That is a real improvement and it
+is not a guarantee, and §10 makes measuring it a QA question rather than a claim
+made here.
 
 **The correction is worth making explicitly, because the empty case is *not*
 today's default.** `app/composition.py` registers `current_time` unconditionally —
@@ -467,11 +522,13 @@ system **should** grow to meet — and 'the plan named something we cannot do ye
 useful signal, not only failure."* That is right, and it is why this decision routes
 the case to a decline that *states its ground* rather than to a silent refusal.
 
-> **Normative.** A goal the system cannot meet remains recorded. The decline's
-> `rationale` is persisted on the `ActionPlan` through the `PlanStore` (ADR-0014
-> §5, ADR-0176 §6), reaches the composing stage through `_render_plan`'s
-> empty-steps branch, and reaches the owner as one sentence in the answer. No
-> stage is left to infer that the goal went unmet.
+> **Normative.** Where the planner declines on §4's second ground, the goal the
+> system could not meet remains recorded: the decline's `rationale` is persisted on
+> the `ActionPlan` through the `PlanStore` (ADR-0014 §5, ADR-0176 §6), reaches the
+> composing stage through `_render_plan`'s empty-steps branch, and reaches the owner
+> as one sentence in the answer. No stage is left to infer that the goal went unmet.
+> Where the planner plans a step instead, the record is the step and its
+> `NO_CAPABLE_TOOL` skip, as it is today.
 
 **The trade is stated rather than hidden: a structured signal becomes a legible
 one.** Before this decision the record was `PlanStep.capability = "search_calendar"`
@@ -735,10 +792,13 @@ it is `Accepted` today and this is its first pair.
 
 ## Consequences
 
-- **The eight rows of #1772 stop being produced.** On a hub advertising
-  `report_current_time` alone, a goal needing a calendar, a contact list or a web
-  search is declined with one sentence naming the act, instead of planned as a step
-  that skips and is then honestly narrated as a tool that never existed.
+- **The prompt that produced #1772's eight rows stops being sent.** On a hub
+  advertising `report_current_time` alone, a goal needing a calendar, a contact list
+  or a web search is a goal the planner is told it cannot carry, and the shape the
+  prompt asks for is a decline with one sentence naming the act. What #1772 recorded
+  was a planner complying with a prompt that supplied no vocabulary; that condition
+  is removed. §6's third clause is why this is an expectation and not a guarantee,
+  and §10 leaves the rate to a QA pass.
 - **The planner's output becomes checkable against something.** "Did the plan name a
   capability that exists?" is a question with an answer at planning time, where
   before it could only be answered at selection time, one stage too late to change
