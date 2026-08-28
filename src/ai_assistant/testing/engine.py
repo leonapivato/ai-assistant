@@ -43,6 +43,7 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     NotificationBudgetError,
+    OversizedValueError,
     PlanningError,
     UngrantableSourceError,
     UnknownContinuationError,
@@ -107,6 +108,16 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+
+# ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0207 §5's
+# third arm requires of `SPOKEN_PARK_SENTENCE` below and ADR-0087 §7 requires of the
+# payload encoder above: "the canonical fake reaches for this one rather than growing
+# a second copy to keep in step by hand". A re-declared triple here would be a second
+# disclosure rule that drifts silently — the fake would certify a consumer against a
+# hub that speaks a different set of notifications, which is the one thing this
+# package may not do, and is the drift golden rule 1 exists to prevent rather than an
+# instance of it. `lint-imports` holds the boundary that rule is enforced by, and
+# `ai_assistant.testing` is test-only rather than a runtime subsystem.
 from ai_assistant.orchestration.disclosure import notification_is_speakable
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -1205,15 +1216,22 @@ class FakeAssistantEngine:
                 f"got {budget} (ADR-0131 §4)"
             )
             raise NotificationBudgetError(msg)
-        offender = next(
-            (member for member in plays if not isinstance(member, SpokenAudioFormat)), None
-        )
-        if offender is not None:
-            msg = (
-                f"plays names the formats the caller can render, and {offender!r} is not "
-                f"one of them (ADR-0206 §1, §7)"
-            )
-            raise ValueError(msg)
+        # Coerced rather than required, for the engine's reason: over the wire
+        # ADR-0087 §7's decode-validate order turns a member's value into the member
+        # before the hub sees it, so a caller spelling one is conforming and this
+        # double must not be stricter than the client it stands in for (ADR-0084 §4).
+        wanted: list[SpokenAudioFormat] = []
+        for member in plays:
+            try:
+                wanted.append(SpokenAudioFormat(member))
+            except ValueError:
+                readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
+                msg = (
+                    f"plays names the formats the caller can render, and {member!r} is "
+                    f"not one of them; this build declares {readable} (ADR-0206 §1, §7)"
+                )
+                raise ValueError(msg) from None
+        plays = tuple(wanted)
         check_arguments(
             "next_notification",
             max_bytes=self._max_payload_bytes,
@@ -1236,6 +1254,22 @@ class FakeAssistantEngine:
     ) -> NotificationDelivery:
         """Apply ADR-0206 §3, §5 and §6 to one selected delivery.
 
+        **All four of §6's degradation causes are reachable here**, which is what
+        keeps this double substitutable for the engine it stands in for (ADR-0084
+        §4). Two are: an empty intersection of ``plays`` with :attr:`spoken_formats`,
+        and the whole projected delivery breaching ADR-0085 §8c. The other two are a
+        ``SpeechError`` and a rendering over ADR-0200 §6's bound, neither of which
+        this fake's own pseudo-audio can produce — a consumer that wants those drives
+        the seam it holds rather than this double.
+
+        **The payload case degrades and never raises.** ADR-0206 §6 measures the
+        *whole projected* delivery and drops the rendering, and it has no second
+        step: a delivery carrying no rendering is the value ADR-0131 §4's 256-byte
+        reserve already guarantees fits. A fake that let the oversized rendered value
+        reach its own result check would raise ``OversizedValueError`` where the
+        engine returns a notification, certifying a consumer against a hub that does
+        not exist — which is the one thing a canonical fake may not do.
+
         Args:
             delivery: What the fake outbox minted.
             plays: The caller's preference order.
@@ -1246,17 +1280,48 @@ class FakeAssistantEngine:
         """
         if not plays:
             return delivery
-        rendering = SpokenRendering.WITHHELD
-        spoken: SpokenAudio | None = None
-        if notification_is_speakable(delivery.notification):
-            chosen = next((member for member in plays if member in self.spoken_formats), None)
-            if chosen is None:
-                rendering = SpokenRendering.DEGRADED
-            else:
-                spoken = SpokenAudio(
-                    content=_pseudo_audio(delivery.notification.summary, chosen), media_type=chosen
-                )
-                rendering = SpokenRendering.RENDERED
+        if not notification_is_speakable(delivery.notification):
+            return self._delivery_with(delivery, None, SpokenRendering.WITHHELD)
+        chosen = next((member for member in plays if member in self.spoken_formats), None)
+        if chosen is None:
+            return self._delivery_with(delivery, None, SpokenRendering.DEGRADED)
+        spoken = self._delivery_with(
+            delivery,
+            SpokenAudio(
+                content=_pseudo_audio(delivery.notification.summary, chosen), media_type=chosen
+            ),
+            SpokenRendering.RENDERED,
+        )
+        try:
+            check_payload(
+                spoken,
+                max_bytes=self._max_payload_bytes,
+                subject="the result of next_notification()",
+            )
+        except OversizedValueError:
+            return self._delivery_with(delivery, None, SpokenRendering.DEGRADED)
+        return spoken
+
+    @staticmethod
+    def _delivery_with(
+        delivery: NotificationDelivery,
+        spoken: SpokenAudio | None,
+        rendering: SpokenRendering,
+    ) -> NotificationDelivery:
+        """Rebuild one delivery around its rendering, through the validator.
+
+        Constructed rather than ``model_copy``-updated, for the engine's reason:
+        ADR-0206 §6's biconditional is *checked* on every value this path produces
+        rather than trusted.
+
+        Args:
+            delivery: What the outbox minted.
+            spoken: The rendering, or ``None``.
+            rendering: Why it is there or is not.
+
+        Returns:
+            The delivery this poll answers with.
+        """
         return NotificationDelivery(
             delivery_id=delivery.delivery_id,
             notification=delivery.notification,

@@ -68,7 +68,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from itertools import count
-from typing import TYPE_CHECKING, Final, get_type_hints
+from typing import TYPE_CHECKING, ClassVar, Final, get_type_hints
 
 import pytest
 from pydantic import SecretStr
@@ -117,6 +117,8 @@ from ai_assistant.core.types import (
     Idempotency,
     MemoryKind,
     MemorySource,
+    NotificationCandidate,
+    NotificationDelivery,
     OperationConfirmation,
     PermissionDecision,
     PermissionOutcome,
@@ -134,6 +136,7 @@ from ai_assistant.core.types import (
     SpendPeriod,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenRendering,
     StepOutcome,
     TimeOfDay,
     ToolCost,
@@ -144,6 +147,8 @@ from ai_assistant.core.types import (
     is_live_confirmation_park,
     secret_value,
 )
+from ai_assistant.orchestration.disclosure import speakable_notification_triple
+from ai_assistant.orchestration.payloads import _encode, project
 from ai_assistant.testing import (
     Disclosure,
     FakeAuditTrail,
@@ -1227,8 +1232,101 @@ class SingleSlotParkSubject:
     parked: ContinuationToken
 
 
+#: When the placed candidate below was noticed. Fixed, and comfortably behind every
+#: clock a binding wires — the concrete engine's is frozen at :data:`AT`, and the
+#: canonical fake's stores read the wall clock, so an instant either could call the
+#: future would make one of the two subjects refuse the offer.
+_NOTICED_AT: Final = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+
+#: When it perishes. ADR-0130 §5 makes an expiry the sole route to ``INTERRUPT`` and
+#: requires it to be falsifiable; it says nothing about how soon, and this suite needs
+#: one that is still ahead of **both** clocks whenever the suite is run. A window
+#: measured from the wall clock would be the obvious alternative and is worse: the
+#: engine binding's clock is frozen in 2026, so "an hour from now" is already the
+#: past there.
+_PERISHES_AT: Final = datetime(2099, 1, 1, 9, 0, tzinfo=UTC)
+
+#: How much room a near-ceiling limit leaves above an unspoken delivery. Any
+#: strictly positive figure works — a rendering is hundreds of bytes and this is a
+#: handful — and it is stated rather than zero so the limit is unambiguously one the
+#: unspoken delivery *fits inside* rather than one it exactly fills.
+_RENDERING_HEADROOM: Final[int] = 16
+
+#: The widest ``delivery_id`` ADR-0131 §4 admits, in bytes, so a limit computed here
+#: covers whatever identifier an implementation happens to mint.
+_WIDEST_DELIVERY_ID: Final = "9" * 59 + "." + "0" * 32
+
+
+def _speakable_candidate() -> NotificationCandidate:
+    """One candidate carrying ADR-0206 §3's placed triple.
+
+    The producer and the class are read off the placement itself rather than written
+    out here, so a binding cannot offer a candidate this suite believes is placed and
+    the implementation does not — which would make every case below pass vacuously in
+    the withheld direction.
+
+    Returns:
+        The candidate.
+    """
+    producer, notification_class, sensitivity = speakable_notification_triple()
+    return NotificationCandidate(
+        candidate_key="contract-placed",
+        producer=producer,
+        notification_class=notification_class,
+        summary="your stand-up starts in ten minutes",
+        noticed_at=_NOTICED_AT,
+        expires_at=_PERISHES_AT,
+        confidence=0.5,
+        sensitivity=sensitivity,
+    )
+
+
+def near_ceiling_limit(candidate: NotificationCandidate) -> int:
+    """The largest payload limit that admits ``candidate`` unspoken and no rendering.
+
+    Exported so both bindings compute the same figure from the same encoder rather
+    than each guessing one: ADR-0087 §7 makes conformance a property of the *bytes*,
+    and a hand-picked number would drift the moment the candidate above changed.
+
+    Args:
+        candidate: The candidate the subject will be built holding.
+
+    Returns:
+        A contract limit strictly above the unspoken delivery's canonical size and
+        strictly below every rendered one's.
+    """
+    unspoken = NotificationDelivery(delivery_id=_WIDEST_DELIVERY_ID, notification=candidate)
+    return len(_encode(project(unspoken))) + _RENDERING_HEADROOM
+
+
+#: The one triple ADR-0206 §3 places as speakable on a channel of unbounded
+#: audience, and a candidate carrying it. Built from the placement predicate's own
+#: constants rather than from three literals here, so a binding cannot offer a
+#: candidate the suite believes is placed and the implementation does not.
+SPEAKABLE_NOTIFICATION: Final = _speakable_candidate()
+
+#: The same candidate with its producer moved off the placed triple, which ADR-0206
+#: §3's second clause withholds: "every class of a producer this ADR does not name".
+UNSPEAKABLE_NOTIFICATION: Final = SPEAKABLE_NOTIFICATION.model_copy(
+    update={"candidate_key": "contract-unplaced", "producer": "a-producer-no-adr-places"}
+)
+
+
 class AssistantEngineContract(ABC):
     """What every ``AssistantEngine`` implementation must do."""
+
+    #: What this implementation raises for an argument its declared type refuses.
+    #:
+    #: **The class is the transport's business and the ordering is the contract's.**
+    #: In process there is no frame, so a malformed argument is a local
+    #: ``ValueError`` (ADR-0085 §3). Over the wire it is a frame the hub cannot
+    #: decode into the method's declared type, and ADR-0084 §3 rules that such a
+    #: frame closes the connection with no reply — which reaches the caller as the
+    #: client's own "the hub hung up" rather than as the hub's refusal. Both are
+    #: conforming, so the suite names the *effect* ADR-0131 §4 fixes — the request
+    #: has no effect on the outbox — and lets each binding say how the refusal
+    #: arrives.
+    refuses_a_malformed_argument_with: ClassVar[tuple[type[BaseException], ...]] = (ValueError,)
 
     @pytest.fixture
     @abstractmethod
@@ -1640,6 +1738,48 @@ class AssistantEngineContract(ABC):
         content (ADR-0185 §10) and so is a fraction of a ruling's size.
         """
 
+    @pytest.fixture
+    @abstractmethod
+    def speaking_engine(self) -> AssistantEngine:
+        """A subject holding a delivery outbox with :data:`SPEAKABLE_NOTIFICATION` in it.
+
+        It must have a synthesizer wired that can produce **every**
+        :class:`~ai_assistant.core.types.SpokenAudioFormat`, so that ADR-0206 §6's
+        empty-intersection degradation is not what a case measuring the rendered path
+        actually reaches.
+
+        A fixture rather than a step in a test because nothing on this surface
+        enqueues a notification: ADR-0130 §3 puts the offer on the ``NotificationWriter``
+        seam and ADR-0131 §3b keeps the outbox behind the engine, so a subject with an
+        entry waiting has to be *built* with one — ``granting_engine``'s reason, one
+        seam over.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def withholding_engine(self) -> AssistantEngine:
+        """The same, holding :data:`UNSPEAKABLE_NOTIFICATION` instead.
+
+        Two subjects rather than two entries in one, because a poll consumes the
+        entry it selects and ADR-0131 §3 fixes no order a case could rely on to say
+        which one it got.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def near_ceiling_engine(self) -> AssistantEngine:
+        """:attr:`speaking_engine`'s subject at a limit only the rendering bursts.
+
+        Its contract limit must admit the delivery of :data:`SPEAKABLE_NOTIFICATION`
+        carrying **no** rendering and refuse the same delivery carrying one, which is
+        what :func:`near_ceiling_limit` computes — so a poll that asks for a rendering
+        reaches ADR-0206 §6's fourth degradation case and nothing else.
+
+        **The limit is a construction-time property**, ``tiny_engine``'s reason, and
+        it is bespoke rather than :data:`_TINY_LIMIT` because the figure has to sit
+        between two sizes this candidate decides.
+        """
+
     # --- the shape of the surface -----------------------------------------
 
     def test_it_satisfies_the_protocol(self, engine: AssistantEngine) -> None:
@@ -1671,6 +1811,153 @@ class AssistantEngineContract(ABC):
         assert isinstance(await engine.interrupted_questions(), tuple)
         assert isinstance(await engine.recent_conversations(), tuple)
         assert isinstance(await engine.pending_confirmations(), tuple)
+
+    # --- ADR-0206: what a poll that asks for a rendering gets --------------
+    #
+    # The clauses that bind **both** implementations, and only those. The rendering
+    # stage's own internals — which of §6's four causes fired, what reached the seam,
+    # what a log holds — are `tests/orchestration/test_spoken_notification.py`'s,
+    # because they are properties of the concrete engine rather than of the contract.
+    # What a client may rely on from any conforming hub is here.
+
+    async def test_an_omitted_plays_asks_for_no_rendering(
+        self, speaking_engine: AssistantEngine
+    ) -> None:
+        """ADR-0206 §1: an empty ``plays`` asks for no rendering and none is produced.
+
+        The candidate is the **placed** one, so this separates "asked for nothing"
+        from "would have been withheld anyway": a conforming hub answers
+        ``NOT_REQUESTED`` even where §3 would have placed what it selected.
+        """
+        delivery = await speaking_engine.next_notification(budget=timedelta(0))
+
+        assert delivery is not None
+        assert delivery.spoken_rendering is SpokenRendering.NOT_REQUESTED
+        assert delivery.spoken is None
+
+    async def test_a_placed_candidate_renders_in_a_format_the_caller_named(
+        self, speaking_engine: AssistantEngine
+    ) -> None:
+        """ADR-0206 §3, §6: the placed triple is spoken, in a format ``plays`` names.
+
+        Never a substitution outside what the caller said it could play — ADR-0200
+        §3's rule reaching this surface — which is the half a hub that ignored
+        ``plays`` and rendered in its own favourite would fail.
+        """
+        plays = (SpokenAudioFormat.MP4,)
+        delivery = await speaking_engine.next_notification(plays=plays, budget=timedelta(0))
+
+        assert delivery is not None
+        assert delivery.spoken_rendering is SpokenRendering.RENDERED
+        assert delivery.spoken is not None
+        assert delivery.spoken.media_type in plays
+
+    async def test_an_unplaced_candidate_is_withheld_and_still_delivered(
+        self, withholding_engine: AssistantEngine
+    ) -> None:
+        """ADR-0206 §3, §5: withheld, and the notification still arrives.
+
+        Both halves, because either alone is a hub a client cannot be written
+        against: a hub that spoke it would breach ADR-0199 §3's placement, and one
+        that dropped the delivery would lose a notification ADR-0131 §3's durability
+        exists to keep.
+        """
+        delivery = await withholding_engine.next_notification(
+            plays=tuple(SpokenAudioFormat), budget=timedelta(0)
+        )
+
+        assert delivery is not None
+        assert delivery.spoken_rendering is SpokenRendering.WITHHELD
+        assert delivery.spoken is None
+        assert delivery.notification == UNSPEAKABLE_NOTIFICATION
+
+    @pytest.mark.parametrize("plays", [(), tuple(SpokenAudioFormat)], ids=["omitted", "every"])
+    async def test_audio_is_present_exactly_when_rendered_on_a_placed_candidate(
+        self, speaking_engine: AssistantEngine, plays: tuple[SpokenAudioFormat, ...]
+    ) -> None:
+        """ADR-0206 §6's biconditional, read off whatever the subject answers.
+
+        Asserted as a *property* rather than against an expected member, so it holds
+        whichever of the four states an implementation legitimately reaches — a hub
+        whose synthesizer degraded is still bound by it, and so is one that rendered.
+
+        **One subject per test.** Requesting both this and
+        :attr:`withholding_engine` in one body would stand two subjects up at once,
+        which the wire binding cannot do: each of its subjects is a hub bound to a
+        socket, and two of them are two hubs.
+        """
+        delivery = await speaking_engine.next_notification(plays=plays, budget=timedelta(0))
+
+        assert delivery is not None
+        rendered = delivery.spoken_rendering is SpokenRendering.RENDERED
+        assert (delivery.spoken is not None) is rendered
+
+    @pytest.mark.parametrize("plays", [(), tuple(SpokenAudioFormat)], ids=["omitted", "every"])
+    async def test_audio_is_present_exactly_when_rendered_on_an_unplaced_candidate(
+        self, withholding_engine: AssistantEngine, plays: tuple[SpokenAudioFormat, ...]
+    ) -> None:
+        """The same property over the candidate ADR-0206 §3 withholds.
+
+        Its whole point is the direction a withheld delivery could go wrong in: audio
+        beside :attr:`~ai_assistant.core.types.SpokenRendering.WITHHELD` would be a
+        rendering of a candidate a disclosure rule refused to speak.
+        """
+        delivery = await withholding_engine.next_notification(plays=plays, budget=timedelta(0))
+
+        assert delivery is not None
+        rendered = delivery.spoken_rendering is SpokenRendering.RENDERED
+        assert (delivery.spoken is not None) is rendered
+
+    async def test_a_malformed_plays_is_refused_and_leaves_the_entry_deliverable(
+        self, speaking_engine: AssistantEngine
+    ) -> None:
+        """ADR-0206 §7, ADR-0131 §4: refused before any outbox state changes.
+
+        "A refused request retires nothing, leases nothing and mints nothing", so the
+        entry the refused poll would have selected is still there for the next one.
+        That is the observable half through this surface, and it is the one that
+        matters: a hub that leased first would have spent the entry on a call that
+        reported failure.
+        """
+        with pytest.raises(self.refuses_a_malformed_argument_with):
+            await speaking_engine.next_notification(
+                # A media type that names **no member**, which is what both
+                # implementations refuse. A member's own *value* is not malformed:
+                # ADR-0087 §7's decode-validate order turns one into the member over
+                # the wire, so an in-process engine that refused it would be stricter
+                # than the client standing in for it (ADR-0084 §4).
+                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
+                budget=timedelta(0),
+            )
+
+        delivery = await speaking_engine.next_notification(budget=timedelta(0))
+        assert delivery is not None
+        assert delivery.notification == SPEAKABLE_NOTIFICATION
+
+    async def test_a_rendering_that_would_burst_the_limit_degrades_rather_than_raising(
+        self, near_ceiling_engine: AssistantEngine
+    ) -> None:
+        """ADR-0206 §6's fourth degradation case, on both implementations.
+
+        The whole *projected* delivery is what ADR-0085 §8c bounds, so a rendering
+        well inside ADR-0200 §6's own bound can still be the bytes that break the
+        frame. It degrades rather than refusing, because a notification the owner can
+        read is worth more than a rendering that would make the result unsendable —
+        and there is no second step, since ADR-0131 §4's reserve already guarantees
+        the rendering-free delivery fits.
+
+        **This is the case a fake is likeliest to get wrong**, because the natural
+        implementation renders and then measures the result the way every other
+        method on this surface does, which raises where a conforming hub answers.
+        """
+        delivery = await near_ceiling_engine.next_notification(
+            plays=tuple(SpokenAudioFormat), budget=timedelta(0)
+        )
+
+        assert delivery is not None
+        assert delivery.spoken_rendering is SpokenRendering.DEGRADED
+        assert delivery.spoken is None
+        assert delivery.notification == SPEAKABLE_NOTIFICATION
 
     # --- clause 1: the page-size default is normative (§3a) ----------------
 

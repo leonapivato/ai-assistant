@@ -45,7 +45,7 @@ import sys
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
@@ -65,7 +65,9 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     SETTLED_SINGLE_SLOT,
+    SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
+    UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
@@ -76,6 +78,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    near_ceiling_limit,
     overfull_invocation_rows,
     seeded_invocation_trail,
     seeded_read_trail,
@@ -103,6 +106,7 @@ from ai_assistant.wire import (
     serve_connection,
 )
 from ai_assistant.wire.envelope import MIN_FRAME_BYTES
+from ai_assistant.wire.errors import HubUnavailableError
 from ai_assistant.wire.server import ConnectionLimits
 
 if TYPE_CHECKING:
@@ -122,6 +126,27 @@ _TINY_FRAME = _TINY_LIMIT + ENVELOPE_RESERVE_BYTES
 
 #: The ordinary frame size: ADR-0084 §3's 16 MiB default.
 _ORDINARY_FRAME = 16 * 1024 * 1024
+
+
+class _DeliverySlots:
+    """A :class:`~ai_assistant.wire.server.DeliveryRegistry` that admits everyone.
+
+    ADR-0131 §3 puts the registry on the hub rather than in ``wire``, and §2's
+    one-connection rule is enforced through it — so a listener handed none closes
+    every ``next_notification`` rather than serving it. What this binding is for is
+    the *payload* crossing the socket, not the slot arithmetic, which
+    ``tests/wire/test_server_delivery.py`` owns and drives directly; so this admits
+    unconditionally and records nothing.
+    """
+
+    def claim(self, device: str | None) -> bool:
+        """Admit every claimant."""
+        del device
+        return True
+
+    def release(self, device: str | None) -> None:
+        """Nothing is held, so nothing is given back."""
+        del device
 
 
 class ServedHub:
@@ -157,7 +182,9 @@ class ServedHub:
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
-        await serve_connection(self.backing, reader, writer, limits=self._limits)
+        await serve_connection(
+            self.backing, reader, writer, limits=self._limits, delivery=_DeliverySlots()
+        )
 
     async def aclose(self) -> None:
         """Stop accepting and remove the socket."""
@@ -215,6 +242,17 @@ def _binding() -> EgressBinding:
 class TestHubEngineClientContract(AssistantEngineContract):
     """The client, held to the shared contract over a real socket."""
 
+    #: ADR-0084 §3: a frame the hub cannot decode into the method's declared type
+    #: closes the connection with no reply, so what a caller sees is this client
+    #: reporting that the hub hung up rather than the hub's own refusal. The
+    #: ordering clause the suite is about is unaffected — nothing was retired,
+    #: leased or minted — and the next poll opens a fresh connection and finds the
+    #: entry, which is what the case goes on to assert.
+    refuses_a_malformed_argument_with: ClassVar[tuple[type[BaseException], ...]] = (
+        ValueError,
+        HubUnavailableError,
+    )
+
     @pytest.fixture
     async def engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
         """A client of a hub at the ordinary contract limit."""
@@ -234,6 +272,47 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
+            yield client
+
+    @pytest.fixture
+    async def speaking_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub holding one placed candidate.
+
+        **This binding is the one that puts ADR-0206 §6's two members on a socket.**
+        The other two exercise the clauses in one process; here ``plays`` is encoded
+        into a request frame and validated against the method's own signature by
+        ``wire/surface.py``, and ``spoken`` and ``spoken_rendering`` are projected
+        into a result frame and reconstructed through ``NotificationDelivery``'s
+        ``extra="forbid"`` validation on the way back. A member whose serialized
+        spelling drifted from §6's would fail here and nowhere else.
+        """
+        backing = FakeAssistantEngine()
+        await backing.notification_outbox.offer(SPEAKABLE_NOTIFICATION)
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def withholding_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub holding one candidate ADR-0206 §3 does not place."""
+        backing = FakeAssistantEngine()
+        await backing.notification_outbox.offer(UNSPEAKABLE_NOTIFICATION)
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def near_ceiling_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose own limit only a rendering bursts.
+
+        **The limit is the hub's alone and the frame stays ordinary**, which is the
+        shape ADR-0206 §6's fourth case actually has: the hub measures the whole
+        projected delivery against *its* contract limit and drops the rendering, and
+        what reaches the client is an ordinary delivery it has no reason to refuse.
+        Narrowing the frame too would make a client-side refusal the thing under
+        test, which is a different clause.
+        """
+        backing = FakeAssistantEngine(max_payload_bytes=near_ceiling_limit(SPEAKABLE_NOTIFICATION))
+        await backing.notification_outbox.offer(SPEAKABLE_NOTIFICATION)
+        async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
 
     @pytest.fixture

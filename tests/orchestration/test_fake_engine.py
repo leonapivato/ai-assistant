@@ -34,7 +34,9 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     SETTLED_SINGLE_SLOT,
+    SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
+    UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
@@ -45,6 +47,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    near_ceiling_limit,
     overfull_invocation_rows,
     page_after_mutating_the_filter,
     seeded_invocation_trail,
@@ -135,6 +138,31 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def tiny_engine(self) -> AssistantEngine:
         """The same implementation, with the limit small enough to reach."""
         return FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+
+    @pytest.fixture
+    async def speaking_engine(self) -> AssistantEngine:
+        """The fake holding one placed candidate, over its own outbox.
+
+        ``spoken_formats`` defaults to every member, which is what the suite requires
+        of this subject, so nothing is narrowed here.
+        """
+        engine = FakeAssistantEngine()
+        await engine.notification_outbox.offer(SPEAKABLE_NOTIFICATION)
+        return engine
+
+    @pytest.fixture
+    async def withholding_engine(self) -> AssistantEngine:
+        """The fake holding one candidate ADR-0206 §3 does not place."""
+        engine = FakeAssistantEngine()
+        await engine.notification_outbox.offer(UNSPEAKABLE_NOTIFICATION)
+        return engine
+
+    @pytest.fixture
+    async def near_ceiling_engine(self) -> AssistantEngine:
+        """The fake at the limit only a rendering bursts."""
+        engine = FakeAssistantEngine(max_payload_bytes=near_ceiling_limit(SPEAKABLE_NOTIFICATION))
+        await engine.notification_outbox.offer(SPEAKABLE_NOTIFICATION)
+        return engine
 
     @pytest.fixture
     def connections(self) -> ConnectionSubject:
