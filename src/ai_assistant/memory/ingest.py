@@ -1382,6 +1382,16 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     direction passes an implementation that merely copies the incoming field and
     proves nothing.
 
+    **``supplied_withheld_content`` is the disjunction of both sides too, on both
+    arms** (ADR-0204 §5). Every word of the paragraph above transfers: ADR-0106 §4's
+    ratchet is the argument ADR-0204 §5 takes by citation, and a survivor written as
+    ``incoming``'s value alone would clear a stamped target the first time an
+    unstamped proposal reinforced it — the laundering moved one step along, which is
+    the failure the field exists to stop. The field is built here rather than
+    inherited by ``model_copy``, so an implementation that simply forgot it would
+    default it to ``False`` and clear the stamp silently, which is why it is written
+    on both arms rather than on the arm that happens to be observed.
+
     The corroboration arm takes the disjunction too, and not the target's value
     alone. ADR-0103 §6 withholds the incoming record's *belief properties* from
     the survivor, and taint is not one of them: it is a fact about what warrant
@@ -1446,6 +1456,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     # Likewise selected once, before the arms: ADR-0106 §4 states the rule over the
     # fold as a disjunction of both sides, so neither arm may read one side alone.
     tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
+    # And once more, for the same reason and by the same rule: ADR-0204 §5's first
+    # clause states the disjunction over the fold, so no fold, merge or reinforcement
+    # writes `False` over a `True` on either arm.
+    withheld = (
+        target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
+    )
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -1456,6 +1472,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             attestation=target.provenance.attestation,
             derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
+            supplied_withheld_content=withheld,
         )
         return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
@@ -1467,6 +1484,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         attestation=incoming.provenance.attestation,
         derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
+        supplied_withheld_content=withheld,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
 

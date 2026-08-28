@@ -1424,6 +1424,47 @@ class Provenance(BaseModel):
     know. Both directions are unavailable for one reason, and the honest position
     is to state what is recorded and name what is not.
 
+    **``supplied_withheld_content`` records what stood in a record's warrant, and
+    never what its text says** (ADR-0204 §1). It is ``True`` by exactly two routes
+    and no third: **directly**, where the supply the turn that produced this record
+    ran over held content ADR-0199 §3 withholds from a channel of unbounded audience
+    — whether or not a subtraction then kept that content from the stages that
+    produced it, and whether or not the produced text drew on it — or **inherited**,
+    where the record was derived from another record whose own field is set
+    (ADR-0204 §5). Deciding "did this text actually use that belief?" would mean
+    reading ``MemoryBase.content`` or asking a model what a passage is about, which
+    ADR-0199 §2 forbids as a decision procedure; this is the one stage upstream that
+    is decidable from recorded origin, and it over-approximates deliberately.
+
+    **On this class rather than on :class:`EpisodicMemory`** (ADR-0204 §1), by
+    :class:`MemoryBase`'s own placement rule — a field is placed by which question
+    it answers. What material stood in front of the producer is where a record came
+    from, which is this class's question, and it is the identical question
+    ``derived_from_external`` already answers about a different property of the same
+    material. It also has to live here for the inherited route to be expressible: a
+    belief distilled from a marked episode must be able to carry the mark, and
+    :class:`EpisodicMemory` cannot carry a field for a :class:`SemanticMemory`.
+
+    **``False`` is a measurement on a record written after the field landed, and a
+    decode default on one written before it** (ADR-0204 §1, §6). On the first it
+    states that neither route reached the record, which is true of every record no
+    turn produced and nothing was derived from — a user's own assertion, a calendar
+    import, a reader's proposal. On the second it is not a measurement at all,
+    because no producer recorded an answer, and no lane or later ADR cites it as
+    evidence about the record carrying it. Neither case gives a supply site a second
+    test: ADR-0204 §3's is the whole of what one applies, to every record alike,
+    because nothing in the data distinguishes the two.
+
+    **It never clears** (ADR-0204 §5). No fold, merge, reinforcement or
+    consolidation writes ``False`` over a ``True``; a fold's value is the
+    **disjunction** of both sides, and a producer deriving a record from records of
+    this store takes the disjunction over **every record it was supplied** — never
+    over the subset it cited, so ``evidence`` is not the input set. A ``SUPERSEDE``
+    neither clears nor inherits it: ADR-0040 §5a carries nothing of the target onto
+    the correction, so the correction carries its own producer's value, and the
+    target is retained with a closed validity window (ADR-0045 §4) still carrying
+    its own.
+
     **No validator constrains ``last_confirmed_at``, and that absence is the
     decision** (ADR-0109 §8). Not required, because a required instant would refuse
     every record already in a store, on the *read* path, at deserialisation — the
@@ -1491,6 +1532,18 @@ class Provenance(BaseModel):
             "the latest ``occurred_at`` among the episodes cited (ADR-0103 §9). "
             "``None`` is *unknown*, never stale and never fresh. Not transaction "
             "time: that is ``last_updated`` (ADR-0109 §2)."
+        ),
+    )
+    supplied_withheld_content: bool = Field(
+        default=False,
+        description=(
+            "Whether content ADR-0199 §3 withholds from a channel of unbounded "
+            "audience stood in this record's warrant (ADR-0204 §1) — because the "
+            "supply the turn that produced it ran over held such content, or "
+            "because it was derived from a record whose own field is set. A supply "
+            "site for a channel of unbounded audience withholds a record carrying "
+            "``True`` (ADR-0204 §3); a bounded channel's supply applies the test to "
+            "nothing."
         ),
     )
 

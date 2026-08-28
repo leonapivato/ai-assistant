@@ -312,6 +312,7 @@ class ConversationLifecycle:
         content: str,
         outcome: str | None = None,
         parked: ParkedBinding | None = None,
+        supplied_withheld_content: bool = False,
     ) -> CaptureReport:
         """Record one turn: the index entry first, then its episode (§3).
 
@@ -358,6 +359,15 @@ class ConversationLifecycle:
             outcome: How the exchange turned out, as the episode's own ``outcome``.
             parked: The binding this turn parked on, where it parked, so a
                 recovered resumption can find its way back to this conversation.
+            supplied_withheld_content: Whether content ADR-0199 §3 withholds from a
+                channel of unbounded audience stood in the warrant of the turn whose
+                rendering ``content`` carries (ADR-0204 §2). **Handed to capture, not
+                computed here** — capture judges nothing (§4), and this is the
+                pipeline's evaluation exactly as ``content`` is the pipeline's
+                rendering. ``False`` where no turn produced the rendering at all: a
+                routed pass and a resumption recovered from durable state each carry
+                no goal statement and no plan rationale of any turn, so there is
+                nothing in their episode for a stamp to be about.
 
         Returns:
             What became of the record. Never raises for a store failure: capture
@@ -385,7 +395,13 @@ class ConversationLifecycle:
         # The turn and the episode recording it carry **one** instant: the reading
         # rides back on the turn rather than being taken twice, so no clock
         # adjustment between the two writes can make them disagree.
-        episode = self._episode(turn, content=content, outcome=outcome, now=turn.occurred_at)
+        episode = self._episode(
+            turn,
+            content=content,
+            outcome=outcome,
+            now=turn.occurred_at,
+            supplied_withheld_content=supplied_withheld_content,
+        )
         try:
             await self._memory.write_atomic(
                 [MemoryWrite(record=episode, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
@@ -430,7 +446,13 @@ class ConversationLifecycle:
         return CaptureReport(conversation_id=turn.conversation_id, degraded=True)
 
     def _episode(
-        self, turn: ConversationTurn, *, content: str, outcome: str | None, now: datetime
+        self,
+        turn: ConversationTurn,
+        *,
+        content: str,
+        outcome: str | None,
+        now: datetime,
+        supplied_withheld_content: bool,
     ) -> EpisodicMemory:
         """Build the one ``EpisodicMemory`` a turn deposits (§4).
 
@@ -458,6 +480,13 @@ class ConversationLifecycle:
         that something happened, nothing retires it, and "is this still true?" is
         not a question about it. Writing ``occurred_at`` into the field instead
         would make every episode in the store claim a currency it has no use for.
+
+        **``supplied_withheld_content`` is the one field this method neither
+        defaults nor decides** (ADR-0204 §2). It is stamped from the value the
+        pipeline evaluated between retrieval and planning and carried here, so
+        "capture judges nothing" holds exactly as it does for ``content``: this
+        method reads no record, no supply and no channel, and every other field
+        ADR-0074 §4 fixes is stamped as it always was.
         """
         return EpisodicMemory(
             id=turn.episode_id,
@@ -469,6 +498,7 @@ class ConversationLifecycle:
                 source=MemorySource.OBSERVED,
                 confidence=CAPTURE_CONFIDENCE,
                 last_updated=now,
+                supplied_withheld_content=supplied_withheld_content,
                 # `last_confirmed_at` left at its `None` default — see above.
             ),
         )

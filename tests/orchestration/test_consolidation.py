@@ -358,7 +358,7 @@ async def test_a_tainted_proposal_citing_no_evidence_is_rejected_rather_than_que
         fact="a belief resting on nothing",
         provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_AT),
     )
-    proposal = stage._marked(_proposal(bare), tainted=True)
+    proposal = stage._marked(_proposal(bare), tainted=True, supplied_withheld=False)
 
     outcome = await writes.write(proposal)
 

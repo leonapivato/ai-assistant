@@ -9,6 +9,10 @@ holds both durable stores by injection (ADR-0074 §9). This stage:
   same window over the most recently active conversation (§8);
 * **hands** the resolved :class:`~ai_assistant.core.types.EpisodicMemory` values
   to the injected :class:`~ai_assistant.core.protocols.Observer`;
+* **marks** each returned proposal with ADR-0204 §5's derivation value — the
+  disjunction of ``supplied_withheld_content`` over the episodes it supplied,
+  assigned rather than merged, exactly as ADR-0106 §3 has the consolidation stage
+  mark its sibling field;
 * **ingests** each returned proposal through
   :meth:`~ai_assistant.core.protocols.MemoryWriter.ingest`, in order and
   independently, ruling by ruling (§4) — the model proposes, a deterministic
@@ -140,6 +144,31 @@ def _check_citations(
             f"so nothing was ingested"
         )
         raise ValueError(msg)
+
+
+def _marked(proposal: MemoryUpdateProposal, *, supplied_withheld: bool) -> MemoryUpdateProposal:
+    """Stamp ADR-0204 §5's derivation marker on one proposal, discarding the producer's.
+
+    **Assignment, never a disjunction with what the observer emitted**, which is the
+    discipline ADR-0106 §3 fixes for the sibling marker and the reason it is stated:
+    a merge would leave a code path in which a producer's claim about its own warrant
+    reached the field, and the marker exists precisely because such a claim is not
+    evidence of the standing it claims (ADR-0094 §5). The value this stage computes
+    is a fact about the batch it selected, so it is written over whatever arrived.
+
+    Args:
+        proposal: What the observer proposed.
+        supplied_withheld: The disjunction over the episodes this pass supplied it.
+
+    Returns:
+        The proposal, with the marker its stage computed.
+    """
+    provenance = proposal.proposed.provenance.model_copy(
+        update={"supplied_withheld_content": supplied_withheld}
+    )
+    return proposal.model_copy(
+        update={"proposed": proposal.proposed.model_copy(update={"provenance": provenance})}
+    )
 
 
 def observed_ruled(
@@ -385,10 +414,22 @@ class ObservationStage:
         # with the writes and a partial write to lose — and it mirrors the producer's
         # own validate-then-apply ordering (§4).
         _check_citations(outcome.proposals, batch=batch)
+        # ADR-0204 §5's derivation rule, computed from the batch this stage selected
+        # and before anything is written — the shape ADR-0106 §3 already gives the
+        # sibling marker on the consolidation path. The disjunction ranges over every
+        # episode the producer was **supplied**, never over the subset it cited: an
+        # observer that read a stamped episode and cited only clean ones would
+        # otherwise emit a belief ADR-0199 §3 places speakable, which is #1708's
+        # laundering with one distillation more in it.
+        supplied_withheld = any(
+            episode.provenance.supplied_withheld_content for episode in episodes
+        )
         proposals: list[ObservedProposal] = []
         dropped = 0
         for proposal in outcome.proposals:
-            entry = await self._ingest(proposal, batch=batch)
+            entry = await self._ingest(
+                _marked(proposal, supplied_withheld=supplied_withheld), batch=batch
+            )
             if entry.decision is None:
                 dropped += 1
             proposals.append(entry)
