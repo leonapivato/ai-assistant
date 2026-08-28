@@ -378,9 +378,10 @@ the typed turn's plan, and "Every `converse_spoken` turn's plan carries none".
 
 ### 5. The stamp never clears, and a record derived from a stamped one carries it
 
-> **Normative.** No fold, merge, reinforcement, supersession or consolidation clears
-> `supplied_withheld_content`. Where two records are folded, the survivor's value is
-> the **disjunction** of both sides' values.
+> **Normative.** No fold, merge, reinforcement or consolidation clears
+> `supplied_withheld_content` on the record that carries it. Where two records are
+> folded, the survivor's value is the **disjunction** of both sides' values, and no
+> implementation writes `False` over a `True`.
 
 > **Normative.** A producer that derives a record from other records in this store
 > sets `supplied_withheld_content` on what it produces to the disjunction of the
@@ -390,10 +391,19 @@ the typed turn's plan, and "Every `converse_spoken` turn's plan carries none".
 > it as one. A producer whose inputs are not records of this store has nothing to
 > inherit and writes `False`.
 
-> **Normative.** The only exit is ADR-0072 §4's supersession by the user's own word,
-> which writes a fresh record at a fresh id whose supply was the user's assertion
-> and nothing else. No implementation offers any other route to clearing the field,
-> and no user act, configuration or later lane clears it in place.
+> **Normative.** A `SUPERSEDE` neither clears nor inherits the field, because it is
+> not an operation on the stamped record's value at all. ADR-0040 §5a rules that
+> after one "the live record is the proposed record — its content, its provenance,
+> its `evidence`, its `confidence` — borrowing from the target only the id it is
+> written at", and `supplied_withheld_content` is a member of that provenance. So
+> the surviving record carries the value the clause above computes for the
+> **proposal**, over what its own producer was supplied, and carries nothing of the
+> target's. ADR-0040 §5a is untouched and this ADR contradicts no sentence of it.
+
+> **Normative.** Beyond that, no user act, configuration, setting or later lane
+> clears the field in place on a record that carries it. A supersession is the only
+> route by which a live belief stops carrying a `True`, and it is that route because
+> it retires the record rather than editing it.
 
 **This is ADR-0106 §4's ratchet, taken for its reason.** That section rules that
 `derived_from_external` never clears and that "a fold's value is the **disjunction**
@@ -402,7 +412,10 @@ Without that, the laundering the marker exists to stop simply moves one step alo
 consolidate tainted material, then reinforce it once from a clean source and watch
 the marker clear." Every word of that transfers. `orchestration/consolidation.py`
 and the writer already compute exactly this disjunction for the sibling field, so
-the mechanism is the one in place rather than a new one.
+the mechanism is the one in place rather than a new one. ADR-0106 §4 draws the same
+line at supersession — the user's own word is "never obliged to inherit taint from
+what it retires" — and the clause above is that line generalised to any proposal,
+which is what ADR-0040 §5a's differential already requires of every writer.
 
 **The inheritance clause is what stops the second distillation.** ADR-0074 §4 makes
 capture "the first producer into the derived band, arriving before the observer it
@@ -573,6 +586,13 @@ layout. Each names an input and the outcome it fixes.
     reads that episode as `OBSERVED` with `about_person` unset, places it speakable
     and yields `False`, so an implementation without the disjunction launders the
     whole warrant through one bounded turn and one extra hop.
+15. **A supersession's survivor carries the proposal's value, not the target's.**
+    A stamped record superseded by a proposal whose own producer was supplied nothing
+    stamped: the live record at that id carries `False`, and the reverse case — an
+    unstamped target superseded by a stamped proposal — carries `True`. This is
+    ADR-0040 §5a's differential and §5's third clause pinned together, in both
+    directions, so neither the ratchet nor the differential can be implemented at
+    the other's expense.
 
 ### 9. What the implementing lane owes
 
@@ -599,7 +619,7 @@ rule 5). It owes:
 4. **The fold's disjunction** and the derivation rule of §5, alongside the sibling
    computation `orchestration/consolidation.py` and the writer already perform for
    `derived_from_external`.
-5. **The fourteen tests of §8.**
+5. **The fifteen tests of §8.**
 6. **Closing #1703 and #1708**, which this decision answers and that lane fixes.
 
 > **Normative.** The records this decision owes on ADR-0203 and on ADR-0199 are made
@@ -761,6 +781,19 @@ argument; using an offer is not amending it. Its closing warning — that a lane
 not infer the trigger from the band: `OBSERVED` says the assistant witnessed
 something" — is obeyed: this ADR reads nothing off the band and records the fact in
 a field of its own.
+
+**ADR-0040 §5a — no record is owed, and §5's third clause is written to make that
+true rather than to assume it.** Its differential rules that after a `SUPERSEDE`
+"the live record is the proposed record — its content, its provenance, its
+`evidence`, its `confidence` — borrowing from the target only the id it is written
+at". A ratchet that made a survivor inherit its target's stamp would contradict that
+sentence directly, and would be a partial supersession of it. This ADR does not:
+`supplied_withheld_content` is a member of the proposal's provenance and travels
+with it exactly as `derived_from_external` already does, so a writer conforming to
+§5a conforms to §5 with no further rule. §8's test 15 pins both directions of it.
+ADR-0040's `REINFORCE` half is likewise untouched — §5's first clause states the
+disjunction for a fold, which is the evidence-shaped obligation §5a already puts on
+that arm and not a new constraint on how content or confidence combine.
 
 **ADR-0106 — no record is owed.** Its subject is `derived_from_external`, and every
 clause of it is about that field. This ADR adds a sibling and reuses §4's ratchet
