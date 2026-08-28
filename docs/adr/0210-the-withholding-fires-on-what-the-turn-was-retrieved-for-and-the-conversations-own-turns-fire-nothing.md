@@ -193,11 +193,22 @@ recent turns, which are in the supply whatever was asked.
 > **Normative.** On an operation whose output channel's audience is **unbounded**
 > (ADR-0199 §1, declared as ADR-0200 §3 declares `converse_spoken`'s), ADR-0204 §2's
 > disjunction and the fact ADR-0199 §5's third clause carries to the composing stage
-> are evaluated over the members of the turn's supply that retrieval placed there for
-> **this turn's own goal statement** — ADR-0074 §5's second and third groups, the
-> relevance-retrieved beliefs and ADR-0158's episodic supplement — and over the
-> turn's context facets. They are **not** evaluated over ADR-0074 §5's first group,
-> the conversation's own recent turns.
+> are evaluated over the members of the turn's supply that a **relevance read taken
+> with this turn's own goal statement returned** — the belief composition ADR-0072 §5
+> orders and ADR-0158's episodic supplement, which are ADR-0074 §5's second and third
+> groups — and over the turn's context facets. They are **not** evaluated over a
+> member the supply holds only because it stands in ADR-0074 §5's first group, the
+> conversation's own recent turns.
+
+> **Normative.** The test is what a relevance read **returned**, and never which group
+> the composition finally placed the record in. ADR-0158 §4's deduplication drops from
+> the supplement any record the tail or the belief composition already holds — the
+> tail's copy survives "because its position carries the conversational order" — so a
+> record *both* the tail and the supplement's read carry stands in the supply at the
+> tail's position and in no other. Such a record **fires**: the supplement's read
+> selected it for this goal, and the deduplication decides where one copy sits rather
+> than why it was chosen. An implementation evaluating over the composed groups alone
+> would lose exactly those records and would under-fire against this clause.
 
 > **Normative.** Both terms of ADR-0204 §2's disjunction are evaluated over that same
 > narrowed set, and neither is dropped: a record of the retrieved groups that ADR-0199
@@ -238,6 +249,16 @@ turn's own goal statement as the query — `LearningLoop._retrieve` through
 query. A withheld record in either was surfaced *for this question*, so ADR-0199 §5's
 third clause has something to be about, and #1703's path is exactly a turn whose
 retrieval surfaced one.
+
+**And the second clause is why the rule is stated over the reads rather than over the
+groups**, which reads as a technicality and is not one. `LearningLoop._supplement`
+computes `held = {record.id for record in preceding}` and returns only what is not in
+it, so a stamped episode of this conversation that the supplement's read *does* return
+is deduplicated away and survives only in the tail. Stated over the groups, the rule
+would answer `False` for a record this turn's own relevance read had chosen — the exact
+under-firing §6 refuses a model's judgement for — and would do it on turns most likely
+to be about the withheld class, since those are the turns whose query matches the
+earlier one. Stated over the reads, the collision has no effect on the answer at all.
 
 **Facets stay in, and the direction is fail-closed.** A facet is assembled rather than
 retrieved, so it earns nothing and this clause could as easily have dropped it. It
@@ -381,8 +402,10 @@ audience. A disclosure ratchet whose latch is a completion is not a ratchet.
 > **Normative.** This ADR does not decide, and no lane cites it as deciding, whether a
 > withheld record was **responsive to the turn's question**. On a store whose band
 > holds fewer records than the retrieval budget, every record of that band stands in
-> every turn's second group whatever was asked, so §1's evaluation is `True` on every
-> turn and #1775's experience persists unchanged. That is this decision declining to
+> every turn's second group whatever was asked — `MemoryStore.search` "applies no
+> relevance threshold, ADR-0128 §1 having moved every eligibility predicate before the
+> ranking cut and added none" (ADR-0187 §5) — so §1's evaluation is `True` on every turn
+> and #1775's experience persists unchanged. That is this decision declining to
 > buy the narrowing with an instrument §6 refuses, and it is recorded as open.
 
 > **Normative.** The residue is tracked as its own question (**#1785**) and is fired by
@@ -460,11 +483,40 @@ a wire-carried field would have bumped for ADR-0203 §1, for ADR-0187 §4's floo
 ADR-0158's supplement, none of which did; §9's reach is the frame — its encoding, the
 validity of a wire-carried `core` type, and the promoted surface's method set.
 
-**And ADR-0204 §7's second ground is untouched.** The field is hub-authoritative: "No
-client sets it, no component reads it off a wire-received record to decide a placement",
-and the withholding happens in the hub, at supply, inside the turn. There is no direction
-in which a client emits a `Provenance` at all, and no peer at any version acts on the
-value, so there is nothing for a version skew to disagree about.
+**The nearer precedent is ADR-0187 §5, on an existing serialized field rather than on a
+selection.** ADR-0181 §3 put `planned_with_external_content` on `ConfirmationEgress`, a
+wire type that reaches a client on `TurnOutcome.step.confirmation`, and *adding* it bumped
+the version. ADR-0187 §4 then changed the condition under which that same already-serialized
+boolean is written, and §5 rules the effect normatively: "§4's floor makes that value read
+`True` **more** often rather than less: where a higher-precedence band would have filled the
+budget and the `ATTESTED` band would never have been read at all, the floor puts an attested
+record in the selection and ADR-0181 §2's disjunction is then true of it." ADR-0187 bumped
+nothing. So the corpus has already ruled the case this ADR is in — an existing wire-carried
+boolean whose write condition narrows or widens — and ruled it the other way from the
+addition that created the field.
+
+**And `wire/envelope.py`'s own record of every bump reasons the same way.** Each entry names
+a decode failure and nothing else: version 11 is bumped because the new member is "**required
+with no default** ... so a version 11 client decoding a version 10 hub's confirmation fails
+with `missing`", and because "`ConfirmationEgress` sets `extra="forbid"` ... so a version 11
+hub emits the member on every egress confirmation and a version 10 client fails with
+`extra_forbidden`". Not one entry in that log is a change to what a hub computes for a field
+whose shape is unmoved. Reading ADR-0124 §9's "different meaning" limb as reaching that would
+make the rule bind on ADR-0187 §4, on ADR-0158's supplement and on ADR-0203 §1, none of which
+bumped, and would put a redeployment of every spoke behind a change no peer can observe.
+
+**ADR-0204 §7's second ground is what makes that safe rather than merely permitted, and this
+ADR keeps it as a live condition.** The field is hub-authoritative: "No client sets it, no
+component reads it off a wire-received record to decide a placement", and the withholding
+happens in the hub, at supply, inside the turn. There is no direction in which a client emits
+a `Provenance` at all, and no peer at any version acts on the value.
+
+> **Normative.** The version question is settled here **on that footing**. A later decision
+> that gives any client, spoke or gateway a rule keyed on
+> `Provenance.supplied_withheld_content` **as received over the wire** owes ADR-0124 §9's
+> test afresh, in its own text, and may not cite this section as having answered it. Until
+> such a decision exists, §8's second clause is where a peer holding the code learns what the
+> field means, which is why that prose edit is owed rather than optional.
 
 > **Normative.** Nothing here authorises egress, relaxes any permission floor, widens
 > any grant, or is cited toward a designation, a registration or a destination.
@@ -510,6 +562,14 @@ subsystem, over the `SupplyFilter` alias `orchestration/loop.py` owns.
 > turn's context fires the evaluation, and `placed_facet_kinds()` still matches ADR-0199
 > §3's list.
 
+> **Normative.** The lane pins **ADR-0158 §4's deduplication collision**, which §1's
+> second clause exists for: a stamped episode of this conversation that stands in the
+> tail **and** is returned by the supplement's own relevance read is deduplicated out of
+> the supplement, stands in the supply at the tail's position alone, and **fires** the
+> evaluation. The negative twin is the same fixture with a supplement read that does not
+> return it, which fires nothing. Without the pair, an implementation evaluating over the
+> composed groups passes every other test in this section.
+
 > **Normative.** The lane pins **the subtraction unmoved**: on a spoken turn whose only
 > withheld record is in the conversation tail, that record is absent from the supply the
 > `TurnResult` carries, from the planner's inputs and from the composing stage's inputs,
@@ -520,15 +580,18 @@ subsystem, over the `SupplyFilter` alias `orchestration/loop.py` owns.
 The implementation is one lane, briefed after this ADR merges (ADR-0015 §5, golden
 rule 5). It owes:
 
-1. **The group boundary**, carried from `LearningLoop.respond` to the supply filter
-   inside `orchestration`, and the filter evaluating the boolean over the members past
-   it while subtracting over the whole supply. No `core` **definition** change and no
-   Protocol change; the two prose edits item 5 names are the whole of this lane's reach
-   into `core/types.py`.
+1. **What the relevance reads returned**, carried from `LearningLoop.respond` to the
+   supply filter inside `orchestration`: the belief composition's records and the ids
+   `_supplement`'s read returned **before** ADR-0158 §4's deduplication, so §1's second
+   clause is answerable. The filter evaluates the boolean over that set while
+   subtracting over the whole supply. A group boundary index alone is not enough and
+   §1's second clause says why. No `core` **definition** change and no Protocol change;
+   the two prose edits item 5 names are the whole of this lane's reach into
+   `core/types.py`.
 2. **`UnboundedAudienceSupply` alone.** `BoundedAudienceSupply` keeps the whole-supply
    evaluation, and the module docstring's account of what the two share is extended to
    say where they now differ.
-3. **The seven tests of §9.**
+3. **The eight tests of §9.**
 4. **The docstring records**: `supply_for_unbounded_audience`'s Returns section states
    what its third value is now taken over, and `orchestration/disclosure.py`'s module
    docstring gains the group distinction beside its account of the three groups.
