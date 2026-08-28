@@ -372,12 +372,14 @@ You get three things back, and they are three different statements.
   **A press that then asks nothing gives the answer back.** Let go without having
   said anything — the brush against the button in a pocket, which is the way this
   usually happens — and the answer picks up from where the sound stopped instead
-  of staying stopped. It is the same answer played on from there, not a new one:
-  nothing is re-asked, no turn runs, and nothing goes to the hub, so it happens
-  right here with no waiting. The page swaps its "this answer stopped being
-  spoken" sentence for one saying so. Where it cannot pick up — the browser has
-  taken the audio away, or a later answer has replaced that one — the earlier
-  sentence stands and the answer is simply the one on screen.
+  of staying stopped. The recording still goes up and comes back empty, because
+  that is how the page learns you said nothing, so there is the ordinary
+  `Sending…` gap first and then the answer plays on from where it was. It is the
+  same answer continued, not a new one: nothing is re-asked and no turn runs. The
+  page swaps its "this answer stopped being spoken" sentence for one saying so.
+  Where it cannot pick up — the recording never came back, the browser has taken
+  the audio away, or a later answer has replaced that one — the earlier sentence
+  stands and the answer is simply the one on screen.
 
 **And the assistant is told what you actually heard.** When you press again, the
 page tells the hub how much of the previous answer played — "3.2 of 9.8 seconds,
