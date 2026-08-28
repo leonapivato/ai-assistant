@@ -185,7 +185,19 @@ narrows that.
 > **Normative.** That limb is decided by reading the file structurally at both
 > endpoints of the move and comparing each `Protocol`'s effective member surface,
 > never by matching the move's hunk lines against a pattern. An endpoint that
-> cannot be parsed binds.
+> cannot be parsed binds, and so does every other case in which this limb cannot
+> be decided — §6's first clause governs it.
+
+> **Normative.** A class in `src/ai_assistant/core/protocols.py` is a `Protocol`
+> when one of its bases resolves to `typing.Protocol`, and a base resolves to
+> `typing.Protocol` when the name it is written under is bound to it by that
+> module's own imports: the bare name bound by `from typing import Protocol`, an
+> alias bound by `from typing import Protocol as P`, or an attribute access on a
+> name bound to the `typing` module by `import typing` or `import typing as t`.
+> `typing_extensions` is read as `typing` wherever this clause names it. Identity
+> is decided by that resolution and never by the base's spelling alone, and a
+> base resolving neither to `typing.Protocol` nor to a class the same file
+> declares binds under §6.
 
 > **Normative.** Any other move touching `src/ai_assistant/core/protocols.py` or
 > `src/ai_assistant/core/types.py` binds where the PR's diff touches a path under
@@ -235,6 +247,34 @@ line that merely moved, or from one inside a docstring, and it reads a hunk
 rather than a class. Comparing the declared members of each `Protocol` at the two
 endpoints answers the question that is actually asked, and an endpoint that
 cannot be parsed binds rather than clears, on the same fail-closed footing as §6.
+
+**And identity is resolved rather than spelled, because those spellings are not
+interchangeable to a reader that matches an identifier.** The structural limb is
+a claim about what the file *declares*, so an implementation of it must decide,
+class by class, whether `Protocol` is among the bases — and keyed on the bare
+identifier that decision is wrong on three spellings this repository already
+writes elsewhere. `src/ai_assistant/wire/surface.py` does a bare `import typing`;
+`src/ai_assistant/tools/egress.py` and `src/ai_assistant/tools/egress_binder.py`
+each bind a protocol class under an alias (`DestinationProtocol as
+SeamProtocol`); and `core/protocols.py`'s own module docstring names its
+contracts in the qualified form while every base in the file is written bare. A
+base move rewriting that file to `from typing import Protocol as P` and widening
+`class Child(Base, P)` is a widening on which **both endpoints parse perfectly**,
+so §4's parse-failure limb never fires and a bare-identifier reading clears the
+floor for an open lane whose required interface just grew. Import resolution is
+the reading that answers the question the limb actually asks, and it is the same
+move §4 makes twice already: read the structure, not the token.
+
+**Nothing in the file is spelled that way today, and the clause is worth its
+lines anyway.** `core/protocols.py` declares 49 `Protocol` classes, and the only
+bases across all of them are the bare `Protocol` and four classes the same file
+declares (`InvocationCompleter`, `Secrets`, `TraceRetention`, `TraceSink`). So
+this is a defect in the specification rather than a live fail-open, and it is
+priced accordingly: the limb already binds unconditionally on a widening, and
+this clause changes no outcome for any move the repository could make this week.
+What it changes is what a future edit to that file costs — an edit written in a
+spelling the project uses in three other modules would otherwise silently move
+the limb from unconditional to occasional.
 
 **The limb is scoped to `core/protocols.py` deliberately.** A field added to a
 `core/types.py` model, or a new value class there, obliges no open PR to do
@@ -593,6 +633,11 @@ as qualified, as ADR-0027 left it.
 > - A move adding a `Protocol` base to an existing `Protocol` and declaring
 >   nothing in its body (owed, which a declared-members-only reading would
 >   clear).
+> - A move widening a `Protocol` whose `typing.Protocol` base is written under an
+>   alias (`from typing import Protocol as P`, `class Child(Base, P)`), and one
+>   where it is written as an attribute access (`import typing`,
+>   `class Child(Base, typing.Protocol)`), each against a PR touching nothing in
+>   `core/` (owed — the two cases a bare-identifier reading clears).
 > - A `core/protocols.py` endpoint that will not parse (owed).
 > - A `core/types.py` move the PR neither touches `core/` for nor names (free).
 > - A move changing a definition the PR's text names (owed).
