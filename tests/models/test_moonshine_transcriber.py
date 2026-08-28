@@ -65,6 +65,21 @@ _LIVENESS_SECONDS = 10.0
 #: is wired, not the model's word error rate.
 _SPOKEN_SENTENCE = "The dentist appointment is on Thursday afternoon."
 
+#: The content words of that sentence, and how many of them the transcript must
+#: carry. Not all four (#1717): int8 inference is not bit-reproducible, and the
+#: engine deletes a single word often enough for the stricter form to have blocked
+#: two merges in one day on changes that touched nothing near this seam — gate
+#: runs 33165593987 (PR #1710, docs-only) and 33207357743 (PR #1754). The rate is
+#: not vanishing: 2 of 20 consecutive local runs on this branch's base dropped one
+#: word. Three of four keeps what ADR-0200 §13's second normative clause asks of
+#: this case — audio in, *this* transcript out, over the real engines, with the
+#: network denied — while tolerating the one deletion that clause never claimed to
+#: measure. A wired seam that has actually regressed does not come back one word
+#: short of the sentence it was given, and the whole transcript is in the failure
+#: message either way, so a real regression stays legible.
+_HEARD_CONTENT_WORDS = frozenset({"dentist", "appointment", "thursday", "afternoon"})
+_HEARD_CONTENT_WORDS_REQUIRED = 3
+
 
 def _tone(seconds: float = 0.4) -> np.ndarray:
     steps = np.linspace(0.0, seconds, int(_TONE_RATE * seconds), endpoint=False, dtype=np.float32)
@@ -404,6 +419,15 @@ async def test_the_real_engine_hears_real_speech_with_no_socket_opened() -> None
     assert len(spoken.decoded()) > 1000
     # Compared on content words rather than on the whole string: a recogniser is
     # entitled to its own punctuation and casing, and pinning those would be a
-    # word-error-rate assertion this case is not making.
+    # word-error-rate assertion this case is not making. Both assertions carry the
+    # transcript, because the one thing a failure here has to answer is what the
+    # engine actually said.
+    assert heard.strip(), f"the real engine returned a blank transcript: {heard!r}"
     words = {word.strip(".,").lower() for word in heard.split()}
-    assert {"dentist", "appointment", "thursday", "afternoon"} <= words
+    heard_words = _HEARD_CONTENT_WORDS & words
+    assert len(heard_words) >= _HEARD_CONTENT_WORDS_REQUIRED, (
+        f"heard {len(heard_words)} of {len(_HEARD_CONTENT_WORDS)} content words, "
+        f"needed {_HEARD_CONTENT_WORDS_REQUIRED}; "
+        f"missing {sorted(_HEARD_CONTENT_WORDS - heard_words)} "
+        f"from {_SPOKEN_SENTENCE!r}; full transcript: {heard!r}"
+    )
