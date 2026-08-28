@@ -53,6 +53,32 @@ if TYPE_CHECKING:
     from _pytest.python import PyCollector
 
 
+def _opts_out(obj: type) -> bool:
+    """Report whether the class says, in pytest's own terms, that it is not a test class.
+
+    ``__test__ = False`` is the explicit opt-out, and pytest honours it a step
+    later than ``istestclass`` -- in ``Class.collect``, which returns no items for
+    it. A class carrying it therefore contributes nothing whether it is abstract
+    or not, so there is nothing for this guard to be about: no test is lost, and
+    the loss is the whole subject. Refusing it anyway would break the one
+    supported way to write an abstract helper named ``Test…``.
+
+    Read defensively, exactly as pytest reads it: a class whose metaclass defines
+    ``__getattr__`` can raise here, and a collection that died reading an
+    attribute would be a worse failure than the one being prevented.
+
+    Args:
+        obj: The class pytest is deciding about.
+
+    Returns:
+        Whether the class carries a falsy ``__test__``.
+    """
+    try:
+        return not getattr(obj, "__test__", True)
+    except Exception:  # any attribute error means "cannot tell"; see above
+        return False
+
+
 def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
     """Report whether pytest would treat ``obj`` as a test class but for its abstractness.
 
@@ -60,7 +86,8 @@ def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
     for the abstractness this guard exists to catch. So the other two halves of
     it are asked separately, through pytest's own predicates rather than through
     a second reading of ``python_classes`` — which would drift from the ini
-    option the moment a project set it.
+    option the moment a project set it. The third condition, ``__test__``, is one
+    ``istestclass`` does not ask at all; see :func:`_opts_out`.
 
     Args:
         collector: The module or class pytest is collecting from.
@@ -68,8 +95,11 @@ def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
         obj: The class itself.
 
     Returns:
-        Whether the name or the ``__test__`` attribute marks it as a test class.
+        Whether the name or the ``__test__`` attribute marks it as a test class,
+        and it has not opted out.
     """
+    if _opts_out(obj):
+        return False
     return bool(collector.classnamefilter(name)) or collector.isnosetest(obj)
 
 
@@ -99,8 +129,9 @@ def abstract_test_class_refusal(collector: PyCollector, name: str, obj: object) 
         f"  never implemented: {missing}\n"
         f"Implement the names above on this binding -- they are the conformance "
         f"suite's abstract fixtures -- or, if the class is deliberately a base "
-        f"rather than a binding, give it a name pytest does not collect (the "
-        f"suites themselves are named `...Contract`, not `Test...`)."
+        f"rather than a binding, say so: give it a name pytest does not collect "
+        f"(the suites themselves are named `...Contract`, not `Test...`), or set "
+        f"`__test__ = False` on it."
     )
 
 
