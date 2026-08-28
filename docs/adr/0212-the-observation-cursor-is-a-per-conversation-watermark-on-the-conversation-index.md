@@ -409,10 +409,19 @@ effects happened and whose cursor did not advance. This clause is about where a 
 > unresolved ordinal in it, or to the page's highest ordinal where the page holds no
 > second unresolved turn.
 
-> **Normative.** The watermark therefore **strictly increases on every pass whose
-> page is non-empty**, and **no unresolved turn is passed over on the pass that first
+> **Normative.** The watermark therefore **strictly increases whenever a pass reads a
+> non-empty page**, and **no unresolved turn is passed over on the pass that first
 > reads it** unless it was that page's lowest turn — which requires the watermark to
 > have already stood immediately below it.
+
+> **Normative.** Two passes over one conversation may overlap, and neither the store
+> nor this decision serialises them. Where they do, both read the same page and both
+> compute the same advance; the first `record_observed` to reach the store stamps it,
+> and the second **performs nothing and returns `None`** because its ordinal is no
+> longer strictly above the recorded one (§8). The watermark still moved, and it moved
+> to the position both passes computed — so the invariant above is a property of the
+> **watermark under any interleaving**, and never a promise that each individual pass
+> is the one that moved it.
 
 The two clauses together give a bounded, checkable invariant rather than a hope: the
 strict rule passes over no unresolved turn at all, and the fallback passes over
@@ -465,6 +474,19 @@ fallback fires and the walk moves past it. A gap therefore delays the walk by ex
 one pass and never more, and a page whose every turn is a settled gap is passed over
 in one pass rather than blocking the conversation forever — ADR-0111 §7's "permanently
 and quietly stopped" made unreachable by construction rather than by argument.
+
+**The overlap is safe, and the reason is the one ADR-0077 §8 already gives.** Both
+passes hand the same episodes to the observer, so the second pays a model call for
+proposals the gate folds into `REINFORCE` on the records the first wrote — "the same
+belief on the same support scores the same however many times it is derived, so a fold
+that takes the maximum finds nothing higher". Neither pass can lower the watermark and
+neither can advance it past what it read, so no coverage is lost in either direction.
+Nothing is engineered to prevent the overlap: holding the store's per-conversation
+exclusion across a pass would hold it across a model call, which is a different and
+worse decision than paying for a duplicate one. In the deployment this ADR is a
+precondition for, the overlap is a hand-run `observe` beside a scheduled one and never
+two scheduled passes, because ADR-0083 §7's loop "runs every due job, in a fixed order,
+**one at a time**".
 
 **Worked, because the arithmetic is the decision.** Watermark 100, bound 20:
 
@@ -760,7 +782,12 @@ advances to the ordinal below the first, and the next pass — which begins at t
 — advances to the ordinal below the *second* rather than past it**, so neither is
 passed over on its only reading; a page of exactly `observation_batch_size` rows whose
 last turn is unresolvable behaves the same as a shorter one, so no rule depends on the
-page's length; an episode that lands between two passes is observed on the second; a pass that raises inside the write path
+page's length; an episode that lands between two passes is observed on the second;
+**two overlapping passes over one conversation leave one watermark at the position both
+computed, the second `record_observed` returning `None`**, written as an end-to-end
+test over two interleaved passes rather than as two store calls in a row, with the
+duplicate proposals folding to `REINFORCE` and no duplicate record; a pass that raises
+inside the write path
 after one proposal was ruled advances nothing and the next pass re-reads the whole
 page; a second pass over the same page produces `REINFORCE` and no duplicate record,
 pinned end to end and not only at the gate; `record_observed` never lowers a
