@@ -140,6 +140,12 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 #: the three.
 _DELIVERY_COLUMNS: Final = "delivery_state TEXT, delivery_played INTEGER, delivery_rendered INTEGER"
 
+#: What a SQLite ``INTEGER`` holds: a signed 64-bit value. A duration beyond it is
+#: refused by :func:`_to_micros_of` as this seam's own error rather than left to raise
+#: the driver's ``OverflowError``, which is not a ``sqlite3.Error`` and so would cross
+#: :meth:`SqliteConversationStore._transaction`'s translation untouched.
+_SQLITE_INT_BOUND: Final = 2**63
+
 #: The columns of the ``turns`` table, foreign key and all — held in one place so
 #: the fresh-database path and :meth:`SqliteConversationStore._migrate_turns`'
 #: rebuild cannot drift apart. Two spellings of one schema is how a migration
@@ -375,8 +381,35 @@ def _delivery_row(delivery: SpokenDelivery | None) -> tuple[Any, Any, Any]:
 
 
 def _to_micros_of(duration: timedelta) -> int:
-    """One duration as a whole number of microseconds, exactly."""
-    return duration // timedelta(microseconds=1)
+    """One duration as a whole number of microseconds, refusing one too large to store.
+
+    **The bound is this backend's, so the refusal is this seam's error** (ADR-0205 §3:
+    ``ConversationStoreError`` "where the store cannot be written"). ``timedelta``
+    reaches ``timedelta.max`` — about 8.6e19 microseconds — which is a value
+    :class:`~ai_assistant.core.types.SpokenDelivery`'s partition happily admits and
+    SQLite's signed 64-bit ``INTEGER`` cannot hold. Adversarial review, round 1,
+    ``blocker``: without this the driver raises ``OverflowError``, which is **not** a
+    ``sqlite3.Error`` and so passes straight through :meth:`_transaction`'s
+    translation, out of ``record_delivery``, past
+    ``ConversationLifecycle.record_delivery``'s degradation — which catches this seam's
+    error and not that one — and costs the owner the turn they had just spoken, for a
+    fact about a turn that had already happened.
+
+    Checked before the statement rather than caught after it, so nothing is half
+    written and the message names what is wrong rather than relaying a driver's.
+
+    Raises:
+        ConversationStoreError: If the duration is outside the range this store can
+            hold.
+    """
+    micros = duration // timedelta(microseconds=1)
+    if not -_SQLITE_INT_BOUND <= micros < _SQLITE_INT_BOUND:
+        msg = (
+            f"a delivery duration of {micros} microseconds is outside the range this "
+            f"store can hold, so the turn's delivery was not written (ADR-0205 §3)"
+        )
+        raise ConversationStoreError(msg)
+    return micros
 
 
 def _micros_of(value: object) -> int:

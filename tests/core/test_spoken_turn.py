@@ -127,6 +127,28 @@ def test_a_recording_with_no_words_is_five_absences_and_no_error() -> None:
     assert empty.spoken_degraded is False
 
 
+def test_an_episode_id_beside_no_outcome_is_refused() -> None:
+    """ADR-0205 §1: ``episode_id`` is ``None`` **exactly when** the call recorded no
+    turn — and a call with no ``outcome`` ran none.
+
+    Raised by **both** review lenses on round 1. The id is the name a device hands
+    back on the next call, so a result carrying one for a turn that never ran invites
+    a report against a turn nothing can stamp; and the value crosses the wire as a
+    legitimate model, so the type is where it has to be refused.
+
+    Only this direction is enforced. The converse is false of a shape §1 admits — "a
+    capture whose index entry did not land" leaves an outcome standing beside no id —
+    which the second case pins so a later editor cannot 'complete' the biconditional.
+    """
+    with pytest.raises(ValidationError, match="episode_id"):
+        SpokenTurn(episode_id="conv:c-1:1")
+
+    unrecorded = SpokenTurn(heard="hello", outcome=TurnOutcome(turn=None))
+    assert unrecorded.episode_id is None, (
+        "an outcome beside no id is the capture whose index entry did not land"
+    )
+
+
 def test_a_transcript_with_no_turn_is_refused() -> None:
     # The "exactly when" stated in the direction that would say the engine heard
     # words and answered nothing.
