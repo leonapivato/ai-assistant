@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from gateway_timing import Timers
 
 from ai_assistant.core.errors import NotificationBudgetError, NotificationOutboxError
 from ai_assistant.core.types import (
@@ -127,13 +128,27 @@ class _Slots:
 
 
 def _fan_out(
-    answers: list[NotificationDelivery | None | Exception], *, slots: _Slots | None = None
+    answers: list[NotificationDelivery | None | Exception],
+    *,
+    slots: _Slots | None = None,
+    timers: Timers | None = None,
 ) -> tuple[DeliveryFanOut, _Scripted, _Slots]:
-    """A fan-out over a scripted engine, with its hub-slot accounting visible."""
+    """A fan-out over a scripted engine, with its hub-slot accounting visible.
+
+    ``timers`` is the keep-alive's interval, driven by hand (ADR-0206 §8): the
+    figure it is armed at is ``gateway_notification_budget``, so a test that waited
+    it out would wait twenty seconds for one write.
+    """
     engine = _Scripted(answers)
     held = slots or _Slots()
     return (
-        DeliveryFanOut(engine=engine, budget=_BUDGET, acquire=held.acquire, release=held.release),
+        DeliveryFanOut(
+            engine=engine,
+            budget=_BUDGET,
+            acquire=held.acquire,
+            release=held.release,
+            defer=timers or Timers(),
+        ),
         engine,
         held,
     )

@@ -1035,6 +1035,7 @@ class Gateway:
             budget=settings.gateway_notification_budget,
             acquire=self._take_hub_slot,
             release=self._give_hub_slot,
+            defer=defer,
         )
         self._bootstrap = BootstrapMint(
             ttl=settings.gateway_bootstrap_ttl, defer=defer, mint_value=mint_value

@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from ai_assistant.core.errors import AssistantError, NotificationBudgetError
+from ai_assistant.core.types import SpokenAudioFormat
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.wire.errors import TransportError
 
@@ -49,6 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.interfaces.gateway.sessions import Cancellable, Defer
 
 _log = structlog.get_logger(__name__)
 
@@ -65,6 +67,51 @@ _DECLINED: Final = "assistant-declined"
 #: Its own name rather than either of theirs, because §9's distinction is only worth
 #: anything if a third condition is not quietly reported as one of the two.
 _FAILED: Final = "delivery-failed"
+
+#: What the gateway asks the hub to render a notification in, in preference order
+#: (ADR-0206 §2). **The gateway's own value, fixed and identical on every poll**: no
+#: browser request carries it, no browser value reaches it, and no browser narrows,
+#: widens or reorders it. ADR-0177 §1's second clause and ADR-0175 §6's put
+#: ``next_notification`` outside the browser control surface entirely, and §2 records
+#: why a browser-supplied list is unavailable twice over — even without that clause,
+#: ADR-0175 §4's fan-out gives one answer to every open stream, so a list assembled
+#: from two browsers with different decoders has no value it could take.
+#:
+#: **It names every member of :class:`~ai_assistant.core.types.SpokenAudioFormat`**,
+#: so no format the synthesizer can produce is excluded by the caller. What naming
+#: the whole enumeration buys is stated exactly in §2 and is worth restating here,
+#: because the loose version of it is wrong: it guarantees the *synthesizer's* choice
+#: is never narrowed, not that every browser can play the result. The engine picks one
+#: member (ADR-0200 §3) and the gateway writes that one rendering to every stream, so a
+#: browser whose decoder covers only the other member plays nothing and renders the
+#: notification on the page — intentionally silent, because the alternative is a
+#: per-stream answer this carrier does not have.
+#:
+#: **The order is a measurement and not a taste**, and §2 lets a later lane change it
+#: on a further measurement without an ADR. Measured 2026-08-28 on the two engines this
+#: repository installs, by recording a 3 s 440 Hz tone through ``MediaRecorder`` and
+#: then handing every sample to ``decodeAudioData`` in each engine — which is the call
+#: the page actually plays a rendering through (``playSpoken``), not a media element:
+#:
+#: * Chromium 151.0.7922.34 — decodes ``audio/webm;codecs=opus`` (3.00 s) and
+#:   ``audio/mp4`` (2.92 s); produces both, at 48 597 and 49 092 bytes for the same
+#:   3 s tone, a 1.0% difference.
+#: * WebKit 26.5 — decodes both, at 3.00 s and 2.96 s; produces neither, because
+#:   Playwright's Linux WebKit ships no ``MediaRecorder`` for either type.
+#:
+#: So **decodability did not separate the two members on either engine and neither did
+#: size**, and the order below is the tie broken on the one figure that did differ:
+#: ``audio/webm;codecs=opus`` is what a browser on those engines *produces* first —
+#: ``TALK_FORMATS`` in ``assets/app.js`` picks it in the same order, measured the same
+#: way — so it is the member most likely to be the one a synthesizer and a page already
+#: agree on. The honest caveat, recorded rather than glossed: Playwright's Linux WebKit
+#: is not Safari on a phone, and milestone 19's exit test is a phone. A measurement on
+#: that device is what would move this constant, and moving it costs no ADR.
+GATEWAY_PLAYS: Final[tuple[SpokenAudioFormat, ...]] = (
+    SpokenAudioFormat.WEBM_OPUS,
+    SpokenAudioFormat.MP4,
+)
+
 
 #: The fault for the one refusal ADR-0175 §8 names by hand: a
 #: ``gateway_notification_budget`` above the hub's own ceiling. No load-time check
@@ -175,8 +222,9 @@ class DeliveryFanOut:
         budget: timedelta,
         acquire: Callable[[], bool],
         release: Callable[[], None],
+        defer: Defer,
     ) -> None:
-        """Build a fan-out holding no poll and no stream.
+        """Build a fan-out holding no poll, no stream and no keep-alive.
 
         Args:
             engine: The hub, as the promoted ``AssistantEngine``. ``next_notification``
@@ -194,13 +242,23 @@ class DeliveryFanOut:
                 (§7), and no lane gives delivery its own budget — ADR-0131 §5's rule
                 applied at this door.
             release: Give that slot back.
+            defer: How the keep-alive's interval is scheduled (ADR-0206 §8). The
+                same seam the session table and the record interval already use,
+                injected rather than reached for so a test fires it instead of
+                waiting out a budget — and so the interval is observably a thing
+                this object holds and drops, which §8's lifetime clause requires.
         """
         self._engine = engine
         self._budget = budget
         self._acquire = acquire
         self._release = release
+        self._defer = defer
         self._streams: set[DeliveryStream] = set()
         self._poll: asyncio.Task[None] | None = None
+        #: The interval ADR-0206 §8 paces the keep-alive by, armed while and only
+        #: while a stream is open. ``None`` where none is armed — which, outside the
+        #: instant between a write and its re-arming, means no stream is open.
+        self._keep_alive: Cancellable | None = None
 
     def open(self) -> DeliveryStream | None:
         """Register a stream, opening the poll where it is the first (§4).
@@ -222,6 +280,12 @@ class DeliveryFanOut:
         self._streams.add(stream)
         if self._poll is None:
             self._poll = asyncio.create_task(self._run())
+            # **Armed with the poll and not inside it** (ADR-0206 §8). The keep-alive
+            # "exists while and only while at least one delivery stream is open", and
+            # this is the step in which that becomes true — a task body does not run
+            # until the loop next turns, so arming there would leave an interval that
+            # is owed and not yet counting.
+            self._arm_keep_alive()
         return stream
 
     def close(self, stream: DeliveryStream) -> None:
@@ -251,12 +315,95 @@ class DeliveryFanOut:
         self._reap()
 
     def _reap(self) -> None:
-        """Cancel the poll and give the hub slot back, holding nothing after."""
+        """Cancel the poll and the keep-alive, and give the hub slot back.
+
+        **The keep-alive is dropped here rather than beside here** (ADR-0206 §8).
+        Its "lifetime is the fan-out's and not the poll's": it is dropped in the
+        same step that ends the last stream and in the same step that ends them
+        all on the way down, and every one of those steps reaches this method —
+        :meth:`close` when the last stream goes, :meth:`shutdown` on the way down,
+        and :meth:`open` when a spent poll is replaced. Cancelling it **before**
+        the early return is what makes that true rather than nearly true: a
+        fan-out whose poll was already reaped still holds an armed interval, and
+        a callback firing after the last stream has gone is the orphaned task
+        ADR-0060 §1 names.
+        """
+        self._cancel_keep_alive()
         poll, self._poll = self._poll, None
         if poll is None:
             return
         poll.cancel()
         self._release()
+
+    def _arm_keep_alive(self) -> None:
+        """Start the interval afresh, replacing whatever was armed (ADR-0206 §8).
+
+        "A write of either kind restarts the interval, so a gateway whose polls
+        complete within their budget writes exactly what it writes today and at
+        exactly the cadence it writes it at today; a keep-alive is emitted only
+        where a poll has outrun the interval."
+        """
+        self._cancel_keep_alive()
+        self._keep_alive = self._defer(self._budget.total_seconds(), self._keep_alive_due)
+
+    def _cancel_keep_alive(self) -> None:
+        """Call the interval off, where one is armed."""
+        armed, self._keep_alive = self._keep_alive, None
+        if armed is not None:
+            armed.cancel()
+
+    def _keep_alive_due(self) -> None:
+        """Write ADR-0175 §4's keep-alive because the interval elapsed (§8).
+
+        **Reached only where a poll has outrun the interval**, because every write
+        re-arms it — so this is the state ADR-0206 §7 creates and §8 exists to keep
+        §4's obligation true in: a browser holding a delivery stream cannot tell a
+        gateway waiting on a long synthesis from one that has stopped, and tying the
+        keep-alive to the poll's return would have made this ADR's one new source of
+        delay the one condition the keep-alive could not report.
+
+        **It is the gateway's own write on ADR-0175 §4's terms and nothing more**: it
+        carries no part of any notification, is not a delivery, is acknowledged by
+        nothing, and leaves §5's acknowledgement rule and ADR-0206 §9 where they
+        stand. The gateway already emits this value of its own motion whenever a poll
+        returns nothing, so what §8 changes is *when* it is written and not *what*.
+        """
+        self._keep_alive = None
+        if not self._streams:
+            # The last stream went in the instant before this callback ran. §8: nothing
+            # of the keep-alive survives that step, and "no value written on any stream
+            # afterwards" — so this writes nothing and arms nothing.
+            return
+        self._write(streams.alive())
+        self._arm_keep_alive()
+
+    def _write(self, value: Mapping[str, Any]) -> int:
+        """Hand one value to every open stream, abandoning those that cannot take it.
+
+        **ADR-0175 §4's per-stream rules bind both kinds unchanged.** The gateway
+        holds at most one value pending per stream and queues nothing behind one, and
+        a write that has not completed when the next value is due on that stream is
+        abandoned and that stream ended. A keep-alive is a value due on that stream,
+        so a stream stalled behind a rendering meets that clause exactly as it meets
+        it behind any other value — and a delivery arriving behind a keep-alive a
+        browser has not drained meets it in the other direction, which ADR-0206 §8
+        states in terms: a keep-alive already handed to a stream is **not** retracted,
+        because a value a stream has taken is a value a browser may already be
+        reading.
+
+        Args:
+            value: The value to write, already framed as a stream value.
+
+        Returns:
+            How many streams took it.
+        """
+        written = 0
+        for stream in tuple(self._streams):
+            if stream.offer(value):
+                written += 1
+            else:
+                stream.abandon()
+        return written
 
     async def _run(self) -> None:
         """Poll while a stream is open, writing each answer to every one (§4, §5).
@@ -302,6 +449,13 @@ class DeliveryFanOut:
             # browser is owed an ending whatever the gateway met.
             _log.exception("gateway.delivery.failed")
             terminal = streams.fault(_FAILED, detail=str(exc))
+        # **Before the terminal value and not after it** (ADR-0206 §8, ADR-0175 §4). A
+        # loop that has stopped polling writes nothing more of its own motion, and an
+        # interval left armed across the ending would fire onto streams that are
+        # already ended — where :meth:`DeliveryStream.offer` refuses and this object
+        # would abandon a stream whose terminal value the browser had not yet drained,
+        # costing it the ending §4 guarantees it.
+        self._cancel_keep_alive()
         if terminal is not None:
             self._end_all(terminal)
 
@@ -317,7 +471,7 @@ class DeliveryFanOut:
         while self._streams:
             try:
                 delivery = await self._engine.next_notification(
-                    acknowledging=acknowledging, budget=self._budget
+                    acknowledging=acknowledging, plays=GATEWAY_PLAYS, budget=self._budget
                 )
             except TransportError as exc:
                 return streams.fault(_UNREACHABLE, detail=str(exc))
@@ -332,13 +486,21 @@ class DeliveryFanOut:
             # that a browser reaching a running gateway must learn that the hub is
             # down rather than that nothing is there.
             value = streams.alive() if delivery is None else streams.notification(delivery)
+            # **The one arbitration point, and it is before either value is handed to
+            # any stream** (ADR-0206 §8). "The gateway decides there which value it
+            # writes for the elapsing interval, and where a poll has returned the
+            # delivery is that value: a keep-alive due or scheduled but **not yet
+            # handed to a stream** is discarded, and for one interval the two never
+            # both reach one stream." Cancelling here is that discard — and it is the
+            # only line at which one is possible, because after the hand-off there is
+            # a browser that may already be reading and a retraction no implementation
+            # can perform (architecture review's ruling, ADR-0206 §8's tenth round).
+            self._cancel_keep_alive()
             watching = tuple(self._streams)
-            written = 0
-            for stream in watching:
-                if stream.offer(value):
-                    written += 1
-                else:
-                    stream.abandon()
+            written = self._write(value)
+            # The interval restarts from this write, whichever kind it was, so the
+            # cadence a browser observes is write-to-write and never poll-to-poll.
+            self._arm_keep_alive()
             # §5: acknowledged only where it was written to at least one open stream.
             acknowledging = None if delivery is None or not written else delivery.delivery_id
             if delivery is not None:
