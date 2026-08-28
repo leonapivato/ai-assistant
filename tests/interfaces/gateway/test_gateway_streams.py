@@ -636,7 +636,13 @@ async def test_a_delivery_streams_head_states_the_cadence_it_will_be_written_at(
         assert status == 200
         assert headers["x-assistant-keep-alive-microseconds"] == ["7000000"]
         await engine.polling.wait()
-        assert engine.calls[-1] == ("next_notification", {"acknowledging": None, "budget": budget})
+        assert engine.calls[-1] == (
+            "next_notification",
+            # ``plays`` is empty because this gateway supplies none yet: ADR-0206 §2's
+            # fixed value is the gateway lane's, and until it lands this poll asks for
+            # no rendering (ADR-0206 §1).
+            {"acknowledging": None, "plays": (), "budget": budget},
+        )
 
 
 async def test_the_cadence_is_stated_on_the_delivery_stream_and_on_nothing_else() -> None:
