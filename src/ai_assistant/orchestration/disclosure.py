@@ -21,10 +21,27 @@ listener "cannot distinguish from a complete one".
 **The class is decided from recorded origin, never by inspecting the words**
 (ADR-0199 §2). For a record that is :attr:`~ai_assistant.core.types.MemoryBase.about_person`,
 :attr:`~ai_assistant.core.types.Provenance.source` and — where the band is
-``ATTESTED`` — :attr:`~ai_assistant.core.types.Attestation.reported_by`. For a
+``ATTESTED`` — :attr:`~ai_assistant.core.types.Attestation.reported_by`, and since
+ADR-0204 §3 a **fourth** recorded field of the same provenance,
+:attr:`~ai_assistant.core.types.Provenance.supplied_withheld_content`. For a
 context facet it is the facet's own **kind**. No content is read: not
 ``MemoryBase.content``, not a facet's rendered text, not a keyword, not a
 pattern, not a classifier, and not a model asked what a passage is about.
+
+**The fourth read is a second reason to withhold, not a fifth placement**
+(ADR-0204 §3, §11). ADR-0199 §3's placements are computed exactly as they were —
+no class becomes speakable or unspeakable here — and a record whose warrant held
+content §3 withholds from this channel is withheld whatever §3's third clause
+would otherwise place it as. That closes the two paths #1703 and #1708 record: a
+withholding turn's own question, and a bounded channel's turn laundering a model
+rationale through capture into a record §3 places speakable.
+
+**The evaluation is also made on a channel whose audience is bounded, where
+nothing is subtracted** (ADR-0204 §2, §4). :class:`BoundedAudienceSupply` runs the
+same predicate over that turn's supply, discards the narrowed supply, and keeps
+only the boolean — so the turn plans over everything it retrieved, exactly as
+ADR-0203 §1's last clause requires, and its capture still records that such
+content stood in its warrant. One predicate, in one module, two uses.
 
 **The withholding subtracts and adds nothing** (ADR-0199 §5, ADR-0203 §1). What
 this module builds is the *supply the whole turn runs over*, so the
@@ -84,6 +101,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import CurrentContext, MemoryRecord
 
 __all__ = [
+    "BoundedAudienceSupply",
+    "TurnSupply",
     "UnboundedAudienceSupply",
     "placed_facet_kinds",
     "speakable_sources",
@@ -142,10 +161,14 @@ def supply_for_unbounded_audience(
             record rather than guessing at a name.
 
     Returns:
-        The context and the memories the turn may run over, and whether ADR-0199 §3
-        withheld anything from them. The third value is what the composing stage is
-        eventually told: **that** a withholding occurred, and nothing about what it
-        was.
+        The context and the memories the turn may run over, and whether anything was
+        withheld from them. The third value is what the composing stage is eventually
+        told: **that** a withholding occurred, and nothing about what it was. It is
+        also ADR-0204 §2's disjunction, over this one evaluation and with no second
+        pass over the supply — its first term because an unplaced record or an
+        unplaced facet was dropped, and its second because :func:`_speakable` refuses
+        a record already carrying ``supplied_withheld_content``, so a supply holding
+        one cannot come back as "nothing was withheld".
     """
     kept = tuple(
         record
@@ -205,6 +228,68 @@ class UnboundedAudienceSupply:
         return narrowed, kept
 
 
+@dataclass(slots=True)
+class BoundedAudienceSupply:
+    """One turn's evaluation on a channel whose audience is bounded (ADR-0204 §2, §4).
+
+    The twin of :class:`UnboundedAudienceSupply`, and deliberately the *same*
+    predicate: it evaluates ADR-0199 §3's withholding over what the turn assembled
+    and retrieved, records whether anything would have been held back, and then hands
+    the turn back **everything it was given**. What varies by the channel's audience
+    is whether the subtraction is applied, and never whether the evaluation is made.
+
+    **Nothing about the turn changes** (ADR-0204 §4). The supply it runs over, the
+    plan it produces, the step that plan drives, the ``TurnResult`` it returns, the
+    reply composed for it and the plan it persists are all exactly what they were
+    before this class existed. What the evaluation buys is one boolean about material
+    the turn was already handed, computed from fields it already carries, which its
+    capture then records — because #1708's finding is not that the typed answer was
+    wrong but that its *capture* becomes an input to a channel whose audience is not
+    bounded.
+
+    **Its :attr:`withheld` is read only by capture**, never by a composing stage:
+    ADR-0199 §5's third clause obliges the stage to be told that a withholding
+    occurred, and on this channel none did. Latched exactly as the unbounded twin's
+    is, for the same fail-closed reason.
+
+    Attributes:
+        speakable_attested_sources: The identities ADR-0199 §3 places, as
+            :func:`supply_for_unbounded_audience` takes them.
+        withheld: Whether ADR-0199 §3 would have held anything back from this turn's
+            supply — ADR-0204 §2's disjunction, over a supply nothing was taken from.
+    """
+
+    speakable_attested_sources: frozenset[str]
+    withheld: bool = False
+
+    def __call__(
+        self, context: CurrentContext, memories: tuple[MemoryRecord, ...]
+    ) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
+        """Evaluate what ADR-0199 §3 would withhold, and subtract none of it.
+
+        Args:
+            context: The context the turn assembled.
+            memories: What the turn retrieved.
+
+        Returns:
+            Exactly what it was given, unnarrowed and unreordered.
+        """
+        _, _, withheld = supply_for_unbounded_audience(
+            context, memories, speakable_attested_sources=self.speakable_attested_sources
+        )
+        self.withheld = self.withheld or withheld
+        return context, memories
+
+
+#: The two postures one conversational operation's supply can take, and there are
+#: exactly two: ADR-0199 §1 fixes the posture as a function of the output channel's
+#: audience alone, and ADR-0204 §2 makes the *evaluation* common to both. A turn is
+#: handed one of these between retrieval and planning
+#: (:data:`~ai_assistant.orchestration.loop.SupplyFilter`), and its capture reads the
+#: recorded fact off the same object afterwards.
+type TurnSupply = UnboundedAudienceSupply | BoundedAudienceSupply
+
+
 def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[str]) -> bool:
     """Whether ADR-0199 §3 places this record as speakable on an unbounded channel.
 
@@ -226,6 +311,15 @@ def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[st
     ADR-0199 §3 does not name, an attested record with no attestation at all — is
     unplaced and therefore withheld.
 
+    **And a fourth read, before any placement is reached** (ADR-0204 §3): a record
+    whose ``supplied_withheld_content`` is set is withheld from this channel however
+    §3's third clause would place it. It is read first among the provenance fields
+    because it is not a placement at all — §3 places the record exactly as it always
+    did, and this is a separate reason the record does not reach the channel, over a
+    separate recorded field. A record carrying ``False`` is placed by the three
+    reads below with nothing added, which is what keeps ADR-0199 §3's speakable set
+    the size it was.
+
     Args:
         record: The record being placed.
         speakable_attested_sources: The attested identities §3 places.
@@ -236,6 +330,8 @@ def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[st
     if record.about_person is not None:
         return False
     provenance = record.provenance
+    if provenance.supplied_withheld_content:
+        return False
     if provenance.source in _PLACED_SOURCES:
         return True
     attestation = provenance.attestation

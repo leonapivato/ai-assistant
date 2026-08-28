@@ -1517,6 +1517,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     §5a keep the fold's own composition rules off that contract. It is pinned
     against both writers directly instead.
 
+    ``supplied_withheld_content`` is the **disjunction** on both arms for the same
+    reason, and is mirrored here for the same one (ADR-0204 §5). A fake that omitted
+    it would clear a stamped record on the first unstamped reinforcement and hand a
+    channel of unbounded audience a record ADR-0204 §3 withholds — the laundering the
+    field exists to stop, performed by the double rather than by `memory`.
+
     ``last_confirmed_at`` is **composed** on both arms rather than inherited from
     either side (:func:`_confirming_instant`, ADR-0109 §5, §6): the later of the two
     records' usable instants, the usable one where only one is, and ``None`` where
@@ -1548,6 +1554,10 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     # Likewise selected once, before the arms (ADR-0106 §4): the clause is stated
     # over the fold as a disjunction, so neither arm may read one side alone.
     tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
+    # And once more, on the same terms (ADR-0204 §5's first clause).
+    withheld = (
+        target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
+    )
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -1558,6 +1568,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             attestation=target.provenance.attestation,
             derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
+            supplied_withheld_content=withheld,
         )
         return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
@@ -1569,5 +1580,6 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         attestation=incoming.provenance.attestation,
         derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
+        supplied_withheld_content=withheld,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})

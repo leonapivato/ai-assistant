@@ -79,9 +79,13 @@ _log = structlog.get_logger(__name__)
 #: rest of the turn may run over. It is a *filter*: it may remove members, and it may
 #: not add one, reorder what survives, assemble a second context, issue a retrieval,
 #: reach a ``ContextProvider`` or a ``MemoryStore``, or make a store query of any
-#: kind. :class:`~ai_assistant.orchestration.disclosure.UnboundedAudienceSupply` is
-#: today's only one; this loop knows nothing of disclosure and applies whatever it is
-#: given, which is what keeps ADR-0199's posture in one module.
+#: kind. It may also remove **nothing at all**:
+#: :class:`~ai_assistant.orchestration.disclosure.BoundedAudienceSupply` is that
+#: filter, and it rides this seam because ADR-0204 §2 puts its *evaluation* at
+#: exactly the point ADR-0203 §2 puts the subtraction — once per turn, between
+#: retrieval and planning, on every conversational operation. This loop knows nothing
+#: of disclosure and applies whatever it is given, which is what keeps ADR-0199's
+#: posture in one module.
 type SupplyFilter = Callable[
     [CurrentContext, tuple[MemoryRecord, ...]], tuple[CurrentContext, tuple[MemoryRecord, ...]]
 ]
@@ -484,9 +488,12 @@ class LearningLoop:
                 adapter to explain a distinction it cannot act on.
             narrow: A :data:`SupplyFilter` applied between retrieval and planning,
                 or ``None`` to plan over everything the turn assembled and
-                retrieved. ``None`` on ``converse`` and ``converse_streaming``,
-                whose channel audience is bounded; ``converse_spoken`` supplies
-                ADR-0199 §3's subtraction here (ADR-0203 §1).
+                retrieved. ``converse_spoken`` supplies ADR-0199 §3's subtraction
+                here (ADR-0203 §1); ``converse`` and ``converse_streaming``, whose
+                channel audience is bounded, supply the filter that evaluates the
+                same predicate and removes nothing (ADR-0204 §2, §4). ``None``
+                remains valid and plans over everything: this method is the seam,
+                not the policy.
 
         Returns:
             The turn's goal, context, assembled memories and plan — each of them

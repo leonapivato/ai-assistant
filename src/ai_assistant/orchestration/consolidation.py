@@ -546,6 +546,13 @@ class ConsolidationStage:
         # is fail-open against exactly the second-order consolidation ADR-0106 §4's
         # monotonicity exists to stop.
         tainted = any(rests_on_recorded_external_content(record.provenance) for record in records)
+        # ADR-0204 §5's derivation rule, computed in the same place and for the same
+        # reason: a consolidation is a record derived from records of this store, so
+        # its value is the disjunction over **every record this stage was supplied**
+        # — never over the subset the model happened to cite, because
+        # `Provenance.evidence` is not the input set and folding over it would let
+        # one uncited stamped input launder the whole warrant.
+        supplied_withheld = any(record.provenance.supplied_withheld_content for record in records)
         now = self._clock()
         labels = {f"R{index + 1}": record.id for index, record in enumerate(records)}
         confirmed = {
@@ -560,7 +567,11 @@ class ConsolidationStage:
         reply = await self._model.complete(conversation)
         proposals, unusable, over_limit = self._distil(reply.content, labels, confirmed, now)
         return await self._route(
-            proposals, tainted=tainted, unusable=unusable, over_limit=over_limit
+            proposals,
+            tainted=tainted,
+            supplied_withheld=supplied_withheld,
+            unusable=unusable,
+            over_limit=over_limit,
         )
 
     async def _route(
@@ -568,6 +579,7 @@ class ConsolidationStage:
         proposals: Sequence[MemoryUpdateProposal],
         *,
         tainted: bool,
+        supplied_withheld: bool,
         unusable: int,
         over_limit: int,
     ) -> _ChunkOutcome:
@@ -584,7 +596,9 @@ class ConsolidationStage:
         )
         for proposal in proposals:
             try:
-                written = await self._writes.write(self._marked(proposal, tainted=tainted))
+                written = await self._writes.write(
+                    self._marked(proposal, tainted=tainted, supplied_withheld=supplied_withheld)
+                )
             except FoldOntoCitedRecordError:
                 # The generalisation landed on one of the records it cites, and the
                 # policy — not this stage — chose that destination (ADR-0116 §2).
@@ -618,8 +632,10 @@ class ConsolidationStage:
                 outcome = outcome.with_committed()
         return outcome
 
-    def _marked(self, proposal: MemoryUpdateProposal, *, tainted: bool) -> MemoryUpdateProposal:
-        """Stamp the computed taint marker on ``proposal``, discarding the producer's.
+    def _marked(
+        self, proposal: MemoryUpdateProposal, *, tainted: bool, supplied_withheld: bool
+    ) -> MemoryUpdateProposal:
+        """Stamp the two computed markers on ``proposal``, discarding the producer's.
 
         **Assignment, never a disjunction with what the producer emitted**, which
         is ADR-0106 §3's "discarded, not merged" — and the difference is the whole
@@ -629,9 +645,18 @@ class ConsolidationStage:
         than a claim the model made. ADR-0094 §5's "a claim carried in a submission
         is not evidence of the standing it claims" with the sign flipped, and
         flipping the sign does not restore the guarantee.
+
+        **``supplied_withheld_content`` is assigned on the same terms** (ADR-0204
+        §5). It is this stage's disjunction over the chunk it selected rather than a
+        value the model proposed, so the sentence above holds of it word for word: no
+        code path exists in which the producer's claim about its own warrant has an
+        effect.
         """
         provenance = proposal.proposed.provenance.model_copy(
-            update={"derived_from_external": tainted}
+            update={
+                "derived_from_external": tainted,
+                "supplied_withheld_content": supplied_withheld,
+            }
         )
         return proposal.model_copy(
             update={"proposed": proposal.proposed.model_copy(update={"provenance": provenance})}

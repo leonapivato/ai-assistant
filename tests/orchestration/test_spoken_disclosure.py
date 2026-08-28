@@ -640,14 +640,23 @@ async def test_a_withheld_class_is_not_read_aloud_one_turn_later() -> None:
     deflects. Its captured episode is then read: with ADR-0203 §1 in force the plan
     rationale that episode carries was authored over a supply the belief had already
     been removed from, so the episode carries no span of it and no value derived
-    from one. Turn two, on the same conversation, *is* supplied that episode — and
-    the composing stage is handed nothing naming what turn one withheld, which is
-    the sentence #1691 heard spoken aloud.
+    from one. Turn two, on the same conversation, is handed nothing naming what turn
+    one withheld, which is the sentence #1691 heard spoken aloud.
 
-    Before this ADR every assertion below the first failed together: the planner saw
+    Before ADR-0203 every assertion below the first failed together: the planner saw
     the belief, wrote it into the rationale, capture stored that under an
     ``OBSERVED`` provenance §3 places as **speakable**, and the next turn retrieved
     it as ordinary supply.
+
+    **What ADR-0204 §3 changes here is turn two's supply, and nothing else** — it
+    partially supersedes ADR-0199 §3's third clause for a record whose warrant held
+    withheld content, and turn one is exactly such a turn (#1703). So the episode
+    turn one captured is *stamped* and no longer reaches turn two, where before it
+    reached it thinned. ADR-0203 §6's obligation is unaffected and is now met twice
+    over; the continuity guard below asserts the retrieval still happened rather than
+    asserting the episode arrived, and
+    ``test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoken_turn``
+    pins the withholding itself.
     """
     planner = _EchoingPlanner()
     model = FakeModelProvider(_ANSWER)
@@ -692,11 +701,16 @@ async def test_a_withheld_class_is_not_read_aloud_one_turn_later() -> None:
         conversation_id=first.outcome.conversation_id,
     )
 
-    # The second turn genuinely ran over the first turn's episode; without this a
-    # case that had lost conversational continuity would pass (ADR-0074 §5).
+    # The second turn genuinely retrieved: without this, a case that had lost
+    # retrieval altogether would pass vacuously. What it may no longer be supplied is
+    # turn one's own episode, which ADR-0204 §3 withholds because turn one's warrant
+    # held content ADR-0199 §3 withholds from this channel.
     assert second.outcome is not None
     assert second.outcome.turn is not None
-    assert _episodes(second.outcome.turn.memories), "the first turn's episode reached turn two"
+    assert _SPEAKABLE_CONTENT in {one.content for one in second.outcome.turn.memories}
+    assert not _episodes(second.outcome.turn.memories), (
+        "the withholding turn's own episode is withheld from a later spoken turn"
+    )
     assert len(model.calls) == 2
     assert _WITHHELD_CONTENT not in _prompt(model, 1)
     assert "Alice" not in _prompt(model, 1)
