@@ -253,12 +253,17 @@ mention that is not a definition tells a PR nothing it could act on.
 
 > **Normative.** The **PR's diff** is `git diff <merge base>...<HEAD>` over the
 > same range ADR-0027 §2's patch identity is computed on, re-anchored to `HEAD`'s
-> parent where ADR-0165 §3 re-anchors that loop. The **PR's text** is the added
-> and removed lines of that diff together with the PR description as GitHub holds
-> it when the acceptance rule runs. The **PR's files** are the complete contents
-> of every path that diff touches, at each of that path's two endpoints **that
-> exists**. A **moved file's text** is that file's whole content at each endpoint
-> of the move that exists.
+> parent where ADR-0165 §3 re-anchors that loop.
+
+> **Normative.** The **PR's text** is the added and removed lines of the PR's
+> diff, together with the PR description as GitHub holds it when the acceptance
+> rule runs.
+
+> **Normative.** The **PR's files** are the complete contents of every path the
+> PR's diff touches, at each of that path's two endpoints **that exists**.
+
+> **Normative.** A **moved file's text** is that file's whole content at each
+> endpoint of the move **that exists**.
 
 > **Normative.** An endpoint that does not exist is not a failure to read one. A
 > file the PR adds has no base-side endpoint, a file it deletes no head-side one,
@@ -277,6 +282,14 @@ mention that is not a definition tells a PR nothing it could act on.
 > every other part occurs as a word in one of the PR's files, or as a component
 > of a path that diff touches — a directory name, or a filename with its
 > extension removed.
+
+**Each input is its own clause, because each moves separately.** ADR-0089 §2 is
+explicit that a passage stating two separable obligations is two clauses, and
+these four are separable in the sharpest way available: the PR description is the
+one input that is author-controlled and mutable, and a later decision to stop
+reading it has to be able to move **the PR's text** without disturbing what **the
+PR's files** or **a moved file's text** are. Under one mark it could not, because
+a superseding ADR names a clause and gets all four.
 
 **A dotted symbol is split, because a definition never carries its own
 qualification.** ADR-0088 §1's citation form is `MemoryStore.ingest` — the class
@@ -508,47 +521,97 @@ as qualified, as ADR-0027 left it.
 
 ### 10. What the implementation owes
 
-The implementation is a separate lane and one PR, confined to `scripts/` and the
-documents that restate the rule:
+> **Normative.** §§1–6 are implemented by a separate lane, in one PR, confined to
+> `scripts/` and to the documents that restate the rule.
 
-- `scripts/ship.sh` — §§1–6 in the acceptance loop and in `--drill`, one
-  implementation for both (§6), with the drift record naming the binding or
-  clearing test per floor path (§6).
-- `docs/review/guide.md` and `CONTRIBUTING.md` → "Report the review, then mark it
-  ready" — the statement of when a base move costs a round, which today
-  enumerates the floor as a flat path list.
-- `tests/scripts/` — a test per clause, not a happy path. At least: a base move
-  merging an ADR the PR names by number (owed); the same move with no such
-  reference anywhere in the PR's text (free); a moved ADR naming a path the PR's
-  diff touches (owed); a moved ADR naming a symbol the PR's diff adds (owed); a
-  moved ADR renamed within `docs/adr/` and one renamed out of it, each read at
-  both endpoints (owed where either name's text binds); a `docs/review/**` move
-  and a `scripts/codex-review.sh` move (owed, no test consulted); a
-  `core/protocols.py` move adding a Protocol, against a PR touching nothing in
-  `core/` (owed); the same against a move adding an annotated attribute and
-  against one adding a property to an existing Protocol (owed under §4's first
-  limb, which a method-only reading would clear); a move adding a `Protocol` base
-  to an existing `Protocol` and declaring nothing in its body (owed, which a
-  declared-members-only reading would clear); a `core/protocols.py` endpoint that
-  will not parse (owed); a `core/types.py` move the PR neither touches `core/`
-  for nor names (free); a move changing a definition the PR's text names (owed);
-  a moved ADR citing `Class.member` against a PR whose diff adds `class Class` on
-  one line and `def member` on another (owed), against a PR adding `def member`
-  to an existing `class Class` whose header is **outside** the hunk's context
-  window (owed — the case a context-line reading clears, and the one that must be
-  written with a class long enough to put the header out of any default window),
-  against a PR adding `def member` to a file that never names `Class` (free); a
-  moved ADR citing `pkg.mod.Symbol` against a PR adding `class Symbol` to
-  `src/ai_assistant/pkg/mod.py` whose contents name neither `pkg` nor `mod`
-  (owed — the path supplies both qualifiers, and a contents-only reading clears
-  it),
-  against a PR that touches a file naming `Class` without adding or removing
-  `member` (free), and against a PR whose diff names only the qualifier (free);
-  a PR that **adds** the file carrying the cited member and one that **deletes**
-  it, each judged on the endpoint it has and neither charged as a failed read; an
-  unreadable PR file, an unreadable endpoint and an unretrievable PR description
-  (owed);
-  and every existing ADR-0027 §§2–4 case still refusing exactly as it does today.
+> **Normative.** That PR implements §§1–6 in `scripts/ship.sh`, in the acceptance
+> loop and in `--drill` alike. §6's single-implementation clause and its
+> drift-record clause govern that implementation and are not restated here.
+
+> **Normative.** That PR brings `docs/review/guide.md` and `CONTRIBUTING.md` →
+> "Report the review, then mark it ready" into line with §§1–6, in place of the
+> flat floor path list each states the rule as today.
+
+> **Normative.** That PR adds tests under `tests/scripts/`: a test per clause of
+> §§1–6, not a happy path.
+
+> **Normative.** Those tests include at least the following cases, each
+> asserting what is named for it.
+>
+> - A base move merging an ADR the PR names by number (owed).
+> - The same move with no such reference anywhere in the PR's text (free).
+> - A moved ADR naming a path the PR's diff touches (owed).
+> - A moved ADR naming a symbol the PR's diff adds (owed).
+> - A moved ADR renamed within `docs/adr/`, and one renamed out of it, each read
+>   at both endpoints (owed where either name's text binds).
+> - A `docs/review/**` move, and a `scripts/codex-review.sh` move (owed, no test
+>   consulted).
+> - A `core/protocols.py` move adding a `Protocol`, against a PR touching nothing
+>   in `core/` (owed).
+> - A move adding an annotated attribute, and one adding a property, to an
+>   existing `Protocol`, each against the same PR (owed under §4's first limb,
+>   which a method-only reading would clear).
+> - A move adding a `Protocol` base to an existing `Protocol` and declaring
+>   nothing in its body (owed, which a declared-members-only reading would
+>   clear).
+> - A `core/protocols.py` endpoint that will not parse (owed).
+> - A `core/types.py` move the PR neither touches `core/` for nor names (free).
+> - A move changing a definition the PR's text names (owed).
+> - A moved ADR citing `Class.member`, against a PR whose diff adds
+>   `class Class` on one line and `def member` on another (owed).
+> - The same citation against a PR adding `def member` to an existing
+>   `class Class` whose header is **outside** the hunk's context window (owed —
+>   the case a context-line reading clears, and the one that must be written with
+>   a class long enough to put the header out of any default window).
+> - The same citation against a PR adding `def member` to a file that never names
+>   `Class` (free).
+> - The same citation against a PR that touches a file naming `Class` without
+>   adding or removing `member` (free).
+> - The same citation against a PR whose diff names only the qualifier (free).
+> - A moved ADR citing `pkg.mod.Symbol`, against a PR adding `class Symbol` to
+>   `src/ai_assistant/pkg/mod.py` whose contents name neither `pkg` nor `mod`
+>   (owed — the path supplies both qualifiers, and a contents-only reading clears
+>   it).
+> - A PR that **adds** the file carrying the cited member, and one that
+>   **deletes** it, each judged on the endpoint it has and neither charged as a
+>   failed read.
+> - An unreadable PR file, an unreadable endpoint, and an unretrievable PR
+>   description (owed).
+> - Every existing ADR-0027 §§2–4 case, still refusing exactly as it does today.
+
+**§10 is marked because in a marked ADR nothing else binds.** ADR-0089 §3 is
+flat: unmarked text "is read to determine what a marked clause *means*; it never
+supplies an obligation". This ADR carries marked clauses, so it is a *marked*
+ADR under ADR-0089 §4, and every obligation of it has to be inside one. §10
+stated the whole of what the implementation owes — the deliverables and every
+required test — as unmarked prose and a bulleted list, which obligated the
+implementation lane to nothing at all. That is ADR-0089 §4's under-marking hazard
+exactly, and it is worth recording that it survived six adversarial rounds of
+this document's own review before the seventh named it; ADR-0138 §4 records the
+same defect being found in its own round 1.
+
+**Four deliverable clauses and not one, for §5's reason.** The lane's
+confinement, the `scripts/ship.sh` implementation, the two restating documents
+and the test suite are separately movable: a later decision to drop the
+`CONTRIBUTING.md` restatement, or to move the implementation to a Python module
+`ship.sh` calls, has to reach one of them without reopening the others.
+
+**The enumeration is one clause, because it is one obligation with a stated
+content.** Its cases are not a set of rules a lane could obey severally; they
+are the floor under a single requirement — that the test suite cover these — and
+a lane that writes all of them but one has failed that one requirement once. A
+bulleted list is admissible inside a mark: ADR-0089 §2's grammar asks only that
+every physical line be `> ` or a bare `>` at column 0, and what it forbids is the
+converse — a mark *inside* a list item, where the block boundary would depend on
+the enclosing structure.
+
+**Two cases were re-attached to the citation they test.** The two free cases
+above that turn on a PR touching a file which names the qualifier were written
+trailing the `pkg.mod.Symbol` case while naming `Class` and `member`, which are
+the *other* citation's names — an artefact of the round-4 insertion of the
+module-qualifier case into the middle of the `Class.member` chain. They are
+stated here against `Class.member`, the only citation whose names they use. No
+case is added, removed or given a different outcome.
 
 ## Alternatives considered
 
