@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, and §10's enumeration of the browser-owned body members)
+- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §4's second-difference clause,
   only as it reaches an operation whose output channel's audience is unbounded, and
@@ -54,18 +54,23 @@
   the ADRs cited, this ADR is read against the text quoted here and that ADR's
   own record says what moved. This is ADR-0143's clause, taken for its reason.
 - **Partially superseded: 2026-08-28 by ADR-0205 — §3's count of the arguments
-  `converse_spoken` takes, and §10's enumeration of the browser-owned members of
-  the `POST /ask/spoken` body. Nothing else of §3, of §10, or of this ADR.**
-  #1700 rules that a spoken answer's delivery is a fact the device reports, so the
-  report needs a way in, and ADR-0205 §1 makes it a fifth keyword-only argument.
+  `converse_spoken` takes, §4's enumeration of `SpokenTurn`'s members, and §10's
+  enumeration of the browser-owned members of the `POST /ask/spoken` body. Nothing
+  else of §3, of §4, of §10, or of this ADR.** #1700 rules that a spoken answer's
+  delivery is a fact the device reports, so the report needs a way in and a way to
+  say which answer it is about; ADR-0205 §1 makes the first a fifth keyword-only
+  argument and the second a fifth member on the result.
 
-  **Replaced — two counts and nothing they qualify.** §3's "it … takes four
+  **Replaced — three counts and nothing they qualify.** §3's "it … takes four
   arguments and no others: `utterance` … `plays` … `timeout` … and
   `conversation_id`" becomes **five**, the addition being `delivery`, a
-  `SpokenDelivery | None` defaulting to `None`. §10's "carrying the **browser-owned**
-  arguments of §3's signature and no others — `utterance`, `plays` and
-  `conversation_id`" gains `delivery`, and its "reads no fourth" becomes "reads no
-  fifth". A reader holding only this ADR would refuse the implementation ADR-0205
+  `SpokenDeliveryReport | None` defaulting to `None`. §4's "a frozen
+  `extra="forbid"` pydantic model in `core/types.py` with four members" becomes
+  **five**, the addition being `episode_id`, an `Identifier | None` naming the turn
+  the call recorded so that a later report can name it back. §10's "carrying the
+  **browser-owned** arguments of §3's signature and no others — `utterance`, `plays`
+  and `conversation_id`" gains `delivery`, and its "reads no fourth" becomes "reads
+  no fifth". A reader holding only this ADR would refuse the implementation ADR-0205
   requires, which is ADR-0070 §1's test, so it is a supersession and it is
   **partial** in ADR-0070 §3's sense.
 
@@ -81,17 +86,24 @@
   route, its complete-upload clause, its refusal of `SpeechRecognition` and
   `speechSynthesis`, and its secure-context stop.
 
-  **Not replaced — §4 and §8, which a reader might expect to move and which do
-  not.** `SpokenTurn` gains no member: the report travels *in*, and nothing about
-  this answer's delivery is known by the time the call returns. §8's refusal to add
-  a field to `EpisodicMemory`, to `Provenance` or a record of the channel stays
-  true — ADR-0205 §3 adds none of the three, putting the fact on the conversation
-  index's turn row instead — and §8's retention clause binds ADR-0205's path
-  unchanged, a report being two durations and a state rather than a rendering.
+  **Not replaced — everything else §4 decides, and §8 entire.** §4's
+  `heard`/`outcome` biconditional, its blank-transcript shape, the local refusals
+  ordered ahead of it, the byte-for-byte transcript, `spoken` as the rendering of
+  `outcome.reply` and of nothing else, the `spoken_degraded` exactly-when clause and
+  the degradation ladder all stand word for word — `episode_id` is bounded and
+  ADR-0205 §10 rules it is never dropped to make a result fit, so the ladder still
+  has one step before ADR-0085 §8c's `OversizedValueError`. **Nothing about this
+  answer's own delivery is disclosed**: the new member names the turn, and what
+  became of the rendering is unknown when the call returns. §8's refusal to add a
+  field to `EpisodicMemory`, to `Provenance` or a record of the channel stays true —
+  ADR-0205 §3 adds none of the three, putting the fact on the conversation index's
+  turn row instead — and §8's retention clause binds ADR-0205's path unchanged, a
+  report being a subject, two durations and a state rather than a rendering.
 
   **The two pairs on the `Status` line name different scopes** — ADR-0203's §4
-  second-difference clause and ADR-0205's two counts — so they accumulate under
-  ADR-0070 §4 and its overlap-precedence rule does not arise. The line leads with
+  second-difference clause and ADR-0205's three counts, one of which is also in §4
+  and is a different sentence of it — so they accumulate under ADR-0070 §4 and its
+  overlap-precedence rule does not arise. The line leads with
   `Partially superseded by`, so under ADR-0082 §2 no amendment qualifier is written
   on it and this note is the whole record. Appended per ADR-0070 §1; no ratified
   text below is rewritten. Refs #1700.
