@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -183,6 +183,55 @@
   rests on, and how narrow it is), ADR-0070 §1 (the test that made it a
   supersession rather than a reinterpretation); #441 (the
   unratified vision direction whose leg-2 constraints §3 carries and §11 files).
+- Partially superseded: 2026-08-28 by ADR-0205 — **§9's enumeration of what a
+  `ConversationTurn` carries, and of what the `ConversationStore` owes, are each
+  one item short.**
+  [ADR-0205](0205-a-spoken-answers-delivery-is-a-fact-the-device-reports-and-an-unreported-answer-is-never-assumed-heard.md)
+  §3 rules that a spoken answer's delivery is recorded on the conversation index's
+  turn row, because the report arrives after the turn was captured and ADR-0068
+  froze the record it would otherwise have gone on. ADR-0205 §10 names these
+  clauses and applies ADR-0070 §1's test; this note records the ruling declared
+  there.
+
+  **Replaced — two enumerations in §9.** "`ConversationTurn` (the conversation it
+  belongs to, its ordinal, the id of the episode that records it, when it occurred,
+  and — where the turn parked — the execution and step ids of the binding it parked
+  on …)" gains one member, `delivery`, a `SpokenDelivery | None` defaulting to
+  `None`. And the list of what `ConversationStore` owes gains one operation — stamp
+  the conversation's most recent turn with a delivery, the store resolving which
+  turn that is — while `append` gains one keyword-only argument carrying the value
+  written at capture. A reader holding only this ADR builds a turn row with no place
+  to put the fact and a store with no way to move it, which is ADR-0070 §1's test.
+
+  **Not replaced — everything §9 decides about why the store exists and what it
+  holds.** The index still holds no content: a turn's content is still exactly one
+  `EpisodicMemory` in the `MemoryStore`, named by `episode_id`, and `delivery` is
+  state about the turn rather than any part of the exchange. The store still mints
+  the id, allocates the ordinal and derives the episode id with no caller supplying
+  any of the three — `record_delivery` follows that posture rather than bending it,
+  taking no ordinal. The intent-log ordering, the two-store coordinator, the
+  unresolvable-`episode_id` gap, and every other obligation on the list stand as
+  they stood.
+
+  **Not replaced — §3, §5 and §11, which this touches and does not move.** §3's
+  capture is unchanged: ADR-0205 adds no field to `EpisodicMemory`, changes nothing
+  the canonical rendering carries, and adds no condition under which a turn is not
+  captured. §5's continuity seam is unchanged and is what makes the new fact free to
+  read — `ConversationLifecycle.history` already walks `turns`, so the row is in
+  hand with no second store call. And §11's deferral of cross-device presence stands
+  whole: ADR-0205 §3 forbids reading `delivery` as a record of where a turn came
+  from, so "nothing on a turn records where it came from" is not lifted here.
+
+  **The four pairs on the `Status` line name different scopes** — ADR-0076's §9
+  obligation set, ADR-0084's §9 item 5 premise, ADR-0086's §5 refusal, and
+  ADR-0205's §9 enumerations — so they accumulate under ADR-0070 §4 and its
+  overlap-precedence rule does not arise. ADR-0076's scope and this one both reach
+  §9, and they name different things about it: what the store *owes* as an obligation
+  set and the reach of its stamped-conversation exclusion there, against the two
+  enumerations named above. Where a reader judges them to overlap, ADR-0070 §4's
+  monotonic rule gives the overlap to the higher-numbered ADR, which is this one. No
+  amendment qualifier is on the line, so ADR-0082 §2's move does not arise.
+  Appended note per ADR-0070 §1; no ratified text below is rewritten. Refs #1700.
 
 ## Context
 
