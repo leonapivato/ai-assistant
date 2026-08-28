@@ -120,9 +120,12 @@ filtered store read, a topic-scoped guard is #1719's and waits on an ADR of its 
 and the reach of a disclosure preference is ADR-0199 §6's surface, which that ADR
 itself defers.
 It cannot decide a matching rule wider than equality, for ADR-0100 §6's reason
-applied here. And it cannot decide the surface on which the owner performs the acts
-§9 rules on, which is a promoted-surface change and therefore its own ADR under
-golden rule 5 and ADR-0015 §5.
+applied here. It cannot decide the surface on which the owner performs the acts §9
+rules on, which is a promoted-surface change and therefore its own ADR under golden
+rule 5 and ADR-0015 §5. And it cannot put anything derived from a belief into an
+observation prompt: ADR-0077 §3 rules that payload, changing it is a record on
+ADR-0077 under ADR-0070 §1, and this lane's fence reaches one ADR file. §5 states
+what that costs and §15 names the instrument that may take it.
 
 What it can decide is everything a consumer needs to *exist*: what the field is,
 what a value in it means, what an empty one means, who may write one, what
@@ -265,8 +268,8 @@ it is deliberately thin.** It makes `"Health"` and `"health"` the same value and
 `"health"` and `"wellbeing"` different ones, which is exactly the split this ADR
 can defend: the first is a spelling, the second is a judgement, and a type that
 tried to decide the second would be the classifier ADR-0199 §2 forbids, moved to
-construction time. What closes the second gap is §5's supplied vocabulary and §9's
-merge act, neither of which is a rule about strings.
+construction time. What closes the second gap is §5's supplied vocabulary, on the one
+producer it reaches, and §9's merge act — neither of which is a rule about strings.
 
 **Refused rather than folded, on ADR-0100 §6's own reasoning.** That section keeps
 a person label verbatim because "a value that is *nearly* right is harder to spot
@@ -310,15 +313,23 @@ change that — a later ADR, ratified, and never a lane deciding it in code".
 > holding no `ModelProvider` proposes no topics and is given none (§6).
 
 > **Normative.** A producer proposes at most `MAX_TOPICS_PER_PROPOSAL` labels per
-> record. A response naming more, naming a value the canonical form of §3 refuses,
-> or naming none, yields **no topics on that record**; the entry is discarded and
-> counted, never repaired, never re-prompted for and never inferred locally. The
-> record itself is unaffected — a bad topics entry never discards the proposal that
-> carried it.
+> record. A response naming more, naming a value the canonical form of §3 refuses, or
+> naming none, yields **no topics on that record**: the topics entry is **ignored**,
+> never repaired, never re-prompted for and never inferred locally. The record itself
+> is unaffected — a bad topics entry never discards the proposal that carried it.
 
-> **Normative.** `MAX_TOPICS_PER_PROPOSAL` is a fixed constant of `core/types.py`.
-> It is not a `Settings` field, not a constructor knob and not a per-deployment
-> value.
+> **Normative.** An ignored topics entry is **not a discarded entry**. No counter of
+> `ObservationOutcome` moves for it, and no `core` type gains a member to count it:
+> `discarded_unusable` and `discarded_over_limit` keep exactly the meanings ADR-0077
+> §4 gives them, and `ObservationOutcome`'s invariant —
+> "`len(proposals) + discarded_unusable + discarded_over_limit` equals the number of
+> entries the model emitted" — is untouched, because an entry whose topics were
+> ignored still yields exactly one proposal.
+
+> **Normative.** `MAX_TOPIC_LABEL_LENGTH` is **64** and `MAX_TOPICS_PER_PROPOSAL` is
+> **4**. Both are fixed constants of `core/types.py`: neither is a `Settings` field,
+> a constructor knob or a per-deployment value, and an implementation that admits a
+> longer label or a fifth proposed topic does not conform.
 
 **ADR-0130 §11's three grounds, answered one by one, because they are the test.**
 That section's ruling is about a model in the *decision* path and its reason is
@@ -347,89 +358,133 @@ ADR-0199 §2 is left whole rather than bent — its prohibition is on deciding a
 The one model reading of the words happens once, at write, by the producer that was
 already reading them to produce the record at all.
 
-**Discarded and counted rather than repaired is ADR-0077 §4's rule, taken as
-given.** `ModelBackedObserver` already holds it — "Entries that cannot be used are
-discarded and *counted* rather than repaired, invented, or re-prompted for: an
-observation has nothing waiting on it, so the cheap remedy is a later run rather
-than a second call inside this one". A topics entry is strictly less load-bearing
-than the proposal carrying it, so a rule that discarded the proposal over a bad
-label would trade a belief for a filing word.
+**Ignored rather than repaired takes half of ADR-0077 §4's rule and deliberately
+leaves the other half.** `ModelBackedObserver` already holds that rule for an entry
+it cannot use — "Entries that cannot be used are discarded and *counted* rather than
+repaired, invented, or re-prompted for: an observation has nothing waiting on it, so
+the cheap remedy is a later run rather than a second call inside this one" — and the
+*not repaired, not re-prompted* half transfers whole. The *counted* half does not,
+and must not: `ObservationOutcome`'s two counts are "exhaustive and disjoint over
+what the model emitted", so counting a usable entry whose topics were bad would break
+the invariant in the one direction it is checked, reporting one proposal and one
+discard for one entry. A topics entry is strictly less load-bearing than the proposal
+carrying it: a rule that discarded the proposal over a bad label would trade a belief
+for a filing word, and a rule that counted it as discarded would misreport the
+model's output.
+
+**Why the values are 64 and 4.** A label is a filing word the owner reads in a
+listing, not a sentence: 64 characters is generous for the longest ordinary
+compound and short enough that a producer writing prose into the field is refused
+rather than accommodated, and it is the same figure `MAX_EVIDENCE_CITATIONS` takes
+for the adjacent kind of bound. Four is the number at which a topic set stays
+readable at a glance and a topic-scoped act stays meaningful; a record that is
+genuinely about five things is a record that is about one thing the vocabulary has
+not learned to name. Both are stated rather than left to the lane because a bound
+whose value each implementation picks is not a bound — the failure ADR-0086 §1
+names when it makes its own constant fixed.
 
 **The budget is what makes the second clause affordable to state.** The added cost
-of this decision at run time is: the supplied vocabulary in the prompt (§5, at most
-`DEFAULT_PAGE_SIZE` labels of at most `MAX_TOPIC_LABEL_LENGTH` characters) and at
-most `MAX_TOPICS_PER_PROPOSAL` short labels per proposal in the response. No call
-count changes anywhere.
+of this decision at run time is: at most `MAX_TOPICS_PER_PROPOSAL` short labels per
+proposal in the response, everywhere; and in the consolidation prompt alone, the
+supplied vocabulary (§5, at most `DEFAULT_PAGE_SIZE` labels of at most 64
+characters). No call count changes anywhere, and the observation prompt does not
+grow at all.
 
 **A fixed constant rather than a knob**, because the axis's whole value is that a
 record's topic set is small enough for the owner to read and small enough that a
-topic-scoped act means something. A deployment that raised it to fifty would
-degrade every consumer of the axis, and neither the owner nor a later lane could
-see from the data that it had. `MAX_EVIDENCE_CITATIONS` is a fixed constant for the
-adjacent reason (ADR-0086 §1), and the observer's own `max_batch_size` and
-`max_proposals` are knobs for the opposite one — they bound a *run*, not the shape
-of what is stored.
+topic-scoped act means something. A deployment that raised it to fifty would degrade
+every consumer of the axis, and neither the owner nor a later lane could see from the
+data that it had. `MAX_EVIDENCE_CITATIONS` is a fixed constant for the adjacent
+reason (ADR-0086 §1), and the observer's own `max_batch_size` and `max_proposals` are
+knobs for the opposite one — they bound a *run*, not the shape of what is stored.
 
-### 5. The vocabulary the proposer is supplied, and the two seams that carry it
-
-> **Normative.** A producer proposing topics is supplied the topic vocabulary the
-> store already holds, and proposes against it: it uses an existing label where one
-> fits and mints a new one only where none does. The supply is a **hint to the
-> producer** and never an authority — a producer is not obliged to use a supplied
-> label, and a supplied vocabulary neither widens nor narrows what that producer may
-> propose about.
+### 5. The vocabulary a proposer is supplied, the one seam that carries it, and the producer it does not reach
 
 > **Normative.** `MemoryStore` (`core/protocols.py`) gains one additive read,
 > `async def topics(self, *, limit: int = DEFAULT_PAGE_SIZE) -> Sequence[TopicLabel]`.
 > It returns the distinct labels carried by the live records the store holds,
 > ordered by the number of records carrying each label descending and then by the
-> label ascending, at most `limit` of them. It reads; it writes nothing, creates
-> nothing and refuses nothing.
+> label ascending, at most `limit` of them. It writes nothing and creates nothing.
 
-> **Normative.** `Observer.observe` (`core/protocols.py`) gains one keyword-only
-> argument, `vocabulary: Sequence[TopicLabel] = ()`, supplied by the calling stage.
-> No other member of any Protocol changes, and no new Protocol is added.
+> **Normative.** `limit` is refused with `ValueError` unless it is **exactly** an
+> `int` satisfying `1 <= limit < 2**63`; `bool` is refused with the rest. Every
+> implementation checks on entry, before the value reaches a query, so the refusal is
+> the same on every backend. A value outside the domain is not clamped and does not
+> yield an empty sequence.
 
-> **Normative.** The vocabulary is **never rendered to a user as a listing** and no
-> surface presents it as an answer about what the store holds. It is a prompt input
-> bounded for a prompt's sake, so its bound drops the rare tail without disclosing
-> that it did, and ADR-0186 §7's rule for a listing shown to a user does not attach
-> to it.
+**The domain is `MemoryStore.walk_records`', not `list_beliefs`', and the difference
+is what a wrong answer would do here.** `walk_records` refuses "anything that is not
+exactly an `int`" outside `1 <= limit < 2**63`, and refuses `bool` because "`True`
+satisfies every range comparison and would quietly become a one-record chunk"; it
+refuses `-1` because "SQLite reads `LIMIT -1` as *no limit*, so a forwarded argument
+returns the whole store from inside a job whose entire purpose is to be bounded". Both
+reasons apply unchanged. Zero is refused too, where `list_beliefs` answers it with an
+empty page, because an empty page is a harmless answer about records and an empty
+vocabulary is not: a producer reads it as "the store holds no labels" and mints a new
+one, so a misconfigured zero would silently produce the fragmentation §5 exists to
+prevent while looking like a store that had nothing to say.
 
-**The seam is where it is because both callers already hold the store.**
-`ObservationStage.__init__` takes `observer`, `conversations`, `memory`, `writes`,
-`batch_size` and `route`; `ConsolidationStage.__init__` takes `memory`, `writes`,
-`model` and its bounds. Neither needs a new collaborator: the observation stage
-reads the vocabulary and passes it through the seam, and the consolidation stage,
-which holds its model directly, reads it and puts it in its own prompt. That is why
-this costs one keyword and one store read rather than a new Protocol and a triad.
+> **Normative.** `ConsolidationStage` (`orchestration/consolidation.py`) reads that
+> vocabulary from the `MemoryStore` it already holds and puts it in the prompt it
+> already sends, and proposes against it: it uses an existing label where one fits
+> and mints a new one only where none does. The supply is a **hint** and never an
+> authority — the producer is not obliged to use a supplied label, and a supplied
+> vocabulary neither widens nor narrows what that producer may propose about.
 
-**It does not breach the `Observer` scope limit, and the reason is the limit's own
-wording.** That Protocol rules that an implementation "cannot fetch more, cannot
-widen its own batch, cannot read a belief … and cannot reach `MemoryStore` at all",
-because "the scope of observation" must be "a property of a ratified seam rather
-than of one implementation's code". A bounded list of filing labels handed *through
-the seam* preserves exactly that property: the observer still cannot fetch,
-cannot widen and holds no store; what it may see is fixed here, in the ratified
-seam, and is visible to every later reader in the signature. And it exposes nothing
-new — the observer is already handed whole episodes, which are transcripts of what
-the user said, so a set of one-word labels derived from beliefs is strictly less
-than what it holds already.
+> **Normative.** **No vocabulary is supplied to the `Observer`, and
+> `Observer.observe` is unchanged.** No Protocol member other than
+> `MemoryStore.topics` is added or altered by this ADR, and no belief, label derived
+> from a belief, profile, facet or plan enters an observation prompt on this ADR's
+> authority. `ModelBackedObserver` proposes topics from the batch it was handed and
+> from nothing else.
 
-**Convergence has to be bought somewhere, and this is the cheapest place.**
-Without it the observer mints `"health"` on Monday and `"wellbeing"` on Tuesday,
-and a topic-scoped act reaches half the store — the failure #1720 names in the same
-breath as the field. §3 refuses to buy it with a matching rule, because a matching
-rule is a judgement about meaning that a string comparison cannot carry. Supplying
-the vocabulary buys it where the judgement already lives, at the one model call
-that is already reading this material.
+**The observer is excluded because ADR-0077 §3 rules its payload, and this ADR is
+not the instrument that changes it.** That section is titled "Which model reads the
+episodes: a named route, no fallback, minimal payload", and its third part is
+explicit: "**The payload is the batch and nothing else.** The prompt carries the
+episodes' canonical `content` … and what the model needs to cite them. It does
+**not** carry the user's existing beliefs, the profile, the context facet, or a
+plan. Sending beliefs would be the obvious way to stop the observer
+re-proposing what is already known — and it is refused, because de-duplication is the
+gate's job and the gate is deterministic and local … Paying for that with a second
+class of Tier 1 data in the prompt would be minimisation (ADR-0004 §7) traded away
+for something already solved."
+
+A vocabulary derived from every live belief is exactly that second class of Tier 1
+data, arriving for exactly the reason ADR-0077 §3 refuses it — to stop the producer
+re-minting what the store already has. The argument transfers without weakening, and it points
+the same way. **Supplying it anyway would be a change to ADR-0077 §3 requiring a
+record under ADR-0070 §1 and ADR-0082 §1, and this ADR makes none** (§16): a reader
+holding only ADR-0077 sends the same payload after this decision as before.
+
+**The consolidation prompt is a different payload, and that is why the supply lands
+there.** `ConsolidationStage` already prompts with a whole chunk of stored records —
+its own composition notes that "a consolidation prompt carries a whole chunk of
+stored records". Labels derived from stored beliefs are the class of data that
+prompt already carries, bounded to at most `DEFAULT_PAGE_SIZE` strings of at most
+`MAX_TOPIC_LABEL_LENGTH` characters, and strictly less content than the records
+beside them. ADR-0004 §7's minimisation test is met on its own terms rather than
+waived: nothing of a new class reaches a new recipient, the volume added is a few
+hundred bytes against a chunk of full records, and what it buys is the one thing
+this producer exists for — coherence across chunks that no chunk-local view can
+reach, since ADR-0111's walk shows each producer a slice.
+
+**So convergence has one instrument here and two elsewhere, and the ADR says which
+is which.** The canonical form of §3 removes spelling variation at construction.
+The consolidation supply above steers the producer that folds the store toward
+coherence. The owner's merge act (§9) collapses a vocabulary that fragmented anyway.
+What is **not** available is steering the observer, which is the largest belief
+producer in the system — so an unmerged store will carry `"health"` and
+`"wellbeing"` side by side until consolidation or the owner brings them together.
+That residue is named in §15 with the instrument that would close it, which is an
+ADR amending ADR-0077 §3 and arguing the minimisation trade there, where it belongs.
 
 **A hint and not an authority, stated because the opposite reading is available.**
-A producer obliged to choose from the supplied set would file a genuinely new
-subject under the nearest old label, and the first hundred records would fix the
-vocabulary of the store forever. The owner's merge act (§9) is the instrument for
-collapsing a vocabulary that fragmented; nothing is the instrument for recovering a
-distinction that was never recorded.
+A producer obliged to choose from the supplied set would file a genuinely new subject
+under the nearest old label, and the first hundred records would fix the vocabulary
+of the store forever. The merge act is the instrument for collapsing a vocabulary
+that fragmented; nothing is the instrument for recovering a distinction that was
+never recorded.
 
 ### 6. Every producer's answer, stated by name
 
@@ -584,7 +639,7 @@ ADR-0073 §3 makes it "unreachable by phrase and destroyable by id" — three re
 losses to record a filing correction. The durable record of the act is the
 preference §9 captures, not a second belief id.
 
-### 9. The owner's acts: relabel, merge, and the correction the proposer is supplied next time
+### 9. The owner's acts: relabel, merge, and what the correction is allowed to reach
 
 > **Normative.** The owner may **relabel** a record: replace the whole of that
 > record's `topics` with a set they state. The act writes the record's topics at its
@@ -603,17 +658,27 @@ preference §9 captures, not a second belief id.
 > infers one from what it holds.
 
 > **Normative.** An owner act that corrects a proposed labelling is captured by
-> `learning/` as a `PreferenceMemory`, and that preference is part of what the
-> vocabulary supply of §5 puts in front of the proposer on later writes. The
-> preference is a record like any other: it is the owner's, it is correctable, and it
-> is deletable.
+> `learning/` as a `PreferenceMemory`. The preference is a record like any other: it
+> is the owner's, it is correctable, and it is deletable, and it is the durable record
+> of what the owner asked for.
 
-> **Normative.** The preference is a **soft** input to a proposal and never a rule
-> applied to a read. A proposer supplied one may still propose otherwise, and no
-> consumer of the axis reads a preference at read time to decide what a record is
-> about. Where the owner wants a record's label settled rather than steered, the
-> instrument is the relabel act above, which is deterministic and final for that
-> record.
+> **Normative.** That preference is **not** an input to any proposer under this ADR,
+> and no clause here guarantees that it reaches one. §5's supply is
+> `Sequence[TopicLabel]` and carries labels alone — no preference text and no
+> rejected-to-corrected mapping — and no implementation may read a preference into it,
+> because the labels it carries are the store's distinct labels and nothing else. What
+> steers the next proposal is the **merge act above**: after it, the abandoned label
+> is in no live record and therefore in no supplied vocabulary, and the corrected one
+> is.
+
+> **Normative.** A supply that carries the preference's own semantics is deferred
+> (§15) and belongs to the surface ADR below, which is the instrument that knows what
+> shape a correction takes. No lane widens §5's seam to carry one without it.
+
+> **Normative.** No consumer of the axis reads a preference at read time to decide
+> what a record is about. Where the owner wants a record's label settled rather than
+> steered, the instrument is the relabel act above, which is deterministic and final
+> for that record.
 
 > **Normative.** The **surface** carrying these acts — its operations, their
 > arguments, their rendering and their confirmation — is not decided here, and no
@@ -628,12 +693,23 @@ of what the record is *about*, they are what make an owner act mean anything, an
 adopting them costs nothing and settles the questions the surface lane would
 otherwise re-argue.
 
-**The relabel/preference pair is the model-trained-by-the-owner shape #1719 §4
-settles for its own axis**, and it is the same here: "The model is trained by the
-owner, not switched off." The deterministic layer is the act on the record; the soft
-layer is the preference the next proposal is supplied. Neither substitutes for the
-other, and the clause above says which is which so that a lane does not implement
-the preference as a read-time rewrite, which would be the read-time classifier again.
+**The relabel/merge pair is the model-trained-by-the-owner shape #1719 §4 settles
+for its own axis**, and it is the same here: "The model is trained by the owner, not
+switched off." The deterministic layer is the act on the record; the soft layer is
+the vocabulary the next proposal is supplied, which the merge act *is what edits*.
+Neither substitutes for the other, and the clauses above say which is which so that a
+lane does not implement the correction as a read-time rewrite, which would be the
+read-time classifier again.
+
+**And the preference is held to what it can actually do.** #1720 asks for "the
+correction path, which is a `PREFERENCE` memory the proposer is supplied next time",
+and half of that is unreachable through the only seam this ADR defines: a
+`Sequence[TopicLabel]` cannot carry "not `wellbeing`, `health`" — it carries labels,
+without text and without a relation between two of them. Writing the guarantee anyway
+would be a clause no conforming implementation could satisfy, which is worse than a
+named deferral. What is kept is the part that works and is the part that matters: the
+owner's act changes the store, the store is what the vocabulary is read from, and the
+next proposal sees the corrected world rather than a sentence about it.
 
 **A merge destroys nothing, stated because the obvious implementation does.** The
 natural way to write "merge A into B" is to drop A and add B, and on a record whose
@@ -685,16 +761,15 @@ proposal against a target it matches; if two labellings of one belief were two
 questions, they would rarely reach a fold at all, and the union would be a rule
 about a case that does not arise.
 
-### 11. Scope: one field, two contract members, and no `PROTOCOL_VERSION` bump
+### 11. Scope: one field, one contract member, and no `PROTOCOL_VERSION` bump
 
 > **Normative.** This ADR adds one field to one `core` type, three names to
 > `core/types.py` (`TopicLabel`, `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL`)
-> and two additive members to `core/protocols.py` (`MemoryStore.topics`, and
-> `Observer.observe`'s `vocabulary` keyword). It adds no new Protocol, no `Settings`
-> field, no member of the promoted `AssistantEngine` surface, no wire operation, no
-> tool and no `RoutableOperation` member. `MemoryWriter`, `MemoryPolicy`,
-> `ContextProvider`, `ConversationStore`, `Planner` and `Reader` are unchanged in
-> signature and in meaning.
+> and one additive member to `core/protocols.py` (`MemoryStore.topics`). It adds no
+> new Protocol, no `Settings` field, no member of the promoted `AssistantEngine`
+> surface, no wire operation, no tool and no `RoutableOperation` member. `Observer`,
+> `MemoryWriter`, `MemoryPolicy`, `ContextProvider`, `ConversationStore`, `Planner`
+> and `Reader` are unchanged in signature and in meaning.
 
 > **Normative.** `PROTOCOL_VERSION` does not move for this change.
 
@@ -721,9 +796,9 @@ ADR-0204 §7 applied to `Provenance` and reached the same answer, and it is what
 distinguishes both from ADR-0181 §3's field, which was required with no default on a
 model that sets `extra="forbid"`.
 
-**Neither new contract member is on the wire.** `MemoryStore` and `Observer` are
-in-process seams the composition root wires; no client calls either, and the
-vocabulary never leaves the hub.
+**The new contract member is not on the wire.** `MemoryStore` is an in-process
+seam the composition root wires; no client calls it, and the vocabulary never leaves
+the hub except inside the consolidation prompt §5 bounds.
 
 **No column, because nothing reads it yet.** ADR-0100 §8 gave `about_person` a
 nullable column because a filtered read was the axis's first consumer; here every
@@ -744,46 +819,52 @@ layout. Each names an input and the outcome it fixes.
    the `MemoryStore` conformance suite so every implementation persists it rather
    than silently dropping it.
 2. **`"Health"` is refused**, and so are `" health"`, `"health "`, `"health  care"`,
-   `"health\tcare"`, `""` and a label of `MAX_TOPIC_LABEL_LENGTH + 1` characters —
-   each at construction, each with the value unchanged in the error rather than
-   folded.
+   `"health\tcare"`, `""` and a 65-character label — each at construction, each with
+   the value unchanged in the error rather than folded. A 64-character label is
+   admitted, so the boundary is pinned on both sides.
 3. **An unsorted tuple is refused**, and so is `("health", "health")`. `("health",
    "sleep")` is admitted and `("sleep", "health")` is not.
 4. **A record constructed with no `topics` carries the empty tuple**, and decoding a
    serialised record written before the field lands yields the empty tuple.
-5. **A tuple longer than `MAX_TOPICS_PER_PROPOSAL` is admissible on the type**, and
-   the producer bound is asserted where the producer is — a model response naming
-   five labels yields no topics on that proposal, and the proposal itself is
-   returned.
-6. **A malformed topics entry does not discard the proposal.** A response whose
-   topics entry is absent, null, not a list, or carries a non-canonical string yields
-   a proposal with the empty tuple and an outcome whose discard count moved.
+5. **A tuple of five labels is admissible on the type**, and the producer bound is
+   asserted where the producer is — a model response naming five labels yields no
+   topics on that proposal, and the proposal itself is returned.
+6. **A malformed topics entry does not discard the proposal and moves no counter.** A
+   response whose topics entry is absent, null, not a list, or carries a non-canonical
+   string yields a proposal with the empty tuple, and the pass reports
+   `discarded_unusable` and `discarded_over_limit` unchanged — so
+   `len(proposals) + discarded_unusable + discarded_over_limit` still equals the
+   number of entries the model emitted.
 7. **A provider failure yields no topics and no record.** The observation pass
    raises and writes nothing, rather than writing unlabelled beliefs.
 8. **The vocabulary is ordered and bounded.** With three labels on five records,
    `MemoryStore.topics` returns them commonest first, ties broken by label ascending,
    and a `limit` below the distinct count returns exactly `limit` of them from the
    head of that order.
-9. **The observer is supplied the vocabulary through the seam.** A stage wired over
-   a store holding labels calls `observe` with them, and an observer that ignores them
-   still satisfies the Protocol.
-10. **The fold takes the union, on both arms.** A target carrying `("health",)`
+9. **`MemoryStore.topics` refuses a limit outside its domain.** `0`, `-1`, `2**63`,
+   `True` and `1.0` each raise, in the `MemoryStore` conformance suite so every
+   implementation refuses alike; `1` and `2**63 - 1` are accepted.
+10. **The consolidation prompt carries the vocabulary and the observation prompt does
+    not.** A consolidation run over a store holding labels puts them in its prompt;
+    an observation pass over the same store sends the batch and nothing derived from a
+    belief, which is the assertion that keeps ADR-0077 §3 true.
+11. **The fold takes the union, on both arms.** A target carrying `("health",)`
     reinforced by an incoming record carrying `("sleep",)` survives with
     `("health", "sleep")`. The direction that must be exercised is the one an
     implementation copying the incoming tuple would pass: a **labelled target
     reinforced by an unlabelled incoming**, whose survivor keeps `("health",)`.
-11. **A `SUPERSEDE` carries nothing across.** A correction proposed with
+12. **A `SUPERSEDE` carries nothing across.** A correction proposed with
     `("sleep",)` against a target carrying `("health",)` writes `("sleep",)`, and the
     retired target still reads `("health",)`.
-12. **Capture writes the empty tuple** on every episode it records, on both the
+13. **Capture writes the empty tuple** on every episode it records, on both the
     ordinary and the resumption path.
-13. **A reader's proposal carries the empty tuple**, whatever the source entry
+14. **A reader's proposal carries the empty tuple**, whatever the source entry
     contains — including a source entry whose own fields are named like labels.
-14. **Two proposals differing only in `topics` share a `proposal_fingerprint`**, and
+15. **Two proposals differing only in `topics` share a `proposal_fingerprint`**, and
     therefore one `question_key` against one conflict set.
-15. **A relabel writes at the same id.** The record's id, `content`, `provenance`
+16. **A relabel writes at the same id.** The record's id, `content`, `provenance`
     and `validity` are unchanged and every citation naming it still resolves.
-16. **A merge is all-or-nothing and destroys nothing.** A record whose only label
+17. **A merge is all-or-nothing and destroys nothing.** A record whose only label
     was the merged-away one carries the survivor label, not the empty tuple; a merge
     that fails part-way leaves no record carrying the new label.
 
@@ -795,23 +876,22 @@ rule 5). It owes:
 1. **The three names and the field** in `core/types.py`, documented in place with
    what a value means and what an empty tuple means, and the canonical fakes and
    record builders in `ai_assistant.testing` extended to carry them.
-2. **The two contract members** in `core/protocols.py` — `MemoryStore.topics` and
-   `Observer.observe`'s `vocabulary` keyword — with the `MemoryStore` conformance
-   suite pinning both the field's round-trip and `topics`' ordering and bound, and
-   the canonical fakes in `ai_assistant.testing` satisfying them. **No new Protocol
-   is added, so no new triad is owed** (`CONTRIBUTING.md` → "Adding a Protocol");
-   what is owed is that every existing implementation and fake moves together.
-3. **The producer half**: the topics entry in `ModelBackedObserver`'s envelope and
-   in `ConsolidationStage`'s, each under ADR-0077 §4's discard-and-count discipline,
+2. **The one contract member** in `core/protocols.py` — `MemoryStore.topics` — with
+   the `MemoryStore` conformance suite pinning the field's round-trip, `topics`'
+   ordering and bound, and its refusal of a limit outside its domain, and every
+   implementation and canonical fake in `ai_assistant.testing` moving together. **No
+   new Protocol is added, so no new triad is owed** (`CONTRIBUTING.md` → "Adding a
+   Protocol"). `Observer` is untouched.
+3. **The producer half**: the topics entry in `ModelBackedObserver`'s envelope and in
+   `ConsolidationStage`'s, ignored rather than counted where it cannot be used (§4),
    with the canonical form applied by the producer before construction.
-4. **The vocabulary read** in `ObservationStage` and `ConsolidationStage`, each from
-   the `MemoryStore` it already holds, and the sqlite implementation of
-   `MemoryStore.topics`.
+4. **The vocabulary read** in `ConsolidationStage` alone, from the `MemoryStore` it
+   already holds, and the sqlite implementation of `MemoryStore.topics`.
 5. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
    computations that already take a disjunction there.
 6. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
    projection.
-7. **The sixteen tests of §12.**
+7. **The seventeen tests of §12.**
 
 > **Normative.** The owner's acts of §9 are **not** in the implementing lane above.
 > They need a surface, the surface is a promoted-surface change, and it is therefore
@@ -883,6 +963,18 @@ noticing it was a decision.
   topic-scoped guard, since an unguarded transcript of a guarded conversation is the
   laundering shape ADR-0204 §5 closed for its own axis by inheritance rather than by
   a second proposal.
+- **A vocabulary supplied to the `Observer`.** §5 withholds it because ADR-0077 §3
+  rules that observation's "payload is the batch and nothing else", and this ADR is
+  not the instrument that changes another ADR's ruling. **Fires** with an ADR that
+  amends or partially supersedes that clause under ADR-0070 §1 and ADR-0082 §1 and
+  argues the ADR-0004 §7 minimisation trade in its own terms — most likely the lane
+  that measures the fragmentation §5 predicts, because the trade is worth arguing once
+  there is a figure rather than a fear.
+- **A supply that carries the owner's correction to a proposer.** §9 keeps the
+  `PreferenceMemory` and declines to promise it reaches one, because
+  `Sequence[TopicLabel]` cannot carry a preference's text or a rejected-to-corrected
+  mapping. **Fires** with §9's surface ADR, which decides the shape of the correction
+  and is therefore the only lane that can say what a seam carrying it would look like.
 - **A matching rule wider than equality.** §3 reserves it. **Fires** with the first
   consumer whose promise cannot be kept by exact labels — most likely the same
   topic-scoped `forget`, where "health" and "healthcare" reaching different sets is
@@ -937,6 +1029,16 @@ reader might expect a record and its absence should be argued rather than assume
   and is #691's question. A topic label resolves to nothing and enrols nobody, so
   none of the three sub-decisions arises. The asymmetry is argued rather than
   inherited.
+- **ADR-0077 §3's payload clause.** "The payload is the batch and nothing else …
+  It does **not** carry the user's existing beliefs, the profile, the context facet,
+  or a plan." A reader holding only ADR-0077 sends the episodes and their citation
+  labels before this decision and sends exactly those after it: §5's fourth clause
+  adds nothing to the observation prompt, and its supply lands on
+  `ConsolidationStage`, which ADR-0077 does not govern. An earlier draft of this ADR
+  *did* put a store-derived vocabulary into `Observer.observe`; that would have been a
+  reader acting differently, which is ADR-0070 §1's line, and it was removed rather
+  than recorded — a record on ADR-0077 is a change to ADR-0077's text, and this lane's
+  fence does not reach it. §15 names the instrument that may take it.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
@@ -972,16 +1074,18 @@ label, which is §15's owner-stated topic — and one dishonest one, inferring t
 at read, which §4 forbids.
 
 **What this costs at run time.** One store read and a slightly longer prompt per
-observation pass and per consolidation chunk. No new call, no new provider dependency,
-no new failure mode on any path that had none: the three producers that hold no
-provider are untouched, and the two that do already end their pass on a `ModelError`.
+consolidation chunk, and a few more tokens in each producer's response. The
+observation prompt does not grow at all. No new call, no new provider dependency, no
+new failure mode on any path that had none: the three producers that hold no provider
+are untouched, and the two that do already end their pass on a `ModelError`.
 
-**What would trigger revisiting it.** A measured store in which the observer's
-labels fragment despite §5's supplied vocabulary — which would mean convergence needs
-an instrument stronger than a hint, and the candidates are an owner-curated vocabulary
-or the matching rule §3 reserves. Or a consumer arriving that genuinely needs the
-axis at read time, which this decision forbids and which would have to be argued as a
-supersession rather than an extension.
+**What would trigger revisiting it.** A measured store in which the observer's labels
+fragment — which §5 predicts, because the observer is supplied no vocabulary and
+ADR-0077 §3 is why. That measurement is the input the deferral in §15 waits for, and
+the candidates it would choose between are an amendment to ADR-0077 §3, an
+owner-curated vocabulary, and the matching rule §3 reserves. Or a consumer arriving
+that genuinely needs the axis at read time, which this decision forbids and which
+would have to be argued as a supersession rather than an extension.
 
 **What it does not fix.** The store the owner has today is unlabelled, and this
 decision labels nothing retrospectively: a belief written before the field lands
@@ -1022,13 +1126,23 @@ against the same shape: the empty tuple already is the unrecorded state, and a t
 state would oblige every consumer to hold a rule about data no producer will ever
 write.
 
-**Deferring the vocabulary supply to a later lane.** This was the smaller ADR, and
-it was rejected because it defers the half that makes the axis work. Without it the
-observer's labels fragment from the first pass, every deferred consumer inherits a
-half-populated axis, and the lane that fixes it does so *after* a store full of
-records has fixed the vocabulary badly. The seam costs one keyword and one store read
-because both calling stages already hold a `MemoryStore`; it will not be cheaper
-later.
+**Supplying the vocabulary to the observer as well.** This was the first draft, and
+it read well until ADR-0077 §3 was quoted rather than remembered: "The payload is the
+batch and nothing else … Sending beliefs would be the obvious way to stop the observer
+re-proposing what is already known — and it is refused". A store-wide label set is a
+second class of Tier 1 data in that prompt, arriving for the very reason that clause
+refuses, so taking it would have needed a record on ADR-0077 under ADR-0070 §1 — an
+edit to another ADR's text, which this lane's fence does not reach and which deserves
+its own argument rather than a paragraph here. It is deferred in §15 with the
+instrument that may take it. What is *not* an alternative is taking the payload
+quietly and leaving §16 saying nothing changed.
+
+**Dropping the vocabulary supply altogether.** The smaller ADR still, and it was
+rejected for the opposite reason: the supply is free on the consolidation prompt,
+which already carries a whole chunk of stored records, and it is the only instrument
+this decision has for pulling a fragmented vocabulary back together without the owner
+doing it by hand. Declining it would leave §9's merge act as the sole remedy and make
+the axis's usefulness a function of how often the owner tidies it.
 
 **Putting the field on `Provenance`.** Rejected in §2 on ADR-0100 §2's own test.
 The tell is that it would sit beside `derived_from_external` and
