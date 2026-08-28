@@ -94,10 +94,11 @@ satisfies either anchor** (ADR-0166). So an anchor is the four static steps plus
 *either* `uv run pytest` or a bare `just test-fast` — `just check` runs the serial
 form of it — and the choice is yours at each anchor independently, with no
 justification owed and no reviewer entitled to require a particular one. It
-runs **at most three suites per machine at once** (`TEST_FAST_SLOTS` changes
-the number): a fourth `just test-fast` from another clone waits for a slot (it
-says so on stderr) rather than contending for cores and memory — a run holds
-3–5 GB, and four at once has crashed the WSL VM.
+runs **at most three suites per user at once** (`TEST_FAST_SLOTS` changes the
+number; the machine is single-user, ADR-0099 §1): a fourth `just test-fast`
+from another clone waits for a slot (it says so on stderr) rather than
+contending for cores and memory — a run holds 3–5 GB, and four at once has
+crashed the WSL VM.
 
 **What discharges an anchor is a run that collected the whole suite and executed
 it to a passing result** — not a command name. Anything that leaves it short

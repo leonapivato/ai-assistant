@@ -170,20 +170,37 @@ test-fast *args:
     # the kernel when this shell exits, killed or not. The names are not `pt-*`,
     # so the reaper above never sees them.
     slots="${TEST_FAST_SLOTS:-3}"
+    # 1..64: a positive integer bounded well inside what shell arithmetic holds,
+    # so no value that passes here can wrap negative and empty the loop below.
     case "$slots" in
         ''|*[!0-9]*|0*) echo "just test-fast: TEST_FAST_SLOTS must be a positive integer, got '$slots'" >&2; exit 2 ;;
     esac
-    # The user's private runtime directory where there is one (0700, so no other
-    # user can plant anything there); the slot files are opened for APPEND, which
-    # truncates nothing, and a symlink at a slot path is refused rather than
-    # followed. Per user, not per machine, which is what a wave of clones is.
-    slot_dir="${XDG_RUNTIME_DIR:-/tmp}"
+    if [ "${#slots}" -gt 2 ] || [ "$slots" -gt 64 ]; then
+        echo "just test-fast: TEST_FAST_SLOTS must be at most 64, got '$slots'" >&2; exit 2
+    fi
+    # The slots live in a directory only this user can write: the runtime
+    # directory where there is one, else one this recipe makes 0700 under TMPDIR
+    # and checks is a real directory it owns with that mode -- never a public
+    # predictable path, where anyone could plant a symlink or a FIFO ahead of us.
+    # Per user, not per machine, which is what a wave of clones is (ADR-0099 §1).
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        slot_dir="$XDG_RUNTIME_DIR"
+    else
+        slot_dir="${TMPDIR:-/tmp}/ai-assistant-$(id -u)"
+        mkdir -p -m 0700 "$slot_dir"
+    fi
+    if [ -L "$slot_dir" ] || [ ! -d "$slot_dir" ] || [ ! -O "$slot_dir" ] || \
+       [ "$(stat -c %a "$slot_dir")" != 700 ]; then
+        echo "just test-fast: $slot_dir is not a private directory of ours; refusing to lock there" >&2; exit 2
+    fi
     gate=""
     while :; do
         for ((i = 0; i < slots; i++)); do
             slot="$slot_dir/ai-assistant-test-fast.slot$i"
-            if [ -L "$slot" ]; then
-                echo "just test-fast: $slot is a symlink; refusing to use it as a lock" >&2; exit 2
+            # A regular file or nothing: not a symlink, not a FIFO that would block
+            # the open, not anything else that could be waiting at that name.
+            if [ -e "$slot" ] && { [ -L "$slot" ] || [ ! -f "$slot" ]; }; then
+                echo "just test-fast: $slot is not a regular file; refusing to use it as a lock" >&2; exit 2
             fi
             exec {fd}>>"$slot"
             if flock -n "$fd"; then gate="$fd"; break; fi
