@@ -522,7 +522,7 @@ as qualified, as ADR-0027 left it.
 ### 10. What the implementation owes
 
 > **Normative.** §§1–6 are implemented by a separate lane, in one PR, confined to
-> `scripts/` and to the documents that restate the rule.
+> `scripts/`, to `tests/scripts/`, and to the documents that restate the rule.
 
 > **Normative.** That PR implements §§1–6 in `scripts/ship.sh`, in the acceptance
 > loop and in `--drill` alike. §6's single-implementation clause and its
@@ -594,7 +594,11 @@ same defect being found in its own round 1.
 confinement, the `scripts/ship.sh` implementation, the two restating documents
 and the test suite are separately movable: a later decision to drop the
 `CONTRIBUTING.md` restatement, or to move the implementation to a Python module
-`ship.sh` calls, has to reach one of them without reopening the others.
+`ship.sh` calls, has to reach one of them without reopening the others. The
+confinement clause names `tests/scripts/` among the permitted paths because,
+standing alone, it has to: unmarked, it was a lead-in to a list whose third item
+was the test suite, and a clause that states its own scope (ADR-0089 §3) cannot
+borrow that from the text below it.
 
 **The enumeration is one clause, because it is one obligation with a stated
 content.** Its cases are not a set of rules a lane could obey severally; they
