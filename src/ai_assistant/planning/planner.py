@@ -29,6 +29,12 @@ that has no purchase on a positive assertion. ``no_capability_needed`` is a key 
 this prompt-level envelope only: it never reaches ``ActionPlan``, which crosses the
 subsystem boundary carrying empty ``steps`` and a ``rationale`` saying why
 (ADR-0176 §8).
+
+**A statement of fact is a decline** (#1695). It asks for nothing, so it wants no
+capability, and the prompt works that direction of ADR-0176 §4's test through
+explicitly — including what the rationale should say, since on a decline the
+rationale is the whole of the plan's content (ADR-0176 §3) and it is what the
+composing stage renders (#1355).
 """
 
 from __future__ import annotations
@@ -108,14 +114,54 @@ _STANCE: Final[Mapping[BeliefBand, str]] = {
     BeliefBand.ATTESTED: "a source the user connected reported",
 }
 
+#: The stated-fact direction of ADR-0176 §4's test, worked through (#1695).
+#:
+#: A statement of fact asks for nothing, so under §4's test it wants no capability
+#: — but the prompt's decline condition reads "answered from what this turn already
+#: carries", and a model applying that literally to *"did you know I go to school at
+#: Northeastern"* finds nothing to answer and plans a store step instead. On the
+#: deployed hub it planned one; nothing carries a memory write (intake is the
+#: observer's, ADR-0093, and ADR-0048 §1 declines ``remember`` in terms), so the
+#: step reached ``NO_CAPABLE_TOOL`` and ADR-0170 §5's honest account made the reply
+#: tell the owner it had no way to remember — false, because ADR-0074 §3 captures
+#: every turn as an episode and the belief lands when the observer runs.
+#:
+#: This block is the decline's *rationale* as much as its shape: ADR-0176 §3 makes
+#: the rationale the whole of a declined plan's content, and ``composing``'s
+#: ``_render_plan`` renders it on a decline (#1355), so what this asks the model to
+#: say is what reaches the composed reply. It asks for "heard and kept with this
+#: conversation" and refuses "now in long-term memory", because the observer's run
+#: is not this turn's (ADR-0093).
+#:
+#: It is a separate constant so the prompt test can assert it **reaches the model**
+#: without string-matching its wording, which ADR-0176 §4 declines to demand of any
+#: lane: an assertion on a sentence "fails on every rewording that improves the
+#: instruction and passes on every rewording that guts it".
+_STATED_FACT_GUIDANCE = """\
+Telling you something is not asking you to do something. Where the user states a \
+fact about themselves, corrects one, or passes on news, and asks for nothing to be \
+done with it, the goal requires no act: what was said is already in the \
+conversation set out in the next message, and this system records that \
+conversation as it happens, so it is kept without any step being taken. Reply with \
+a DECLINE, and let the rationale say that you heard it and that it is kept with \
+this conversation. Do not name a capability for storing, saving or remembering it: \
+no capability does that, and a step naming one finds no tool, which makes the \
+answer tell the user there is no way to remember what they just said. Do not claim \
+in the rationale that it is now in long-term memory either — that is taken up \
+separately, and not in this turn."""
+
 #: The two legal envelope shapes and the test between them (ADR-0176 §4).
 #:
 #: The test is stated as what the goal *requires*, never as a list of request
 #: categories, because the material a goal might be answered from is rendered into
 #: this same prompt one message below (:func:`_render_request`) — so "can this be
 #: answered from what is in front of me?" is a question about the text the model is
-#: already holding, and a category list is not (ADR-0176 §4).
-_SYSTEM_PROMPT = """\
+#: already holding, and a category list is not (ADR-0176 §4). The stated-fact block
+#: sits under the decline shape as one *direction* of that test worked through, in
+#: the same requires-terms — the way §4's own prose names the two directions
+#: concretely — and the general rule still closes the section.
+_SYSTEM_PROMPT = (
+    """\
 You are the planning stage of an AI assistant. Decide what the user's goal \
 requires, then reply with exactly one of the two JSON objects below — a single \
 JSON object and nothing else, no prose, no code fence.
@@ -143,6 +189,10 @@ memories, the assembled context and the conversation set out in the next message
  "steps": [],
  "no_capability_needed": true}
 
+"""
+    + _STATED_FACT_GUIDANCE
+    + """
+
 A decline is an ordinary, expected outcome — not a fallback, not an error, not a \
 last resort. Naming a capability for a goal that needs none is the worse answer of \
 the two. Judge which shape is wanted by what the goal requires, not by what kind \
@@ -153,6 +203,7 @@ and, when present, must be a JSON object. In a decline, `steps` must be the empt
 list, `no_capability_needed` must be the JSON literal true (not 1, not "true"), \
 and `rationale` must be a non-empty string. Do not include step ids; they are \
 assigned downstream."""
+)
 
 
 def _uuid() -> str:
