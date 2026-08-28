@@ -1343,8 +1343,13 @@ def test_a_decode_the_press_overtook_starts_no_source() -> None:
     assert "playing = mine" in playing
     assert stopping.index("playing = null") < stopping.index("mine.source.stop()")
     assert playing.index("await context.decodeAudioData(") < playing.index("if (playing !== mine)")
-    assert playing.index("if (playing !== mine)") < playing.index("source.start()")
-    assert playing.index("source.start()") < playing.index("mine.source = source")
+    assert playing.index("if (playing !== mine)") < playing.index("soundFrom(context, mine, 0)")
+    # A source is armed and started in one place, and taken onto the record only once it
+    # has started. A first playing and a resume both reach it (#1701), so neither can grow
+    # an order of its own and the check above reads for both.
+    sounding = _functions(script)["soundFrom"]
+    assert sounding.index("source.start(0, offset)") < sounding.index("mine.source = source")
+    assert script.count("createBufferSource()") == 1
 
 
 def test_one_playback_is_in_the_air_and_taking_the_record_over_ends_it() -> None:
@@ -1371,6 +1376,139 @@ def test_one_playback_is_in_the_air_and_taking_the_record_over_ends_it() -> None
     # Through the one function that ends a playback, so there is no second way to leave a
     # source sounding with nothing holding it.
     assert script.count("mine.source.stop()") == 1
+
+
+def test_a_press_landing_after_a_natural_end_does_not_say_it_interrupted_one() -> None:
+    """Issue #1705, deferred from PR #1702's adversarial review as a ``minor``.
+
+    ``ended`` is a **queued task** and not a synchronous callback, so a source that
+    reached its natural end still names itself in ``playing`` for the moments between the
+    two. A press landing in that window found the record, stopped a source that had
+    already finished — harmless, and the ``try`` around it exists for exactly that — and
+    then wrote "this answer stopped being spoken" under an answer whose audio had been
+    heard in full.
+
+    What tells the two apart is where the sound had reached, and it has to be arithmetic
+    over the audio context's own clock rather than a second listener: the whole of the
+    window is *before* the queued one runs, so there is no event to wait for inside it.
+    ``stopPlaying`` stamps the reading before it stops the source, because after ``stop()``
+    there is no clock left to read it from and both callers that need it run afterwards.
+    """
+    script = _code("app.js")
+    stopping = _functions(script)["stopPlaying"]
+    interrupting = _functions(script)["interruptPlayback"]
+    reading = _functions(script)["playedSoFar"]
+    elapsed = _functions(script)["playbackElapsed"]
+
+    assert stopping.index("mine.played = playedSoFar(mine)") < stopping.index("mine.source.stop()")
+    assert interrupting.index("if (playbackElapsed(ended)) {") < interrupting.index(
+        "playbackInterrupted(ended.slot)"
+    )
+    # The context's clock and not the page's: `currentTime` advances with the audio, so a
+    # context the browser suspended part-way through accrues no playback nobody heard.
+    assert "listeningContext.currentTime - mine.startedAt" in reading
+    assert "Date.now()" not in reading
+    assert "mine.buffer.duration" in reading
+    assert "mine.played >= mine.buffer.duration" in elapsed
+    # Read off the record, never from a second `ended` listener — which is what makes the
+    # question answerable inside the window at all. There is one such listener in the file.
+    assert "addEventListener" not in elapsed
+    assert script.count('addEventListener("ended"') == 1
+
+
+def test_a_press_that_asked_nothing_gives_the_answer_back_where_it_stopped() -> None:
+    """Issue #1701, the owner's direction of 2026-08-28.
+
+    A press is an interrupt (#1696), and an interrupt the owner did not mean to make is a
+    silence they did not ask for. ADR-0200 §4's no-words release is the one ending that
+    says so: "nothing was asked, so nothing was answered, no turn ran, no episode was
+    captured and no conversation was created". The answer that was sounding is still the
+    answer and the page is still holding its decoded buffer, so it is given back from
+    where the sound stopped.
+
+    **Page-locally, and that is the whole point.** One more source, no request, nothing
+    re-rendered — so the accident never reaches the hub as a gap in a delivery it is told
+    about. ADR-0205 §8 names this sibling and says what makes that legible: "a resume that
+    never left the page produces no report".
+
+    **A record of its own rather than the one the press ended**, because the stopped
+    source's ``ended`` listener still names the old record — and a resume that reused it
+    would hand that queued task a live playback to let go of, defeating the identity check
+    that makes the listener safe.
+
+    **And where it cannot resume, the interruption's own sentence stands.** A context that
+    is not running, a slot the next render detached, a source the browser will not start:
+    "this answer stopped being spoken" is true in each of those, so it is the fallback
+    rather than something to clear first.
+    """
+    script = _code("app.js")
+    rendering = _functions(script)["renderSpokenTurn"]
+    interrupting = _functions(script)["interruptPlayback"]
+    resuming = _functions(script)["resumeInterrupted"]
+
+    # Held by the press that ended it and dropped at the top of every press, before
+    # anything decides to keep one: what a release can resume is its own press's playback
+    # or nothing at all.
+    assert interrupting.index("held = null") < interrupting.index("held = ended")
+    # Consumed on the no-words release and on no other ending — the declaration and its
+    # one caller are the two occurrences in the file.
+    assert rendering.index("saying(HEARD_NOTHING)") < rendering.index("resumeInterrupted()")
+    assert script.count("resumeInterrupted()") == 2
+    # Nothing leaves the page.
+    assert "fetch(" not in resuming
+    assert "/ask/spoken" not in resuming
+    assert "fault(" not in resuming
+    # One playback in the air, which taking the record over is what ends (PR #1702).
+    assert resuming.index("stopPlaying()") < resuming.index("playing = resumed")
+    # From where the sound stopped, onto a record of its own.
+    assert "played: mine.played" in resuming
+    assert "soundFrom(context, resumed, mine.played)" in resuming
+    # The two conditions that leave the interruption's sentence standing instead.
+    assert "!mine.slot.isConnected" in resuming
+    assert 'context.state !== "running"' in resuming
+    # The notice replaces that sentence, through the one writer that owns it.
+    assert "playbackResumed(resumed.slot)" in resuming
+    assert "if (!slot.isConnected) {" in _functions(script)["playbackResumed"]
+    assert script.count("PLAYBACK_RESUMED") == 2
+
+
+def test_how_much_of_an_answer_sounded_is_one_value_across_a_resume() -> None:
+    """What #1701's resume owes #1700's report, so that the two do not disagree.
+
+    ADR-0205 §7 has the page report ``COMPLETE`` "where the source ended of its own
+    accord", with both durations "the decoded buffer's own", and ``INTERRUPTED`` "where a
+    press ended it", with "a measured elapsed ... read only where the playback was cut
+    short". A resume that measured only its own source would make an answer taken up again
+    and heard to its end report the *remainder* — an answer heard in full reported as
+    interrupted, which is the failure that ADR exists to remove arriving from the page.
+
+    So the reading is one value: the offset a source started from plus what the context's
+    clock has advanced since, carried across the resume as the new record's offset, and
+    stamped by whichever ending got there — the press through ``stopPlaying``, the natural
+    end through the buffer's own duration. This lane implements no report; what it owes is
+    a value the lane that does can read.
+    """
+    script = _code("app.js")
+    reading = _functions(script)["playedSoFar"]
+    sounding = _functions(script)["soundFrom"]
+    resuming = _functions(script)["resumeInterrupted"]
+
+    assert "mine.offset + (listeningContext.currentTime - mine.startedAt)" in reading
+    assert "Math.min(Math.max(sounded, 0), mine.buffer.duration)" in reading
+    # A source that ended by itself played the whole buffer, and the record says so.
+    assert "mine.played = mine.buffer.duration" in sounding
+    assert sounding.index("mine.offset = offset") < sounding.index("source.start(0, offset)")
+    assert "mine.startedAt = context.currentTime" in sounding
+    # Carried across the resume rather than restarted at zero: the new source begins at
+    # nothing behind it, and what is behind the *playback* is the reading it inherits.
+    assert "played: mine.played" in resuming
+    assert "offset: 0" in resuming
+    # No report is built here. ADR-0205 §7's fourth body member is its own implementing
+    # lane's, and this one still sends the three the route has always read.
+    sending = _functions(script)["sendRecording"]
+    assert "asked.utterance" in sending
+    assert "asked.plays" in sending
+    assert "asked.delivery" not in sending
 
 
 def test_a_recorder_that_would_not_start_is_advised_on_what_the_page_actually_knows() -> None:
