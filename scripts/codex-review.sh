@@ -433,11 +433,28 @@ _live_marker() {
 # A detached round's output, indented and clipped to its tail. The tail is what
 # carries the failure; the head is the aggregate, which is long, always present,
 # and never the reason a round stopped.
+#
+# Takes the path explicitly, and distinguishes THREE states, because collapsing
+# two of them is how a message stops being true. The single fallback line this
+# replaces — `(no log: this round was not started with --start)` — was printed on
+# an EMPTY file exactly as on an absent one, and the one caller that reaches it
+# with an empty file is `--start`'s own grace expiry, which truncated that file
+# and launched a child into it moments earlier. So it told a lane its round had
+# not been started, by the very mode that had just started it, three lines under
+# a sentence beginning "It failed at startup" (issues #1670, #1674). Both
+# reporters read the pair as evidence of a dead round; in all three recorded
+# instances the round was alive and went on to record its artifact.
 _echo_log() {
-    if [[ -s "$log_file" ]]; then
-        tail -n 25 "$log_file" | sed 's/^/  | /' >&2
+    local path="$1"
+    if [[ -n "$path" && -s "$path" ]]; then
+        tail -n 25 "$path" | sed 's/^/  | /' >&2
+    elif [[ -n "$path" ]]; then
+        echo "  | (${path#"${repo_root}/"} is empty: the round has written nothing" >&2
+        echo "  |  to it yet. That is what a round still starting looks like, and" >&2
+        echo "  |  it is not evidence in either direction.)" >&2
     else
-        echo "  | (no log: this round was not started with --start)" >&2
+        echo "  | (no log: this round was not started with --start, so its output" >&2
+        echo "  |  went to the terminal that ran it.)" >&2
     fi
 }
 
@@ -496,7 +513,18 @@ _mode_start() {
     # would report a round that "is not running" while its child ran on to
     # completion behind the message. Refused at the point it is read, like every
     # other numeric knob here.
-    local start_grace="${CODEX_REVIEW_START_GRACE:-30}"
+    #
+    # The default is 120s rather than 30s (issue #1670). A round does not claim
+    # the loop the instant it starts: it resolves the base, renders the whole
+    # `base...HEAD` diff and computes the patch identity FIRST, and only then
+    # takes the persona lock and publishes the marker this poll is watching for.
+    # On a large branch, on a machine where two or three other clones are running
+    # their own rounds — which is the ordinary state of this project, not an
+    # unusual one — that is comfortably more than thirty seconds. The old default
+    # made the timeout the common path rather than the exceptional one, and every
+    # second of the grace is spent only on a start that has not yet confirmed:
+    # nothing waits longer for a round that claims normally.
+    local start_grace="${CODEX_REVIEW_START_GRACE:-120}"
     if [[ ! "$start_grace" =~ ^[1-9][0-9]{0,3}$ ]]; then
         echo "CODEX_REVIEW_START_GRACE must be a decimal integer from 1 to 9999 with" \
             "no leading zero (a shell reads a leading zero as octal), not" \
@@ -668,11 +696,32 @@ _mode_start() {
             # rather than killed: if it is merely slow it will claim the loop and
             # `--wait` will find it, where killing a round mid-flight would throw
             # away work to make a message true.
-            echo "the detached '${persona}' round did not claim this loop within" >&2
-            echo "  ${start_grace}s. It failed at startup, or it is unusually slow —" >&2
-            echo "  its output follows (${log_file#"${repo_root}/"}). If it is running" >&2
-            echo "  after all, --wait will find it; nothing here has killed it." >&2
-            _echo_log
+            #
+            # The ORDER of the sentences is the fix issue #1670 asks for. The
+            # message used to lead with "It failed at startup", which is the one
+            # reading this code cannot support and the one that invites the
+            # relaunch `--start` exists to prevent; both reports of it were rounds
+            # that were running perfectly well. So it now leads with the action,
+            # says plainly that nothing here has killed anything, and names the
+            # reason a healthy round is often still unclaimed at this point.
+            #
+            # The status stays 1. It is not a claim about the round — it is
+            # `--start`'s own contract, which is to return zero once THIS
+            # invocation's round is confirmed running, and that has not happened.
+            # A distinct code would only help a caller that acted differently on
+            # it, and the one thing any caller should do here is the one line
+            # below.
+            echo "the detached '${persona}' round has not claimed this loop within" >&2
+            echo "  ${start_grace}s. Nothing here has killed it, and nothing here can" >&2
+            echo "  see whether it is dead: a round claims the loop only after it has" >&2
+            echo "  rendered the whole diff and computed the patch identity, so a" >&2
+            echo "  healthy round on a large branch — or on a machine where another" >&2
+            echo "  clone is reviewing — is often still short of that point." >&2
+            echo "  Do NOT start a second round; ask --wait, which is the only thing" >&2
+            echo "  that can tell a slow start from a failed one:" >&2
+            echo "    scripts/codex-review.sh --wait ${persona}" >&2
+            echo "  Its output so far:" >&2
+            _echo_log "$log_file"
             exit 1
         fi
         sleep 1
@@ -855,11 +904,16 @@ _mode_wait() {
 
         if [[ "$live" -eq 0 ]]; then
             if [[ "$r_tree" == "$tree" ]]; then
+                # The log is read from the path THAT ROUND recorded in its own
+                # marker, not from the one this invocation would compute. They are
+                # normally the same file, but the marker is the round's own
+                # statement about where its output went, and it is empty for a
+                # round that ran in the foreground — which `_echo_log` then says,
+                # instead of pointing at a file that was never written.
                 echo "the '${persona}' round for HEAD's tree ${tree:0:12} is no longer" >&2
                 echo "  running and recorded no artifact — it failed rather than" >&2
-                echo "  finished. Its output follows, where it was detached" >&2
-                echo "  (${log_file#"${repo_root}/"}):" >&2
-                _echo_log
+                echo "  finished. Its own output follows:" >&2
+                _echo_log "$(_round_field log)"
                 exit 4
             fi
             echo "no '${persona}' round is in flight for HEAD's tree ${tree:0:12}, and" >&2
