@@ -1,7 +1,33 @@
 # 48. The first local tools, and a default-registry factory to wire them
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0208 (§1's `recall_memory` half of the first tool set, §2's declaration row for it, and §3's `memory` parameter as the dependency the factory binds it with)
 - Date: 2026-07-23
+- **Partially superseded: 2026-08-28 by ADR-0208 — §1's `recall_memory` half of
+  the first tool set, §2's declaration row for it, and §3's `memory` parameter as
+  the dependency the factory binds it with, and nothing else of §§1–3 or of this
+  ADR.** The milestone-19 measurement (#1699) put a spoken memory question through
+  a live turn and it parked at `CONFIRM` and said nothing; #1715 read the tree
+  behind that and the owner ruled the tool unregistered.
+  §1 wires `recall_memory` to "the *same* store the loop retrieves from", and the
+  turn already reads that store one stage earlier — ungated, by band precedence and
+  budget — while this tool's own read is band-blind and its result reaches no reply,
+  because the composing stage renders a driven step from closed vocabularies alone
+  (ADR-0170 §5a). In its place ADR-0208 §1 rules that the default registry binds no
+  memory tool and that the retrieval stage is the one read of the store a turn
+  makes, with §2 deleting the declaration, the implementation and the eight alias
+  rows that fold onto it.
+
+  **What is untouched.** §1's `current_time` half and every reason it gives for the
+  set being small; §1's deferral of `remember` with its idempotency question; §2's
+  `current_time` column and its argument that `MEDIUM` was the honest declaration
+  for a Tier 1 read, which ADR-0208 agrees with rather than overturns; and the whole
+  of §3's factory arrangement — one object implementing both `ToolRegistry` and
+  `ToolInvoker`, registration staying inside `tools/`, the composition root
+  supplying dependencies and taking back a ready registry. What §3 loses is `memory`
+  being one of those dependencies. The injected-dependency pattern §1 shipped this
+  tool to demonstrate is not lost either: it is what every `orchestration`
+  collaborator, the configured egress tool and the retrieval stage itself follow
+  (ADR-0208 §2).
 
 ## Context
 
