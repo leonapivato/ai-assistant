@@ -720,20 +720,29 @@ outbox has already leased. ADR-0135 §3 is the clause that names the difference,
 it names it for the acknowledgement and the selection before this ADR adds a third
 item to the same list.
 
-**What that costs ADR-0175 §4's cadence, bounded rather than waved away.** That
-clause has the gateway writing on every open stream "at least once per
+**What this does to ADR-0175 §4's cadence, and where the answer is.** That clause
+has the gateway writing on every open delivery stream "at least once per
 `gateway_notification_budget`", and a poll that renders answers later than its
-budget — so the interval between writes grows by up to the synthesis bound. It is
-*bounded*, which is the property the clause's own prose asks for: "One write per
-poll cycle makes the liveness of the gateway, of its hub connection and of the
-browser's own socket observable at a bounded cadence." And the slack is not new in
-kind — ADR-0135 §3 records that "a poll's occupancy was never exactly its budget"
-because argument validation, the acknowledgement and the result frame's write all
-sit outside the waiting. What this ADR adds is a larger term to a sum that was
-never zero, with a ceiling the deployment sets. §11 records that ADR-0175 §4 is
-therefore untouched.
+budget. So a gateway that wrote only when a poll returned would breach the cadence
+by up to the synthesis bound, and §8 is where this ADR stops it doing that: the
+keep-alive is paced by the interval and not by the poll, so the clause is satisfied
+literally, in the two value kinds it already fixes, on every stream and at every
+budget.
 
-### 8. An idle device is a fact about the device, and the page queues no rendering
+**An earlier draft argued the cadence was merely *bounded* and that this was
+enough, and both lenses blocked it on the seventh round.** That draft leant on
+ADR-0135 §3's record that "a poll's occupancy was never exactly its budget" —
+argument validation, the acknowledgement and the result frame's write all sit
+outside the waiting — and called a rendering a larger term in a sum that was never
+zero. The reasoning does not hold and the ADR is better without it: ADR-0135's
+slack is microseconds of bookkeeping, a rendering is seconds of synthesis, and
+"bounded by the budget plus the synthesis ceiling" is a weaker guarantee than "at
+least once per `gateway_notification_budget`", which is what §4 actually says. A
+clause is satisfied or superseded; there is no third thing, and this ADR
+supersedes neither ADR-0175 nor ADR-0135. §8 satisfies it and §11 records the
+reading.
+
+### 8. The page is given the rendering, the keep-alive does not wait for the poll, and an idle device is a fact about the device
 
 > **Normative.** The value the gateway writes on a delivery stream gains **exactly
 > one member**, `spoken`, and no other. `streams.notification`'s enumeration is
@@ -775,6 +784,56 @@ ADR-0175 §4 already holds "at most one value pending per stream" and already en
 a stream whose write has not completed when the next value is due, "so a browser
 that stops reading cannot delay another browser's delivery" — which is the clause
 that prices this, unchanged, and costs the abandoned browser a reconnect.
+
+> **Normative.** The gateway writes on every open delivery stream at least once per
+> `gateway_notification_budget` **whether or not a poll has returned**. Where that
+> interval elapses while a poll is still outstanding — which a poll that renders
+> may cause (§7) — the gateway writes "a value carrying nothing but its own kind".
+> ADR-0175 §4's cadence clause is thereby satisfied literally, in the second of the
+> two value kinds it already fixes, and is neither superseded nor relaxed.
+
+> **Normative.** The keep-alive is paced by that interval and never by the poll's
+> return. A write of either kind restarts the interval, so a gateway whose polls
+> complete within their budget writes exactly what it writes today and at exactly
+> the cadence it writes it at today; a keep-alive is emitted only where a poll has
+> outrun the interval, which before this ADR could not happen.
+
+> **Normative.** That write is the gateway's own, on ADR-0175 §4's terms and
+> nothing more: it carries no part of any notification, is not a delivery, is
+> acknowledged by nothing, and leaves ADR-0175 §5's acknowledgement rule and this
+> ADR's §9 exactly where they stand. It composes no behaviour the promoted surface
+> does not offer (ADR-0168 §1) — the gateway already emits this value of its own
+> motion whenever a poll returns nothing — so what this section changes is **when**
+> it is written and not **what** is written.
+
+> **Normative.** ADR-0175 §4's per-stream rules bind the keep-alive unchanged: the
+> gateway holds at most one value pending per stream and queues nothing behind one,
+> and a write that has not completed when the next value is due on that stream is
+> abandoned and that stream ended. A keep-alive is a value due on that stream, so a
+> stream stalled behind a rendering meets that clause exactly as it meets it behind
+> any other value, and this ADR does not soften it.
+
+**One figure still paces both, which is the clause a reader will check next.**
+ADR-0175 §8 rules that `gateway_notification_budget` is both the poll's `budget`
+and "the interval within which §4 obliges a write on every open delivery stream",
+and that "one figure paces both". This ADR adds no second figure and no heartbeat
+setting: the keep-alive interval **is** that field, so §8's refusal of a second
+clock — "a heartbeat shorter than the poll obliges a write with nothing to write
+about, and one longer is inert" — has nothing to bite on here. What §8's own
+reason-clause observes, that "the write a browser observes is the completion of the
+poll the budget bounds", stated the mechanism of a gateway whose polls could not
+outrun their budget; §7 creates the case where one can, and pacing the keep-alive
+by the same figure is what keeps §8's obligation true in that case rather than
+letting it lapse. A reader holding only ADR-0175 sets the same field to the same
+default and observes the same cadence.
+
+**And the keep-alive matters most in exactly the state this ADR creates.** §4's
+own ground for it is that "a stream that writes nothing for an hour is a stream
+nothing can distinguish from one that has died, at either end", and a browser
+holding a delivery stream cannot tell a gateway waiting on a long synthesis from a
+gateway that has stopped. Tying the keep-alive to the poll's return would have made
+this ADR's one new source of delay the one condition the keep-alive could not
+report — which is the failure §4 spends a write to prevent, met head on.
 
 > **Normative.** "Idle", for the browser this milestone speaks from, is a
 > conjunction of facts about the **device** and never about the room: the page
@@ -890,8 +949,11 @@ say which, or how many did not.
 - **A bound on how far a rendering may push a poll past its budget** (§7).
   ADR-0135 §3 permits the request's own work to outrun the budget and this ADR
   adds a term to it; the ceiling today is the synthesis decorator's own deadline,
-  which a deployment sets. **Fires** on a measurement that the keep-alive interval
-  ADR-0175 §4 paces has grown far enough to matter to a browser — a figure the
+  which a deployment sets. **This deferral no longer touches ADR-0175 §4's
+  cadence**, which §8 preserves whatever the poll does; what is left open is how
+  long a *notification* may take to arrive once the hub has one, which is a
+  latency question and not a liveness one. **Fires** on a measurement that a
+  browser waits long enough for a delivery to matter to the owner — a figure the
   implementing lane can produce and this ADR cannot.
 - **Streamed speech on the delivery path.** The rendering comes back whole, as
   ADR-0200 §11 already defers it for a turn. **Fires** with that deferral, which
@@ -988,23 +1050,25 @@ Six near misses, named so a reviewer can check them rather than take them:
   as ratified and this ADR reads none of them more widely, which is ADR-0200 §12's
   finding about the same ADR reached again on the delivery path. **No record is
   owed on it.**
-- **ADR-0175 §4, §5 and §6 are untouched, and the one a reader will doubt is §4's
-  cadence.** Its fan-out clause is satisfied by the gateway relaying one value
+- **ADR-0175 §4, §5, §6 and §8 are untouched, and the one a reader will doubt is
+  §4's cadence.** Its fan-out clause is satisfied by the gateway relaying one value
   unchanged and is argued in §5 rather than asserted; its retention clause binds
   unchanged (§8); §5's acknowledgement rule is left exactly where it stands (§9);
   §6's second clause — that this poll is the gateway's own — is what §2 depends on
   rather than what it changes, and its closed enumeration of five browser-reached
   operations gains nothing, because this ADR adds no browser-reached operation.
-  **The cadence clause is the one to check**, because a poll that renders answers
-  later than `gateway_notification_budget`. It is untouched on ADR-0135 §3's own
-  account of what a budget bounds: "a poll's occupancy was never exactly its
-  budget", since argument validation, the acknowledgement and the result frame's
-  write all sit outside the waiting, so a reader holding only ADR-0175 was never
-  building a gateway whose interval was exactly that figure. §4's own prose asks
-  for "a bounded cadence" and the cadence stays bounded — by the budget plus the
-  synthesis decorator's deadline. What grows is a term, not the kind of the
-  guarantee, and §10 defers the measurement that would make the term worth
-  bounding further.
+  **The cadence clause is the one to check**, because §7 lets a poll that renders
+  answer later than `gateway_notification_budget`. It is satisfied rather than
+  weakened, and §8 is where: the clause obliges a write per interval of one of two
+  kinds — "a delivery where the poll returned one, and otherwise a value carrying
+  nothing but its own kind" — and §8 makes the gateway write the second kind when
+  the interval elapses with a poll still outstanding. The obligation is met on its
+  own words, at its own figure, on every stream and at every budget. **No record is
+  owed on ADR-0175**, and none would be enough if one were: a clause satisfied
+  literally is not amended, and a clause a later ADR could not satisfy would need
+  superseding rather than recording — which this lane's fence would not have
+  admitted. §8 also checks the second clause a reader reaches from there, ADR-0175
+  §8's "one figure paces both", and adds no second clock.
 - **ADR-0135 §3 is adopted rather than superseded, and §7 was rewritten to adopt
   it.** Its clause that a poll's budget bounds "how long the hub may wait for an
   entry to become available, and bounds nothing else about the request" is read as
@@ -1084,10 +1148,10 @@ dispatcher. What is decided here is what each must contain if it exists.
 > in one of them and leave the gate green. That lane carries the
 > `PROTOCOL_VERSION` bump.
 
-> **Normative.** The gateway's fixed `plays` (§2) and the page's idle-device
-> playback (§8) land in a lane fenced to `interfaces/gateway/`, briefed against
-> the merged text of the lane above, under `track:web-client`'s concurrency rule
-> (#1226 §3).
+> **Normative.** The gateway's fixed `plays` (§2), the interval-paced keep-alive
+> (§8) and the page's idle-device playback (§8) land in a lane fenced to
+> `interfaces/gateway/`, briefed against the merged text of the lane above, under
+> `track:web-client`'s concurrency rule (#1226 §3).
 
 > **Normative.** A lane satisfies the rows of this table that fall inside its
 > fence and adds none: a deliverable this table does not name is out of that lane
@@ -1108,7 +1172,7 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §5 (delivery) | A withheld notification is still returned and still acknowledgeable | A test that the poll returns it, that it is acknowledged normally, and that the outbox holds nothing after |
 | §6 | The two members, the enumeration, and the validator stating §6's invariant both ways | Tests constructing each admissible shape and rejecting each inadmissible one, `spoken` beside every non-`RENDERED` member included |
 | §6 (values) | The four serialized values exactly as §6 fixes them | A test enumerating `SpokenRendering` and asserting each member's value; a round-trip through `wire/codec.py` asserting the value on the wire |
-| §6 (degradation) | The five `DEGRADED` cases | Five tests, one per case, each asserting the delivery still travels |
+| §6 (degradation) | The four `DEGRADED` cases | Four tests, one per case, each asserting the delivery still travels |
 | §6 (no collapse) | A withholding is never a degradation | A test that a `WITHHELD` delivery is not retried into speech on the next poll |
 | §6 (translation) | `SpeechError` degrades; every other exception propagates | Two tests, one each direction, over a synthesizer made to fail |
 | §6 (ceiling) | The whole projected delivery measured; the rendering dropped | A near-ceiling test: a candidate lawful for `offer` plus a rendering degrades rather than raising |
@@ -1120,6 +1184,8 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §8 (shape) | `spoken` is `null` or an object of exactly `content` and `media_type` | A test per shape, asserting the member is present in both |
 | §8 | The page plays only with a running context and nothing in the air | A test that a delivery arriving during a playback is rendered and not queued; a test that a page with no context renders and does not play |
 | §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
+| §8 (keep-alive) | The gateway's keep-alive paced by `gateway_notification_budget` and not by the poll's return | A test that with a poll outstanding beyond that interval, every open delivery stream still receives a value within it; a test that the value is the one carrying nothing but its own kind, that it is not a delivery and acknowledges nothing, and that a gateway whose polls complete within budget writes no extra value |
+| §8 (keep-alive, stalled) | A stream stalled behind a rendering is abandoned and ended when the keep-alive falls due | A test asserting the abandonment, that nothing is queued behind the pending value, and that no other stream's cadence is delayed by it |
 | §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
 | §11 | ADR-0131's record is made in this ADR's own change | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0131 reaches ADR-0206 from its header |
 
@@ -1137,13 +1203,14 @@ producer to land inherits a stated default rather than a habit.
 **Harder, and stated plainly.** Every notification producer that lands from now on
 is silent by default and stays silent until an ADR places it, which is a tax
 ADR-0199 §3 already imposed and this ADR makes concrete rather than theoretical.
-A poll that renders answers later than its budget (§7), so the keep-alive interval
-ADR-0175 §4 paces grows by up to the synthesis bound — bounded, set by the
-deployment, and larger than the slack ADR-0135 §3 already ratified rather than new
-in kind. And
-a page that has had no user gesture will not speak at all (§8) — the honest shape
-of "proactive speech" on a browser is that the owner has to have spoken to it
-first, and no clause here can change a browser's autoplay rule.
+A poll that renders answers later than its budget (§7), so a *notification* can
+now reach a browser later than one figure used to predict, and the gateway grows a
+keep-alive it must pace itself rather than get for free from the poll's return
+(§8). That is a real cost and it buys back ADR-0175 §4's cadence exactly; what it
+does not buy back is the latency, which §10 defers a measurement for. And a page
+that has had no user gesture will not speak at all (§8) — the honest shape of
+"proactive speech" on a browser is that the owner has to have spoken to it first,
+and no clause here can change a browser's autoplay rule.
 
 The owner also gains nothing here about a class they want *silenced*: ADR-0199
 §6's record surface is still deferred, so the only postures available are the ones
@@ -1152,8 +1219,9 @@ the condition that ends it.
 
 **Revisit if** a producer arrives whose sensitivity genuinely varies with its
 content, since §3's argument for placing a single tier rests on
-`calendar-upcoming`'s being a constant; if the edge-of-window degradation turns
-out to be common, which is §10's first deferral; or if a channel arrives that is
+`calendar-upcoming`'s being a constant; if a rendering pushes a poll far enough
+past its budget for the delay to matter to the owner, which is §10's first
+deferral; or if a channel arrives that is
 both a delivery target and bounded, since §5 declares this path's rendering
 unbounded outright and a bounded one has to arrive as its own declared channel.
 
