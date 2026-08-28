@@ -372,9 +372,10 @@ why one is refused rather than deferred.
 > `delivery`, a `SpokenDelivery | None` defaulting to `None`, written onto the row it
 > allocates. Capture uses it (§4); no other caller supplies one.
 
-> **Normative.** An absent `delivery` means **the turn produced no spoken rendering**.
-> It is never read as delivered, never read as unknown, and never read as a claim
-> about a turn that ran on any other operation.
+> **Normative.** An absent `delivery` means **no delivery fact was recorded for
+> this turn** — on the surface as it stands, a turn that did not run on
+> `converse_spoken`, since §4 stamps every turn that did. It is never read as
+> delivered and never read as heard.
 
 > **Normative.** `delivery` is **not a record of the channel a turn arrived on**. No
 > lane, implementation or later ADR reads it as one, infers an arrival channel from
@@ -433,12 +434,22 @@ the room to hear ought to be.
 > turn out of `UNKNOWN`. Only a device's report does, through §1's argument, and only
 > once (§1).
 
-> **Normative.** A turn whose rendering never existed — synthesis raised, the format
-> intersection was empty, a bound was breached (ADR-0200 §4) — stays `UNKNOWN`. The
-> hub knows in that case that nothing was heard, and this ADR deliberately does not
-> mint a fourth state to say so: `spoken_degraded` already told the caller, and a
-> second spelling on the index would be a value that must agree with one held
-> elsewhere. §8 records the state as available additively and not decided here.
+> **Normative.** A turn whose rendering never existed — a park, an `outcome.reply`
+> of `None`, synthesis raising, an empty format intersection, a breached bound
+> (ADR-0200 §4) — stays `UNKNOWN` and is **not** left absent. The hub knows in that
+> case that nothing was heard, which is stronger than unknown; `UNKNOWN` is the
+> conservative reading of it, and the conservative direction is the safe one here,
+> because the supply rule never renders an `UNKNOWN` turn as heard (§5). What is
+> not available is leaving it absent: absence is what a turn that ran on another
+> operation carries, and a spoken turn whose answer was never rendered would then
+> be indistinguishable from a text turn the page delivered on its own channel —
+> which is the assumption this ADR exists to remove, reappearing at the one shape
+> where the hub could have been certain.
+
+> **Normative.** This ADR deliberately mints **no fourth state** for that case.
+> `spoken_degraded` already told the caller, and a second spelling on the index
+> would be a value that must agree with one held elsewhere. §8 records the state as
+> available additively and not decided here.
 
 ### 5. How the composing stage is told, and why nothing is retrieved a second time
 
@@ -728,6 +739,27 @@ Four near misses, named so a reviewer can check them rather than take them:
   contact was attempted, reached a device, or was seen. This ADR adds no field to
   any of those types and says nothing about contact. `core/types.py`'s notification
   block stays byte-correct.
+
+**ADR-0203 §3 is checked and no record is made on it, and the argument is given
+rather than assumed.** Architecture review, round 1, `blocker`, reads its marked
+clause — "This is achieved with **no new type and no new member**. No
+`core/types.py` model gains a field, `TurnOutcome` gains no narrowed variant,
+`SpokenTurn` keeps the four members ADR-0200 §4 gives it" — as a live prohibition
+this ADR breaches. Three things in ADR-0203's own text say otherwise. The clause's
+subject is "**This is achieved**", so the three items are what ADR-0203 does not do
+rather than what nobody may. §5 states the same scope outright: "This ADR decides
+conduct inside `orchestration` and **adds no contract surface**. It adds no
+Protocol and no member to one, no `core` type and no field on one". And §9
+attributes the count to ADR-0200 rather than enacting it — "Everything else §4
+decides stands: `SpokenTurn`'s four members" — so ADR-0200 §4 is the authority,
+ADR-0203 defers to it, and superseding ADR-0200 §4 is what keeps ADR-0203's
+sentence pointing at a live rule instead of a dead one. The record therefore goes
+where the rule lives and nowhere else. The contrary reading is real and is
+**parked as #1716** rather than dismissed: were it taken, what is owed is one
+`Status` pair and one dated note on ADR-0203 naming that sentence, and nothing this
+ADR decides moves either way. `docs/adr/0203-*.md` is outside this lane's fence and
+is already carried by another open lane, which is the second reason the question is
+parked rather than answered by editing it here.
 
 **No *amendment* record is owed anywhere.** ADR-0082 §1 owes one "when the later ADR
 amends a named clause — and not otherwise". The two clauses of ADR-0200 and the one
