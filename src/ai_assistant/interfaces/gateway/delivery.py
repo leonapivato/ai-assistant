@@ -50,6 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.core.types import NotificationDelivery
     from ai_assistant.interfaces.gateway.sessions import Cancellable, Defer
 
 _log = structlog.get_logger(__name__)
@@ -255,6 +256,14 @@ class DeliveryFanOut:
         self._defer = defer
         self._streams: set[DeliveryStream] = set()
         self._poll: asyncio.Task[None] | None = None
+        #: The `next_notification` call currently outstanding, as a task, or ``None``
+        #: between two of them. **A task rather than a bare await, so that the
+        #: arbitration point can ask whether the poll has returned** (ADR-0206 §8).
+        #: Adversarial review, round 1, ``blocker``: a completed call and a resumed
+        #: caller are two different instants on one event loop, and an interval
+        #: elapsing between them found no way to tell "the poll has outrun its budget"
+        #: from "the poll is done and its delivery is this interval's value".
+        self._answering: asyncio.Task[NotificationDelivery | None] | None = None
         #: The interval ADR-0206 §8 paces the keep-alive by, armed while and only
         #: while a stream is open. ``None`` where none is armed — which, outside the
         #: instant between a write and its re-arming, means no stream is open.
@@ -353,7 +362,7 @@ class DeliveryFanOut:
             armed.cancel()
 
     def _keep_alive_due(self) -> None:
-        """Write ADR-0175 §4's keep-alive because the interval elapsed (§8).
+        """Decide what this elapsing interval writes, and write it (ADR-0206 §8).
 
         **Reached only where a poll has outrun the interval**, because every write
         re-arms it — so this is the state ADR-0206 §7 creates and §8 exists to keep
@@ -373,6 +382,25 @@ class DeliveryFanOut:
             # The last stream went in the instant before this callback ran. §8: nothing
             # of the keep-alive survives that step, and "no value written on any stream
             # afterwards" — so this writes nothing and arms nothing.
+            return
+        answering = self._answering
+        if answering is not None and answering.done():
+            # **The coincidence, seen from this side** (§8). The poll has returned and
+            # the loop has not yet resumed on it — two instants a caller cannot tell
+            # apart from inside an ``await``, which is why the poll is a task. §8 fixes
+            # which value the interval takes: "where a poll has returned the delivery is
+            # that value: a keep-alive due or scheduled but **not yet handed to a
+            # stream** is discarded". So this is the discard, and it re-arms nothing —
+            # the delivery's own write restarts the interval a beat later, which is what
+            # keeps the cadence write-to-write rather than shortening it by this turn.
+            #
+            # Adversarial review, round 1, ``blocker``. Cancelling the interval from the
+            # loop's side alone was arbitration that could not see a poll which had
+            # already finished: the keep-alive went out first, filled every stream's one
+            # pending slot, and ADR-0175 §4 then abandoned every one of them in the
+            # instant after they were given the notification they were waiting for —
+            # exactly the outcome §8's ninth round was written to prevent, reached by a
+            # scheduling order rather than by a missing clause.
             return
         self._write(streams.alive())
         self._arm_keep_alive()
@@ -469,16 +497,27 @@ class DeliveryFanOut:
         """
         acknowledging: str | None = None
         while self._streams:
-            try:
-                delivery = await self._engine.next_notification(
+            # **Issued as a task so that the keep-alive can see it finish**, which is
+            # ADR-0206 §8's arbitration read from the other side — see
+            # :attr:`_answering`. Cancelling this loop cancels it: a task awaiting a
+            # future has that future cancelled in the same step, so ADR-0175 §5's
+            # "cancels an outstanding poll that has not yet selected an entry" is
+            # reached exactly as it was when this was a bare ``await``.
+            self._answering = answering = asyncio.ensure_future(
+                self._engine.next_notification(
                     acknowledging=acknowledging, plays=GATEWAY_PLAYS, budget=self._budget
                 )
+            )
+            try:
+                delivery = await answering
             except TransportError as exc:
                 return streams.fault(_UNREACHABLE, detail=str(exc))
             except NotificationBudgetError as exc:
                 return streams.fault(_BUDGET_DECLINED, detail=str(exc))
             except AssistantError as exc:
                 return streams.fault(_DECLINED, detail=str(exc))
+            finally:
+                self._answering = None
             # A delivery where the poll returned one, and otherwise a value carrying
             # nothing but its own kind (§4). The keep-alive is not decoration: a
             # stream that writes nothing for an hour is one nothing can distinguish

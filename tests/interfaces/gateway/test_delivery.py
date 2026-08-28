@@ -44,6 +44,12 @@ if TYPE_CHECKING:
 _AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 _BUDGET = timedelta(seconds=20)
 
+#: How many event-loop turns a helper will yield waiting for a condition. Large
+#: enough for every step the fan-out takes between one poll's answer and the next
+#: poll's request, small enough that a loop which has stopped polling costs nothing
+#: worth noticing.
+_TURNS = 20
+
 
 def _delivery(number: int) -> NotificationDelivery:
     """One delivery, numbered so a test can tell two apart."""
@@ -108,11 +114,28 @@ class _Scripted(FakeAssistantEngine):
         return answer
 
     async def answer_one_poll(self) -> None:
-        """Let the outstanding poll return, and let the loop reach the next."""
+        """Let the outstanding poll return, and let the loop reach the next.
+
+        Yielded to until the fan-out has actually written, rather than a fixed number
+        of turns: since ADR-0206 §8 the call is issued as its own task — so that the
+        keep-alive's arbitration can see it finish — and a task costs one more turn
+        between the answer and the write than an inline ``await`` did. Waiting on the
+        condition instead of counting turns is what keeps this helper right the next
+        time that changes.
+        """
         await self.polling.wait()
         self.released.set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # Until this poll has finished, and then until the fan-out has reached the
+        # next one or has stopped polling. Bounded so a loop that ends — a fault, the
+        # last stream going — costs a few idle turns rather than hanging.
+        for _ in range(_TURNS):
+            await asyncio.sleep(0)
+            if not self.polling.is_set():
+                break
+        for _ in range(_TURNS):
+            if self.polling.is_set():
+                break
+            await asyncio.sleep(0)
 
 
 class _Slots:
@@ -1086,5 +1109,63 @@ async def test_the_acknowledgement_rides_the_next_poll_across_a_keep_alive() -> 
 
     assert engine.acknowledged[:2] == [None, delivered.delivery_id]
     assert [value["kind"] for value in read[:3]] == ["notification", "alive", "alive"]
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_poll_that_returned_in_the_same_turn_wins_the_interval() -> None:
+    """§8's coincidence at the instant a caller cannot see from inside an ``await``:
+    the poll has **returned** and the loop has not yet resumed on it.
+
+    "A delivery and a keep-alive are arbitrated at one point, and that point is before
+    either is handed to any stream… where a poll has returned the delivery is that
+    value: a keep-alive due or scheduled but **not yet handed to a stream** is
+    discarded, and for one interval the two never both reach one stream."
+
+    Adversarial review, round 1, ``blocker``. Arbitrating only from the loop's side
+    left this order unhandled — the interval callback ran first, wrote ``alive`` into
+    every stream's one pending slot, and the delivery that had *already been produced*
+    then met ADR-0175 §4's abandonment clause on every one of them. A reconnect on
+    every open stream, and the notification lost to all of them, for a liveness signal
+    the delivery was about to supply.
+
+    Driven deterministically rather than raced: the engine's answer is released and the
+    loop is yielded to only until the poll's own coroutine has run past its wait —
+    ``polling`` is cleared in its ``finally``, so a cleared flag means the call has
+    finished and nothing has yet written its result. The interval is then fired into
+    exactly that window.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([_delivery(1)], timers=timers)
+    one, two = fan_out.open(), fan_out.open()
+    assert one is not None
+    assert two is not None
+    here: list[Mapping[str, Any]] = []
+    there: list[Mapping[str, Any]] = []
+    reading = asyncio.gather(_drain(one, here), _drain(two, there))
+    await engine.polling.wait()
+    due = timers.armed[0]
+
+    engine.released.set()
+    # Yielded turn by turn rather than awaited on an event, because what is wanted is
+    # the *narrowest* window in which the call has finished and its caller has not
+    # resumed — an event would be one more scheduling step wide, which is the whole of
+    # what this case is about.
+    for _ in range(_TURNS):
+        await asyncio.sleep(0)
+        if not engine.polling.is_set():
+            break
+    # The window: the call has returned and no value has reached any stream.
+    assert here == []
+    assert there == []
+    timers.fire_all()
+    for _ in range(4):
+        await asyncio.sleep(0)
+
+    assert due.cancelled is True
+    assert [value["kind"] for value in here] == ["notification"]
+    assert [value["kind"] for value in there] == ["notification"]
+    assert not one.abandoned.is_set()
+    assert not two.abandoned.is_set()
     fan_out.shutdown()
     await reading
