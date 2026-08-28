@@ -900,10 +900,12 @@ coverage.**
 > construction, which is §6's third arm and the shape #1699 measured; and (h) §5's
 > retention clause holds over the park branch — no audio, neither the utterance nor
 > the rendering of §2's sentence, reaches any store, index, trace, audit trail,
-> routing trail, outbox or log — asserted over the same durable surfaces
+> routing trail, outbox or log — asserted over §5's **whole** enumeration and not
+> over a smaller set: the memory store, the audit trail, the source-read trail, the
+> conversation store and both log tiers, which
 > `tests/orchestration/test_converse_spoken.py::test_no_audio_reaches_any_store_trail_or_log`
-> already reads, which drives an answered turn and therefore never enters this
-> branch. Row (g) is
+> already reads, **and the `RoutingTrail` and the `NotificationOutbox`, which it does
+> not**. Row (g) is
 > pinned over **both** of §1's shapes, the step park and the routed one, as (a) and
 > (b) are: §6's third arm ranges over §1's definition and not over one member of
 > it, and an arm that refused the silent step park while admitting the silent
@@ -912,13 +914,22 @@ coverage.**
 
 **Row (h) exists because §5's retention clause acquires a new subject and no
 existing test reaches it.** ADR-0200 §8 and §5 above already forbid retaining the
-rendering, and nothing in this decision relaxes them — but the test that reads
-every durable surface for audio drives an answered turn, so an implementation
-that synthesised the sentence correctly on both parks and logged the octets in
-the park branch alone would satisfy rows (a) through (g) and breach §5. Row (f)
-guards the way *in* to the synthesizer; row (h) guards the way *out* of it, and
-the two together are what make the branch's disclosure properties tested rather
-than asserted.
+rendering, and nothing in this decision relaxes them — but the nearest existing
+test drives an *answered* turn, so an implementation that synthesised the
+sentence correctly on both parks and logged the octets in the park branch alone
+would satisfy rows (a) through (g) and breach §5. Row (f) guards the way *in* to
+the synthesizer; row (h) guards the way *out* of it, and the two together are
+what make the branch's disclosure properties tested rather than asserted.
+
+**Row (h) is stated as §5's enumeration rather than as "the surfaces that test
+reads", and the difference is the point.** That test's surfaces are the ones an
+answered turn can reach; §5's list is longer, and the two sinks it adds are
+exactly the ones the *routed* park introduces — a routed park runs the routing
+stage, so a `RoutingTrail` record is written on that path and is a sink no
+answered-turn test has ever had a reason to read, and ADR-0206's delivery
+direction makes the `NotificationOutbox` the other. Naming a test as the measure
+of a rule would let the rule shrink to the test; the rule is §5's sentence, and
+row (h) reads every sink it names.
 
 > **Normative.** Both park shapes are exercised in the **shared `AssistantEngine`
 > conformance suite** (`tests/orchestration/assistant_engine_contract.py`), so the
