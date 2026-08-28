@@ -13,6 +13,16 @@ proving the build is offline; and in-process the whole build runs inside
 :func:`network_denied`, so "no fetch" is asserted rather than inferred from a
 warm cache.
 
+Each distribution carries the whole vendored artifact set — 263 MiB since
+ADR-0200 §13 added the two speech models beside the embedding model — so the
+builds are done **once per run** and shared, rather than once per pytest session.
+A session fixture is not enough on its own: ``just test-fast`` runs a session per
+xdist worker, so every worker that happened to draw one of these tests built its
+own wheel, sdist and sdist-derived wheel. The build now happens under a lock in
+the run-wide temp root, the directory above the per-worker ones, which is the
+pattern pytest-xdist documents for exactly this; a serial run has that root to
+itself and simply builds (issue #1682).
+
 The tests that build or load a distribution are skipped when the artifact is not
 staged. A staged artifact is the normal state of a working tree — ``uv sync``
 builds the project, which runs the hook — so on a developer machine and in CI
@@ -23,11 +33,15 @@ still run in a fresh clone, where ADR-0024 §4 leaves the artifact absent.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import email.parser
+import fcntl
 import hashlib
 import importlib.metadata
+import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -95,42 +109,138 @@ def _built_in(directory: Path) -> Iterator[None]:
         yield
 
 
-@pytest.fixture(scope="session")
-def checkout_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A wheel built from this git checkout, with the network denied throughout."""
-    _require_the_staged_artifact()
-    out = tmp_path_factory.mktemp("checkout-wheel")
-    with _built_in(_PROJECT_ROOT):
-        name = build_wheel(str(out))
-    return out / name
+#: The subdirectory of the run-wide temp root that the shared build writes into.
+_SHARED_BUILD = "packaging-distributions"
+
+#: Written last, inside the lock, recording what was built. Its presence is what
+#: tells the next worker the build *finished* rather than merely started, so a
+#: build that died halfway is rebuilt rather than half-read.
+_BUILT = "built.json"
 
 
-@pytest.fixture(scope="session")
-def sdist(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """An sdist built from this git checkout, with the network denied throughout."""
-    _require_the_staged_artifact()
-    out = tmp_path_factory.mktemp("sdist")
-    with _built_in(_PROJECT_ROOT):
-        name = build_sdist(str(out))
-    return out / name
+@dataclasses.dataclass(frozen=True)
+class _Distributions:
+    """The three real distributions this module looks inside."""
+
+    checkout_wheel: Path
+    sdist: Path
+    sdist_wheel: Path
 
 
-@pytest.fixture(scope="session")
-def sdist_wheel(sdist: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A wheel built from the unpacked sdist — the ``--no-binary`` install path.
+def _run_root(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The temp directory shared by every worker of *this* run, and by no other run.
 
-    The one that would expose a hook configured for the wheel target only, or an
-    sdist that shipped the code but not the artifact: this build has no git
-    checkout to fetch from and no network to fetch over.
+    Under ``pytest-xdist`` a worker's basetemp is a ``popen-gw*`` directory inside
+    the run's own basetemp, so the parent is the run root; a serial run's basetemp
+    already is one. `tests/conftest.py` recognises a worker by the same attribute,
+    which xdist sets on the worker's config and on nothing else.
     """
-    unpacked = tmp_path_factory.mktemp("sdist-unpacked")
+    base = tmp_path_factory.getbasetemp()
+    return base.parent if hasattr(request.config, "workerinput") else base
+
+
+@contextlib.contextmanager
+def _exclusively(lock: Path) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on *lock* for the block.
+
+    ``fcntl`` rather than ``filelock``, which this project does not declare as a
+    dependency, and which `service/lock.py` did not need either. The kernel drops
+    the lock when the descriptor closes, so a worker killed mid-build releases it
+    without leaving the others waiting on a lock nobody holds.
+    """
+    with lock.open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _build_the_distributions(into: Path) -> _Distributions:
+    """Build the wheel, the sdist, and the wheel from that sdist, all under *into*.
+
+    The sdist-derived wheel is the ``--no-binary`` install path: the one that
+    would expose a hook configured for the wheel target only, or an sdist that
+    shipped the code but not the artifact. It builds from the unpacked sdist,
+    which has no git checkout to fetch from and no network to fetch over.
+    """
+    checkout_wheel_dir = into / "checkout-wheel"
+    checkout_wheel_dir.mkdir(parents=True, exist_ok=True)
+    with _built_in(_PROJECT_ROOT):
+        checkout_wheel = checkout_wheel_dir / build_wheel(str(checkout_wheel_dir))
+
+    sdist_dir = into / "sdist"
+    sdist_dir.mkdir(parents=True, exist_ok=True)
+    with _built_in(_PROJECT_ROOT):
+        sdist = sdist_dir / build_sdist(str(sdist_dir))
+
+    unpacked = into / "sdist-unpacked"
+    shutil.rmtree(unpacked, ignore_errors=True)  # a previous attempt may have died here
     with tarfile.open(sdist) as archive:
         archive.extractall(unpacked, filter="data")  # built by this test
     (root,) = list(unpacked.iterdir())
-    out = tmp_path_factory.mktemp("sdist-wheel")
+    sdist_wheel_dir = into / "sdist-wheel"
+    sdist_wheel_dir.mkdir(parents=True, exist_ok=True)
     with _built_in(root):
-        name = build_wheel(str(out))
-    return out / name
+        sdist_wheel = sdist_wheel_dir / build_wheel(str(sdist_wheel_dir))
+    # The unpacked sdist is a build *input* holding a fourth copy of the same
+    # vendored bytes, and nothing reads it once the wheel is out of it (#1682).
+    shutil.rmtree(unpacked)
+
+    return _Distributions(checkout_wheel=checkout_wheel, sdist=sdist, sdist_wheel=sdist_wheel)
+
+
+@pytest.fixture(scope="session")
+def built_distributions(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> _Distributions:
+    """The three distributions, built once per run and shared across xdist workers.
+
+    The first worker to arrive builds them; the rest block on the lock and then
+    read what it left. Nothing mutates the built files afterwards, so reading them
+    outside the lock is safe — and the recorded names are read *inside* it, so a
+    reader cannot see a half-written record.
+    """
+    _require_the_staged_artifact()
+    root = _run_root(request, tmp_path_factory)
+    shared = root / _SHARED_BUILD
+    shared.mkdir(parents=True, exist_ok=True)
+    built = shared / _BUILT
+    with _exclusively(root / f"{_SHARED_BUILD}.lock"):
+        if not built.is_file():
+            distributions = _build_the_distributions(shared)
+            built.write_text(
+                json.dumps(
+                    {
+                        "checkout_wheel": distributions.checkout_wheel.relative_to(
+                            shared
+                        ).as_posix(),
+                        "sdist": distributions.sdist.relative_to(shared).as_posix(),
+                        "sdist_wheel": distributions.sdist_wheel.relative_to(shared).as_posix(),
+                    }
+                )
+            )
+        recorded: dict[str, str] = json.loads(built.read_text())
+    return _Distributions(
+        checkout_wheel=shared / recorded["checkout_wheel"],
+        sdist=shared / recorded["sdist"],
+        sdist_wheel=shared / recorded["sdist_wheel"],
+    )
+
+
+@pytest.fixture(scope="session")
+def checkout_wheel(built_distributions: _Distributions) -> Path:
+    """A wheel built from this git checkout, with the network denied throughout."""
+    return built_distributions.checkout_wheel
+
+
+@pytest.fixture(scope="session")
+def sdist(built_distributions: _Distributions) -> Path:
+    """An sdist built from this git checkout, with the network denied throughout."""
+    return built_distributions.sdist
+
+
+@pytest.fixture(scope="session")
+def sdist_wheel(built_distributions: _Distributions) -> Path:
+    """A wheel built from the unpacked sdist — the ``--no-binary`` install path."""
+    return built_distributions.sdist_wheel
 
 
 def _wheel_members(wheel: Path) -> Mapping[str, bytes]:
@@ -284,10 +394,20 @@ async def test_the_packaged_artifact_embeds_with_the_network_denied(
     ONNX Runtime cannot load. The embedder code is this checkout's, which is the
     same code the wheel contains; what the wheel uniquely contributes, and what
     is under test here, is the data.
+
+    Only the members under that path are unpacked, at the same relative paths the
+    wheel records them under: the embedder reads nothing else, and unpacking the
+    whole wheel wrote a further 263 MiB of speech artifacts into the run's temp
+    tree per parametrisation (#1682). A wheel that packaged the artifact anywhere
+    else still fails here — there is then nothing to unpack and nothing to load —
+    which is why the emptiness is asserted rather than left to the loader.
     """
     wheel: Path = request.getfixturevalue(wheel_fixture)
+    prefix = f"ai_assistant/{_ARTIFACT_IN_PACKAGE.as_posix()}/"
     with zipfile.ZipFile(wheel) as archive:
-        archive.extractall(tmp_path)  # noqa: S202  # built by this test
+        members = [name for name in archive.namelist() if name.startswith(prefix)]
+        assert members, f"the wheel carries nothing under {prefix}"
+        archive.extractall(tmp_path, members)  # noqa: S202  # built by this test
     unpacked = tmp_path / "ai_assistant" / _ARTIFACT_IN_PACKAGE
     monkeypatch.setattr(fastembed_embedder, "packaged_artifact_dir", lambda: unpacked)
 
