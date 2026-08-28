@@ -17,9 +17,10 @@
 - **Partially supersedes:**
   [ADR-0199](0199-the-audience-of-the-output-channel-decides-what-may-be-said-and-a-withheld-class-is-deflected-rather-than-redacted.md)
   — §3's third clause, the placement of speakable classes, **scoped to exactly one
-  case**: a record whose provenance records that the supply its producing turn ran
-  over held content §3 withholds from a channel of unbounded audience. Such a
-  record is withheld from that channel however §3's third clause would place it.
+  case**: a record whose provenance records that content §3 withholds from a channel
+  of unbounded audience stood in its warrant — by §2's direct route or §5's
+  inherited one, which §1 makes exhaustive. Such a record is withheld from that
+  channel however §3's third clause would place it.
   Every other record §3 places is placed unchanged, no class is unplaced, no class
   becomes speakable, and §3's first, second and fourth through eighth clauses are
   untouched — the Tier 0 floor, the withheld list, the notification key, the
@@ -671,8 +672,9 @@ and two more classes. A captured episode is the first of those by construction
 (ADR-0074 §4), so a reader holding only ADR-0199 supplies a stamped episode to a
 channel of unbounded audience; after this decision they withhold it. Acting
 differently again, so a supersession, and **narrow**: it is scoped to a record
-carrying this ADR's field set, and every other record §3's third clause places is
-placed unchanged.
+carrying this ADR's field set — by either of §1's two routes, so a belief derived
+from a stamped episode is inside the scope as squarely as the episode is — and
+every other record §3's third clause places is placed unchanged.
 
 **ADR-0199 §2 — no record is owed, and this is the judgement a reviewer should
 check first.** Its first clause enumerates what a class is decided from, and one
