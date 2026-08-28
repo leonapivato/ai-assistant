@@ -255,9 +255,16 @@ mention that is not a definition tells a PR nothing it could act on.
 > same range ADR-0027 §2's patch identity is computed on, re-anchored to `HEAD`'s
 > parent where ADR-0165 §3 re-anchors that loop. The **PR's text** is the added
 > and removed lines of that diff together with the PR description as GitHub holds
-> it when the acceptance rule runs. The **PR's files** are the complete contents,
-> at both endpoints, of every path that diff touches. A **moved file's text** is
-> that file's whole content at each endpoint of the move that exists.
+> it when the acceptance rule runs. The **PR's files** are the complete contents
+> of every path that diff touches, at each of that path's two endpoints **that
+> exists**. A **moved file's text** is that file's whole content at each endpoint
+> of the move that exists.
+
+> **Normative.** An endpoint that does not exist is not a failure to read one. A
+> file the PR adds has no base-side endpoint, a file it deletes no head-side one,
+> and a rename has one of each under two names; each is read on the side it has,
+> and §6's fail-closed rule reaches only an endpoint that exists and cannot be
+> read.
 
 > **Normative.** The extractions are `scripts/brief_check.py`'s, reused and not
 > restated: `ADR-NNNN` by `_ADR_RE`, backticked tokens by `_BACKTICK_RE`, and
@@ -291,6 +298,14 @@ names `MemoryStore` in that file whether the class header sits three lines above
 the hunk or three hundred, so nothing here turns on how much context `git diff`
 was asked for. A PR adding an unrelated `ingest` to a file that never mentions
 `MemoryStore` binds nothing.
+
+**Absence and unreadability are different, and only one of them binds.** A PR
+that adds a file has no base-side content for it, which is the ordinary shape of
+adding a file rather than evidence that anything went wrong; reading it as a
+failed read would charge a round on every PR that adds a file. So the rule reads
+the sides a path has and no more. What §6 binds on is the other case — an
+endpoint that exists and will not come back — where the input the test needs is
+genuinely missing and clearing would be a guess.
 
 **A qualifier may be a module rather than a class, so the path answers too.**
 `classify` returns a symbol for `memory.store.SqliteStore` exactly as it does for
@@ -529,8 +544,10 @@ documents that restate the rule:
   it),
   against a PR that touches a file naming `Class` without adding or removing
   `member` (free), and against a PR whose diff names only the qualifier (free);
-  an unreadable PR file, an unreadable endpoint and an unretrievable PR
-  description (owed);
+  a PR that **adds** the file carrying the cited member and one that **deletes**
+  it, each judged on the endpoint it has and neither charged as a failed read; an
+  unreadable PR file, an unreadable endpoint and an unretrievable PR description
+  (owed);
   and every existing ADR-0027 §§2–4 case still refusing exactly as it does today.
 
 ## Alternatives considered
