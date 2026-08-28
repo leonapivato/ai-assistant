@@ -276,6 +276,18 @@ What it changes is what a future edit to that file costs — an edit written in 
 spelling the project uses in three other modules would otherwise silently move
 the limb from unconditional to occasional.
 
+**A spelling the clause does not name resolves to nothing, and so it binds.** A
+wildcard `from typing import *`, a subscripted base, a `Protocol` re-exported
+through a module of this repository — none of them is bound to `typing.Protocol`
+by a form the clause names, so each falls to the clause's last sentence and to §6
+and costs the round. That is deliberately where they land rather than an
+oversight: it is over-binding, on a file that changes rarely and behind its own
+merged ADR each time, and §5 states the asymmetry this ADR runs on —
+"over-binding is the cost this ADR accepts and prices; under-binding is the
+failure it must not have". Naming more spellings would be adding parse cases to
+buy back rounds on a file that costs almost none; if that ever bites, the
+implementation lane can say so with a case in hand.
+
 **The limb is scoped to `core/protocols.py` deliberately.** A field added to a
 `core/types.py` model, or a new value class there, obliges no open PR to do
 anything: the "now should consume" hazard is a *Protocol* hazard, and golden rule
@@ -308,8 +320,8 @@ mention that is not a definition tells a PR nothing it could act on.
 > **Normative.** An endpoint that does not exist is not a failure to read one. A
 > file the PR adds has no base-side endpoint, a file it deletes no head-side one,
 > and a rename has one of each under two names; each is read on the side it has,
-> and §6's fail-closed rule reaches only an endpoint that exists and cannot be
-> read.
+> and §6's fail-closed rule reaches, among endpoints, only one that exists and
+> cannot be read.
 
 > **Normative.** The extractions are `scripts/brief_check.py`'s, reused and not
 > restated: `ADR-NNNN` by `_ADR_RE`, backticked tokens by `_BACKTICK_RE`, and
@@ -416,14 +428,17 @@ pre-artifact edit and the removal of a citation that bound nothing. What follows
 is a lane's obligation and **not** a claim that the acceptance rule got the
 answer wrong: the rule reads the description in front of it and is right to, the
 removal is not observable to it, and §6 does not reach it because nothing failed
-to be read. A PR can therefore be cleared by the rule and still owe the round
-under this clause — which is the ordinary shape of a conduct rule, not a
-contradiction, and it is why the obligation names the lane rather than `ship`. Binding the description *mechanically* to the recorded
-artifact — snapshotting the retrieved body and refusing a cleared floor when it
-has changed — is the stronger answer and is deliberately not taken here: it
-would put a second input into every review artifact, which is a change to what
-`scripts/codex-review.sh` records rather than to what the floor test decides. It
-is filed as #1750 against the implementation.
+to be read and nothing was undecidable. A PR can therefore be cleared by the rule
+and still owe the round under this clause — which is the ordinary shape of a
+conduct rule, not a contradiction, and it is why the obligation names the lane
+rather than `ship`.
+
+**The mechanical alternative is declined here.** Binding the description
+*mechanically* to the recorded artifact — snapshotting the retrieved body and
+refusing a cleared floor when it has changed — is the stronger answer and is
+deliberately not taken here: it would put a second input into every review
+artifact, which is a change to what `scripts/codex-review.sh` records rather than
+to what the floor test decides. It is filed as #1750 against the implementation.
 
 **The extraction reads fenced blocks too.** `brief_check` strips them for its own
 purpose — reporting a brief's broken citations — where a false positive is the
@@ -434,9 +449,14 @@ accepts and prices; under-binding is the failure it must not have.
 
 ### 6. Fail closed, disclose either way, and one implementation
 
-> **Normative.** A test that cannot be computed binds. An unreadable endpoint, an
-> unparseable listing, a PR description that cannot be retrieved, and any error
-> reaching the extraction each make the round owed.
+> **Normative.** Where a test this decision states cannot be evaluated, the base
+> move binds. This clause governs every test in §§2–5 and every judgement this
+> section asks for, and it is a rule rather than a list: a parse failure at
+> either endpoint, a name whose binding cannot be resolved, an import the
+> resolver cannot follow, an unreadable file, an unreadable endpoint, an
+> unparseable base-move listing, a PR description that cannot be retrieved and
+> any other error reaching the extraction are instances of it — and so is an
+> undecidable case this ADR does not name.
 
 > **Normative.** One implementation of §§1–5 serves `scripts/ship.sh`'s
 > acceptance loop and its `--drill` mode alike, never two statements of one rule.
@@ -446,6 +466,31 @@ accepts and prices; under-binding is the failure it must not have.
 > rendering, and a set that does not fit the publishing budget still makes path
 > (b) unavailable. The record additionally names, for each floor path in the set,
 > the test that bound it or that every test cleared it.
+
+**The fail-closed clause is stated as a rule, and that is deliberate.** It
+replaces a clause that enumerated four inputs, and it keeps all four; what it
+adds is that the enumeration is no longer the boundary. Every test above is a
+claim about text a later change will write — §3's about ADR prose, §4's about
+Python syntax, §5's about a diff and a description GitHub renders — and the case
+that defeats such a test is by construction the one nobody thought of. An
+enumeration is therefore a proxy for the property that is wanted, and it decays
+exactly the way ADR-0199 §3 says a permissive default decays: "the next source to
+land — a health integration, a message reader, a photograph — is speakable on the
+day it merges, by omission". §3 inverts that by naming the speakable set so that
+"an unplaced class is withheld", and ADR-0021 §5 makes the same move for its two
+policy floors, which it writes "against the distinction that matters rather than
+against a proxy for it". This clause is that shape for this mechanism: the cost
+of a case this ADR did not foresee is a round bought, never a review reused.
+
+**It is fail-closed twice over, in ADR-0021 §5's sense, and both statements are
+kept on purpose.** §4's structural limb says for itself that an unparseable
+endpoint binds and that an unresolvable base binds; this clause says that
+anything else undecidable binds too. Under ADR-0089 §3 a clause states its own
+scope and cannot borrow one from text below it, so a reader of §4 alone must
+reach the safe answer without §6 — while a reader who arrives at an input §4
+never contemplated must still find one sentence that settles it. The overlap is
+the redundancy that buys both, and the cross-reference in §4's structural limb
+names where the general rule lives rather than restating it.
 
 The single-implementation clause is ADR-0165 §6's principle applied to a second
 rule, and #751 is why it is normative rather than advisory: a hand-built replica
@@ -659,6 +704,9 @@ as qualified, as ADR-0027 left it.
 > - A PR that **adds** the file carrying the cited member, and one that
 >   **deletes** it, each judged on the endpoint it has and neither charged as a
 >   failed read.
+> - A class in `core/protocols.py` whose base resolves neither to
+>   `typing.Protocol` nor to a class the same file declares (owed — §4's
+>   unresolvable-binding limb, which is §6's rule reached through §4).
 > - An unreadable PR file, an unreadable endpoint, an unparseable base-move
 >   listing, an unretrievable PR description, and any other error reaching the
 >   extraction (owed — §6's fail-closed inputs, each tested on its own).
