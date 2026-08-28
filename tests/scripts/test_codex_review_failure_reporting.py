@@ -21,7 +21,10 @@ detached log ``--wait`` prints as its evidence for exit 4.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -36,6 +39,7 @@ from _fake_codex import SCRIPT, artifact_for, bash, run_review
 from test_codex_review_start_wait import NOT_IN_FLIGHT, _env, _fields, _git, _init_repo, _run
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from subprocess import CompletedProcess
 
 
@@ -157,6 +161,58 @@ def _loop_lock(repo: Path, base: str = "main") -> Path:
     return session / f"{key}.lock"
 
 
+#: Long enough that nothing below can outlast it, because nothing below waits for
+#: it: the hold is ended by releasing it, not by its expiry.
+_HOLD_SECONDS = 120
+
+
+@contextlib.contextmanager
+def _the_loop_lock_held(repo: Path) -> Iterator[None]:
+    """Hold this repo's review-loop lock for the body, and release it on the way out.
+
+    That is the on-disk state the two tests below are about: a round alive and
+    blocked short of its claim, which is the slow case ``--start``'s grace-expiry
+    message describes.
+
+    **Entered only once the lock really is held**, established by failing to take
+    it rather than by assuming the child was scheduled. A holder still starting up
+    would let the round take the lock, claim, and pass — with the test asserting on
+    a message about a case it never reached.
+
+    **Released by signalling the whole process group.** ``flock(1)`` forks and
+    execs the command it is given, and the lock is on a descriptor both processes
+    hold, so terminating the ``Popen`` handle leaves the grandchild holding it for
+    the rest of its sleep. Everything downstream that needs the lock then waits out
+    that sleep: with a 20-second hold, both tests took 20 seconds each, waiting on
+    a lock nothing was using (measured on this branch, `--durations`: 20.91 s and
+    20.76 s). Killing the group makes the hold end when the body ends, which is
+    what it was always meant to mean, and lets the duration be generous instead of
+    load-bearing.
+    """
+    flock = shutil.which("flock")
+    assert flock is not None
+    lock = _loop_lock(repo)
+    holder = subprocess.Popen(  # noqa: S603  # resolved flock, test-controlled path
+        [flock, str(lock), "sleep", str(_HOLD_SECONDS)], start_new_session=True
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            taken = subprocess.run(  # noqa: S603  # resolved flock, test-controlled path
+                [flock, "-n", str(lock), "true"], check=False, capture_output=True
+            )
+            if taken.returncode != 0:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("the holder never took the review-loop lock")
+        yield
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(holder.pid), signal.SIGTERM)
+        holder.wait()
+
+
 @pytest.mark.skipif(shutil.which("flock") is None, reason="the loop lock needs flock")
 def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     tmp_path: Path,
@@ -175,16 +231,8 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _env(tmp_path, CODEX_REVIEW_START_GRACE="1")
-    flock = shutil.which("flock")
-    assert flock is not None
-    holder = subprocess.Popen(  # noqa: S603  # resolved flock, test-controlled path
-        [flock, str(_loop_lock(repo)), "sleep", "20"]
-    )
-    try:
+    with _the_loop_lock_held(repo):
         started = _run(repo, env, "--start", "adversarial", "main")
-    finally:
-        holder.terminate()
-        holder.wait()
 
     assert started.returncode == 1
     assert "failed at startup" not in started.stderr
@@ -322,12 +370,7 @@ def test_the_liveness_check_reads_a_clone_path_as_data_not_as_syntax(
     repo = tmp_path / "repo"
     _init_repo(repo)
     env = _env(tmp_path, CODEX_REVIEW_START_GRACE="1")
-    flock = shutil.which("flock")
-    assert flock is not None
-    holder = subprocess.Popen(  # noqa: S603  # resolved flock, test-controlled path
-        [flock, str(_loop_lock(repo)), "sleep", "20"]
-    )
-    try:
+    with _the_loop_lock_held(repo):
         started = subprocess.run(  # noqa: S603  # resolved bash, test-controlled copy
             [bash(), str(script), "--start", "adversarial", "main"],
             cwd=repo,
@@ -348,9 +391,6 @@ def test_the_liveness_check_reads_a_clone_path_as_data_not_as_syntax(
         # lock. This is the assertion the `pgrep -f` form failed.
         assert f"{script} adversarial" in _shell(command, tmp_path).stdout
         assert not (tmp_path / "pwned").exists()
-    finally:
-        holder.terminate()
-        holder.wait()
 
     # Once the round is genuinely gone the same command says so, by printing
     # nothing at all — which is the half that makes "no match" mean something.
