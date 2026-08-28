@@ -3672,6 +3672,16 @@ const PLAYBACK_INTERRUPTED =
   "You pressed to talk, so this answer stopped being spoken. Nothing of the answer is " +
   "missing — what is above is all of it.";
 
+// The press that ended a playback and then asked nothing (#1701, the owner's direction
+// of 2026-08-28). Written into the slot the sentence above was written into, because it
+// **replaces** it: an answer that picked up where it stopped did not stop being spoken,
+// and leaving the earlier sentence standing would be the page's account of the sound
+// disagreeing with the sound.
+const PLAYBACK_RESUMED =
+  "That press asked nothing, so this answer picked up where the sound stopped. It is " +
+  "the same answer, played on from there rather than started again — nothing was " +
+  "re-asked and no new turn ran.";
+
 // What stopping a spoken wait says. #1500's condition on the third entry, and the
 // wording is `ASK_ABANDONED`'s because the state is the same one: the request went out
 // and no response was read, so the turn may have run and was certainly never called
@@ -3739,7 +3749,23 @@ function readyToPlay() {
 // interrupt has to reach a playback that has no source yet: `playSpoken` awaits a resume
 // and a decoder before it has anything to stop, and a press landing in that window must
 // leave nothing behind that will start afterwards.
+//
+// **What a record carries**, beside the source and the slot the notices go into: the
+// decoded `buffer`, the `offset` into it the current source started at, the audio
+// context's `startedAt` instant it started on, and `played` — where the sound had
+// reached when the playback ended, stamped by whichever ending got there. Together they
+// answer "how much of this answer sounded" from the record alone, which is what
+// `playedSoFar` reads and what #1705 needs answered in the window a second `ended`
+// listener cannot reach.
 let playing = null;
+
+// **The playback a press ended that may turn out to have been an accident** (#1701), or
+// `null` where there is none. Held from the press until the answer to it comes back,
+// because whether the press asked anything is not known until then: ADR-0200 §4's
+// no-words release is the one ending that resumes it, and every other ending drops it —
+// which `interruptPlayback` does at the top of every press, before anything decides to
+// keep one.
+let held = null;
 
 // **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
 // iPhone). Pressing to talk over an answer that is still being spoken is the same act as
@@ -3758,9 +3784,32 @@ let playing = null;
 // them only on the presses that happened to record would be answering a different act.
 function interruptPlayback() {
   const ended = stopPlaying();
-  if (ended !== null) {
-    playbackInterrupted(ended.slot);
+  // **Dropped on every press, before anything decides to keep one.** What `held` names
+  // is this press's playback or it is nothing: a press that goes on to ask a question,
+  // or that never reaches a recorder at all, must not leave a buffer behind for some
+  // later press's silence to resume.
+  held = null;
+  if (ended === null) {
+    return;
   }
+  // **A playback that had already elapsed was not interrupted** (#1705). `ended` is a
+  // queued task and not a synchronous callback, so a source that reached its natural end
+  // still names itself in `playing` for the moments between the two — and a press
+  // landing there found a record, stopped a source that had already finished, and wrote
+  // "this answer stopped being spoken" under an answer that had been heard in full. The
+  // sentence was wrong about a few milliseconds of the world, which is a small thing to
+  // be wrong about and the page's own account of the sound to be wrong in.
+  //
+  // Decided from where the sound had reached, which `stopPlaying` has just stamped, and
+  // not from a second listener: the whole of the window is *before* the queued one runs.
+  if (playbackElapsed(ended)) {
+    return;
+  }
+  playbackInterrupted(ended.slot);
+  // Kept for the release that turns out to have asked nothing (#1701). Nothing here
+  // resumes it — this runs inside the press, and whether that press was an accident is
+  // not known until its answer comes back.
+  held = ended;
 }
 
 // End whatever is in the air, let go of the record, and hand back what it named — or
@@ -3775,6 +3824,10 @@ function stopPlaying() {
   // Cleared first, so a decode this overtook finds the record already gone and starts
   // nothing — see `playSpoken`, where that comparison is made.
   playing = null;
+  // **Where the sound had reached, stamped before the source is stopped.** After `stop()`
+  // there is no clock left to read it from, and both callers that need it run afterwards:
+  // the notice this ending may owe (#1705) and the resume that may follow it (#1701).
+  mine.played = playedSoFar(mine);
   if (mine.source !== null) {
     try {
       mine.source.stop();
@@ -3785,6 +3838,44 @@ function stopPlaying() {
     mine.source = null;
   }
   return mine;
+}
+
+// How much of a playback's buffer has sounded, in seconds: what was already behind its
+// source when that source started, plus what the audio context's clock has advanced
+// since.
+//
+// **The context's clock and not the page's.** `currentTime` advances with the audio the
+// context is playing, so a context the browser suspended part-way through accrues no
+// playback nobody heard — which a wall clock would. Clamped to the buffer, because a
+// source that has run past its end goes on advancing `currentTime` and what is being
+// asked about is the answer and not the clock.
+//
+// **One value whatever ended the playback, and one across a resume.** A resumed playback
+// starts with the interrupted one's reading as its `offset` (#1701), so an answer taken
+// up again and allowed to finish reads as the whole buffer rather than as the remainder
+// — which is what "played N of M s" has to mean for the report ADR-0205 §7 defines to be
+// able to say `COMPLETE` of it.
+function playedSoFar(mine) {
+  if (mine.buffer === null) {
+    return 0;
+  }
+  if (mine.source === null || listeningContext === null) {
+    return mine.offset;
+  }
+  const sounded = mine.offset + (listeningContext.currentTime - mine.startedAt);
+  return Math.min(Math.max(sounded, 0), mine.buffer.duration);
+}
+
+// Whether a playback reached the end of its buffer, read off the two values its record
+// carries. **Answerable in the window a second `ended` listener cannot reach** (#1705):
+// the whole of that window is between the natural end and the queued task, so what
+// decides it has to be arithmetic over the clock rather than another event.
+//
+// A record with no buffer has not elapsed and cannot have: it is a playback whose decode
+// the press overtook, which never sounded at all and is an interruption exactly as one
+// cut off mid-sentence is.
+function playbackElapsed(mine) {
+  return mine.buffer !== null && mine.played >= mine.buffer.duration;
 }
 
 // The press being served, or `null` between presses.
@@ -4178,6 +4269,11 @@ function renderSpokenTurn(turn, chosenAt) {
   if (turn.outcome === null) {
     heardWas(null);
     saying(HEARD_NOTHING);
+    // The press ended a playback and then asked nothing, which is the accident #1701 is
+    // about: the answer that was sounding is still the answer, so it is given back where
+    // it stopped rather than left stopped. Here rather than in `sendRecording`, because
+    // this is the one place that knows the release carried no words.
+    resumeInterrupted();
     return;
   }
   heardWas(turn.heard);
@@ -4232,7 +4328,7 @@ async function playSpoken(spoken, slot) {
   // interrupted; and that is exactly why the invariant is held here rather than left to
   // be inferred from the only caller there happens to be today.
   stopPlaying();
-  const mine = { source: null, slot };
+  const mine = { source: null, slot, buffer: null, offset: 0, startedAt: 0, played: 0 };
   playing = mine;
   try {
     // **The press's resume, awaited rather than assumed** (#1690). `readyToPlay` starts
@@ -4264,19 +4360,8 @@ async function playSpoken(spoken, slot) {
     if (playing !== mine) {
       return;
     }
-    const source = context.createBufferSource();
-    source.buffer = decoded;
-    source.connect(context.destination);
-    // Cleared where the playback ends of its own accord, so the next press does not
-    // report an answer that finished as one it interrupted. `ended` fires on `stop()`
-    // too, where the record has already moved on and the identity check is what says so.
-    source.addEventListener("ended", () => {
-      forgetPlaying(mine);
-    });
-    source.start();
-    // After `start`, because a source that has not started cannot be stopped and a
-    // record naming one would have `interruptPlayback` throw rather than interrupt.
-    mine.source = source;
+    mine.buffer = decoded;
+    soundFrom(context, mine, 0);
   } catch (_) {
     // **Only while this is still the playback in the air.** An interrupt has already
     // said what happened, in the one place that knows it was an act rather than a
@@ -4286,6 +4371,87 @@ async function playSpoken(spoken, slot) {
       couldNotPlay(slot);
     }
   }
+}
+
+// Start the record's buffer sounding from `offset` seconds in, and take the source onto
+// the record.
+//
+// **The one place a playback begins.** Where it started and how much of the buffer is
+// already behind it are written where the source is started, so the two cannot drift
+// apart — a first playing passes zero, and a resume passes what the press it is
+// recovering from had already sounded (#1701).
+function soundFrom(context, mine, offset) {
+  const source = context.createBufferSource();
+  source.buffer = mine.buffer;
+  source.connect(context.destination);
+  // Cleared where the playback ends of its own accord, so the next press does not report
+  // an answer that finished as one it interrupted. `ended` fires on `stop()` too, where
+  // the record has already moved on and been stamped — the identity check is what tells
+  // the two apart. A source that ended by itself played the whole buffer, and the record
+  // says so before it is let go, so `played` reads the same however the playback ended.
+  source.addEventListener("ended", () => {
+    if (playing !== mine) {
+      return;
+    }
+    mine.played = mine.buffer.duration;
+    forgetPlaying(mine);
+  });
+  mine.offset = offset;
+  mine.startedAt = context.currentTime;
+  source.start(0, offset);
+  // After `start`, because a source that has not started cannot be stopped and a record
+  // naming one would have `interruptPlayback` throw rather than interrupt.
+  mine.source = source;
+}
+
+// **The answer an accidental press ended, taken up where the sound stopped** (#1701, the
+// owner's direction of 2026-08-28). ADR-0200 §4's no-words release is the one ending
+// this runs on: nothing was asked, no turn ran, nothing was captured and no conversation
+// was created — so the press turned out to be an accident, and the answer on screen is
+// still the answer.
+//
+// **Page-locally, with no hub call.** The decoded buffer is still held and where it
+// stopped is still on the record, so the whole of this is one more source: nothing is
+// re-sent, nothing is re-rendered, and the interruption never reaches the hub as a gap
+// in a delivery it is told about — ADR-0205 §8 names this sibling and says why that is
+// legible, "a resume that never left the page produces no report".
+//
+// **A record of its own rather than the one the press ended.** The stopped source's
+// `ended` listener still names the old record, and a resume that reused it would hand
+// that queued task a live playback to let go of — the identity check that makes
+// `forgetPlaying` and the listener safe is exactly what a reused record defeats.
+//
+// **And where it cannot resume it leaves the interruption's own sentence standing**: a
+// context that is not running, a slot the next render detached, a source this browser
+// will not start. That sentence is true in each of those cases, which is why it is the
+// fallback rather than something to clear first.
+function resumeInterrupted() {
+  const mine = held;
+  held = null;
+  if (mine === null || mine.buffer === null || !mine.slot.isConnected) {
+    return;
+  }
+  const context = listeningContext;
+  if (context === null || context.state !== "running") {
+    return;
+  }
+  stopPlaying();
+  const resumed = {
+    source: null,
+    slot: mine.slot,
+    buffer: mine.buffer,
+    offset: 0,
+    startedAt: 0,
+    played: mine.played,
+  };
+  playing = resumed;
+  try {
+    soundFrom(context, resumed, mine.played);
+  } catch (_) {
+    forgetPlaying(resumed);
+    return;
+  }
+  playbackResumed(resumed.slot);
 }
 
 // Let go of a playback that is over, and only where it is still the one being held: a
@@ -4318,6 +4484,18 @@ function playbackInterrupted(slot) {
     return;
   }
   slot.textContent = PLAYBACK_INTERRUPTED;
+  slot.hidden = false;
+}
+
+// The resume, under the same rule and for the same reason, and its own function for the
+// same one: each notice reaches this panel through exactly one place, so a check can say
+// so of each. It writes over the interruption's sentence rather than beside it, because
+// the two are accounts of the same sound and only the later one is true.
+function playbackResumed(slot) {
+  if (!slot.isConnected) {
+    return;
+  }
+  slot.textContent = PLAYBACK_RESUMED;
   slot.hidden = false;
 }
 
