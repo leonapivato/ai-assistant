@@ -12,10 +12,14 @@ utterances through a live turn. *"What is my name?"* composed and was spoken bac
 *"What do I take in my coffee?"* reached `AWAITING_CONFIRMATION` in 4.9 s and said
 nothing at all: the planner had named a memory lookup, the selection stage found
 `recall_memory`, and that tool's `MEDIUM` risk drew a `CONFIRM` under the default
-policy. On the spoken channel a park is silence (ADR-0200 §4 — "`spoken` is `None`
-wherever `outcome.reply` is `None`"), so the owner held the button, asked, released,
-and heard nothing while a confirmation card appeared on a screen they were not
-looking at.
+policy. On the tree #1699 measured, a park on the spoken channel was silence
+(ADR-0200 §4 — "`spoken` is `None` wherever `outcome.reply` is `None`"), so the owner
+held the button, asked, released, and heard nothing while a confirmation card
+appeared on a screen they were not looking at. ADR-0207 §1 has since replaced that
+clause for this shape: such a pass now says one fixed sentence naming the screen. The
+silence is answered; **the park is not**. The owner still asked a question about
+their own memory and still did not get it answered, and that is what this decision
+is about.
 
 That reading is filed as **#1715**, with the owner's ruling on it: **unregister**.
 This ADR is that ruling written down. The useful capability the tool gestured at —
@@ -85,8 +89,9 @@ disputes the declaration.
 What the confirmation *buys* is the question. It gates a read of the owner's own
 store that the same turn has already performed ungated one stage earlier, at a
 larger and better-ordered budget, whose result is composed into nothing. It costs a
-park per firing — on the typed channel a card, on the spoken channel silence (#1699)
-— and #1715 records the honest summary: "The confirmation protects nothing: same
+park per firing — on the typed channel a card, on the spoken channel a card and,
+since ADR-0207 §1, a sentence naming it (#1699 measured the silence that preceded
+that ruling) — and #1715 records the honest summary: "The confirmation protects nothing: same
 data, same `search`, already read one stage earlier ungated; the result is composed
 into nothing."
 
@@ -391,10 +396,11 @@ dependencies and taking back a ready registry — stands whole; what is replaced
   the disclosure filter runs over the union, and the measurement that should decide
   whether it is worth building at all. Nothing in this ADR is cited toward that
   decision in either direction.
-- **Whether a parked spoken turn should say so aloud** — #1699's own question, and
-  an ADR-0200 §4 matter. This decision removes the most frequent cause of such a
-  park; it does not answer what a park should sound like, and the answer is owed
-  whatever else parks.
+- **What a parked spoken turn sounds like.** #1699 asked it and **ADR-0207** decided
+  it: one fixed sentence naming the screen, partially superseding ADR-0200 §4 for
+  that shape. This decision removes the most frequent cause of such a park and
+  changes nothing about how one is spoken; ADR-0207 governs that, unchanged and
+  uncited toward anything here.
 - **A memory *write* tool.** ADR-0048 §1 deferred `remember` with the
   side-effecting-idempotency question it carries, and that deferral is untouched.
   ADR-0053's refusal to alias a write intent onto a read is likewise untouched, and
@@ -445,7 +451,8 @@ obligates, and the prose beside them is read to determine what they mean.
 ## Consequences
 
 - **A memory question stops parking.** The most frequent `CONFIRM` on the turn path
-  disappears, and with it the spoken-channel silence #1699 measured. The answer is
+  disappears, and with it both the silence #1699 measured and the sentence ADR-0207
+  put in its place — a park that no longer happens needs neither. The answer is
   composed from the supply, which is where it was composed from all along.
 - **One relevance read per turn, at the site that has the machinery.** Band
   precedence, budgets, the kind filter, the episodic supplement and — on an
