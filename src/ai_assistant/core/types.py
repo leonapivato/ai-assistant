@@ -15374,8 +15374,20 @@ class SpokenTurn(BaseModel):
         type does not hold, and ``spoken_degraded`` beside a rendering would report
         a partial delivery a call that streams nothing cannot make.
 
+        **And an ``episode_id`` beside no outcome would name a turn that never ran**
+        (ADR-0205 §1). Its "exactly when" is a biconditional about the *call*, and
+        one direction of it is a property this type can hold: an id is present only
+        where a turn was recorded, and ``outcome`` being ``None`` proves none was.
+        The other direction is deliberately **not** enforced, because it is false of
+        a shape §1 admits — a capture whose index entry did not land leaves an
+        outcome standing beside no id. Refusing the first direction matters beyond
+        tidiness: the id is the name a device hands back on the next call, so a
+        result carrying one for a turn that never ran would invite a report against
+        a turn nothing can stamp.
+
         Raises:
-            ValueError: If the four members do not describe one of §4's shapes.
+            ValueError: If the five members do not describe one of §4's shapes, or
+                if an ``episode_id`` stands beside no outcome (ADR-0205 §1).
         """
         if (self.heard is None) != (self.outcome is None):
             msg = (
@@ -15401,6 +15413,13 @@ class SpokenTurn(BaseModel):
             msg = (
                 "spoken_degraded is never True beside a rendering: this call streams "
                 "nothing, so it has no partial rendering to carry (ADR-0200 §4)"
+            )
+            raise ValueError(msg)
+        if self.episode_id is not None and self.outcome is None:
+            msg = (
+                "episode_id names the episode recording the turn this call ran, and a "
+                "call with no outcome ran none: ADR-0205 §1 makes it None exactly when "
+                "the call recorded no turn, and the no-words pair is one of those cases"
             )
             raise ValueError(msg)
         return self

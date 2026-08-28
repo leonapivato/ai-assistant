@@ -27,7 +27,7 @@ from conversation_store_contract import (
 )
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
-from ai_assistant.core.types import ParkedBinding
+from ai_assistant.core.types import ParkedBinding, SpokenDelivery, SpokenDeliveryState
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -1485,6 +1485,60 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
         # connection rather than leaving it mid-transaction.
         marked = await store.mark_active(conversation.id)
         assert marked.id == conversation.id
+    finally:
+        store.close()
+
+
+async def test_a_delivery_duration_this_store_cannot_hold_is_this_seams_error(
+    tmp_path: Path,
+) -> None:
+    """ADR-0205 §3: ``ConversationStoreError`` "where the store cannot be written".
+
+    Adversarial review, round 1, ``blocker``. ``timedelta`` reaches ``timedelta.max``
+    — about 8.6e19 microseconds — which
+    :class:`~ai_assistant.core.types.SpokenDelivery`'s partition admits and a signed
+    64-bit SQLite ``INTEGER`` cannot hold, and which a browser can reach through the
+    gateway's twenty-digit duration members. Left to the driver it is an
+    ``OverflowError``, which is **not** a ``sqlite3.Error``, so it crosses this
+    module's translation untouched, escapes ``record_delivery``, and is not caught by
+    ``ConversationLifecycle.record_delivery``'s degradation — costing the owner the
+    turn they had just spoken, for a fact about a turn that had already happened.
+
+    **In this store's own tests and not the shared suite**, for the reason the suite's
+    docstring already gives about stores that persist bytes: the bound is a property
+    of a backend that persists 64-bit integers, and the canonical fake holds the value
+    perfectly well. What the contract owes is the *class* of the error, which this
+    asserts here against the implementation that has the bound.
+
+    The row is read back afterwards, because a refusal that had already written half a
+    delivery would be the worse failure: it must stay eligible for a report that fits.
+    """
+    store = SqliteConversationStore(path=str(tmp_path / "conversations.db"), now=_fixed_now)
+    try:
+        conversation = await store.start()
+        turn = await store.append(
+            conversation.id,
+            occurred_at=_NOW,
+            delivery=SpokenDelivery(state=SpokenDeliveryState.UNKNOWN),
+        )
+
+        with pytest.raises(ConversationStoreError, match="outside the range"):
+            await store.record_delivery(
+                conversation.id,
+                episode_id=turn.episode_id,
+                delivery=SpokenDelivery(
+                    state=SpokenDeliveryState.COMPLETE,
+                    played=timedelta.max,
+                    rendered=timedelta.max,
+                ),
+            )
+
+        row = await store.turn_of_episode(turn.episode_id)
+        assert row is not None
+        assert row.delivery is not None
+        assert row.delivery.state is SpokenDeliveryState.UNKNOWN, (
+            "the refusal wrote nothing, so a report that fits still lands"
+        )
     finally:
         store.close()
 

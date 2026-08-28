@@ -3930,12 +3930,19 @@ function playbackElapsed(mine) {
 // and a turn nobody reports on stays `UNKNOWN`, which is the true account of it.
 //
 // **The durations are whole microseconds**, `timedelta`'s own resolution and the
-// spelling this gateway reads every duration in. Where the two round to the same
-// microsecond the report is `complete`: ADR-0205 §2 makes equality the definition of
-// having played the answer out, and a difference below a microsecond is not a
-// difference — sending `interrupted` with two equal numbers would be a value the
-// promoted surface refuses, which is the page reporting nothing at all in place of
-// reporting a rounding.
+// spelling this gateway reads every duration in.
+//
+// **An interruption that cannot be spelled is not reported at all, and is never
+// spelled `complete`.** Architecture review, round 1, `blocker`. A press landing
+// within a microsecond of the buffer's end rounds both numbers equal, and
+// `interrupted` with two equal numbers is a value ADR-0205 §2's partition refuses —
+// but the answer to that is silence, not the other state. §7 says this page "reports
+// `COMPLETE` where the source ended of its own accord and `INTERRUPTED` where a press
+// ended it… and it invents neither", so rewriting a press's state into `complete`
+// would be the page inventing exactly the one §7 forbids it to. It would also fail in
+// the direction the whole decision exists to close: the composing stage would treat an
+// answer the owner cut off as fully heard. Omitting leaves the turn `UNKNOWN`, which
+// §4 calls the conservative reading and which no stage ever renders as heard.
 function reportDelivery(mine, state) {
   if (mine.episode === null || mine.conversation === null || mine.buffer === null) {
     return;
@@ -3948,13 +3955,20 @@ function reportDelivery(mine, state) {
   if (!Number.isFinite(played) || played < 0) {
     return;
   }
+  // The partition ADR-0205 §2 fixes, checked here so that what this page sends is
+  // always a value the promoted surface admits: `complete` is the two equal, and
+  // `interrupted` is `played` strictly below `rendered`. An interruption that does not
+  // satisfy it is dropped rather than restated as the other state.
+  if (state === "interrupted" && played >= rendered) {
+    return;
+  }
   pendingDelivery = {
     conversation: mine.conversation,
     report: {
       episode_id: mine.episode,
       delivery: {
-        state: played >= rendered ? "complete" : state,
-        played_microseconds: String(Math.min(played, rendered)),
+        state,
+        played_microseconds: String(played),
         rendered_microseconds: String(rendered),
       },
     },

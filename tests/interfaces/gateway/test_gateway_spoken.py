@@ -885,3 +885,33 @@ async def test_a_report_beside_no_conversation_is_refused_by_the_promoted_surfac
 
         assert status == 400
         assert body["fault"] == "rejected"
+
+
+async def test_an_explicit_null_delivery_is_the_absence_json_has_a_word_for() -> None:
+    """Adversarial review, round 1, ``blocker`` — **waived**, with the grounds here.
+
+    The finding reads ADR-0205 §7's "a present member that is not a JSON object is
+    malformed" as reaching ``null``. This surface already decided that question for
+    the member sitting immediately beside this one in the same body:
+    :func:`~ai_assistant.interfaces.gateway.server._optional_string` treats an
+    explicit ``null`` as the absence it is, saying so in its own words — "JSON has a
+    way of saying 'no selector' and a client using it is not getting the type wrong"
+    — and ``conversation_id`` is read through it on this very route.
+
+    So refusing ``delivery: null`` would make one optional member of one body
+    disagree with every other optional member on the surface, including its
+    neighbour. §7's clause is about a report the gateway "cannot parse into a
+    ``SpokenDeliveryReport``"; a ``null`` asks it to parse none, which is the sentence
+    before it — "Where the body carries no ``delivery``, no ``delivery`` reaches
+    ``converse_spoken``".
+
+    Pinned rather than argued, so the reading is asserted where a later editor meets
+    it.
+    """
+    engine = FakeAssistantEngine()
+    engine.start_conversation("conv-1")
+    async with _harness(engine) as one:
+        status, _ = await one.whole("POST", _SPOKEN, _body(conversation_id="conv-1", delivery=None))
+
+        assert status == 200
+        assert engine.calls[0][1]["delivery"] is None, "no report reached the surface"

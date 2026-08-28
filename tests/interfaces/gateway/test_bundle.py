@@ -5859,11 +5859,18 @@ def test_the_report_carries_two_durations_and_a_state_and_nothing_else() -> None
     script = _code("app.js")
     building = _functions(script)["reportDelivery"]
 
-    sent = set(re.findall(r"^\s*(\w+):", building, re.MULTILINE))
-    assert sent == {"conversation", "report", "episode_id", "delivery", "state"} | {
-        "played_microseconds",
-        "rendered_microseconds",
-    }
+    # Both spellings, because a shorthand property is still a member: `state,` and
+    # `episode_id: mine.episode` reach the body identically.
+    sent = set(re.findall(r"^\s*(\w+)[:,]$|^\s*(\w+):", building, re.MULTILINE))
+    named = {one for pair in sent for one in pair if one}
+    assert {"episode_id", "delivery", "state", "played_microseconds", "rendered_microseconds"} <= (
+        named
+    )
+    # And §2's "nothing else", as the enumeration it is rather than as a set equality
+    # that a refactor of the local variables would break: no audio, no rendering, no
+    # transcript, no word or character position, no sample offset, no format.
+    for forbidden in ("content", "media_type", "transcript", "heard", "words", "chars", "samples"):
+        assert forbidden not in building, f"§2 admits no {forbidden}"
     # Derived from the decoded buffer the page already holds (§7), and from nothing it
     # went and asked for.
     assert "mine.buffer.duration * MICROSECONDS" in building
@@ -5906,3 +5913,25 @@ def test_the_page_obtains_the_report_from_no_new_browser_capability() -> None:
     # One decoder and one context, as before.
     assert script.count("decodeAudioData") == 1
     assert script.count("new AudioContext(") == 1
+
+
+def test_an_interruption_the_page_cannot_spell_is_reported_as_nothing() -> None:
+    """ADR-0205 §7: the page "invents neither" state.
+
+    Architecture review, round 1, ``blocker``. A press landing within a microsecond of
+    the buffer's end rounds both durations equal, and ``interrupted`` with two equal
+    numbers is outside §2's partition — but the answer to that is silence, not the
+    other state. Restating it as ``complete`` would have the composing stage treat an
+    answer the owner cut off as fully heard, which is the failure the whole decision
+    exists to close, arriving through the one function meant to prevent it. Omitting
+    leaves the turn ``UNKNOWN``, which §4 calls the conservative reading and which no
+    stage renders as heard.
+    """
+    building = _functions(_code("app.js"))["reportDelivery"]
+
+    assert 'state === "interrupted" && played >= rendered' in building, (
+        "an interruption that cannot be spelled is dropped"
+    )
+    assert "state," in building, "the state sent is the state the caller drew"
+    assert '? "complete"' not in building
+    assert '"complete" : state' not in building
