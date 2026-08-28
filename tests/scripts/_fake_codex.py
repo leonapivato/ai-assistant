@@ -18,6 +18,9 @@ every case:
   rollout, to exercise the read-only fail-closed path.
 - ``FAKE_CODEX_RESUME_FAIL`` — when ``1``, a ``resume`` exits non-zero, standing
   in for a pruned/unavailable session (the degradation path).
+- ``FAKE_CODEX_START_FAIL`` — when ``1``, a *fresh* session exits non-zero with
+  its whole failure on stdout as ``--json`` events and **nothing on stderr**,
+  which is what real ``codex exec --json`` does (issues #1674, #1675).
 - ``FAKE_CODEX_PROMPT_COPY`` — a path to copy the prompt (stdin) to, so a test
   can assert on what the reviewer was told.
 - ``FAKE_CODEX_PRE_CMD``    — a shell snippet ``eval``'d before output is
@@ -93,6 +96,19 @@ eff="${sb:-read-only}"
 if [[ "$mode" == "start" ]]; then
     tid="${FAKE_CODEX_THREAD_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null ||
         echo "fake-$$-${RANDOM}")}"
+fi
+
+# A fresh session the service refuses. The whole failure goes to STDOUT as --json
+# events and stderr stays EMPTY — measured behaviour of codex-cli 0.146.0, and the
+# shape that made issues #1674 and #1675 unreadable: the driver routes that stdout
+# into a temp file it then deletes.
+if [[ "$mode" == "start" && "${FAKE_CODEX_START_FAIL:-}" == "1" ]]; then
+    if [[ "$want_json" -eq 1 ]]; then
+        printf '{"type":"thread.started","thread_id":"%s"}\n' "$tid"
+        printf '{"type":"error","message":"fake codex: the service refused this request"}\n'
+        printf '{"type":"turn.failed","error":{"message":"fake codex: refused"}}\n'
+    fi
+    exit 1
 fi
 
 if [[ "$want_json" -eq 1 ]]; then
