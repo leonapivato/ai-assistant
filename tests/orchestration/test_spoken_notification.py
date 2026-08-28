@@ -134,6 +134,32 @@ async def _poll_one(
     return delivery, seam
 
 
+class _AnnouncingOutbox(FakeNotificationOutbox):
+    """A canonical outbox that says when a poll has parked in its wait.
+
+    The synchronisation point ADR-0135 §2's elapsed-time reading needs a case to be
+    able to aim at: the engine reads its clock **once**, at the poll's start, and a
+    case that advanced the clock before that read would move the start rather than
+    the elapsed time — and would then pass while exercising nothing, because the
+    entry it offers is claimed on the first pass either way. A sleep cannot rule that
+    out; entering the wait is proof the start instant has already been taken.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        """Create the outbox with an unset arrival-parked event."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        #: Set the first time a caller parks in :meth:`wait_for_arrival`.
+        self.parked = asyncio.Event()
+
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget, as the seam declares it
+    ) -> bool:
+        """Announce that a poll has parked, then wait exactly as the fake does."""
+        self.parked.set()
+        return await super().wait_for_arrival(timeout)
+
+
 class TestTheArgument:
     """§1: ``plays`` on ``next_notification``, keyword-only, defaulting to ``()``."""
 
@@ -898,7 +924,7 @@ class TestTheBudget:
         the elapsed time is then zero however long the poll really waits.
         """
         clock = _Advancing()
-        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(seconds=30))
+        outbox = _AnnouncingOutbox(now=lambda: NOW, lease=timedelta(seconds=30))
         seam = FakeSpeechSynthesizer()
         harness = Harness(transcriber=FakeSpeechTranscriber(), synthesizer=seam)
         engine = _wired(
@@ -910,7 +936,14 @@ class TestTheBudget:
         )
 
         async def outlive_the_budget() -> None:
-            await asyncio.sleep(0.02)
+            # **Waited for rather than slept past.** The poll being parked in
+            # ``wait_for_arrival`` is proof it has already read its start instant, so
+            # advancing now really moves the *elapsed* time rather than the start. A
+            # sleep would leave the case passing on a poll that began after the
+            # advance, which is the same silent weakening the round before this one
+            # had — it would claim the entry on its first pass with a budget that had
+            # never elapsed.
+            await outbox.parked.wait()
             clock.advance(timedelta(minutes=1))
             await outbox.offer(_placed())
 
