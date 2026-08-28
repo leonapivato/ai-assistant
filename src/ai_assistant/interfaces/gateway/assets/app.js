@@ -3808,16 +3808,16 @@ let held = null;
 // rides the request that turn already makes. The honest cost is the owner who
 // interrupts and never speaks again — that report is never sent and the hub's record
 // stays `UNKNOWN`, which is the correct account of it rather than a gap.
+// **Nothing is evicted, and a measured report is kept until it is sent.** Both review
+// lenses, round 3, `blocker`, on a bound this page had put here of its own accord:
+// ADR-0205 §7 admits exactly one case for reporting nothing — "where it holds no such
+// pair" — and an eviction manufactures a second, leaving a turn the page had genuinely
+// measured `UNKNOWN` when the owner comes back to it. The growth this guarded against
+// does not survive arithmetic: an entry is five short strings, one per conversation
+// this page has played an answer in and not yet spoken in again, so a session would
+// need thousands of such conversations to hold what a single rendered turn already
+// holds in the DOM. The ADR-visible behaviour is worth more than the bound.
 const pendingDeliveries = new Map();
-
-// How many conversations' reports this page will hold at once. A page left open across
-// many conversations would otherwise grow one entry per conversation it ever played an
-// answer in, for the life of the page — small entries, but an unbounded set, which is
-// not a shape to ship. The oldest is dropped when a new one arrives past the bound, and
-// dropping one costs exactly what never sending it costs: that turn stays `UNKNOWN`,
-// which ADR-0205 §1 already names as the correct record of an unreported turn rather
-// than a gap.
-const PENDING_DELIVERY_LIMIT = 32;
 
 // **A press is an interrupt** (#1696, the owner's ruling of 2026-08-28, from a real
 // iPhone). Pressing to talk over an answer that is still being spoken is the same act as
@@ -3979,11 +3979,9 @@ function reportDelivery(mine, state) {
   if (state === "interrupted" && played >= rendered) {
     return;
   }
-  // Re-inserted rather than updated in place, so the eviction below sees this
-  // conversation as the most recent: `Map` keeps insertion order, and a plain `set`
-  // over an existing key would leave it in its old position and drop the freshest
-  // report first.
-  pendingDeliveries.delete(mine.conversation);
+  // One report per conversation, and the later playback is the one that stands: what
+  // §7 asks for is "the playback it **last** had in the air" for that conversation, so
+  // a second answer played there replaces the first rather than joining it.
   pendingDeliveries.set(mine.conversation, {
     episode_id: mine.episode,
     delivery: {
@@ -3992,9 +3990,6 @@ function reportDelivery(mine, state) {
       rendered_microseconds: String(rendered),
     },
   });
-  while (pendingDeliveries.size > PENDING_DELIVERY_LIMIT) {
-    pendingDeliveries.delete(pendingDeliveries.keys().next().value);
-  }
 }
 
 // The report to send with a request against `conversation`, or `null` (ADR-0205 §7).

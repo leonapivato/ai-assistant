@@ -58,7 +58,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
-from ai_assistant.core.types import DEFAULT_PAGE_SIZE, secret_value
+from ai_assistant.core.types import DEFAULT_PAGE_SIZE, SpokenDeliveryState, secret_value
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
     ENVELOPE_RESERVE_BYTES,
@@ -340,10 +340,14 @@ class HubClient:
             id of the episode recording it.
 
         Raises:
-            ValueError: If ``plays`` is empty or ``conversation_id`` is blank —
-                refused here, before any I/O, so this client and the engine it
-                stands in for refuse the same values without a round trip (ADR-0085
-                §9). Spelled inline rather than shared with
+            ValueError: If ``plays`` is empty, ``conversation_id`` is blank, a
+                ``delivery`` is supplied beside a ``conversation_id`` of ``None``, or
+                a supplied ``delivery`` carries a state of ``UNKNOWN`` — each refused
+                here, before any I/O, so this client and the engine it stands in for
+                refuse the same values without a round trip (ADR-0085 §9, ADR-0205
+                §1, §2). It bites hardest on this method: a refusal deferred to the
+                far side would put a **recording** on the network for a call the hub
+                is bound to refuse. Spelled inline rather than shared with
                 ``orchestration.payloads``' twin, because ``wire`` depends on
                 ``core`` and nothing else; what keeps the two agreeing is the shared
                 conformance suite, which drives this refusal against both.
@@ -358,6 +362,25 @@ class HubClient:
                 "synthesizer produces (ADR-0200 §3)"
             )
             raise ValueError(msg)
+        if delivery is not None:
+            # ADR-0205 §1 and §2's two refusals, mirrored here for the reason the two
+            # above are: a value the promoted surface refuses "locally, before any I/O"
+            # must not cost a round trip — and on this path it would cost a *recording*
+            # crossing the network for a call guaranteed to be refused at the far end.
+            if selected is None:
+                msg = (
+                    "a delivery report names a turn of a conversation, and a fresh "
+                    "conversation contains no turn one could name; supply the conversation "
+                    "this report is about, or no report (ADR-0205 §1)"
+                )
+                raise ValueError(msg)
+            if delivery.delivery.state is SpokenDeliveryState.UNKNOWN:
+                msg = (
+                    "a device that does not know reports nothing: UNKNOWN is what the hub "
+                    "writes for an unreported turn, and the absence of a report is spelled "
+                    "by omitting the argument (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
         return await self._call(  # type: ignore[no-any-return]
             "converse_spoken",
             utterance=utterance,
