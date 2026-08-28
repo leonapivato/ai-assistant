@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -238,10 +238,10 @@ cannot be set by a group whose membership does not depend on the turn.
 Context needs no store: one stamped episode in the tail, nothing retrieved, and the
 boolean comes back `True`. Every later turn inherits it, so the property ADR-0204 §6
 asserts — that continuity survives "for every turn on which nothing was withheld" —
-is defeated by the second turn after any withholding at all. Removing the first group
-from the evaluation restores it exactly, and restores nothing else: the tail's stamped
-episodes stay withheld, and the spoken channel still cannot read back the turns on
-which the withholding did bite.
+is defeated by the second turn after any withholding at all. Taking the evaluation off a
+record no relevance read of this turn returned restores it exactly, and restores nothing
+else: the tail's stamped episodes stay withheld, and the spoken channel still cannot read
+back the turns on which the withholding did bite.
 
 **The second and third groups keep the evaluation honest.** Both are read with the
 turn's own goal statement as the query — `LearningLoop._retrieve` through
@@ -327,13 +327,14 @@ ADR-0204 §6 names for it.** That section's words are "a withholding turn is exa
 turn whose supply held content §3 withholds — so §2 stamps its episode and §3 withholds
 that episode from a later unbounded-channel turn." A turn that asks about the withheld
 class is a turn whose *retrieval* surfaces the withheld record: the question is the
-query, and the record's placement in the second or third group is the whole of what §1
-evaluates. So the deflecting turn's episode is stamped exactly as it is today, and a
+query, and that read's having returned it is the whole of what §1 evaluates —
+wherever ADR-0158 §4's deduplication then leaves the copy. So the deflecting turn's episode is stamped exactly as it is today, and a
 later spoken turn cannot read the question back.
 
 **What #1703's path does not include, and did not include before this ADR.** A turn
-whose supply held a withheld record *only* in its first group is a turn whose own
-question caused no withheld record to be retrieved. Its episode is not stamped, and its
+whose supply held a withheld record that **no relevance read of this turn returned** —
+a record standing in the conversation's recent turns and nowhere else — is a turn whose
+own question caused no withheld record to be retrieved. Its episode is not stamped, and its
 question may be read back aloud. That is the same case ADR-0204 §6's second clause
 already declines — a question naming a third party where the turn asking it was
 supplied nothing §3 withholds — and this ADR neither widens nor narrows it. Under
@@ -370,8 +371,11 @@ aloud reads that module.
 
 > **Normative.** No implementation, lane or later ADR narrows the evaluation this ADR
 > rules by a **retrieval score, a rank, a similarity threshold or any other magnitude
-> the ranking produced**. The set §1 names is decided by which group of the supply a
-> record stands in, and by nothing about how well it scored.
+> the ranking produced**. The set §1 names is decided by **whether a relevance read
+> taken with this turn's goal statement returned the record** — a membership — and by
+> nothing about how well it scored, where it ranked, or where the composition finally
+> placed it. A record's final position in ADR-0074 §5's groups governs the subtraction
+> and the prompt's order (ADR-0203 §2) and decides nothing here.
 
 > **Normative.** No implementation, lane or later ADR narrows it by **reading
 > content** — not `MemoryBase.content`, not a facet's rendered text, not the goal
