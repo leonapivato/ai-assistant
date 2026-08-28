@@ -904,8 +904,13 @@ coverage.**
 > over a smaller set: the memory store, the audit trail, the source-read trail, the
 > conversation store and both log tiers, which
 > `tests/orchestration/test_converse_spoken.py::test_no_audio_reaches_any_store_trail_or_log`
-> already reads, **and the `RoutingTrail` and the `NotificationOutbox`, which it does
-> not**. Row (g) is
+> already reads, **and the `RoutingTrail`, which it does not** — the routed park
+> writes a routing record, so that trail is a sink this branch reaches. The
+> `NotificationOutbox` is asserted as an **absence**, not as a sink on this path:
+> neither park enqueues anything and this decision reaches no delivery, so what is
+> pinned there is that it stays empty of audio, which is a check that this call
+> path did not acquire the outbox rather than a check on a path it uses.
+> Row (g) is
 > pinned over **both** of §1's shapes, the step park and the routed one, as (a) and
 > (b) are: §6's third arm ranges over §1's definition and not over one member of
 > it, and an arm that refused the silent step park while admitting the silent
@@ -923,13 +928,22 @@ what make the branch's disclosure properties tested rather than asserted.
 
 **Row (h) is stated as §5's enumeration rather than as "the surfaces that test
 reads", and the difference is the point.** That test's surfaces are the ones an
-answered turn can reach; §5's list is longer, and the two sinks it adds are
-exactly the ones the *routed* park introduces — a routed park runs the routing
-stage, so a `RoutingTrail` record is written on that path and is a sink no
-answered-turn test has ever had a reason to read, and ADR-0206's delivery
-direction makes the `NotificationOutbox` the other. Naming a test as the measure
-of a rule would let the rule shrink to the test; the rule is §5's sentence, and
-row (h) reads every sink it names.
+answered turn can reach; §5's list is longer, and the sink it adds that this
+branch actually reaches is the `RoutingTrail` — a routed park runs the routing
+stage, so a routing record is written on that path, and no answered-turn test has
+ever had a reason to read it. Naming a test as the measure of a rule would let
+the rule shrink to the test; the rule is §5's sentence, and row (h) reads every
+sink it names.
+
+**The outbox is on that list and is not on this path, and row (h) says which of
+the two it is.** `NotificationOutbox` serves ADR-0131 §3's delivery direction,
+which ADR-0206 decides and §5 above states this ADR does not reach: neither park
+enqueues a notification, the sentence is never spoken on a delivery, and nothing
+here gives `converse_spoken` an edge to the outbox. Row (h) therefore pins it as
+an absence — the assertion is that no audio is there and that this branch
+acquired no such edge — and no lane reads row (h) as licence to add outbox
+handling for a park's rendering. Stating it this way rather than dropping it
+keeps §5's sentence checked whole without implying a path it does not have.
 
 > **Normative.** Both park shapes are exercised in the **shared `AssistantEngine`
 > conformance suite** (`tests/orchestration/assistant_engine_contract.py`), so the
