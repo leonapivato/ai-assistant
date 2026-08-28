@@ -1,6 +1,6 @@
 # 208. `recall_memory` leaves the default tool set, and the turn's supply is retrieved at one site
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-28
 
 ## Context
