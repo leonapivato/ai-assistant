@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Accepted, partially superseded by ADR-0041
+- Status: Accepted, partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster)
 - Date: 2026-07-19
 - Note (2026-07-21): §4's RUNNING → INDETERMINATE transition has a second
   trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline, or is
@@ -94,6 +94,39 @@
   its cause — ADR-0194 §9 states that it neither changes nor relies on the
   sentence — so this appended dated note is the whole record and no Status edit is
   owed (ADR-0082 §1). Refs #1561, ADR-0194 §3.
+
+- **Partially superseded: 2026-08-29 by ADR-0211 — §6's `Planner` Protocol block,
+  and only the roster of inputs `plan` declares.** §6 declares `plan(goal, *,
+  context, memories)`. ADR-0211 §1 adds a fourth input, a required keyword-only
+  `capabilities: Sequence[str]` carrying the capability vocabulary
+  `ToolRegistry.capabilities()` advertises (ADR-0016 §5), so that the planner can
+  apply a test about what the system can actually do — the defect #1772 measured on
+  the milestone-20 QA run, where nearly every spoken answer narrated a tool the
+  planner had invented, and the question ADR-0016 §5 left open as #60.
+
+  **Why supersession and not an amendment.** A reader holding only this ADR writes
+  the three-input `plan` above, and under golden rule 5 — "a Protocol change is a
+  breaking change" — an implementation of it does not satisfy the widened Protocol.
+  The reader's artefact stops conforming, which is acting differently in ADR-0070
+  §1's sense, and §1 puts a change to what was decided on the supersession side
+  however small the edit. It is **partial** in ADR-0070 §3's sense.
+
+  **Not replaced — everything else of §6, and the rest of this ADR.** §6's
+  push-not-fetch sentence — "`context` and `memories` are parameters rather than
+  things the planner fetches itself: the pipeline already assembles context and
+  retrieves memory *before* planning, and a planner that reached for them directly
+  would import two subsystems it has no business importing" — is true word for word
+  after the change and is the stated *ground* of ADR-0211 §2, which applies it to
+  `tools` as the third subsystem. §6's `async` clause stands, and its Protocol-triad
+  practice stands and is what ADR-0211 §9 bills the implementing lane for. §2's
+  capability abstraction, the frozen plan and the `planning → tool selection`
+  boundary are untouched: ADR-0211 adds an input to the planner and takes nothing
+  from the selection stage, and its §7 keeps `SkipReason.NO_CAPABLE_TOOL` and
+  ADR-0037 §1's table exactly as they are. §§1, 3-5 and 7 are untouched.
+
+  ADR-0041's pair is kept rather than restructured to ADR-0070 §4's leading-token
+  form: giving it the `(<scope>)` it lacks would mean asserting what ADR-0041
+  replaced, which is ADR-0041's to state. Refs #1772, #60, ADR-0211 §11.
 
 ## Context
 

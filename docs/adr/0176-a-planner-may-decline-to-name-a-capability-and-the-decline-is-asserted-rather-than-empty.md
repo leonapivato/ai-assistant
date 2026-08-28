@@ -1,6 +1,6 @@
 # 176. A planner may decline to name a capability, and the decline is asserted rather than empty
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0211 (§4's second normative clause — the test the prompt states between the plan and decline envelope shapes)
 - Date: 2026-08-21
 - **Partially supersedes:**
   [ADR-0047](0047-the-model-backed-planner.md) — §4 step 2's requirement that the
@@ -26,6 +26,45 @@
 - **It decides no `core/protocols.py` and no `core/types.py` surface** (§8), so
   golden rule 5 is not triggered and this is `Accepted` on merge rather than
   ratified contract-first — the position ADR-0047 declared for itself.
+
+- **Partially superseded: 2026-08-29 by ADR-0211 — §4's second normative clause,
+  and nothing else of §4 or of this ADR.** That clause reads: "The test the prompt
+  states is what the goal *requires*: a plan envelope where accomplishing the goal
+  requires the assistant to act in the world or to reach for something this turn has
+  not already been given; a decline envelope where the goal is answered from what the
+  turn already carries — the retrieved memories, the assembled context, and the
+  conversation rendered into this same prompt. The prompt states the test in those
+  terms rather than by enumerating request categories." ADR-0211 §4 replaces it
+  whole: the planner is now told the capability vocabulary the registry advertises,
+  a plan step is admitted only where a listed capability can carry it, and a goal
+  that requires an act no listed capability can perform is a **second ground for a
+  decline** rather than a plan. Both halves of the clause therefore move — the plan
+  half gains a condition, the decline half gains a ground.
+
+  **Why supersession and not an amendment.** A reader holding only this ADR prompts
+  for a plan whenever the goal requires an act, including the seven rows of #1772
+  where nothing advertised could perform it, and ADR-0211 prompts for a decline. The
+  clause is **marked**, and ADR-0089 §3 makes the marked set the whole of what a
+  marked ADR obligates, so a marked clause going false is a ruling changing rather
+  than a stale phrase (ADR-0113's header note records the same shape). ADR-0070 §1
+  puts that on the supersession side; it is **partial** in ADR-0070 §3's sense.
+
+  **Not replaced — and this is the larger half.** §1's two-shape grammar is
+  untouched: ADR-0211 §5 rules that a decline on either ground is *this* envelope —
+  empty `steps`, the `no_capability_needed` marker at the JSON boolean `true`, a
+  non-blank `rationale` — and adds no key, no marker and no third shape. §1's
+  strictness and inertness rules and their two required tests stand. §2's extraction
+  predicate stands, so ADR-0071's records are untouched. §3's rationale condition is
+  not merely kept but relied on harder: ADR-0211 §4's third clause stacks a content
+  obligation on it for the second ground, and ADR-0211 §7 makes the persisted
+  rationale the record of a goal the system could not meet. §4's **first**, **third**
+  and **fourth** normative clauses bind unchanged — both shapes named in the prompt,
+  the one narrow test naming `no_capability_needed`, and the refusal to string-match
+  the prompt's wording, which ADR-0211 §9 restates as a constraint on its own lane.
+  §5's repair message, §6's persistence and composition, §7's honest limit, §8's
+  scope statement — a claim about *this* ADR's reach, which a later ADR changing a
+  contract does not falsify — §9's deferrals and §10's records of ADR-0047 and
+  ADR-0071 all stand. Refs #1772, #60, ADR-0211 §11.
 
 ## Context
 
