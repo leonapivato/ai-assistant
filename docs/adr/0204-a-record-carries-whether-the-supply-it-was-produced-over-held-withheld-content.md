@@ -366,8 +366,10 @@ the typed turn's plan, and "Every `converse_spoken` turn's plan carries none".
 
 > **Normative.** A producer that derives a record from other records in this store
 > sets `supplied_withheld_content` on what it produces to the disjunction of the
-> field over the records it derived from. It records what it received; it infers
-> nothing, and a producer whose inputs are not records of this store has nothing to
+> field over **every record it was supplied**. The disjunction ranges over what the
+> producer received and never over the subset it cited, selected, ranked or judged
+> relevant — `Provenance.evidence` is not the input set, and no implementation reads
+> it as one. A producer whose inputs are not records of this store has nothing to
 > inherit and writes `False`.
 
 > **Normative.** The only exit is ADR-0072 §4's supersession by the user's own word,
@@ -534,6 +536,17 @@ layout. Each names an input and the outcome it fixes.
     `converse_spoken` turn's `turn.memories`. This is §5's second clause pinned end
     to end: without it an implementation passes every test above while the second
     hop launders the value.
+12. **The disjunction ranges over what the producer received, not over what it
+    cited.** A producer supplied one stamped record and one unstamped one, emitting a
+    belief whose `Provenance.evidence` cites **only the unstamped** input: the emitted
+    belief carries `True`. This is the test §5's second clause is worth writing down
+    for — an implementation that folds the field over `evidence` alone passes test 11
+    and fails here, and its output reaches an unbounded channel carrying a warrant the
+    producer actually read.
+13. **A producer supplied nothing stamped emits `False`.** The same producer over an
+    input set none of which carries the field emits a belief carrying `False`, so
+    §5's disjunction is pinned in the direction that would otherwise stamp
+    everything and empty ADR-0199 §3's speakable set by a different route.
 
 ### 9. What the implementing lane owes
 
@@ -560,7 +573,7 @@ rule 5). It owes:
 4. **The fold's disjunction** and the derivation rule of §5, alongside the sibling
    computation `orchestration/consolidation.py` and the writer already perform for
    `derived_from_external`.
-5. **The eleven tests of §8.**
+5. **The thirteen tests of §8.**
 6. **Closing #1703 and #1708**, which this decision answers and that lane fixes.
 
 > **Normative.** The records this decision owes on ADR-0203 and on ADR-0199 are made
@@ -761,7 +774,7 @@ the fact is recorded at the one moment it is decidable.
 defaulted, so a producer that forgets it writes `False` and a record is supplied
 that should have been withheld — the fail-open direction, and the one this ADR
 accepts deliberately in §1's third clause because the alternative empties ADR-0199
-§3's speakable set. §5's disjunction and §8's tests are the mitigation — tests 9 and 11
+§3's speakable set. §5's disjunction and §8's tests are the mitigation — tests 9, 11 and 12
 in particular, which pin the two paths on which a value travels without a fresh
 evaluation to compute it — and a producer review obligation is the rest of it.
 
