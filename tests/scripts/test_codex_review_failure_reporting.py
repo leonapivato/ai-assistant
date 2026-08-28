@@ -211,10 +211,10 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     # running the same persona must not read as this round still being alive
     # (adversarial round 6 on PR #1722). Matched as a FIXED STRING, because a
     # path is not a pattern (adversarial round 7; pinned end-to-end by
-    # ``test_the_liveness_check_matches_a_clone_path_that_looks_like_a_pattern``).
+    # ``test_the_liveness_check_reads_a_clone_path_as_data_not_as_syntax``).
     assert _confirm_command(started.stderr) == (
         "ps -eo pid,args | "
-        f"""grep -F -f <(printf '%s\\n' "{SCRIPT} adversarial ") | """
+        f"""grep -F -f <(printf '%s\\n' '{SCRIPT} adversarial ') | """
         'grep -v "^ *$$ "   # this clone\'s round only'
     )
     assert "pgrep" not in started.stderr
@@ -256,40 +256,65 @@ def _confirm_command(stderr: str) -> str:
     return lines[0]
 
 
-def _shell(command: str) -> subprocess.CompletedProcess[str]:
+def _single_quoted(text: str) -> str:
+    """POSIX single-quoting, in the ``'\\''`` spelling the script emits.
+
+    Not ``shlex.quote``: that spells an embedded quote ``'"'"'``, which is
+    equally valid and a different string, and this is an assertion about the
+    exact bytes a reader sees.
+    """
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def _shell(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run exactly what the message printed, the way an operator would paste it."""
     return subprocess.run(  # noqa: S603  # resolved bash, running this repo's own message
-        [bash(), "-c", command], check=False, capture_output=True, text=True
+        [bash(), "-c", command], cwd=cwd, check=False, capture_output=True, text=True
     )
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="the loop lock needs flock")
 @pytest.mark.skipif(shutil.which("ps") is None, reason="the liveness check needs ps")
-def test_the_liveness_check_matches_a_clone_path_that_looks_like_a_pattern(
+def test_the_liveness_check_reads_a_clone_path_as_data_not_as_syntax(
     tmp_path: Path,
 ) -> None:
-    """A path is not a pattern (adversarial round 7 on PR #1722).
+    """A clone path is data. Two layers used to read it as syntax; neither may.
 
     The grace-expiry message names the one case in ``--start``'s mode where a
     second round is the right move: the child has *gone*, so no claim will ever
-    arrive. It used to have the operator confirm that with
+    arrive. It has the operator confirm that with a process listing, and that
+    listing is both a **pattern** for the matcher and **shell source** for the
+    reader who pastes it. Interpolating a path into either is the same bug twice.
+
+    *As a pattern* (adversarial round 7). It used to print
     ``pgrep -fa "<script> <persona> "``, and ``pgrep -f`` reads its argument as an
-    **ERE** — so under a clone at ``…/clone+[1]/…`` the ``+`` repeats an ``e`` and
-    ``[1]`` is a character class, the live child does not match, and the message
-    walks a lane into relaunching a round that is still running. That is the
-    paid-round-thrown-away failure the whole mode exists to prevent.
+    ERE: under a clone at ``…/clone+[1]/…`` the ``+`` repeats an ``e``, ``[1]`` is
+    a character class, an unbalanced bracket is invalid outright — and the live
+    child does not match. The message then walks a lane into relaunching a round
+    that is still running, which is the paid-round-thrown-away failure the whole
+    mode exists to prevent.
 
-    So this drives the printed command for real, from a clone path carrying ERE
-    metacharacters, against a round that is alive at that moment — held short of
-    its claim by the review-loop lock, exactly as the slow case is.
+    *As shell source* (adversarial round 8). The needle was interpolated into a
+    double-quoted string, so a clone at ``…/$(touch pwned)/…`` ran the
+    substitution on paste, and a ``"`` or a backtick broke the quoting outright.
 
-    The second half is the reason the check is ``grep -F -f`` and not a bare
-    ``grep -F``: ``pgrep`` excludes its own process from the listing and ``grep``
-    does not, so a needle sitting in ``grep``'s argv matches itself and the
-    command can never print nothing. "No match" is the entire signal here, so it
-    has to be reachable.
+    So the clone here carries both kinds at once, and the printed command is run
+    for real: against a round alive at that moment — held short of its claim by
+    the review-loop lock, exactly as the slow case is — and again once that round
+    has finished.
+
+    That second run is the reason the needle goes through ``-f`` and the caller's
+    own pid is dropped. ``pgrep`` excluded its own process from the listing;
+    ``grep`` does not, and neither ever excluded the shell running the pasted
+    line. Either self-match makes the command always print something, and "no
+    match" is the entire signal here, so it has to be reachable.
     """
-    clone = tmp_path / "clone+[1]" / "scripts"
+    # Every character here is one of the two layers' metacharacters: `+[]` for
+    # the ERE, `$(…)`, a backtick, `'` and `"` for the shell. The `$(touch
+    # pwned)` is live: if the needle ever reaches a reader's shell unquoted, the
+    # file appears.
+    hostile = "clone+[1]$(touch pwned)`it's\"q"
+    clone = tmp_path / hostile / "scripts"
     clone.mkdir(parents=True)
     script = clone / "codex-review.sh"
     shutil.copy(SCRIPT, script)
@@ -314,24 +339,29 @@ def test_the_liveness_check_matches_a_clone_path_that_looks_like_a_pattern(
         assert started.returncode == 1
         command = _confirm_command(started.stderr)
 
-        # The clone path reaches the operator verbatim — brackets, plus and all —
-        # rather than as something they would have to unescape to check.
-        assert f'"{script} adversarial "' in command
+        # Single-quoted, with the one character single quotes cannot carry closed
+        # and reopened — so the path is still legible to a reader checking it
+        # against their own clone, and inert to the shell that reads the line.
+        assert _single_quoted(f"{script} adversarial ") in command
 
         # And it finds the round that is alive right now, blocked on the loop
-        # lock. This is the assertion the replaced `pgrep -f` form failed.
-        assert f"{script} adversarial" in _shell(command).stdout
+        # lock. This is the assertion the `pgrep -f` form failed.
+        assert f"{script} adversarial" in _shell(command, tmp_path).stdout
+        assert not (tmp_path / "pwned").exists()
     finally:
         holder.terminate()
         holder.wait()
 
-    assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
-
     # Once the round is genuinely gone the same command says so, by printing
-    # nothing at all. Polled rather than asserted once: `--wait` returns when the
-    # artifact is recorded, which is a moment before the child has finished
-    # exiting.
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline and _shell(command).stdout != "":
+    # nothing at all — which is the half that makes "no match" mean something.
+    #
+    # The round's departure is awaited through the listing itself rather than
+    # through `--wait`, deliberately: in the window this whole message is about,
+    # `--wait` can answer exit 4 about a live round (issue #1730), so an assertion
+    # on it here would be an assertion about that gap under load and not about
+    # this command. That the child ran at all is already established above.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and _shell(command, tmp_path).stdout != "":
         time.sleep(0.2)
-    assert _shell(command).stdout == ""
+    assert _shell(command, tmp_path).stdout == ""
+    assert not (tmp_path / "pwned").exists()
