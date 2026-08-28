@@ -178,13 +178,21 @@ stamp from any supply site for such a channel.
 > `Provenance` gains a member, and no existing member of any `core` type changes
 > its type, its default or its meaning.
 
-> **Normative.** `False` is the field's meaning and not merely its default: it
-> states that neither route reached this record, which is true of every record no
-> turn produced and nothing was derived from — a user's own assertion, a calendar
-> import, a reader's proposal, a record written before this field existed. §2 and
-> §5 are the only two grounds on which any producer sets it `True`, and they are
-> exhaustive: no implementation invents a third, and no consumer reads `False` as
-> "not recorded".
+> **Normative.** On a record written **after** this field lands, `False` is the
+> field's meaning and not merely its default: it states that neither route reached
+> that record, which is true of every such record no turn produced and nothing was
+> derived from — a user's own assertion, a calendar import, a reader's proposal. §2
+> and §5 are the only two grounds on which any producer sets it `True`, and they are
+> exhaustive: no implementation invents a third.
+
+> **Normative.** On a record written **before** this field lands, `False` is a
+> decode default and not a measurement, because no producer recorded an answer. §6's
+> first clause governs it: the guarantee this ADR gives is prospective, and no lane,
+> implementation or later ADR cites a pre-field `False` as evidence about the record
+> carrying it. No supply site is thereby given a second test — §3's is the whole of
+> what a supply site applies, to every record alike, because nothing in the data
+> distinguishes the two cases and a rule that pretended otherwise would be inventing
+> a distinction it cannot read.
 
 **On `Provenance` because that is the question it answers**, which is
 `MemoryBase`'s own placement rule: "a field is placed by which question it answers,
@@ -208,7 +216,14 @@ observer later distils from a marked episode must be able to carry the stamp, an
 can hold would close #1708 and leave the same laundering one distillation further
 along.
 
-**Two states rather than three, and the absence is not a fourth state.** ADR-0109's
+**Two states rather than three, and a pre-field record is neither a third state nor
+a definitive negative.** §1's fourth and fifth clauses are the pair that keeps those
+apart: a post-field `False` is a measurement, a pre-field `False` is a decode
+default nobody may reason from, and *neither* gives a supply site a second test to
+apply — which is what stops the honest statement of the residue from turning into an
+unimplementable rule about data nothing can distinguish.
+
+**And a third state was still considered and rejected.** ADR-0109's
 `last_confirmed_at` takes `None` for "the store does not hold this", and the shape
 was considered here and rejected: §1's question — did such content stand in this
 record's warrant, by either route? — has a true answer for every record ever
@@ -436,7 +451,10 @@ discovering it after the observer lands costs a supersession.
 > **Normative.** No lane, implementation or later ADR cites this ADR as authority
 > that a record written before this field existed carries a true value in it. Such a
 > record decodes `False` because nothing recorded an answer, and where its producing
-> turn's supply in fact held withheld content, `False` is wrong about it.
+> turn's supply in fact held withheld content, that `False` is wrong about it. This
+> is a limit on what may be *concluded* from the value and not a second value: §1's
+> fifth clause fixes the same thing at the field's own definition, and neither
+> clause gives a supply site anything to read beyond §3's test.
 
 > **Normative.** Nothing in this ADR is cited as authority that a question naming a
 > third party is safe to repeat on a channel of unbounded audience where the turn
