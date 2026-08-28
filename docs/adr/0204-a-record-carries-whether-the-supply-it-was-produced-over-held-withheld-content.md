@@ -392,13 +392,20 @@ the typed turn's plan, and "Every `converse_spoken` turn's plan carries none".
 > inherit and writes `False`.
 
 > **Normative.** A `SUPERSEDE` neither clears nor inherits the field, because it is
-> not an operation on the stamped record's value at all. ADR-0040 §5a rules that
-> after one "the live record is the proposed record — its content, its provenance,
-> its `evidence`, its `confidence` — borrowing from the target only the id it is
-> written at", and `supplied_withheld_content` is a member of that provenance. So
-> the surviving record carries the value the clause above computes for the
-> **proposal**, over what its own producer was supplied, and carries nothing of the
-> target's. ADR-0040 §5a is untouched and this ADR contradicts no sentence of it.
+> not an operation on the stamped record's value at all. ADR-0040 §5a's
+> differential — a `SUPERSEDE` "carries nothing of the target onto the surviving
+> record", which ADR-0045 leaves standing unchanged — puts the correction's own
+> provenance on the correction, and `supplied_withheld_content` is a member of that
+> provenance. So the correction carries the value the clause above computes for the
+> **proposal**, over what its own producer was supplied, and nothing of the
+> target's.
+
+> **Normative.** The stamped target is not edited by the supersession either. Under
+> ADR-0045 §4 and §5a the target is **retained with a closed validity window** and
+> the correction is written as a new record at a freshly-minted id, so a stamped
+> record that is superseded keeps its own `True` and stays withheld from a channel
+> of unbounded audience for as long as it is in the store. Neither ADR-0040 §5a nor
+> ADR-0045 §4 is contradicted by any sentence of this ADR.
 
 > **Normative.** Beyond that, no user act, configuration, setting or later lane
 > clears the field in place on a record that carries it. A supersession is the only
@@ -586,13 +593,15 @@ layout. Each names an input and the outcome it fixes.
     reads that episode as `OBSERVED` with `about_person` unset, places it speakable
     and yields `False`, so an implementation without the disjunction launders the
     whole warrant through one bounded turn and one extra hop.
-15. **A supersession's survivor carries the proposal's value, not the target's.**
-    A stamped record superseded by a proposal whose own producer was supplied nothing
-    stamped: the live record at that id carries `False`, and the reverse case — an
-    unstamped target superseded by a stamped proposal — carries `True`. This is
-    ADR-0040 §5a's differential and §5's third clause pinned together, in both
-    directions, so neither the ratchet nor the differential can be implemented at
-    the other's expense.
+15. **A supersession writes an unstamped correction beside a retained stamped
+    target.** A stamped record superseded by a proposal whose own producer was
+    supplied nothing stamped: the test asserts **two** records at **distinct** ids —
+    the target retained with a closed validity window and still carrying `True`, and
+    the live correction at a freshly-minted id carrying `False` (ADR-0045 §4, §5a) —
+    and the reverse case, an unstamped target superseded by a stamped proposal,
+    carrying `False` and `True` respectively. This is ADR-0040 §5a's differential and
+    §5's third and fourth clauses pinned together, in both directions, so neither the
+    ratchet nor the differential can be implemented at the other's expense.
 
 ### 9. What the implementing lane owes
 
@@ -782,15 +791,19 @@ not infer the trigger from the band: `OBSERVED` says the assistant witnessed
 something" — is obeyed: this ADR reads nothing off the band and records the fact in
 a field of its own.
 
-**ADR-0040 §5a — no record is owed, and §5's third clause is written to make that
-true rather than to assume it.** Its differential rules that after a `SUPERSEDE`
-"the live record is the proposed record — its content, its provenance, its
-`evidence`, its `confidence` — borrowing from the target only the id it is written
-at". A ratchet that made a survivor inherit its target's stamp would contradict that
-sentence directly, and would be a partial supersession of it. This ADR does not:
-`supplied_withheld_content` is a member of the proposal's provenance and travels
-with it exactly as `derived_from_external` already does, so a writer conforming to
-§5a conforms to §5 with no further rule. §8's test 15 pins both directions of it.
+**ADR-0040 §5a and ADR-0045 §4 — no record is owed on either, and §5's third and
+fourth clauses are written to make that true rather than to assume it.** §5a's
+differential is that a `SUPERSEDE` "carries nothing of the target onto the surviving
+record", and ADR-0045's own amendment note records that this half "stands unchanged"
+while §5a's id clause was rewritten — the correction is no longer written at the
+target's id; the target is "**retained with a closed validity window**" and the
+correction is written at "a **freshly-minted id absent from the store**". A ratchet
+that made a correction inherit its target's stamp would contradict the differential;
+one that edited the target would contradict the retention. This ADR does neither:
+`supplied_withheld_content` is a member of the proposal's provenance and travels with
+it exactly as `derived_from_external` already does, and a retained target is not
+written to at all, so a writer conforming to §5a and to ADR-0045 §4 conforms to §5
+with no further rule. §8's test 15 pins both records, both ids and both directions.
 ADR-0040's `REINFORCE` half is likewise untouched — §5's first clause states the
 disjunction for a fold, which is the evidence-shaped obligation §5a already puts on
 that arm and not a new constraint on how content or confidence combine.
