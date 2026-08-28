@@ -529,6 +529,17 @@ from ai_assistant.wire.errors import (
 #: untouched, no existing frame's encoding changes, and the error registry gains no
 #: code: both of §1's refusals are ``ValueError``, which this surface already
 #: carries.
+#:
+#: **It composes with ADR-0207's bump rather than colliding with it**, which
+#: ADR-0207 §7 states from the other side: that decision widens ``SpokenTurn``'s
+#: validator for a park that carries a rendering beside a ``reply``-less outcome,
+#: and its own implementing lane bumps the constant too. "The two bumps compose and
+#: do not collide: whichever lands second reads the constant as it then stands and
+#: adds one, and each writes its own note." This lane landed first and took 19; the
+#: note above is this decision's alone, and ADR-0207's lane writes its own rather
+#: than merging the two. ADR-0207 §5 reads this member set as settled — "the four
+#: ADR-0200 §4 fixed and the fifth ADR-0205 §1 added" — so nothing here is left open
+#: for it to revisit.
 PROTOCOL_VERSION: Final[int] = 19
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
