@@ -54,9 +54,20 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from citations import ADR_RE, BACKTICK_RE, classify
+
 _FENCE_OPEN_RE = re.compile(r"`{3,}|~{3,}")
 
-_ADR_RE = re.compile(r"\bADR-(\d{3,4})\b")
+# The extraction itself moved to `scripts/citations.py`, whole and unchanged, so
+# `scripts/floor_test.py` can read the same one: ADR-0209 §5 requires that reuse
+# by name — "reused and not restated" — and issue #751 records what a second
+# spelling of one of this repository's acceptance rules cost. The classifier's
+# prefix list went with it (`citations.PATH_PREFIXES`).
+#
+# The two regexes keep their private aliases here because this module's own
+# prose names them, and because they are what is actually used below.
+_ADR_RE = ADR_RE
+_BACKTICK_RE = BACKTICK_RE
 
 # ``§9``, ``§§3-5``, ``section 9``, ``§8a``; the separator may be a hyphen, an en
 # dash or an em dash. A range is expanded only between plain numbers, so a
@@ -75,25 +86,6 @@ _LARGEST_RANGE = 20
 # is close; what the bound buys is that a brief cannot hand this script a
 # traceback in place of a report.
 _LARGEST_LABEL = 9
-
-_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
-
-# A backticked token is a path only when it names one of these trees. Requiring
-# the prefix is what keeps ``origin/main`` and ``feat(scope)`` out of the report:
-# a token that merely contains a slash is not evidence of a path, and a checker
-# that guesses here spends its credibility on false absences.
-_PATH_PREFIXES = (
-    "src/",
-    "tests/",
-    "docs/",
-    "scripts/",
-    "benchmarks/",
-    ".claude/",
-    ".github/",
-)
-_FILE_SUFFIXES = frozenset(
-    {"py", "md", "toml", "yml", "yaml", "sh", "json", "txt", "cfg", "ini", "lock", "sql"}
-)
 
 ABSENT = "absent"
 PRESENT = "present"
@@ -269,37 +261,6 @@ def section_references(text: str) -> list[_Reference]:
         adr = _binding_adr(text, match, adrs)
         references.extend(_references_for(adr, match.group("first"), match.group("last")))
     return references
-
-
-def classify(token: str) -> tuple[str, str] | None:
-    """Return ``(kind, cleaned token)`` for a backticked token, or None to ignore it.
-
-    Args:
-        token: The text between one pair of backticks.
-
-    Returns:
-        ``("path", ...)`` for a token naming one of this repository's trees,
-        ``("file", ...)`` for a bare filename, ``("symbol", ...)`` for something
-        shaped like a Python name, and None for prose, commands and flags.
-    """
-    cleaned = token.strip().removesuffix("()")
-    if not cleaned or any(c.isspace() for c in cleaned):
-        return None
-    if cleaned.startswith(_PATH_PREFIXES):
-        return "path", cleaned
-    # Python's own rule for what a name may be, rather than an ASCII imitation of
-    # it, so a Unicode identifier is checked instead of silently skipped.
-    if not all(part.isidentifier() for part in cleaned.split(".")):
-        return None
-    last = cleaned.rsplit(".", maxsplit=1)[-1]
-    if last.lower() in _FILE_SUFFIXES:
-        return "file", cleaned
-    # A bare lowercase word (``main``, ``pytest``, ``ship``) is prose far more
-    # often than it is a symbol; a dot, an underscore or a capital is what makes
-    # a token worth searching for.
-    if "." in cleaned or "_" in cleaned or any(c.isupper() for c in cleaned):
-        return "symbol", cleaned
-    return None
 
 
 def grep_symbols(root: Path, names: set[str]) -> dict[str, tuple[str, bool]]:
