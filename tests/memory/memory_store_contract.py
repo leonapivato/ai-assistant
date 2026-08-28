@@ -674,6 +674,39 @@ class MemoryStoreContract:
     async def test_get_missing_returns_none(self, store: MemoryStore) -> None:
         assert await store.get("nope") is None
 
+    async def test_a_records_disclosure_stamp_survives_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0204 §9's first obligation, on the contract rather than on one store.
+        # `Provenance.supplied_withheld_content` is what a supply site for a channel
+        # of unbounded audience reads to decide whether a record reaches that
+        # channel's turn at all (§3), and it reads it off a record the store handed
+        # back. So an implementation that dropped the field — a backend indexing the
+        # columns it knows and rebuilding the rest, say — would answer `False` for a
+        # stamped record on every read after the first, and the whole ruling would
+        # hold only until the process that wrote the record went away. Both values
+        # are pinned: one that returned `True` for everything would empty ADR-0199
+        # §3's speakable set instead, which fails milestone 19's exit test by the
+        # other route (§1's third clause).
+        stamped = _preference("stamped", "prefers concise replies")
+        await store.add(
+            stamped.model_copy(
+                update={
+                    "provenance": stamped.provenance.model_copy(
+                        update={"supplied_withheld_content": True}
+                    )
+                }
+            )
+        )
+        await store.add(_preference("unstamped", "prefers a written summary"))
+
+        got = await store.get("stamped")
+        assert got is not None
+        assert got.provenance.supplied_withheld_content is True
+        plain = await store.get("unstamped")
+        assert plain is not None
+        assert plain.provenance.supplied_withheld_content is False
+
     async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
         # Upsert is a full replacement, not a merge: re-adding an id must leave no
         # trace of the previous record — not its content, not its subtype fields,
