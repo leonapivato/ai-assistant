@@ -5008,12 +5008,12 @@ class Engine:
         self._reject_if_closing()
         named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
         self._check_budget(budget)
-        self._check_plays(plays)
+        wanted = self._check_plays(plays)
         check_arguments(
             "next_notification",
             max_bytes=self._max_payload_bytes,
             acknowledging=named,
-            plays=plays,
+            plays=wanted,
             budget=budget,
         )
         outbox = self._delivery_surface()
@@ -5025,15 +5025,15 @@ class Engine:
         # synthesis is outstanding neither a withholding nor a degradation, so it
         # propagates and sets no ``spoken_rendering`` at all.
         return await self._tracked(
-            self._poll(outbox, named, plays, budget),
+            self._poll(outbox, named, wanted, budget),
             "next_notification",
             checked=True,
             shielded=False,
         )
 
     @staticmethod
-    def _check_plays(plays: tuple[SpokenAudioFormat, ...]) -> None:
-        """Refuse a ``plays`` that names something this hub cannot mean.
+    def _check_plays(plays: tuple[SpokenAudioFormat, ...]) -> tuple[SpokenAudioFormat, ...]:
+        """Refuse a ``plays`` naming a format that does not exist, and normalise it.
 
         **An empty one is admitted rather than refused**, unlike ``converse_spoken``'s
         (ADR-0200 §3), and the asymmetry is ADR-0206 §1's: there, an empty preference
@@ -5041,33 +5041,45 @@ class Engine:
         here it is the ordinary state of every caller that cannot play audio, and it
         asks for no rendering rather than for an impossible one.
 
-        **What is refused is a member that is not a format.** In-process there is no
-        adapter between a caller and this method — over the wire ``wire.surface``
-        derives one from this signature and refuses there — so without this check a
-        string that merely looks like a media type would reach the placement, be
-        compared against a synthesizer's ``formats``, never match, and arrive as a
-        silent degradation instead of the malformed argument it is. Refused **before
-        any outbox effect**, which is ADR-0131 §4's ordering reaching ADR-0206 §7's
-        third clause.
+        **It coerces rather than requiring the member, so the two implementations of
+        this contract agree.** Over the wire, ``wire.surface`` derives this argument's
+        adapter from the signature and ADR-0087 §7's order — decode, validate into the
+        declared type, then measure — turns a member's *value* into the member before
+        this method sees it, so a client sending ``"audio/mp4"`` is a conforming
+        caller. In-process there is no adapter, so a bare ``str`` arrives as it was
+        written; refusing it here would make the in-process engine strictly less
+        capable than the client that stands in for it, which is exactly the divergence
+        ADR-0084 §4 forbids "in **either** direction". What is refused is what
+        validation would refuse either way: a string naming no member at all. Refused
+        **before any outbox effect**, which is ADR-0131 §4's ordering reaching ADR-0206
+        §7's third clause.
 
         Args:
             plays: What the caller says it can render.
 
+        Returns:
+            The same preference order, with every member normalised to the
+            enumeration — so the format handed to the seam is a
+            :class:`~ai_assistant.core.types.SpokenAudioFormat` whichever way the
+            caller spelled it.
+
         Raises:
-            ValueError: If any member is not a
-                :class:`~ai_assistant.core.types.SpokenAudioFormat`.
+            ValueError: If a member names no format this build declares.
         """
-        offender = next(
-            (member for member in plays if not isinstance(member, SpokenAudioFormat)), None
-        )
-        if offender is not None:
-            msg = (
-                f"plays names the formats the caller can render, and {offender!r} is not "
-                f"one of them; a malformed argument is refused before the "
-                f"acknowledgement is applied and before any entry is selected "
-                f"(ADR-0131 §4, ADR-0206 §7)"
-            )
-            raise ValueError(msg)
+        named: list[SpokenAudioFormat] = []
+        for member in plays:
+            try:
+                named.append(SpokenAudioFormat(member))
+            except ValueError:
+                readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
+                msg = (
+                    f"plays names the formats the caller can render, and {member!r} is "
+                    f"not one of them; this build declares {readable}. A malformed "
+                    f"argument is refused before the acknowledgement is applied and "
+                    f"before any entry is selected (ADR-0131 §4, ADR-0206 §7)"
+                )
+                raise ValueError(msg) from None
+        return tuple(named)
 
     def _check_budget(self, budget: timedelta) -> None:
         """Refuse a budget outside ADR-0131 §4's closed range, before any effect.

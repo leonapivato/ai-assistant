@@ -967,7 +967,7 @@ class TestTheOrdering:
         with pytest.raises(ValueError, match="not one of them"):
             await engine.next_notification(
                 acknowledging="1.abcdef",
-                plays=("audio/webm;codecs=opus",),  # type: ignore[arg-type]  # the malformed value is the subject
+                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
                 budget=timedelta(0),
             )
 
@@ -985,6 +985,34 @@ class TestTheOrdering:
 
         with pytest.raises(ValueError, match="not one of them"):
             await engine.next_notification(
-                plays=("audio/mp4",),  # type: ignore[arg-type]  # the malformed value is the subject
+                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
                 budget=timedelta(0),
             )
+
+    async def test_a_member_s_own_value_is_not_malformed(self) -> None:
+        """The line between the two, and why it is where the wire puts it.
+
+        ADR-0087 §7 fixes the order as decode, validate into the declared type, then
+        measure — so ``wire.surface``'s adapter turns ``"audio/mp4"`` into
+        :attr:`~ai_assistant.core.types.SpokenAudioFormat.MP4` before the hub sees
+        it, and a client spelling a member's value is a conforming caller. An
+        in-process engine that refused the same spelling would be strictly less
+        capable than the client standing in for it, which ADR-0084 §4 forbids "in
+        **either** direction". So it is coerced, and the format that reaches the seam
+        is the member either way.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        await outbox.offer(_placed())
+        engine, seam = _speaking(outbox)
+
+        delivery = await engine.next_notification(
+            plays=("audio/mp4",),  # type: ignore[arg-type]  # a member's value, which is admitted
+            budget=timedelta(0),
+        )
+
+        assert delivery is not None
+        assert delivery.spoken_rendering is SpokenRendering.RENDERED
+        assert delivery.spoken is not None
+        assert delivery.spoken.media_type is SpokenAudioFormat.MP4
+        assert seam is not None
+        assert [media_type for _, media_type in seam.calls] == [SpokenAudioFormat.MP4]

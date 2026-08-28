@@ -41,7 +41,9 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     SETTLED_SINGLE_SLOT,
+    SPEAKABLE_NOTIFICATION,
     SPEND_ZERO_CEILING,
+    UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
@@ -52,6 +54,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    near_ceiling_limit,
     overfull_invocation_rows,
     seeded_invocation_trail,
     seeded_read_trail,
@@ -121,6 +124,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
+    FakeNotificationOutbox,
     FakeObserver,
     FakePlanStore,
     FakeRoutingRecorder,
@@ -362,6 +366,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     memory: FakeMemoryStore | None = None,
     plans: FakePlanStore | None = None,
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
+    notification_outbox: FakeNotificationOutbox | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -399,6 +404,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     a snapshot, and the case that separates the two needs the store emptied *behind* an
     engine that has already settled a park. Nothing on the promoted surface reaches plan
     state, so a fixture that could not hold the store could not arrange it.
+
+    ``notification_outbox`` is ADR-0131 §3's delivery seam, a knob because nothing on
+    this surface enqueues a notification — ADR-0130 §3 puts the offer on the
+    ``NotificationWriter`` seam — so a subject with an entry waiting has to be built
+    holding one. Left ``None`` for every other case, which is the deployment the suite
+    had before ADR-0206 and is why none of them is affected by it.
 
     ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
     the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
@@ -534,6 +545,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         # seam, so what these supply is a subject for it to drive at all.
         transcriber=FakeSpeechTranscriber(),
         synthesizer=FakeSpeechSynthesizer(),
+        notification_outbox=notification_outbox,
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
@@ -557,6 +569,51 @@ class TestEngineContract(AssistantEngineContract):
     async def tiny_engine(self) -> AsyncIterator[AssistantEngine]:
         """The same implementation, with the limit small enough to reach."""
         built = _wire(max_payload_bytes=_TINY_LIMIT)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def speaking_engine(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine holding a placed candidate in its delivery outbox.
+
+        The entry is offered through the outbox itself, which is how a real one
+        arrives — ADR-0130 §3's writer hands it over and nothing on the promoted
+        surface can — and the synthesizer ``_wire`` already supplies declares every
+        format, which is what this subject owes the suite.
+        """
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(SPEAKABLE_NOTIFICATION)
+        built = _wire(notification_outbox=outbox)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def withholding_engine(self) -> AsyncIterator[AssistantEngine]:
+        """The same, holding a candidate ADR-0206 §3 does not place."""
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(UNSPEAKABLE_NOTIFICATION)
+        built = _wire(notification_outbox=outbox)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def near_ceiling_engine(self) -> AsyncIterator[AssistantEngine]:
+        """The same at the limit only a rendering bursts, computed by the suite."""
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(SPEAKABLE_NOTIFICATION)
+        built = _wire(
+            notification_outbox=outbox,
+            max_payload_bytes=near_ceiling_limit(SPEAKABLE_NOTIFICATION),
+        )
         await built.start()
         try:
             yield built
