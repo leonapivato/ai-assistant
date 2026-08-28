@@ -5970,3 +5970,34 @@ def test_a_report_for_one_conversation_survives_a_playback_in_another() -> None:
     taking = functions["takeDelivery"]
     assert "pendingDeliveries.delete(conversation)" in taking
     assert "clear()" not in taking, "taking one conversation's report keeps every other"
+
+
+def test_a_report_whose_request_the_hub_never_saw_is_put_back() -> None:
+    """ADR-0205 §7, and §1's idempotence as the reason it is safe.
+
+    Adversarial review, round 4, ``blocker``. ``takeDelivery`` lets go of the report
+    before ``fetch``, because the body needs it — so a request that never arrived took
+    a measured delivery fact with it and left the turn ``UNKNOWN`` although the page
+    had measured it. Resending is safe rather than merely tolerable: §1 makes a report
+    name its turn, so a resend "either finds it unstamped and stamps it, or finds it
+    stamped and does nothing".
+
+    **Restored on the three outcomes where the hub cannot have seen the request**, and
+    on no others: a rejected ``fetch``, a read the owner abandoned, and the gateway
+    saying it could not reach the hub. A refusal the gateway authored about the request
+    itself is deterministic, so putting the report back there would resend one refused
+    identically for ever.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    sending = functions["sendRecording"]
+
+    assert "let played = null" in sending, "declared where the catch can reach it"
+    assert sending.count("restoreDelivery(asked.conversation_id, played)") == 3
+    assert 'body.fault === "hub-unreachable"' in sending, (
+        "and only that refusal, because every other one is the gateway's own and repeats"
+    )
+
+    # A newer measurement wins: §7 asks for the playback last in the air.
+    restoring = functions["restoreDelivery"]
+    assert "pendingDeliveries.has(conversation)" in restoring

@@ -4016,6 +4016,26 @@ function takeDelivery(conversation) {
   return report;
 }
 
+// **Put back a report whose request the hub cannot have seen** (ADR-0205 §7).
+//
+// Adversarial review, round 4, `blocker`. `takeDelivery` lets go of the report before
+// `fetch`, because the body needs it — so a request that never arrives took a measured
+// delivery fact with it, and the turn stayed `UNKNOWN` although this page had measured
+// it. Resending is safe rather than merely tolerable: §1 makes a report name its turn,
+// so a resend "either finds it unstamped and stamps it, or finds it stamped and does
+// nothing", and it "can never be applied to a turn captured since".
+//
+// **A newer measurement wins.** If a playback in that conversation ended while the
+// failed request was out, the report now held is about a later answer — which is the
+// one §7 asks for, "the playback it **last** had in the air" — so this puts the old one
+// back only where nothing has taken its place.
+function restoreDelivery(conversation, report) {
+  if (!report || !conversation || pendingDeliveries.has(conversation)) {
+    return;
+  }
+  pendingDeliveries.set(conversation, report);
+}
+
 // Microseconds in a second, so the two conversions read as arithmetic.
 const MICROSECONDS = 1000000;
 
@@ -4314,6 +4334,11 @@ async function sendRecording(mine) {
     return;
   }
   const asked = {};
+  // **Declared outside the `try`, because the `catch` is one of the two places that
+  // put it back** (ADR-0205 §7): a request the hub never saw must not take a measured
+  // delivery fact with it, and a `const` inside the block would be out of scope
+  // exactly where the restore is owed.
+  let played = null;
   try {
     // **A press that ran past the bound sends nothing**, and the fault slot has already
     // said so — at the moment it happened, while the owner was still holding the button.
@@ -4342,7 +4367,7 @@ async function sendRecording(mine) {
     // §7). It rides the request this turn already makes: there is no route for it and
     // ADR-0205 §1 declines to add one, because its only reader is the composing stage
     // of the very turn this request is asking for.
-    const played = takeDelivery(conversationId);
+    played = takeDelivery(conversationId);
     if (played !== null) {
       asked.delivery = played;
     }
@@ -4373,9 +4398,21 @@ async function sendRecording(mine) {
     // wrong one for a read the owner stopped. The owner has already been told what
     // happened.
     if (mine.stopping.signal.aborted) {
+      // The owner stopped the read, so what the hub did with the report is unknown to
+      // this page. Put it back (ADR-0205 §1: a resend is idempotent, because a report
+      // names its turn and a stamped turn performs nothing).
+      restoreDelivery(asked.conversation_id, played);
       return;
     }
     if (!response.ok) {
+      // **Restored only where the hub cannot have seen it.** `hub-unreachable` is the
+      // gateway saying it could not reach the hub (ADR-0168 §9), so the report was
+      // never applied and a later request carries it. Every other refusal is one the
+      // gateway itself authored about this request, which is deterministic — restoring
+      // it would resend a report refused identically for ever.
+      if (body.fault === "hub-unreachable") {
+        restoreDelivery(asked.conversation_id, played);
+      }
       show("answer", false);
       conversationLost(body, asked.conversation_id);
       refused("console", body, response.status);
@@ -4383,6 +4420,10 @@ async function sendRecording(mine) {
     }
     renderSpokenTurn(body.turn, chosenAt);
   } catch (_) {
+    // `fetch` rejected, so nothing reached the hub: the connection failed, the page is
+    // offline, or the request was aborted before a response existed. The measurement
+    // stands and the next request for that conversation carries it.
+    restoreDelivery(asked.conversation_id, played);
     // An abort this owner asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one; `abandonSpoken` has
     // already said what happened, in the one place that knows it was an act rather than
