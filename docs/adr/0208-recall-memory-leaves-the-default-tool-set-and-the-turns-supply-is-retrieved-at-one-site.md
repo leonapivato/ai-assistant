@@ -1,4 +1,4 @@
-# 208. `recall_memory` leaves the default tool set, and the retrieval stage is the one read of the store a turn makes
+# 208. `recall_memory` leaves the default tool set, and the turn's supply is retrieved at one site
 
 - Status: Proposed
 - Date: 2026-08-28
@@ -145,23 +145,33 @@ about it.
 > "Re-adding it behind a lower risk level" and "re-adding it under another id" are
 > both that registration.
 
-> **Normative.** The retrieval stage is the **sole reader** of the assistant's own
-> store on the turn path. "One read" names one *site*, never a count of calls: the
-> stage's own per-band reads (ADR-0072 §5, ADR-0113) and its episodic supplement
-> (ADR-0158 §1) are unchanged, and nothing in this decision removes, merges or
-> bounds any read those sections require of it.
+> **Normative.** On the turn path the assistant's own store is read **for
+> relevance** — records selected by their bearing on the goal rather than by an
+> identifier the turn already holds — at exactly one site: the retrieval stage. One
+> site is not one call, and this clause bounds no read that site makes: its per-band
+> reads (ADR-0072 §5, ADR-0113) and its episodic supplement (ADR-0158 §1) are
+> unchanged, and nothing here removes, merges or budgets any of them.
+
+> **Normative.** That clause binds a relevance selection and nothing else. A **keyed
+> load** — records the turn already names, fetched by identifier — is not a second
+> retrieval and is untouched in both directions: `ConversationLifecycle.history`
+> loading the current conversation's episodes through `MemoryStore.get_many` reads
+> the same store on every turn that has history, and goes on doing so. A routed
+> pass resolving its own argument (ADR-0201 §5) is likewise untouched; it is not
+> the `ConversationLoop` path this clause is stated over.
 
 > **Normative.** A component on the turn path that wants records the supply does
 > not hold does not obtain them by invoking a tool.
 
-**That scoping sentence is in the clause rather than beside it, because the title's
-phrase would otherwise be read as arithmetic.** `assemble_by_band` issues one
-`MemoryStore.search` per band by construction — that is the whole of ADR-0072 §5's
-remedy for a band-neutral single read letting "a flood of low-confidence inferences
-… displace an assertion *below the cut*" — and `ConversationLoop` then makes
-ADR-0158 §1's separate episodic read. A rule counting calls would forbid both. What
-this decision counts is *stages that touch the store on the turn path*, and after §1
-there is one.
+**Both scoping clauses are marks rather than prose beside one, because each of them
+is a rule a lane could otherwise get wrong in a way that costs something real.** A
+rule counting *calls* would forbid `assemble_by_band`'s per-band reads — the whole
+of ADR-0072 §5's remedy for a band-neutral single read letting "a flood of
+low-confidence inferences … displace an assertion *below the cut*" — and would
+forbid ADR-0158 §1's episodic supplement beside them. A rule counting *readers of
+the store* would forbid the conversation history load, which is how a turn sees the
+exchange it is continuing and which selects nothing. What this decision counts is
+*relevance selections into the turn's supply*, and after §1 there is one.
 
 **The ground is that the read is already performed, better, one stage earlier.**
 Every property the tool lacks, `assemble_by_band` has: band precedence and per-band
@@ -429,10 +439,11 @@ obligates, and the prose beside them is read to determine what they mean.
 - **A memory question stops parking.** The most frequent `CONFIRM` on the turn path
   disappears, and with it the spoken-channel silence #1699 measured. The answer is
   composed from the supply, which is where it was composed from all along.
-- **One reader of the store per turn, at the site that has the machinery.** Band
+- **One relevance read per turn, at the site that has the machinery.** Band
   precedence, budgets, the kind filter, the episodic supplement and — on an
   unbounded channel — the withholding all apply to it, because there is no longer a
-  second read that bypasses them.
+  second relevance read that bypasses them. The conversation history load is
+  unaffected and selects nothing.
 - **A latent leak path is closed by removal rather than by care.** With no tool
   reading the store downstream of ADR-0203 §1's site, the question of what a future
   wiring of tool output into composition would leak from a spoken turn does not

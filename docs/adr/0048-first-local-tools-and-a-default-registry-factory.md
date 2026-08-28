@@ -13,9 +13,9 @@
   budget — while this tool's own read is band-blind and its result reaches no reply,
   because the composing stage renders a driven step from closed vocabularies alone
   (ADR-0170 §5a). In its place ADR-0208 §1 rules that the default registry binds no
-  memory tool and that the retrieval stage is the sole reader of that store on the
-  turn path, with §2 deleting the declaration, the implementation and the eight
-  alias rows that fold onto it.
+  memory tool and that the turn path reads that store for relevance at one site, the
+  retrieval stage, with §2 deleting the declaration, the implementation and the
+  eight alias rows that fold onto it.
 
   **What is untouched.** §1's `current_time` half and every reason it gives for the
   set being small; §1's deferral of `remember` with its idempotency question; §2's
