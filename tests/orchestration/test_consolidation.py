@@ -136,6 +136,7 @@ def _provenance(
     *,
     source: MemorySource = MemorySource.OBSERVED,
     tainted: bool = False,
+    supplied_withheld: bool = False,
 ) -> Provenance:
     """Provenance in whichever band ``source`` places it.
 
@@ -149,6 +150,7 @@ def _provenance(
         confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
         last_updated=_AT,
         derived_from_external=tainted,
+        supplied_withheld_content=supplied_withheld,
         attestation=(
             Attestation(reported_by="a-connected-source", reported_at=_AT) if attested else None
         ),
@@ -161,6 +163,7 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
     *,
     source: MemorySource = MemorySource.OBSERVED,
     tainted: bool = False,
+    supplied_withheld: bool = False,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
 ) -> MemoryRecord:
@@ -168,7 +171,7 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
         id=record_id,
         content=content,
         fact=content,
-        provenance=_provenance(source=source, tainted=tainted),
+        provenance=_provenance(source=source, tainted=tainted, supplied_withheld=supplied_withheld),
         expires_at=expires_at,
         validity=validity or Validity(),
     )
@@ -1506,3 +1509,34 @@ async def test_an_envelope_behind_exactly_the_miss_budget_is_still_found() -> No
 
     assert report.proposed == 1
     assert report.discarded_unusable == 0
+
+
+# --- ADR-0204 §5: the derivation rule at this producer too -------------------
+
+
+async def test_a_stamped_input_stamps_the_proposal_though_the_producer_omitted_it() -> None:
+    """§5's second clause, computed by the stage that selected the chunk.
+
+    The same shape ADR-0106 §10's first case gives the sibling marker, and for the
+    same reason: a selection step that read the field off the model's output would
+    find nothing there and write a consolidation ADR-0199 §3 places speakable over
+    material a channel of unbounded audience may not be told.
+    """
+    store = await _seeded([_record("r1", supplied_withheld=True), _record("r2")])
+    writes, _ = _gated(store)
+
+    await _stage(store=store, writes=writes).run()
+
+    assert len(writes.proposals) == 1
+    assert writes.proposals[0].proposed.provenance.supplied_withheld_content is True
+
+
+async def test_a_chunk_holding_nothing_stamped_leaves_the_proposal_unstamped() -> None:
+    """The negative control: the disjunction is over the chunk, not a constant."""
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+
+    await _stage(store=store, writes=writes).run()
+
+    assert len(writes.proposals) == 1
+    assert writes.proposals[0].proposed.provenance.supplied_withheld_content is False
