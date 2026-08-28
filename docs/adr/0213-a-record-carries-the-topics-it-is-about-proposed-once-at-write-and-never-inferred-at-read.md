@@ -122,10 +122,12 @@ itself defers.
 It cannot decide a matching rule wider than equality, for ADR-0100 §6's reason
 applied here. It cannot decide the surface on which the owner performs the acts §9
 rules on, which is a promoted-surface change and therefore its own ADR under golden
-rule 5 and ADR-0015 §5. And it cannot put anything derived from a belief into an
-observation prompt: ADR-0077 §3 rules that payload, changing it is a record on
-ADR-0077 under ADR-0070 §1, and this lane's fence reaches one ADR file. §5 states
-what that costs and §15 names the instrument that may take it.
+rule 5 and ADR-0015 §5. And it does not put anything derived from a belief into an
+observation prompt: ADR-0077 §3 rules that payload on ADR-0004 §7's minimisation
+ground, and reopening that trade wants evidence this decision does not have — a
+measured store in which the vocabulary demonstrably fails to converge — rather than a
+paragraph. §5 states what declining it costs and §15 names the condition that fires
+the ADR which may take it.
 
 What it can decide is everything a consumer needs to *exist*: what the field is,
 what a value in it means, what an empty one means, who may write one, what
@@ -1061,7 +1063,14 @@ widely than it now holds?
 > against any earlier ADR. Every ADR it cites binds after it exactly as it bound
 > before, and no `Status` line moves.
 
-The four nearest candidates are worked through, because each is close enough that a
+**Nothing here is withheld for want of room to write it.** A header-only record under
+ADR-0082 §1 — a `Status` line and one dated note, no Decision text rewritten — is
+cheap, and the corpus makes such records in the superseding ADR's own change
+(ADR-0204's, for two earlier ADRs at once). So the absence of one below is a finding
+about this decision's reach, not an economy: where a record were owed, it would be
+made here.
+
+The six nearest candidates are worked through, because each is close enough that a
 reader might expect a record and its absence should be argued rather than assumed.
 
 - **ADR-0100 §6's "whom, not what".** That clause reads: "The axis is *whom*, not
@@ -1089,9 +1098,23 @@ reader might expect a record and its absence should be argued rather than assume
   adds nothing to the observation prompt, and its supply lands on
   `ConsolidationStage`, which ADR-0077 does not govern. An earlier draft of this ADR
   *did* put a store-derived vocabulary into `Observer.observe`; that would have been a
-  reader acting differently, which is ADR-0070 §1's line, and it was removed rather
-  than recorded — a record on ADR-0077 is a change to ADR-0077's text, and this lane's
-  fence does not reach it. §15 names the instrument that may take it.
+  reader acting differently, which is ADR-0070 §1's line, and it was **removed rather
+  than recorded**. Removing it is the honest order of the two: ADR-0077 §3's ground is
+  ADR-0004 §7 minimisation, and a decision that widened an observation payload would
+  owe that trade an argument and a measurement, not a Status line appended to carry a
+  change made for a different decision's convenience. §15 names the condition that
+  fires an ADR which may take it, and what such an ADR would then owe ADR-0077 under
+  ADR-0070 §1 and ADR-0082 §1.
+- **ADR-0074 §4's "capture judges nothing else".** That section enumerates what
+  capture declines to fill — "`importance` stays at its default … `participants` stays
+  empty … `validity` stays fully open" — and states the principle those three are
+  instances of. §6 gives a fourth instance rather than a fourth rule: capture writes no
+  topics, for the reason §4 already gives, on a field §4 could not have named because it
+  did not exist. A reader holding only ADR-0074 stamps an episode exactly as they did
+  and declines exactly what they declined. That is ADR-0070's amend-vs-supersede test
+  answered *below* amendment: this is an ADR applying an earlier one's stated principle
+  to new ground, which changes neither its text nor its reach, so ADR-0074's `Status`
+  line is not touched by this change.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
@@ -1201,10 +1224,11 @@ it read well until ADR-0077 §3 was quoted rather than remembered: "The payload 
 batch and nothing else … Sending beliefs would be the obvious way to stop the observer
 re-proposing what is already known — and it is refused". A store-wide label set is a
 second class of Tier 1 data in that prompt, arriving for the very reason that clause
-refuses, so taking it would have needed a record on ADR-0077 under ADR-0070 §1 — an
-edit to another ADR's text, which this lane's fence does not reach and which deserves
-its own argument rather than a paragraph here. It is deferred in §15 with the
-instrument that may take it. What is *not* an alternative is taking the payload
+refuses, so taking it would have needed a record on ADR-0077 under ADR-0070 §1 and
+ADR-0082 §1 — and, before that record, the argument the record would stand on: why the
+minimisation ADR-0077 §3 protects is worth trading for a filing hint, measured rather
+than asserted. This decision has no such measurement, so it declines the payload rather
+than buying it on credit. It is deferred in §15 with the condition that fires it. What is *not* an alternative is taking the payload
 quietly and leaving §16 saying nothing changed.
 
 **Dropping the vocabulary supply altogether.** The smallest ADR of all, and it was
