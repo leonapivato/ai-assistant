@@ -234,7 +234,16 @@ test-fast *args:
     # takes the last occurrence, and a run that emptied some other directory while
     # the cleanup below removed this one would be the hazard this recipe exists to
     # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
-    if uv run pytest -n auto "$@" --basetemp="$tmp"; then
+    #
+    # `--dist worksteal` leads for that same reason, and is there because xdist's
+    # default (`load`) hands each worker its next test only when it finishes one,
+    # so a worker that draws a long test late leaves the others idle at the tail;
+    # worksteal lets an idle worker take work off a busy one's queue instead.
+    # Measured worth ~5% of the wall clock on this suite (#1752). It changes which
+    # worker runs a test, and neither what is collected nor whether it runs, so
+    # ADR-0166 §1 is untouched -- it is one of that clause's options "that changes
+    # neither what is collected nor whether it runs", alongside `-n 4` and `-q`.
+    if uv run pytest -n auto --dist worksteal "$@" --basetemp="$tmp"; then
         rm -rf "$tmp" "$tmp.lease"
     else
         status=$?
