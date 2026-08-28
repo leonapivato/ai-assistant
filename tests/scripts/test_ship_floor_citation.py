@@ -777,6 +777,34 @@ def test_a_widening_under_a_guarded_protocol_import_binds(tmp_path: Path) -> Non
     assert any("widens Protocol `Reader`" in r and "peek" in r for r in judged.reasons)
 
 
+def test_an_import_shadowed_inside_a_function_does_not_resolve_a_base(
+    tmp_path: Path,
+) -> None:
+    """Binding is lexical, so a nested import binds nothing at module scope.
+
+    The module's real `Protocol` comes from somewhere else; a helper *function*
+    imports `typing.Protocol` for its own use. A reader that collected every
+    import in the file would resolve `class Legacy(Protocol)` to
+    `typing.Protocol`, judge it a Protocol, find no widening, and clear a floor
+    that §4's last sentence and §6 require it to bind — a base resolving neither
+    to `typing.Protocol` nor to a class this file declares. The move here widens
+    nothing precisely so that the *clear* is what the bug would produce.
+
+    Adversarial review of PR #1755, round 1, blocker 2.
+    """
+    before = (
+        "from elsewhere import Protocol\n\n\n"
+        "def helper() -> None:\n    from typing import Protocol  # noqa: F401\n\n\n"
+        "class Legacy(Protocol):\n    def read(self) -> str: ...\n"
+    )
+    after = before.replace('"""', "") + "\n\n# a comment the move adds\n"
+
+    judged = _protocols_case(tmp_path, before, after)
+
+    assert judged.owed
+    assert any("resolves neither to typing.Protocol" in r for r in judged.reasons)
+
+
 def test_two_classes_sharing_a_name_in_one_endpoint_bind(tmp_path: Path) -> None:
     """A base written under an ambiguous name resolves to nothing decidable.
 

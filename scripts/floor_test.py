@@ -388,12 +388,7 @@ def _typing_bindings(tree: ast.Module) -> _Bases:
     """
     names: set[str] = set()
     modules: set[str] = set()
-    # Walked rather than read off `tree.body`, because `from typing import
-    # Protocol` under an `if TYPE_CHECKING:` guard is an ordinary spelling and a
-    # top-level-only reading would resolve every base in such a file to nothing —
-    # which §6 binds on, but for a reason that is this reader's rather than the
-    # file's.
-    for node in ast.walk(tree):
+    for node in _module_level(tree):
         if isinstance(node, ast.ImportFrom) and node.module in {"typing", "typing_extensions"}:
             names.update(
                 alias.asname or alias.name for alias in node.names if alias.name == "Protocol"
@@ -465,12 +460,43 @@ def _declared_members(node: ast.ClassDef) -> set[str]:
     return members
 
 
+def _module_level(tree: ast.Module) -> list[ast.stmt]:
+    """The statements at a module's own scope, in source order.
+
+    ``if``/``try`` blocks are descended into and **function and class bodies are
+    not**, because Python's binding rules are lexical and this reader's whole job
+    is to say what a name at module scope is bound to. A bare ``ast.walk`` reads
+    every nested statement as though it bound at module scope, which is a
+    fail-OPEN on the one question §4's structural limb asks: a module whose real
+    ``Protocol`` comes from somewhere else, plus a ``from typing import Protocol``
+    inside some helper function, would have every ``class X(Protocol)`` in it
+    resolved to ``typing.Protocol`` and judged as a Protocol — so a move that
+    widened nothing would clear a floor §4's last sentence and §6 require it to
+    bind. Adversarial review of PR #1755, round 1, blocker 2.
+    """
+    out: list[ast.stmt] = []
+    pending: list[ast.stmt] = list(reversed(tree.body))
+    while pending:
+        stmt = pending.pop()
+        out.append(stmt)
+        if isinstance(stmt, ast.If | ast.Try):
+            nested = [*stmt.body, *stmt.orelse]
+            if isinstance(stmt, ast.Try):
+                nested += stmt.finalbody
+                for handler in stmt.handlers:
+                    nested += handler.body
+            pending.extend(reversed(nested))
+    return out
+
+
 def _classes_in(tree: ast.Module) -> dict[str, ast.ClassDef]:
     """Every ``ClassDef`` in the file, keyed by name.
 
-    Walked rather than read off ``tree.body``, because a Protocol declared inside
-    an ``if TYPE_CHECKING:`` or a ``try:`` block is still surface an
-    implementation must satisfy.
+    Read at **module scope**, descending through ``if``/``try`` blocks: a Protocol
+    declared inside an ``if TYPE_CHECKING:`` block is still surface an
+    implementation must satisfy, while one declared inside a *function* is a local
+    and is not. A base written under a name that only a nested class defines
+    therefore resolves to nothing here, and §6 binds — the safe direction.
 
     Raises:
         UnevaluableError: Two classes share a name. A base written under that name
@@ -478,7 +504,7 @@ def _classes_in(tree: ast.Module) -> dict[str, ast.ClassDef]:
             §6 binds — over-binding on a spelling `core/protocols.py` does not use.
     """
     classes: dict[str, ast.ClassDef] = {}
-    for node in ast.walk(tree):
+    for node in _module_level(tree):
         if not isinstance(node, ast.ClassDef):
             continue
         if node.name in classes:
