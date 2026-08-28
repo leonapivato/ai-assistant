@@ -3844,6 +3844,29 @@ function interruptPlayback() {
   if (ended === null) {
     return;
   }
+  // **A notification's playback is ended and nothing else** (ADR-0206 §8, §9). The
+  // press interrupts it — "a press to talk always interrupts a notification's
+  // playback… a notification is the interruptible one of the two" — and that is the
+  // whole of what happens. Three things this deliberately does *not* do:
+  //
+  // * **It reports nothing.** §9: "No component sends, records or infers whether a
+  //   page had a context, was playing, played, finished playing or was interrupted."
+  //   `reportDelivery` would refuse this record anyway — a notification has no
+  //   `episode_id` and no conversation — but refusing it by accident is not the same
+  //   as refusing it on purpose, and §9 is a clause a later lane must not be able to
+  //   defeat by giving the record two names it does not have.
+  // * **It writes no notice.** A notification has no answer panel to write one into,
+  //   and "That answer stopped being spoken" under a notification would name the
+  //   wrong subject.
+  // * **It is never held for a resume.** #1701's resume is for an *answer* an
+  //   accidental press cut off, and §8 forbids the page holding a rendering for
+  //   later in terms: "The page holds no rendering for later, queues nothing behind
+  //   a playback, and plays no notification after the delivery that carried it has
+  //   been rendered on screen." The notification is on the page either way, which
+  //   under §5 is the channel that carries it.
+  if (ended.notification) {
+    return;
+  }
   // **A playback that had already elapsed was not interrupted** (#1705). `ended` is a
   // queued task and not a synchronous callback, so a source that reached its natural end
   // still names itself in `playing` for the moments between the two — and a press
@@ -4552,6 +4575,9 @@ async function playSpoken(spoken, slot, episode, conversation) {
     played: 0,
     episode,
     conversation,
+    // An answer, which is the reportable kind and the resumable one (ADR-0205 §7,
+    // #1701). `playNotification` builds the other kind and says why.
+    notification: false,
   };
   playing = mine;
   try {
@@ -4618,10 +4644,18 @@ function soundFrom(context, mine, offset) {
       return;
     }
     mine.played = mine.buffer.duration;
-    // A source that ended of its own accord played the buffer, so the buffer's own
-    // duration is both numbers — which is what ADR-0205 §2's equality requires of
-    // `COMPLETE` and what it costs the device to say it: nothing.
-    reportDelivery(mine, "complete");
+    // **A notification that finished is reported nowhere** (ADR-0206 §9). ADR-0205
+    // §7's report is about a turn the owner asked for, and this is a delivery nobody
+    // asked for: "no component sends, records or infers whether a page … finished
+    // playing". Said here rather than left to `reportDelivery`'s own refusal, for the
+    // reason `interruptPlayback` gives at the other ending — a clause §9 states in
+    // terms should not depend on a record happening to lack two members.
+    if (!mine.notification) {
+      // A source that ended of its own accord played the buffer, so the buffer's own
+      // duration is both numbers — which is what ADR-0205 §2's equality requires of
+      // `COMPLETE` and what it costs the device to say it: nothing.
+      reportDelivery(mine, "complete");
+    }
     forgetPlaying(mine);
   });
   mine.offset = offset;
@@ -4677,6 +4711,8 @@ function resumeInterrupted() {
     // page needs no rule of its own to keep that true.
     episode: mine.episode,
     conversation: mine.conversation,
+    // Only an answer is ever held for a resume, so only an answer ever reaches here.
+    notification: false,
   };
   playing = resumed;
   try {
@@ -4920,6 +4956,95 @@ function renderNotification(value) {
   list.insertBefore(item, list.firstChild);
 }
 
+// **Speak a notification, but only into an idle device** (ADR-0206 §8).
+//
+// "Idle" is a conjunction of facts about the **device** and never about the room: the
+// page holds a running audio context established by a user gesture in this document,
+// and it holds no playback in the air. It is not an audience fact — nothing here asks
+// or infers who is present, and no clause of ADR-0206 is conditioned on it.
+//
+// **The context is the constraint that decides this, and it is a property of browsers
+// rather than of this design.** `readyToPlay` builds and resumes the decoding context
+// inside the press gesture because that is the only place a browser will let it, so a
+// page that has had no gesture since load holds no running context and cannot make
+// one. Nothing here resumes: a `resume()` outside a gesture is the defect #1690
+// records, and an unprompted utterance is possible exactly on a page the owner has
+// already spoken to. The honest statement of the milestone is that the device speaks
+// *proactively* rather than *spontaneously*.
+//
+// **Where either fact does not hold it plays nothing and the notification is on the
+// page**, which is where §5 puts it either way — and the rendering is **dropped**,
+// not held: no queue behind the playback, no replay when the sound stops, nothing
+// aging against an artifact ADR-0130 says is about a moment.
+//
+// **A rendering never interrupts a playback in the air** (§8). The check is `playing
+// !== null` and not a check on what kind of playback it is: a notification yields to
+// an answer and to another notification alike, and the only thing that ever ends one
+// is a press.
+//
+// **And nothing about any of it is reported** (§9). No component sends, records or
+// infers whether this page had a context, played, finished or was interrupted;
+// playback is not an acknowledgement, and ADR-0175 §5's acknowledgement rides the
+// gateway's own next poll whatever happened here.
+function playNotification(spoken) {
+  // `null` is one of the two shapes §8 fixes, and the member is never absent — so a
+  // withheld, degraded or unrequested rendering arrives as a value read the same way
+  // a present one is. What is *not* here is why: `spoken_rendering` does not cross,
+  // and there is nothing for this page to do differently if it did.
+  if (!spoken) {
+    return;
+  }
+  const context = listeningContext;
+  if (context === null || context.state !== "running" || playing !== null) {
+    return;
+  }
+  // The record `stopPlaying`, `soundFrom` and `forgetPlaying` all read, with the three
+  // members that make it a notification's: no slot, because there is no answer panel
+  // this belongs under; no episode and no conversation, because there is no turn this
+  // is about; and the flag `interruptPlayback` reads.
+  const mine = {
+    source: null,
+    slot: null,
+    buffer: null,
+    offset: 0,
+    startedAt: 0,
+    played: 0,
+    episode: null,
+    conversation: null,
+    notification: true,
+  };
+  playing = mine;
+  void decodeNotification(context, mine, spoken);
+}
+
+// The decode and the start, off the delivery reader's own turn.
+//
+// **A browser that cannot decode this rendering plays nothing and says nothing**
+// (ADR-0206 §2). One delivery carries one rendering in one format — the engine picks
+// the first member of the gateway's `plays` the synthesizer also names, and the
+// gateway writes that one rendering to every open stream — so a browser whose decoder
+// covers only the other member is *intentionally* silent, exactly as one that could
+// decode neither is. It is not a failure to report: the notification is on the page,
+// and §9 forbids reporting the silence anywhere else.
+//
+// **The record is let go where the decode failed and kept where a press overtook it.**
+// `interruptPlayback` clears `playing` before it stops anything, so a press landing
+// while this was decoding leaves `playing !== mine` — and starting a source then would
+// be the utterance the owner interrupted beginning to speak *after* they had begun,
+// which is the failure the interrupt exists to remove arriving a moment late.
+async function decodeNotification(context, mine, spoken) {
+  try {
+    const decoded = await context.decodeAudioData(bytesOf(spoken.content).buffer);
+    if (playing !== mine) {
+      return;
+    }
+    mine.buffer = decoded;
+    soundFrom(context, mine, 0);
+  } catch (_) {
+    forgetPlaying(mine);
+  }
+}
+
 // One delivery stream (ADR-0175 §4). The gateway writes on it at least once per
 // `gateway_notification_budget` — a delivery where its poll returned one, and
 // otherwise a value carrying nothing but its own kind — so a stream that has gone
@@ -5137,7 +5262,12 @@ async function readDeliveries(half) {
     for await (const value of streamValues(response)) {
       heard();
       if (value.kind === "notification") {
+        // Rendered first and played second, in that order and unconditionally: §8
+        // says the page "plays nothing and renders the notification on the page"
+        // wherever it cannot play, so the render is what always happens and the
+        // playback is what sometimes does.
         renderNotification(value);
+        playNotification(value.spoken);
       } else if (TERMINAL_KINDS.has(value.kind)) {
         terminal = value;
         break;
