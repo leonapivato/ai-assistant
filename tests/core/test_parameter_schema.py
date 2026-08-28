@@ -305,6 +305,124 @@ def test_a_root_id_is_permitted() -> None:
     assert _definition(parameters_schema={"$id": "urn:tool:smtp", "type": "object"})
 
 
+# --- §6: the check is computed once per document and given at every construction
+
+
+def test_a_second_construction_of_one_schema_is_answered_from_the_memo() -> None:
+    """The check is memoised on the document, which is the whole of #1758's fix (§6).
+
+    Asserted as a cache *hit* rather than as a duration, because a wall-clock
+    assertion on a loaded machine is a flake and this is the property the timing
+    was evidence of. If a later change makes the key vary per construction — an
+    object identity, an instance counter — the answer stays correct and the hits
+    stop, and only this case notices.
+    """
+    schema = {"type": "object", "properties": {"memoised": {"type": "integer"}}}
+    core_types._cached_schema_defect.cache_clear()
+
+    assert _definition(parameters_schema=schema).parameters_schema
+    after_first = core_types._cached_schema_defect.cache_info()
+    assert (after_first.hits, after_first.misses) == (0, 1)
+
+    assert _definition(parameters_schema=dict(schema)).parameters_schema
+    after_second = core_types._cached_schema_defect.cache_info()
+    assert (after_second.hits, after_second.misses) == (1, 1)
+
+
+def test_a_memoised_refusal_is_raised_again_verbatim() -> None:
+    """A cached *defect* is still a refusal, with the message it had the first time (§6).
+
+    The memo remembers the reason, not merely that there was one, so the second
+    construction of an unreadable schema fails exactly as the first did. A memo
+    that cached only the boolean would pass every "does it refuse" case and lose
+    the sentence a tool author reads.
+    """
+    schema = {"type": "not-a-json-type"}
+    core_types._cached_schema_defect.cache_clear()
+
+    with pytest.raises(ValidationError) as first:
+        _definition(parameters_schema=schema)
+    with pytest.raises(ValidationError) as second:
+        _definition(parameters_schema=dict(schema))
+
+    assert str(first.value) == str(second.value)
+    assert core_types._cached_schema_defect.cache_info().hits == 1
+
+
+def test_a_bool_and_the_int_it_equals_are_two_schemas_and_not_one() -> None:
+    """Why the memo is keyed on the canonical encoding rather than the frozen value.
+
+    ``True == 1`` and ``hash(True) == hash(1)`` in Python, so a memo keyed on the
+    ``FrozenDict``'s own equality would answer ``{"minLength": True}`` from
+    ``{"minLength": 1}``'s entry — and jsonschema's ``integer`` type check
+    excludes ``bool``, so the second is a schema §6 accepts and the first is one
+    it refuses. ADR-0021 §1's encoding spells them ``true`` and ``1``.
+
+    Run in both orders, because a key that conflates them fails in whichever
+    direction is asked second and only one of the two orders is the dangerous
+    one — the accepted schema laundering the refused one.
+    """
+    readable: Mapping[str, Any] = {"type": "object", "properties": {"n": {"minLength": 1}}}
+    unreadable: Mapping[str, Any] = {"type": "object", "properties": {"n": {"minLength": True}}}
+    assert readable == unreadable  # the Python-value equality a hash key would use
+
+    core_types._cached_schema_defect.cache_clear()
+    assert _definition(parameters_schema=readable).parameters_schema
+    with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
+        _definition(parameters_schema=unreadable)
+
+    core_types._cached_schema_defect.cache_clear()
+    with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
+        _definition(parameters_schema=unreadable)
+    assert _definition(parameters_schema=readable).parameters_schema
+
+
+def test_a_definition_mutated_past_its_guard_is_still_refused_on_revalidation() -> None:
+    """The memo does not launder the corruption route §6's revalidation clause closes.
+
+    A definition whose ``parameters_schema`` is swapped through
+    ``object.__setattr__`` keeps its object identity and loses its canonical
+    encoding, so the mutated document misses the entry the original filled and is
+    meta-validated afresh. Assigning the definition to a model-typed field re-runs
+    the ``after`` model validator, which is the revalidation ADR-0029 §2's step 1
+    and ADR-0018 §4 already perform.
+    """
+    tool = _definition(parameters_schema={"type": "object"})
+    object.__setattr__(tool, "__dict__", {**tool.__dict__, "parameters_schema": {"type": "string"}})
+
+    with pytest.raises(ValidationError, match="does not admit an object"):
+        ActionRequest(tool=tool, parameters={})
+
+
+def test_a_schema_with_no_canonical_encoding_is_answered_uncached() -> None:
+    """A document the key cannot be built from is answered as it was before the memo.
+
+    Pydantic refuses a ``parameters_schema`` holding a value with no JSON encoding
+    long before this validator sees one, so the only way here is the corrupted
+    instance above. The answer must be the one the checks give, not an exception
+    from the encoder standing in for it, and nothing may be cached under a key
+    that could not be computed.
+    """
+    corrupted: Mapping[str, Any] = {"unknown-keyword": object()}
+    core_types._cached_schema_defect.cache_clear()
+
+    assert core_types._unreadable_schema_reason(corrupted) is None
+    assert core_types._cached_schema_defect.cache_info().currsize == 0
+
+
+def test_the_memo_is_bounded_so_a_stream_of_schemas_cannot_grow_it() -> None:
+    """The documents are provider-authored, so the memo holds a fixed number (§6, §7)."""
+    core_types._cached_schema_defect.cache_clear()
+    for index in range(core_types._MAX_CACHED_SCHEMAS + 20):
+        assert _definition(
+            parameters_schema={"type": "object", "properties": {f"p{index}": {}}}
+        ).parameters_schema
+
+    info = core_types._cached_schema_defect.cache_info()
+    assert info.maxsize == core_types._MAX_CACHED_SCHEMAS
+    assert info.currsize == core_types._MAX_CACHED_SCHEMAS
+
+
 # --- §6: the depth bound, measured rather than asserted ----------------------
 
 
