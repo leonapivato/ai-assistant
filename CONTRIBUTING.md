@@ -269,7 +269,8 @@ accepted (ADR-0027 §2):
 - **The base has moved** — the recorded base is a *proper* ancestor of the merge
   base, the reviewed patch identity is unchanged, and the base move clears the
   floor below. `ship` then publishes the drift — both bases and the whole file
-  set the move touched — in the comment it posts.
+  set the move touched, with the test that decided each floor path — in the
+  comment it posts.
 
 It also refuses on a dirty tree, on `main`, and when the PR head is behind local
 `HEAD`.
@@ -302,23 +303,61 @@ out** — `scripts/ship.sh --drill` (`just drill`) runs this same acceptance rul
 and posts nothing, so a round that is owed is discovered while it is still cheap.
 (It fetches the PR's base, as `ship` does; what it does not do is write to
 GitHub.) It reports the inputs it judged, not just a verdict: the base move's
-file set with floor paths marked, and where it made no floor claim, which of its
-three reasons applies — none of which is a clear. **Rebase first**: on a `HEAD`
-that does not contain the fetched tip it refuses, rather than testing the floor
-over the range to the *old* merge base — a different base move from the one
-being asked about, and where nothing else has moved, an empty one (issue #751).
+file set with floor paths marked and the test that bound or cleared each of them,
+and where it made no floor claim, which of its four reasons applies — none of
+which is a clear. **Rebase first**: on a `HEAD` that does not contain the fetched
+tip it refuses, rather than testing the floor over the range to the *old* merge
+base — a different base move from the one being asked about, and where nothing
+else has moved, an empty one (issue #751).
 
-**A base move costs a review round when it lands in ADR-0027 §3's floor:**
-`src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` — the
-contract surface — plus `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`,
-`scripts/codex-review.sh` and `docs/adr/**`, the standing contracts the review
-was conducted under. The floor is read rename-aware on **both** endpoints: a
-floor path is breached when it appears as the source or the destination of a
-rename, and when it is deleted. Clearing the floor is necessary but not
-sufficient — the moved-base path above carries the rest of the conditions, and
-a base move that edits the reviewed hunks costs its round whatever the floor
-says. Merging to `main`, meanwhile, does not move a PR's merge base at all;
-rebasing onto it does.
+**ADR-0027 §3's floor is the set of base moves the gate cannot see and a reviewer
+would have judged differently, and since ADR-0209 it has two halves.**
+
+- **The standing review contracts bind outright** — `docs/review/**`,
+  `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh`. No test is
+  consulted and no PR can clear them: they are the instructions the reviewer is
+  conducted under, so a base move touching one conducts every later review under
+  different instructions while touching no document (ADR-0209 §1).
+- **The ADRs and the contract surface bind only where the moved text and the PR
+  name each other** — `docs/adr/**`, `src/ai_assistant/core/protocols.py` and
+  `src/ai_assistant/core/types.py` (ADR-0209 §§2–4). Four tests, any one of
+  which costs the round:
+  - the PR's text — its diff's added and removed lines **and its description** —
+    writes `ADR-NNNN` for the moved ADR;
+  - the moved ADR's own text names a path the PR's diff touches, or a symbol an
+    added or removed line of it carries;
+  - the move adds a `Protocol` to `src/ai_assistant/core/protocols.py`, or widens
+    any `Protocol`'s effective member surface — inherited members included. This
+    limb is unconditional, because "a diff that *now should* consume it" is a
+    relation the PR's own text cannot witness;
+  - for any other move to `protocols.py` or `core/types.py`: the PR's diff
+    touches `src/ai_assistant/core/`, or a name whose *definition* the move
+    changed occurs in the PR's text.
+- **Anything undecidable binds** (ADR-0209 §6) — a `core/protocols.py` endpoint
+  that will not parse, a base whose binding cannot be resolved, an unreadable
+  file, a PR description GitHub will not return, and any failure nobody
+  foresaw. The rule is fail-closed as a *rule*, not as a list.
+
+The floor is read rename-aware on **both** endpoints: a floor path counts when
+it appears as the source or the destination of a rename, and when it is deleted,
+and a moved ADR is read at each of its names. Every test is persona-agnostic — a
+test that binds costs the round for every persona the change requires. Clearing
+the floor is necessary but not sufficient — the moved-base path above carries the
+rest of the conditions, and a base move that edits the reviewed hunks costs its
+round whatever the floor says. Merging to `main`, meanwhile, does not move a PR's
+merge base at all; rebasing onto it does.
+
+**Do not work out which test binds from memory — `just drill` prints it,** per
+path, beside the file set it was decided over, and the ship comment carries the
+same reason for the merge reviewer.
+
+**Your PR description can add a binding and must never lose one.** It is read as
+part of the PR's text, so a citation there costs the round exactly as one in the
+diff does. Once a review has been recorded, do not delete from the description a
+citation that would bind a base move being published: the round is owed
+regardless, and `ship` computes it — each round records the description it was
+taken beside, and reads the union of that and the live body (ADR-0209 §5, issue
+#1750). Adding to the description is free of this and always was.
 
 Anchoring on content rather than the commit SHA is what makes squashing,
 amending, and reverting free: a commit that changes no reviewed byte does not
