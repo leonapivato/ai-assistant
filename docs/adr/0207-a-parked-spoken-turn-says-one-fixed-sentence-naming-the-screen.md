@@ -897,12 +897,28 @@ coverage.**
 > park — no confirmation content, no policy `reason`, no tool id, no routed subject,
 > no part of the transcript — reaches the synthesizer on any of them; and (g) a live
 > park carrying `spoken` `None` beside `spoken_degraded` `False` is refused at
-> construction, which is §6's third arm and the shape #1699 measured. Row (g) is
+> construction, which is §6's third arm and the shape #1699 measured; and (h) §5's
+> retention clause holds over the park branch — no audio, neither the utterance nor
+> the rendering of §2's sentence, reaches any store, index, trace, audit trail,
+> routing trail, outbox or log — asserted over the same durable surfaces
+> `tests/orchestration/test_converse_spoken.py::test_no_audio_reaches_any_store_trail_or_log`
+> already reads, which drives an answered turn and therefore never enters this
+> branch. Row (g) is
 > pinned over **both** of §1's shapes, the step park and the routed one, as (a) and
 > (b) are: §6's third arm ranges over §1's definition and not over one member of
 > it, and an arm that refused the silent step park while admitting the silent
 > routed one would pass a singular test while letting #1699's silence cross the
 > wire on exactly the routed operations §1 was widened to reach.
+
+**Row (h) exists because §5's retention clause acquires a new subject and no
+existing test reaches it.** ADR-0200 §8 and §5 above already forbid retaining the
+rendering, and nothing in this decision relaxes them — but the test that reads
+every durable surface for audio drives an answered turn, so an implementation
+that synthesised the sentence correctly on both parks and logged the octets in
+the park branch alone would satisfy rows (a) through (g) and breach §5. Row (f)
+guards the way *in* to the synthesizer; row (h) guards the way *out* of it, and
+the two together are what make the branch's disclosure properties tested rather
+than asserted.
 
 > **Normative.** Both park shapes are exercised in the **shared `AssistantEngine`
 > conformance suite** (`tests/orchestration/assistant_engine_contract.py`), so the
