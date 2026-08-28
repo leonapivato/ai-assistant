@@ -21,11 +21,9 @@ import re
 import string
 import unicodedata
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from functools import lru_cache
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
@@ -6065,64 +6063,44 @@ def _root_type_defect(document: Mapping[str, FrozenJson]) -> str | None:
 
 
 _MAX_CACHED_SCHEMAS: Final = 128
-"""How many distinct schema documents :func:`_cached_schema_defect` remembers.
+"""How many answers :data:`_schema_defects` keeps before it starts over.
 
 Bounded rather than unbounded, because under ADR-0145 §7's threat model the
 documents are chosen by a server this repository does not control: an unbounded
 memo would let a discovery loop publishing a fresh schema each pass grow `core`'s
-memory without limit. An entry also *retains* the document it answers about for
-as long as it lives, which is why the bound is small rather than generous — a
-registry's whole tool set fits inside it several times over, and the cost of a
-miss is one meta-validation, not a failure.
+footprint without limit. Small rather than generous, because a registry's whole
+tool set fits inside it several times over and the cost of a miss is one
+meta-validation, not a failure.
 """
 
+_schema_defects: dict[bytes, tuple[str | None]] = {}
+"""ADR-0145 §6's answer per schema document, keyed by a digest of it.
 
-@dataclass(frozen=True, slots=True)
-class _SchemaKey:
-    """A candidate ``parameters_schema``, identified by its canonical encoding.
+**Nothing of the document is kept.** The key is a 32-byte digest and the value is
+one of a closed set of short sentences, so an entry costs a fixed few dozen bytes
+however large the schema it answers about. That is what lets
+:data:`_MAX_CACHED_SCHEMAS` be an entry count: a ``parameters_schema`` is bounded
+in depth (§6) but in neither breadth nor bytes, so a memo that retained documents
+would bound entries and not memory, and would keep a provider's schemas alive
+past the definitions that carried them.
 
-    **Equality and hashing are the canonical bytes alone**; ``document`` rides
-    along excluded from both. That is what lets :func:`_cached_schema_defect` be
-    memoised without ever evaluating a document reconstructed from its own key: a
-    hit answers about a document byte-identical to the one asked about, and a miss
-    runs the checks over the caller's own value. The check exists to be
-    trustworthy about documents from servers this repository does not control
-    (ADR-0145 §6), so the document it reads is the one it was handed.
+**The digest is over ADR-0021 §1's canonical encoding**, which is the identity
+this module already stakes an authorisation on:
+:attr:`ActionRequest.parameters_digest` is ``sha256`` over the same encoding of a
+call's arguments, and a permission decision is recorded against it. Two documents
+with one digest are one document on exactly that assumption, and no weaker one.
 
-    **The canonical bytes are the key rather than the frozen value's own hash**,
-    and the difference is not cosmetic. ``FrozenDict`` hashes and compares as
-    Python values, where ``True == 1`` and ``hash(True) == hash(1)``;
-    ``{"minLength": 1}`` is a valid draft 2020-12 schema and
-    ``{"minLength": True}`` is not, because jsonschema's ``integer`` type check
-    excludes ``bool``. A Python-equality key would therefore answer the second
-    from the first's entry and load a schema §6 refuses. ADR-0021 §1's encoding
-    spells them ``1`` and ``true``, which are two keys.
-    """
+**Not the frozen value's own hash**, and the difference is not cosmetic.
+``FrozenDict`` hashes and compares as Python values, where ``True == 1`` and
+``hash(True) == hash(1)``; ``{"minLength": 1}`` is a valid draft 2020-12 schema
+and ``{"minLength": True}`` is not, because jsonschema's ``integer`` type check
+excludes ``bool``. A Python-equality key would answer the second from the first's
+entry and load a schema §6 refuses. The canonical encoding spells them ``1`` and
+``true``.
 
-    canonical: bytes
-    document: Mapping[str, FrozenJson] = field(compare=False)
-
-
-@lru_cache(maxsize=_MAX_CACHED_SCHEMAS)
-def _cached_schema_defect(key: _SchemaKey) -> str | None:
-    """Return :func:`_schema_defect` of ``key``'s document, memoised on its bytes.
-
-    The memo is sound because the checks it caches are a pure function of the
-    document: they read no setting, no clock and no state, and
-    :data:`_MAX_SCHEMA_DEPTH` and the dialect are module constants. Two documents
-    with one canonical encoding are one document, so one answer serves both.
-
-    What it buys is that the answer is *computed* once rather than *given* once.
-    ADR-0145 §6 requires the check to run "wherever a ``ToolDefinition`` is
-    constructed", and it still does — every construction asks and every
-    construction is answered, including the defensive rebuilds ADR-0018 §4,
-    :func:`_detached_tool` and ADR-0029 §2's step 1 perform. §6's clause is about
-    which stages the refusal reaches, not about how many times a metaschema is
-    walked, and a definition mutated through ``object.__setattr__`` is still
-    refused on revalidation: the mutation changes the canonical bytes, so it
-    misses this cache and is meta-validated afresh.
-    """
-    return _schema_defect(key.document)
+The value is a 1-tuple so that "remembered as readable" — ``(None,)``, the
+common answer — and "not remembered" are two states one lookup tells apart.
+"""
 
 
 def _schema_defect(schema: Mapping[str, FrozenJson], /) -> str | None:
@@ -6164,13 +6142,34 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     included, which is why the memo begins after the bound rather than in front of
     it. :func:`_schema_defect` carries the order of everything after.
 
-    **The rest of the answer is memoised on the document's canonical encoding**,
-    because meta-validating the same document again yields the same answer at a
-    price that dominates construction: walking the draft 2020-12 metaschema costs
-    roughly fifty times what encoding the document does, and the shape it is
-    charged for most often is ``{}``, the default every tool that declares no
-    arguments carries. Every construction still asks and still gets §6's answer;
-    :func:`_cached_schema_defect` says why asking twice may be answered once.
+    **The rest of the answer is memoised** in :data:`_schema_defects`, because
+    meta-validating the same document again yields the same answer at a price that
+    dominates construction: walking the draft 2020-12 metaschema costs roughly
+    fifty times what encoding the document does, and the shape it is charged for
+    most often is ``{}``, the default every tool that declares no arguments
+    carries. The memo is sound because :func:`_schema_defect` is a pure function
+    of the document — it reads no setting, no clock and no state, and the depth
+    bound and the dialect are module constants.
+
+    **What the memo changes is that the answer is computed once, not that it is
+    given once.** §6 requires the check to run "wherever a ``ToolDefinition`` is
+    constructed … including every defensive revalidation and detachment already
+    required of a registry, of a request and at the seam", and it still does:
+    every construction asks and every construction is answered, ADR-0018 §4's
+    rebuild, :func:`_detached_tool` and ADR-0029 §2's step 1 included. §6's clause
+    fixes which stages the refusal reaches, not how many times a metaschema is
+    walked. The corruption route it closes is untouched — a definition mutated
+    through ``object.__setattr__`` carries a different document, so it digests
+    differently, misses the memo and is meta-validated afresh.
+
+    **No lock, because there is nothing here a race could corrupt.** Each step
+    below is a single dict operation; a thread that loses one recomputes a pure
+    function, or starts the memo over a moment early, and neither changes an
+    answer. The memo is cleared wholesale rather than evicted entry by entry: the
+    working set is a registry's declarations, a handful fixed for the life of a
+    process, so a 129th distinct document says the working set is not what this
+    memo is for. An eviction order is state that can be wrong; starting over
+    cannot be.
 
     Every reason returned describes the *schema*, which is Tier 2 configuration
     authored by the tool's provider; nothing here reads a call's arguments, so
@@ -6185,15 +6184,22 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     if _json_depth(schema, _MAX_SCHEMA_DEPTH) > _MAX_SCHEMA_DEPTH:
         return f"it nests deeper than {_MAX_SCHEMA_DEPTH} levels"
     try:
-        canonical = _canonical_bytes(_thaw_json(schema))
+        digest = sha256(_canonical_bytes(_thaw_json(schema))).digest()
     except TypeError, ValueError:
         # A value with no canonical encoding has no key, so it is answered
         # uncached rather than answered differently. Pydantic refuses such a
         # `parameters_schema` before this validator sees it; what reaches here is
         # the corrupted instance ADR-0145 §6's revalidation clause exists for, and
-        # it must still get the answer it got before there was a cache.
+        # it must still get the answer it got before there was a memo.
         return _schema_defect(schema)
-    return _cached_schema_defect(_SchemaKey(canonical, schema))
+    remembered = _schema_defects.get(digest)
+    if remembered is not None:
+        return remembered[0]
+    reason = _schema_defect(schema)
+    if len(_schema_defects) >= _MAX_CACHED_SCHEMAS:
+        _schema_defects.clear()
+    _schema_defects[digest] = (reason,)
+    return reason
 
 
 class ParameterViolation(BaseModel):
