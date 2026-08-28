@@ -721,6 +721,25 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``StrEnum`` as ``SpokenAudioFormat`` already is", so ADR-0087 §2c's scalar table
     gains no row and ``project`` gains no branch.
 
+    **ADR-0207 §7 is under the second limb alone**, and moves only the version, to
+    20 against the same forty methods. ``SpokenTurn`` gains no member and loses none
+    (ADR-0207 §5); what moves is **which of its shapes the type admits** — on a live
+    confirmation park, ``spoken`` may carry a rendering beside an ``outcome`` whose
+    ``reply`` is ``None``, and ``spoken_degraded`` may be ``True`` there. That is a
+    limb the corpus has been caught by before, and ADR-0124 §9 names the case: the
+    rule bumps "whether the change **widens or narrows** the type", because read as
+    "narrowing bumps, widening is safe" it would have got ADR-0122's widening wrong.
+    The bite is one-directional and one direction is all §9 asks for: a version 20 hub
+    emitting a parked turn that carries a rendering is reconstructed through a version
+    19 client's copy of the *old* validator — ``wire/client.py``'s ``converse_spoken``
+    is annotated ``-> SpokenTurn`` and "a result payload takes the shape of the
+    method's own declared return annotation" (ADR-0085 §10) — and raises there. The
+    **first** limb is deliberately not met: no method is added, and no method's
+    arguments or results change type. ADR-0207 §7 states the bump in the deciding ADR
+    and puts it on the implementing lane, and it also fixes the arithmetic against
+    ADR-0205's concurrent bump — "whichever lands second reads the constant as it then
+    stands and adds one, and each writes its own note".
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -729,7 +748,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 19), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 20), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
