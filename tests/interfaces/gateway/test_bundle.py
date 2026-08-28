@@ -5994,24 +5994,22 @@ def test_a_report_whose_request_the_hub_never_saw_is_put_back() -> None:
 
     assert "let played = null" in sending, "declared where the catch can reach it"
     assert sending.count("restoreDelivery(asked.conversation_id, played)") == 3
-    assert "!DELIVERY_SETTLED.has(body.fault)" in sending, (
-        "kept unless the answer shows the report is settled, rather than the reverse"
+    assert "body.fault !== DELIVERY_REFUSED" in sending, (
+        "kept on every refusal but the one about the report itself"
     )
-    # Adversarial review, round 5, `major`. The first cut named the one refusal after
-    # which to keep it, which threw the measurement away on every refusal the gateway
-    # decides *before* it relays — an unusable recording, a body the halves disagree
-    # about, a request over the size bound. None reaches `converse_spoken`, none can
-    # have stamped the turn, and each is answered by pressing again.
-    settled = script[
-        script.index("const DELIVERY_SETTLED") : script.index(
-            "]);", script.index("const DELIVERY_SETTLED")
-        )
-    ]
-    assert {"transcription-failed", "assistant-declined", "rejected", "delivery-unusable"} == set(
-        re.findall(r'"([a-z-]+)"', settled)
+    # **The page reads no fault name as a witness that the turn was stamped**, which is
+    # the class adversarial review found twice — rounds 5 and 6, on two different faults
+    # that arise before `record_delivery` is reached. `assistant-declined` is the
+    # second: `Engine.converse_spoken` raises `OversizedValueError` for a recording over
+    # the bound *before* it records the report. Enumerating the faults that do witness a
+    # stamp was always going to be a list one case short, so the page enumerates none:
+    # §1 makes a resend idempotent, so keeping costs one redundant field and dropping
+    # costs the fact.
+    assert "DELIVERY_SETTLED" not in script, "no fault-name allowlist survives"
+    assert script.count("DELIVERY_REFUSED") == 2, "one constant, one use"
+    assert 'const DELIVERY_REFUSED = "delivery-unusable"' in script, (
+        "and the one exception is the refusal about the report itself, which repeats"
     )
-    for kept in ("recording-unusable", "malformed-request", "request-too-large"):
-        assert kept not in settled, f"a pre-relay refusal keeps the report: {kept}"
 
     # A newer measurement wins: §7 asks for the playback last in the air.
     restoring = functions["restoreDelivery"]

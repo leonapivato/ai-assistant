@@ -4016,26 +4016,28 @@ function takeDelivery(conversation) {
   return report;
 }
 
-// The refusals after which putting a report back would be pointless, so it is let go
-// of instead (ADR-0205 §7). Everything **not** named here keeps the measurement,
-// because a refusal decided before the gateway relays cannot have stamped the turn and
-// is answered by pressing again.
+// The one refusal after which a report is let go of rather than kept (ADR-0205 §7).
 //
-// Two kinds, and the test is the same for both: could a later, identical report land?
+// **The page stopped guessing which side a failure happened on**, which is the class of
+// bug adversarial review found twice — first on the refusals the gateway decides before
+// it relays, then on `assistant-declined`, which `Engine.converse_spoken` can raise for
+// an oversized recording *before* it records the report. A fault name is not a witness
+// to whether the turn was stamped, and enumerating the ones that are was always going
+// to be a list one case short.
 //
-// - **The hub ruled on this request**, so the report reached `converse_spoken` and was
-//   applied there — it is recorded before the recording is even transcribed (ADR-0205
-//   §1), so a transcription failure settles it exactly as an answer does. A hub that
-//   declined for its own reasons declines a resend the same way.
-// - **The refusal is about the report itself**, which is deterministic: an identical
-//   resend earns an identical refusal, so keeping it would put the same doomed value on
-//   every subsequent request for that conversation.
-const DELIVERY_SETTLED = new Set([
-  "transcription-failed",
-  "assistant-declined",
-  "rejected",
-  "delivery-unusable",
-]);
+// So the rule is the asymmetry instead. §1 makes a resend **idempotent** — a report
+// names its turn, so it "either finds it unstamped and stamps it, or finds it stamped
+// and does nothing" — while dropping a live measurement loses it for ever. Keeping a
+// report that turns out to have landed costs one redundant field on one request;
+// dropping one that did not costs the fact. So the report is let go of on exactly two
+// answers: a call that **returned**, where the engine recorded it before the recording
+// was even transcribed, and this one.
+//
+// `delivery-unusable` is the gateway saying it could not parse the report itself, which
+// is deterministic by construction: an identical resend earns an identical refusal, so
+// keeping it would put the same doomed value on every later request for that
+// conversation and wall the owner out of speaking there at all.
+const DELIVERY_REFUSED = "delivery-unusable";
 
 // **Put back a report whose request the hub cannot have seen** (ADR-0205 §7).
 //
@@ -4426,17 +4428,10 @@ async function sendRecording(mine) {
       return;
     }
     if (!response.ok) {
-      // **Kept unless the answer shows the report is settled.** Adversarial review,
-      // round 5, `major`: the first cut of this restored only on `hub-unreachable`,
-      // which threw the measurement away on every refusal the gateway decides *before*
-      // it relays — an unusable recording, a body the two halves disagree about, a
-      // request over the size bound. None of those reaches `converse_spoken`, so none
-      // can have stamped the turn, and each is answered by pressing again with a
-      // recording that works — which would then carry a report this page had already
-      // discarded. The safe default is therefore to keep it, and to name the few
-      // answers after which resending is pointless rather than the many after which it
-      // is not.
-      if (!DELIVERY_SETTLED.has(body.fault)) {
+      // **Kept on every refusal but the one about the report itself.** No refusal
+      // proves the turn was stamped — see `DELIVERY_REFUSED` — and §1 makes a resend
+      // idempotent, so keeping is the cheap direction and dropping is the lossy one.
+      if (body.fault !== DELIVERY_REFUSED) {
         restoreDelivery(asked.conversation_id, played);
       }
       show("answer", false);

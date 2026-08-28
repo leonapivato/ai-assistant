@@ -30,7 +30,12 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from test_engine import PATIENT, Harness, NoStepPlanner
 
-from ai_assistant.core.errors import ConversationStoreError, SpeechError, UnknownConversationError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    OversizedValueError,
+    SpeechError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     EpisodicMemory,
     MemorySource,
@@ -676,3 +681,49 @@ async def test_the_captured_episode_is_byte_identical_with_and_without_a_report(
     assert without == with_report, (
         "no delivery sentence enters what a later turn replays (ADR-0205 §5)"
     )
+
+
+async def test_an_oversized_recording_raises_before_the_report_is_recorded() -> None:
+    """The hub-side fact the page's retention rule rests on (ADR-0200 §6, ADR-0205 §1).
+
+    Adversarial review, round 6, ``major``, found the page treating
+    ``assistant-declined`` as proof the turn had been stamped. It is not:
+    :meth:`Engine.converse_spoken` refuses a recording over
+    ``hub_max_spoken_audio_bytes`` **locally, before any I/O**, which is before
+    ``_converse_spoken`` records the report — so the fault crosses to the browser with
+    the report unapplied.
+
+    Pinned here rather than left implicit in the page, because it is a property of the
+    *engine's ordering*: a lane that moved the recording check after the stamp would
+    make the page's rule wrong without touching the page. The turn is read back
+    afterwards to show it is still eligible, which is what makes the owner's next press
+    able to carry the same report and land it.
+    """
+    harness = _wired(max_spoken_audio_bytes=16)
+    first = await _spoken(harness)
+    assert first.outcome is not None
+    conversation = str(first.outcome.conversation_id)
+    oversized = SpokenAudio(
+        content=b64encode(b"x" * 64).decode("ascii"), media_type=SpokenAudioFormat.MP4
+    )
+
+    with pytest.raises(OversizedValueError):
+        await harness.engine.converse_spoken(
+            oversized,
+            plays=(_MP4,),
+            timeout=PATIENT,
+            conversation_id=conversation,
+            delivery=_report(str(first.episode_id)),
+        )
+
+    rows = await _rows(harness, conversation)
+    assert [one.delivery for one in rows] == [_UNSTAMPED], (
+        "the report never reached the store, so the turn is still stampable"
+    )
+
+    # And the very next call, with a recording that fits, carries the same report and
+    # lands it — which is the whole of what the page's retention buys.
+    await _spoken(harness, conversation_id=conversation, delivery=_report(str(first.episode_id)))
+
+    landed = await _rows(harness, conversation)
+    assert landed[0].delivery == _INTERRUPTED
