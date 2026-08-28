@@ -1,7 +1,51 @@
 # 203. On a channel of unbounded audience the withholding binds the whole turn, and nothing downstream inherits what it removed
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0204 (§4's second clause, that no episode is marked, filtered or withheld on the ground that a withholding occurred during the turn that produced it)
 - Date: 2026-08-28
+- **Partially superseded: 2026-08-28 by ADR-0204 — §4's second clause, and
+  nothing else of §4 or of this ADR.** That clause reads "No episode is marked,
+  filtered or withheld on the ground that a withholding occurred during the turn
+  that produced it", and §4 gives its ground in the same breath: "With §1 in force
+  the withholding has put nothing in the episode to mark: every record and every
+  facet the captured rendering's plan half was derived from was placed as speakable
+  on that channel before any stage saw it." The milestone-19 re-drive against this
+  ADR's own implementation filed **#1708**, which records that the premise is true
+  of a turn on a channel of unbounded audience and false of a turn on a bounded
+  one: a `converse` turn plans over the withheld records — correctly, by §1's last
+  clause — and `Engine._capture` renders that rationale into an episode this ADR
+  leaves speakable on the spoken channel. **#1703** records the other half, the
+  goal statement of a withholding turn, which the premise does not reach at all.
+
+  **Replaced — the refusal to mark, and only that.** ADR-0204 §1 adds
+  `Provenance.supplied_withheld_content`, §2 sets it from the supply the producing
+  turn ran over on every channel, and §3 withholds a stamped record from any supply
+  site for a channel of unbounded audience. A reader now acts differently, which is
+  ADR-0070 §1's test, so this is a supersession rather than an amendment, and it is
+  **partial** in ADR-0070 §3's sense.
+
+  **Not replaced — the rest of §4.** Its first clause is a statement about what
+  *this* ADR adds and stays true word for word. Its third clause, that the turn's
+  own goal statement reaches the stages of the turn that asked it, is used as given
+  by ADR-0204 and is untouched. Its fourth and fifth clauses decline to decide what
+  ADR-0204 decides and stay accurate about this ADR's own scope, the fifth's
+  refusal to let this ADR be cited as authority that the path is safe included. Its
+  sixth clause names what a decision doing the marking would owe, and ADR-0204 is
+  that decision — the clause is discharged rather than replaced.
+
+  **Not replaced — §§1–3 and §§5–9.** §1's subtraction stays exactly where it is,
+  over the same predicate; ADR-0204 restores no withheld record to any stage of a
+  turn on such a channel. §2's four prohibitions and its no-backfill rule, §3's
+  bound on what such an operation returns, §5's scope, §6's tests, §7's records and
+  §8's deferrals all bind exactly as they did.
+
+  **One unmarked sentence of §1 is falsified, and no record is owed for it.** §1's
+  milestone-19 cost paragraph reads that captured episodes are "`OBSERVED` with
+  `about_person` unset by construction (ADR-0074 §4), so the subtraction never
+  removes one and ADR-0074 §5's continuity seam is unaffected". After ADR-0204 the
+  subtraction does remove one — a stamped episode. That paragraph carries no mark,
+  and ADR-0089 §1 and §3 make an unmarked argument no obligation, so it is a
+  supersession of nothing; it is named here so a reader checking the cost claim is
+  sent to ADR-0204 §6 and its Consequences rather than left with it.
 - **Partially supersedes:**
   [ADR-0199](0199-the-audience-of-the-output-channel-decides-what-may-be-said-and-a-withheld-class-is-deflected-rather-than-redacted.md)
   — §5's second clause, that "the `TurnResult` the turn produced is unchanged",
