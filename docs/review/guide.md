@@ -111,8 +111,11 @@ acceptance — started detached rather than reimplemented (issue #1594).*
 `--start` that returns non-zero without confirming is **not** a statement that
 the round is dead — it cannot see that; it is saying only that no claim arrived
 in the grace, and a round renders the whole diff and computes the patch identity
-before it claims. Ask `--wait`, which can tell the two apart, and never relaunch
-(issues #1670, #1674). And when `--wait` answers exit 4 about a round that failed,
+before it claims. Never relaunch (issues #1670, #1674). Ask `--wait` — but note
+that it is not conclusive in that same window: it reads the round marker and the
+persona lock, both of which an unclaimed child has yet to publish, so it can
+answer exit 4 about a round that is alive. There and only there, an exit 4 is not
+the "stop polling" it is everywhere else; the round's log is what settles it. And when `--wait` answers exit 4 about a round that failed,
 read the log it prints: `codex exec --json` puts its failures on **stdout**, so
 until issue #1674 that log ended at "Running Codex …" with nothing after it and
 the reason was discarded unread.*

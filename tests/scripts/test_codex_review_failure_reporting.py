@@ -190,6 +190,14 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     assert "was not started with --start" not in started.stderr
     assert "Nothing here has killed it" in started.stderr
     assert "--wait adversarial" in started.stderr
+    # And it does not promise what `--wait` cannot deliver here. An unclaimed
+    # child has published neither the marker nor the lock `--wait` reads, so
+    # `--wait` answers exit 4 about a round that is alive — the one window where
+    # a 4 is not "stop polling". A message that sent a lane there calling `--wait`
+    # conclusive would be walking it into the relaunch this mode exists to stop
+    # (adversarial round 3 on PR #1722).
+    assert "the only thing" not in started.stderr
+    assert "NOT the 'stop polling'" in started.stderr
     # The round it could not confirm is still a real round, and finishes.
     assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
 
