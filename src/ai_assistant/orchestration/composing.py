@@ -208,8 +208,54 @@ _WITHHELD_LINE: Final = (
     "Something that bears on this was NOT AVAILABLE ON THIS CHANNEL and has not been shown to you."
 )
 
+#: How an answer bound for the ear is *said*, as against what it says (#1779).
+#:
+#: The audience of the channel is one fact and it implies two things, not one: what
+#: may be said, which ADR-0199 decides at supply and which never reaches this
+#: prompt, and **the register it is said in**, which is this. Both reach the stage
+#: from the operation being executed (ADR-0200 §7) and neither is an argument a
+#: caller supplied.
+#:
+#: **It is a direction worked through rather than a list of categories**, which is
+#: the form ADR-0176 §4 fixes for a prompt clause and the reason its
+#: implementing-lane clause refuses a test that string-matches the wording: an
+#: assertion on the prose "fails on every rewording that improves the instruction
+#: and passes on every rewording that guts it". So what a test can say about this
+#: text is *that a spoken pass carries it and a written pass does not*, and reading
+#: the register itself is a reviewer's job.
+#:
+#: **What it changes is the shape of the sentence and never its content.** Nothing
+#: here asks the model to judge what may be said, to soften a claim, or to round a
+#: value it was given — the truth clause of :data:`_SYSTEM_PROMPT` and ADR-0199 §5's
+#: deflection shape (:data:`_WITHHOLDING_PROMPT`, appended after this) both bind a
+#: spoken answer exactly as they bind a written one.
+#:
+#: The material behind it is the milestone-20 QA transcripts (#1765), where spoken
+#: answers came back in the written register: colon-led preambles, enumerations
+#: introduced by a colon, asides set off by dashes, and one 5,449-character answer
+#: that reached 86% of ``hub_max_spoken_audio_bytes`` — a document, read out.
+_SPOKEN_REGISTER: Final = """\
+Say it the way you would say it aloud, not the way you would write it down. A \
+listener cannot see punctuation and cannot look back over a sentence, so keep each \
+sentence short and to one idea, put the part that answers the question first, and \
+use the contractions a person actually speaks in. Nothing may stand in for \
+structure the ear will not hear — no parentheses, no aside set off by dashes, no \
+colon introducing a list. Where there are two things to say, say two sentences. Say \
+a number, a time, a date or a duration the way a person says it — "half past four", \
+"the twenty-eighth of August", "about twenty minutes" — rather than the way it is \
+written down, and without making it vaguer than what you were given. Length is what \
+a listener can hold rather than what a screen can show. A sentence or two is usually \
+the whole answer, and where there is genuinely more than that, say what was asked \
+and stop."""
+
 #: What is added to a system prompt where the answer is bound for a channel of
 #: **unbounded** audience — ADR-0200 §3's spoken turn, and today nothing else.
+#:
+#: Two things, in the order the model needs them: what the channel *is*, and then
+#: :data:`_SPOKEN_REGISTER`, how an answer for it is said. Interpolated rather than
+#: spelled here, so the register is a named thing a test can point at and cannot be
+#: defined while sitting outside the prompt that carries it — the same reason
+#: :data:`_TAIL_HEADING` is a constant.
 #:
 #: **It carries no decision procedure and takes none away.** ADR-0199 §2 forbids
 #: deciding a class by inspecting content, so nothing here asks the model to judge
@@ -225,11 +271,13 @@ _WITHHELD_LINE: Final = (
 #: query, no resolved argument, no candidate, no record, no listing and no count")
 #: and its third clause forbids "rendering a routed result into text and supplying
 #: that text to a model". A statement about the channel is neither.
-_SPOKEN_CHANNEL_PROMPT: Final = """\
+_SPOKEN_CHANNEL_PROMPT: Final = f"""\
 THIS ANSWER WILL BE SPOKEN ALOUD. It is bound for a loudspeaker, so it reaches \
 whoever is within range of the device without their doing anything. Write for the \
 ear: plain sentences, no markdown, no bullets, no headings, no code, and no URLs \
-read out character by character."""
+read out character by character.
+
+{_SPOKEN_REGISTER}"""
 
 #: What is added on top of that where ADR-0199 §3 held something back — the
 #: deflection shape §5 specifies, and nothing else.
@@ -887,8 +935,9 @@ def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> st
     One prompt with clauses appended rather than a family of prompts, because
     everything ``base`` says is true whichever channel the answer is bound for — and
     a second copy would be a second place for those rules to drift apart. What is
-    appended is what the channel changes: writing for the ear (ADR-0200 §3), and
-    ADR-0199 §5's deflection shape where something was actually withheld.
+    appended is what the channel changes: writing for the ear and the register that
+    is said in (ADR-0200 §3, :data:`_SPOKEN_REGISTER`), and ADR-0199 §5's deflection
+    shape where something was actually withheld.
 
     Args:
         base: This pass's own instruction — :data:`_SYSTEM_PROMPT` for a turn,
