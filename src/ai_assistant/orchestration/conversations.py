@@ -29,7 +29,7 @@ through their Protocols (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
         ConversationTurn,
         MemoryRecord,
         ParkedBinding,
+        SpokenDelivery,
+        SpokenDeliveryReport,
     )
 
 _log = structlog.get_logger(__name__)
@@ -106,8 +109,12 @@ class CaptureReport:
             none could be resolved — a resumption whose parked binding no longer
             names a turn, which §3 ratifies as "not captured at all, and no
             conversation invented".
-        episode_id: The id of the episode recording the turn, or ``None`` when no
-            episode stands.
+        episode_id: The id of the episode recording the turn, or ``None`` where no
+            index row stands for it — a refused append, or a capture compensated
+            because the conversation was deleted underneath it. It is **not**
+            ``None`` merely because the episode write failed (ADR-0205 §1): the
+            turn's index row exists either way, and that row is what carries the
+            turn's delivery, so a report naming it can still be applied.
         degraded: Whether the exchange went **unrecorded**. The turn's answer is
             still the answer — capture failure degrades a turn, it never fails one
             — but it is reported rather than swallowed, because a user whose turns
@@ -122,18 +129,30 @@ class CaptureReport:
 
 @dataclass(frozen=True, slots=True)
 class AssembledHistory:
-    """A conversation's recent turns, resolved to records (ADR-0074 §5).
+    """A conversation's recent turns, resolved to records (ADR-0074 §5, ADR-0205 §5).
 
     Attributes:
         records: The turns' episodes, oldest first, with every id that no longer
             resolves **skipped**: a turn that was deleted, expired, or whose
             episode write never landed is a gap, never an error, so a conversation
             that lost a turn still resumes and never resurrects the deleted one.
+        deliveries: What a device reported playing of each of those turns, keyed by
+            the episode qualified (ADR-0205 §5). **Every such turn of the tail and
+            not only the previous one**, because a report may name a turn that is no
+            longer the previous one — a turn whose episode is in front of the
+            composing stage carrying words the device did not play must arrive with
+            the fact that it did not. It is read off the rows :meth:`history` walked
+            for the records themselves, so the count of them costs no second store
+            call and no second retrieval. A turn whose row carries no ``delivery``,
+            and one whose episode did not resolve, are both simply absent: a
+            delivery fact travels with the episode it qualifies and never without
+            it.
         degraded: Whether reading them failed outright, which costs the turn its
             continuity exactly as a failed retrieval costs it its personalisation.
     """
 
     records: tuple[MemoryRecord, ...] = ()
+    deliveries: Mapping[str, SpokenDelivery] = field(default_factory=dict)
     degraded: bool = False
 
 
@@ -278,16 +297,25 @@ class ConversationLifecycle:
             turns = await self._conversations.turns(conversation_id)
             episodes = await self._memory.get_many([turn.episode_id for turn in turns])
             records: list[MemoryRecord] = []
+            deliveries: dict[str, SpokenDelivery] = {}
             for turn in turns:
                 episode = episodes.get(turn.episode_id)
-                if episode is not None:
-                    records.append(episode)
+                if episode is None:
+                    continue
+                records.append(episode)
+                # ADR-0205 §5: paired with the episode it qualifies, off the row
+                # this loop already holds. Collected **inside** the liveness check,
+                # so a fact whose episode did not resolve is dropped with it — a
+                # delivery travelling without the answer it is about is a value that
+                # says how long something ran with nothing beside it.
+                if turn.delivery is not None:
+                    deliveries[turn.episode_id] = turn.delivery
         except ConversationStoreError, MemoryStoreError:
             # Losing continuity costs the answer its history, not its usefulness —
             # so the turn goes on, saying so, exactly as a failed retrieval does.
             _log.warning("conversation_history_degraded", stage="history", exc_info=True)
             return AssembledHistory(degraded=True)
-        return AssembledHistory(records=tuple(records))
+        return AssembledHistory(records=tuple(records), deliveries=deliveries)
 
     async def conversation_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
         """The turn a parked confirmation belongs to, or ``None`` (§3).
@@ -305,7 +333,7 @@ class ConversationLifecycle:
 
     # --- capture (§3, §4, §8) ------------------------------------------------
 
-    async def capture(
+    async def capture(  # noqa: PLR0913 — the conversation, the rendering, its outcome, the binding a park recorded, the turn's disclosure evaluation and its delivery; every one is a distinct fact about the turn being recorded
         self,
         conversation_id: str,
         *,
@@ -313,6 +341,7 @@ class ConversationLifecycle:
         outcome: str | None = None,
         parked: ParkedBinding | None = None,
         supplied_withheld_content: bool = False,
+        delivery: SpokenDelivery | None = None,
     ) -> CaptureReport:
         """Record one turn: the index entry first, then its episode (§3).
 
@@ -368,6 +397,14 @@ class ConversationLifecycle:
                 routed pass and a resumption recovered from durable state each carry
                 no goal statement and no plan rationale of any turn, so there is
                 nothing in their episode for a stamp to be about.
+            delivery: What is known about this turn's spoken answer having been
+                played, written onto the index row this allocates (ADR-0205 §4).
+                ``converse_spoken`` supplies ``SpokenDelivery(state=UNKNOWN)`` —
+                unconditionally, the park, the absent reply and the degraded
+                synthesis included, because at capture the hub has produced an answer
+                and knows nothing about what reached anyone. Every other operation
+                supplies ``None``, and an absent value is never read as delivered and
+                never read as heard.
 
         Returns:
             What became of the record. Never raises for a store failure: capture
@@ -382,7 +419,7 @@ class ConversationLifecycle:
             # is the outcome §3 explicitly rejects. Nothing has been written when
             # it fails, so it degrades exactly as a refused append does.
             turn = await self._conversations.append(
-                conversation_id, occurred_at=self._now(), parked=parked
+                conversation_id, occurred_at=self._now(), parked=parked, delivery=delivery
             )
         except ConversationStoreError:
             # A refused append needs no compensation, because nothing was written:
@@ -412,9 +449,65 @@ class ConversationLifecycle:
             # failed turn; rolling the index entry back would lose the only durable
             # record that the exchange happened at all.
             _log.warning("conversation_capture_degraded", stage="episode", exc_info=True)
-            return CaptureReport(conversation_id=conversation_id, degraded=True)
+            # The **id is still reported**, degraded though the capture is
+            # (ADR-0205 §1): the index row landed and it is what carries the
+            # delivery, so a device reporting on this turn later reaches a row that
+            # exists. What did not land is the episode, which every reader already
+            # renders as a gap.
+            return CaptureReport(
+                conversation_id=conversation_id, episode_id=turn.episode_id, degraded=True
+            )
 
         return await self._verify(turn)
+
+    async def record_delivery(
+        self, conversation_id: str, report: SpokenDeliveryReport
+    ) -> ConversationTurn | None:
+        """Apply one device's report to the turn it names (ADR-0205 §1, §3).
+
+        **One store call and no sequence**, which is why this is short: the store
+        owns all three of §3's conditions and decides them under its own
+        per-conversation exclusion, so there is nothing here to compose and nothing
+        for a caller to re-derive. It sits on this stage rather than on the engine
+        because this stage is where the ``ConversationStore`` handle lives.
+
+        **A benign miss is discarded rather than raised** (§1). A report naming a
+        turn this conversation does not carry — an index entry deleted or reclaimed,
+        an id belonging to another conversation, a turn already stamped — performs
+        nothing and returns ``None``, and the call that carried it goes on: a benign
+        state must not cost the owner the turn they just spoke.
+
+        **A store fault degrades it too, and that is this stage's judgement rather
+        than a ratified clause.** ADR-0205 leaves it open; the reason to degrade is
+        capture's own — the report is a fact about a turn that has already happened,
+        and losing it costs a later prompt one input, where raising would throw away
+        the turn the owner is speaking now. It is logged rather than swallowed.
+
+        **An unknown conversation still raises**, because that is not a fact about
+        the report at all: the same id is about to be handed to :meth:`begin`, which
+        refuses it for the same reason, so answering it here would only move the
+        refusal one line later.
+
+        Args:
+            conversation_id: The conversation the report is about.
+            report: The device's report, naming its turn by episode id.
+
+        Returns:
+            The turn as stamped, or ``None`` where nothing was stamped.
+
+        Raises:
+            UnknownConversationError: If the conversation is absent or stamped
+                deleted.
+        """
+        try:
+            return await self._conversations.record_delivery(
+                conversation_id, episode_id=report.episode_id, delivery=report.delivery
+            )
+        except UnknownConversationError:
+            raise
+        except ConversationStoreError:
+            _log.warning("spoken_delivery_unrecorded", stage="record_delivery", exc_info=True)
+            return None
 
     async def _verify(self, turn: ConversationTurn) -> CaptureReport:
         """Destroy the episode just written if its conversation is gone (§8).

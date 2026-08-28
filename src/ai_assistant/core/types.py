@@ -4860,6 +4860,201 @@ class PlanExport(BaseModel):
         return self
 
 
+# --- a spoken answer's delivery: what a device reports having played --------
+# ADR-0205's three values. Declared **here**, above the conversation block,
+# rather than in the speech block at the foot of this module: §3 puts the fact on
+# `ConversationTurn`, so the type it is spelled with has to exist by the time that
+# model is built. The three depend on nothing but `timedelta`, `StrEnum` and
+# `Identifier`, so nothing about the speech block's own ordering rule is weakened
+# by the split — what is below stays below because `SpokenAudio` and `SpokenTurn`
+# depend on `TurnOutcome`, and none of these three does.
+
+
+class SpokenDeliveryState(StrEnum):
+    """How much of a spoken answer a device reports having played (ADR-0205 §2).
+
+    **A closed vocabulary of three, and adding a member is a change to what was
+    decided.** §2 fixes it at exactly these, and §8 leaves a fourth — for a
+    rendering that never existed — available additively to a later ADR rather than
+    taking it here.
+
+    **The three partition the durations** (:class:`SpokenDelivery`), so the state
+    is derivable from them and cannot disagree with them. That is the whole reason
+    a state is carried beside two numbers rather than inferred at each reader:
+    inference at the reader is where two readers disagree.
+
+    Attributes:
+        UNKNOWN: Nothing was reported. What capture writes on every turn of
+            ``converse_spoken`` (§4) and **never** a value a caller supplies: a
+            device that does not know reports nothing, and the absence of a report
+            is spelled by omitting the argument (§2).
+        COMPLETE: The device played the rendering out. ``played`` equals
+            ``rendered``, which is what a source that ended of its own accord did
+            (§7).
+        INTERRUPTED: The device stopped short. ``played`` is strictly below
+            ``rendered``.
+    """
+
+    UNKNOWN = "unknown"
+    COMPLETE = "complete"
+    INTERRUPTED = "interrupted"
+
+
+class SpokenDelivery(BaseModel):
+    """What a device played of one spoken answer, in time (ADR-0205 §2, §3).
+
+    **Exactly three members**, and this is the *fact* rather than the report: §3
+    records it on a :class:`ConversationTurn`'s row, and
+    :class:`SpokenDeliveryReport` is what names the turn it is about.
+
+    **Granularity is time.** No lane derives a word, a sentence or a character
+    position from these durations, and no surface promises one — the synthesizer
+    gives no word timestamps and §2 rules that time is enough.
+
+    **It is a device's claim and nothing verifies it** (§2). No component decodes
+    the rendering, measures it, re-times it, or compares a reported duration
+    against anything: the device is the only witness to what a loudspeaker
+    actually emitted, so an unverified claim is not the worse of two available
+    answers, it is the only one. ADR-0200 §9's refusal of a *declared* duration on
+    :class:`SpokenAudio` is not read as forbidding this one — that refusal was
+    about a second answer to a question the payload already answers, and this
+    answers one the payload does not answer at all.
+
+    **It carries no audio and permits none to be reconstructed** (§2), so
+    ADR-0200 §8's retention clause binds this path exactly as it binds every other.
+    No fragment, no transcript, no span of what was heard, no word count, no
+    character offset, no sample position and no format.
+
+    Frozen and ``extra="forbid"``, so the three members are the whole of it.
+
+    Attributes:
+        state: Which of §2's three states this is. Derivable from the two
+            durations, and refused where it disagrees with them.
+        played: How much of the rendering the device says it played, or ``None``
+            beside ``UNKNOWN``.
+        rendered: How long the whole rendering was, by the device's own decoding
+            of it, or ``None`` beside ``UNKNOWN``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: SpokenDeliveryState = Field(
+        description="Whether nothing was reported, the answer played out, or it was cut short."
+    )
+    played: timedelta | None = Field(
+        default=None,
+        description="How much of the rendering the device played; None beside UNKNOWN.",
+    )
+    rendered: timedelta | None = Field(
+        default=None,
+        description="How long the whole rendering was; None beside UNKNOWN.",
+    )
+
+    @model_validator(mode="after")
+    def _the_state_partitions_the_durations(self) -> Self:
+        """Refuse every value outside §2's partition.
+
+        ``DeferredProposal``'s coherence-validator shape, taken for ADR-0130 §2's
+        stated reason: a value that has already contradicted itself is not a
+        report, it is a defect. No value satisfies two of the three states and
+        none satisfies none of them.
+
+        **``COMPLETE`` is equality and not ``played <= rendered``**, which
+        ADR-0205 §2 argues at length: the weaker rule admits ``COMPLETE`` beside a
+        ``played`` of zero — a report saying in one member that nothing was heard
+        and in another that the answer was delivered — and §5 permits a
+        ``COMPLETE`` turn to be rendered as nothing, so that value would make an
+        entirely unheard answer disappear from the prompt as delivered. Equality
+        costs the device nothing: a source that ended of its own accord played the
+        buffer, so the buffer's own duration is both numbers.
+
+        Raises:
+            ValueError: If the three members do not describe one of §2's states.
+        """
+        if self.state is SpokenDeliveryState.UNKNOWN:
+            if self.played is not None or self.rendered is not None:
+                msg = (
+                    "an UNKNOWN delivery carries no durations: nothing was reported, so "
+                    "there is nothing to have measured (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.played is None or self.rendered is None:
+            msg = (
+                f"a {self.state.value} delivery carries both durations: the state is "
+                f"derivable from them, so a state without them is a claim with nothing "
+                f"behind it (ADR-0205 §2)"
+            )
+            raise ValueError(msg)
+        if self.rendered <= timedelta(0):
+            msg = (
+                f"a rendering that was played has a positive duration, and this one is "
+                f"{self.rendered} (ADR-0205 §2)"
+            )
+            raise ValueError(msg)
+        if self.played < timedelta(0):
+            msg = f"a device cannot have played a negative duration, and this is {self.played}"
+            raise ValueError(msg)
+        if self.state is SpokenDeliveryState.COMPLETE:
+            if self.played != self.rendered:
+                msg = (
+                    "a COMPLETE delivery played the whole rendering, so played equals "
+                    "rendered; anything less is INTERRUPTED (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.state is SpokenDeliveryState.INTERRUPTED:
+            if self.played >= self.rendered:
+                msg = (
+                    "an INTERRUPTED delivery stopped short, so played is strictly below "
+                    "rendered; the two being equal is COMPLETE (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        assert_never(self.state)
+
+
+class SpokenDeliveryReport(BaseModel):
+    """One device's report about one turn's spoken answer (ADR-0205 §1, §2).
+
+    **Exactly two members**, and it exists only as ``converse_spoken``'s fifth
+    argument. Two types rather than one because the subject is a property of the
+    *report* and not of the turn: the row §3 stamps already names its own episode,
+    so a stored fact carrying that id a second time would be ADR-0084 §3's
+    redundancy — a second answer to a question the record already answers.
+
+    **A report names the turn it is about, and is applied to that turn and no
+    other** (§1). No report is resolved from position: not from "the
+    conversation's most recent turn", not from an ordinal the caller counted, and
+    not from anything a caller could get wrong without saying so. A report about
+    turn 1 that reaches the hub after turn 2 was captured therefore records
+    delivery of turn 1, which is true, rather than of turn 2, which is a confident
+    falsehood nothing in the value would have exposed.
+
+    **It is not an audience and cannot become one** (§1). It says how much of a
+    rendering a device played, not who was within range of it; ADR-0199 §1's third
+    clause reaches this value as squarely as ADR-0200 §3 says it reaches ``plays``,
+    and no implementation reads it on the disclosure path.
+
+    Attributes:
+        episode_id: The id of the episode recording the turn this report is about
+            — the value ``SpokenTurn.episode_id`` disclosed, handed back
+            unchanged.
+        delivery: What the device played of that turn's rendering. Its ``state``
+            is never ``UNKNOWN``: a device that does not know reports nothing, and
+            the absence of a report is spelled by omitting the argument (§2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    episode_id: Identifier = Field(
+        description="The episode recording the turn this report is about (ADR-0205 §1)."
+    )
+    delivery: SpokenDelivery = Field(
+        description="What the device played of that turn's rendering (ADR-0205 §2)."
+    )
+
+
 # --- conversations: the durable thread, and the turns indexed under it -------
 # ADR-0074's four values. A conversation is durable, server-side state with an
 # identity of its own; a turn is the *index entry* that names the episode
@@ -4952,6 +5147,29 @@ class ConversationTurn(BaseModel):
     and monotonic within its conversation; ``episode_id`` is *derived* by the same
     store from the conversation and that ordinal, so two captured episodes cannot
     collide by construction rather than by probability.
+
+    **``delivery`` is the third fact this row carries about a turn beside its
+    identity** — after ``occurred_at`` and ``parked`` — and it is state about the
+    turn, not content of it (ADR-0205 §3): two durations and a state are not the
+    exchange, so "this store holds no content" binds unchanged. It is what can
+    carry a fact that arrives *late*, which is the whole reason it lives here and
+    not on the episode: ADR-0068 froze the record graph and ``MemoryStore`` has no
+    update, so a field on ``EpisodicMemory`` could only ever keep the value capture
+    gave it — which is the value the report exists to replace.
+
+    **An absent ``delivery`` means no delivery fact was recorded for this turn**
+    (§3) — on the surface as it stands, a turn that did not run on
+    ``converse_spoken``, since §4 stamps every turn that did. It is never read as
+    delivered and never read as heard.
+
+    **And it is not a record of the channel a turn arrived on** (§3). No lane,
+    implementation or later ADR reads it as one, infers an arrival channel from it,
+    or cites ADR-0205 as authority for recording a channel: ADR-0200 §11's deferral
+    of "recording the channel on an episode" and ADR-0074 §11's "nothing on a turn
+    records where it came from" are both untouched. The fact recorded is about the
+    **rendering's delivery** — an output fact — where those deferrals are about
+    **origin**, and a value that happens to correlate is not an answer to a
+    different question.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -4968,6 +5186,10 @@ class ConversationTurn(BaseModel):
     parked: ParkedBinding | None = Field(
         default=None,
         description="The binding this turn parked on, where it parked (ADR-0074 §3).",
+    )
+    delivery: SpokenDelivery | None = Field(
+        default=None,
+        description="What a device played of this turn's spoken answer (ADR-0205 §3).",
     )
 
 
@@ -15050,13 +15272,18 @@ class SpeechFailure(StrEnum):
 
 
 class SpokenTurn(BaseModel):
-    """What one spoken turn produced (ADR-0200 §4).
+    """What one spoken turn produced (ADR-0200 §4, ADR-0205 §1).
 
-    Four members, and **two shapes a reader should be able to name from them
-    alone**: a recording that carried no words is ``heard`` ``None``; a turn whose
-    answer could not be spoken is ``spoken`` ``None`` with ``spoken_degraded``
-    ``True`` beside an ``outcome`` whose ``reply`` is present. Neither is reachable
-    from ``converse``, and both are legible without decoding a payload.
+    **Five members** since ADR-0205 §1, which partially supersedes ADR-0200 §4's
+    count and nothing else about it — the addition is ``episode_id`` and every
+    other clause of §4 binds unchanged, the ``heard``/``outcome`` biconditional and
+    the degradation ladder included.
+
+    **Two shapes a reader should be able to name from them alone**: a recording
+    that carried no words is ``heard`` ``None``; a turn whose answer could not be
+    spoken is ``spoken`` ``None`` with ``spoken_degraded`` ``True`` beside an
+    ``outcome`` whose ``reply`` is present. Neither is reachable from ``converse``,
+    and both are legible without decoding a payload.
 
     **``heard`` is ``None`` exactly when ``outcome`` is ``None``**, and that pair
     is the recording that carried no words: nothing was asked, so nothing was
@@ -15098,6 +15325,19 @@ class SpokenTurn(BaseModel):
             would have breached ADR-0085 §8c. It is never ``True`` beside a
             non-``None`` ``spoken``, because this call streams nothing and so has no
             partial rendering to carry.
+        episode_id: The id of the episode recording the turn this call ran, so
+            that a caller has a name to give back on the next one (ADR-0205 §1).
+            ``None`` **exactly when** the call recorded no turn — a recording that
+            carried no words, or a capture whose index entry did not land — and
+            **not** ``None`` merely because the episode write failed, since the
+            turn's index row exists either way and is what carries the delivery
+            (ADR-0074 §3's intent log). Disclosing it confers nothing: there is one
+            principal on this hub (ADR-0099 §1), no operation of the promoted
+            surface takes an episode id, and ADR-0205 adds none that does — the id
+            reaches the caller so that it can be handed back and for no other
+            purpose. Bounded, and **never dropped to make a result fit**
+            (ADR-0205 §10b): ADR-0200 §4's degradation ladder still has exactly one
+            step before ADR-0085 §8c's ``OversizedValueError``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15117,6 +15357,10 @@ class SpokenTurn(BaseModel):
     spoken_degraded: bool = Field(
         default=False,
         description="Whether an answer existed and speaking it did not complete.",
+    )
+    episode_id: Identifier | None = Field(
+        default=None,
+        description="The episode recording this turn, for a later report to name (ADR-0205 §1).",
     )
 
     @model_validator(mode="after")

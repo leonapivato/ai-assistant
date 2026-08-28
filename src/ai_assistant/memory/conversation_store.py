@@ -53,7 +53,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -66,6 +66,8 @@ from ai_assistant.core.types import (
     ConversationExport,
     ConversationTurn,
     ParkedBinding,
+    SpokenDelivery,
+    SpokenDeliveryState,
     describe_untrusted,
 )
 from ai_assistant.memory._transactions import transaction
@@ -121,6 +123,23 @@ _EPISODE_NAMESPACE = "conv"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
+#: ADR-0205 §3's fact, spelled as three nullable columns rather than one blob: the
+#: state as its ``StrEnum`` value, and each duration as a whole number of
+#: microseconds, which is ``timedelta``'s own resolution and so exact in both
+#: directions. A row whose ``delivery_state`` is ``NULL`` carries **no delivery fact**
+#: — on the surface as it stands, a turn that did not run on ``converse_spoken`` — and
+#: is left exactly as it stands by :meth:`SqliteConversationStore.record_delivery`.
+#:
+#: Three columns rather than a JSON member for ``parked``'s reason one field over: the
+#: partition ADR-0205 §2 fixes is enforced by the ``core`` model on the way out, and a
+#: column per member is what lets a stored row's corruption surface as this seam's own
+#: error rather than as a decode of text nobody validated.
+#:
+#: ``TEXT`` for the state and ``INTEGER`` microseconds for the two durations, each
+#: nullable because ``UNKNOWN`` carries neither and an absent delivery carries none of
+#: the three.
+_DELIVERY_COLUMNS: Final = "delivery_state TEXT, delivery_played INTEGER, delivery_rendered INTEGER"
+
 #: The columns of the ``turns`` table, foreign key and all — held in one place so
 #: the fresh-database path and :meth:`SqliteConversationStore._migrate_turns`'
 #: rebuild cannot drift apart. Two spellings of one schema is how a migration
@@ -128,12 +147,20 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _TURNS_COLUMNS = (
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
     "ordinal INTEGER NOT NULL, episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
-    "execution_id TEXT, step_id TEXT, PRIMARY KEY(conversation_id, ordinal)"
+    "execution_id TEXT, step_id TEXT, " + _DELIVERY_COLUMNS + ", "
+    "PRIMARY KEY(conversation_id, ordinal)"
 )
 
-#: The turn columns every read selects, aliased to ``t`` for the joins.
+#: The turn columns every read selects, aliased to ``t`` for the joins. The unaliased
+#: spelling is written out at each of the three reads that needs it rather than held
+#: here: ruff's ``S608`` reads a query assembled from a name as a possible injection
+#: vector whatever the name holds, and a literal at the call site is the cheaper answer
+#: than a suppression on each of them. What keeps the four in step is
+#: :meth:`SqliteConversationStore._decode_turn`, which every one of them feeds and which
+#: fails loudly on a row whose positions have moved.
 _TURN_SELECT = (
-    "t.conversation_id, t.ordinal, t.episode_id, t.occurred_at, t.execution_id, t.step_id"
+    "t.conversation_id, t.ordinal, t.episode_id, t.occurred_at, t.execution_id, t.step_id, "
+    "t.delivery_state, t.delivery_played, t.delivery_rendered"
 )
 
 
@@ -273,6 +300,96 @@ def _stamped_id_of(value: object) -> str:
     """
     if type(value) is not str or not value.strip():
         msg = f"a stored conversation id is not usable: {describe_untrusted(value)}"
+        raise ConversationStoreError(msg)
+    return value
+
+
+def _delivery_from(state: object, played: object, rendered: object) -> SpokenDelivery | None:
+    """Rebuild ADR-0205 §3's fact from its three columns, or report there is none.
+
+    ``NULL`` in ``delivery_state`` is **absence** and not a state: it is what every
+    turn that did not run on ``converse_spoken`` carries, and what every turn written
+    before ADR-0205 landed carries after :meth:`SqliteConversationStore._migrate_delivery`.
+    The two durations are read only where a state is present, so a stray microsecond
+    beside a ``NULL`` state cannot conjure a delivery out of half a row.
+
+    The partition itself is not re-checked here. :class:`SpokenDelivery`'s validator
+    owns it and a row that breaches it raises ``ValidationError``, which
+    :meth:`SqliteConversationStore._decode_turn` already translates into this seam's
+    corrupt-row error — one rule, in the one place ADR-0205 §2 puts it.
+
+    Raises:
+        ConversationStoreError: If ``state`` is a string this build's vocabulary does
+            not name, which is a stored row no validator further along can place.
+    """
+    if state is None:
+        return None
+    try:
+        member = SpokenDeliveryState(str(state))
+    except ValueError as exc:
+        msg = f"a stored turn carries an unknown delivery state: {describe_untrusted(state)}"
+        raise ConversationStoreError(msg) from exc
+    return SpokenDelivery(
+        state=member,
+        played=None if played is None else timedelta(microseconds=_micros_of(played)),
+        rendered=None if rendered is None else timedelta(microseconds=_micros_of(rendered)),
+    )
+
+
+def _refuse_unknown_delivery(delivery: SpokenDelivery) -> None:
+    """Refuse an ``UNKNOWN`` report before any I/O (ADR-0205 §3).
+
+    ``UNKNOWN`` is written by capture and only through ``append``; it is not a value
+    ``record_delivery`` carries. Without this a consumer holding the Protocol could
+    stamp ``UNKNOWN`` over ``UNKNOWN`` — a write the row's own state cannot
+    distinguish from no write, leaving the row eligible afterwards — and ADR-0205
+    §1's stamped-once rule would be a promise the store could not keep against a
+    caller that is not the engine.
+
+    Raises:
+        ValueError: If the delivery's state is ``UNKNOWN``.
+    """
+    if delivery.state is SpokenDeliveryState.UNKNOWN:
+        msg = (
+            "record_delivery does not carry an UNKNOWN delivery: that value is written "
+            "by capture through append, and a device that does not know reports nothing "
+            "(ADR-0205 §2, §3)"
+        )
+        raise ValueError(msg)
+
+
+def _delivery_row(delivery: SpokenDelivery | None) -> tuple[Any, Any, Any]:
+    """Render ADR-0205 §3's fact into the three columns, or three nulls.
+
+    The inverse of :func:`_delivery_from`, written beside it so the two spellings of
+    one encoding cannot drift. Microseconds because that is ``timedelta``'s own
+    resolution, so the value read back is the value written.
+    """
+    if delivery is None:
+        return (None, None, None)
+    return (
+        delivery.state.value,
+        None if delivery.played is None else _to_micros_of(delivery.played),
+        None if delivery.rendered is None else _to_micros_of(delivery.rendered),
+    )
+
+
+def _to_micros_of(duration: timedelta) -> int:
+    """One duration as a whole number of microseconds, exactly."""
+    return duration // timedelta(microseconds=1)
+
+
+def _micros_of(value: object) -> int:
+    """Read one stored duration's microseconds, refusing anything that is not one.
+
+    ``bool`` is excluded with the same care :func:`_instant_from` takes over an
+    instant: it is an ``int`` subclass and ``True`` is not a duration.
+
+    Raises:
+        ConversationStoreError: If the stored value is not an integer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"a stored turn carries a delivery duration that is not an integer: {value!r}"
         raise ConversationStoreError(msg)
     return value
 
@@ -420,6 +537,10 @@ class SqliteConversationStore:
             # them with it. It switches enforcement off for itself, because a
             # legacy file may already hold a row the constraint would refuse.
             self._migrate_turns(conn)
+            # After the rebuild rather than before it: a rebuild writes the current
+            # schema and so already carries these, and running this first would add
+            # columns to a table about to be dropped.
+            self._migrate_delivery(conn)
             # The two uniqueness invariants the store *proves* rather than asks a
             # caller to keep (ADR-0074 §9.1): one turn per episode id, and one turn
             # per parked binding. In the schema, so a second writer racing the
@@ -562,6 +683,13 @@ class SqliteConversationStore:
                 "FROM turns"
             )
             for row in read:
+                # The six columns a pre-foreign-key file can be relied on to have.
+                # A file old enough to want this rebuild predates ADR-0205's three
+                # entirely, and :meth:`_migrate_delivery` — which runs after this —
+                # finds them already present on the table this writes, so every
+                # carried-across turn lands carrying no delivery. Which is what
+                # ADR-0205 §3 says of a turn that did not run on ``converse_spoken``,
+                # and true of every one of them.
                 conn.execute(
                     "INSERT INTO turns_migrated(conversation_id, ordinal, episode_id, "
                     "occurred_at, execution_id, step_id) VALUES (?, ?, ?, ?, ?, ?)",
@@ -578,6 +706,34 @@ class SqliteConversationStore:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
             raise
+
+    @staticmethod
+    def _migrate_delivery(conn: sqlite3.Connection) -> None:
+        """Add ADR-0205 §3's three columns to a ``turns`` table written before them.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file whose ``turns``
+        table already exists, so the columns in :data:`_TURNS_COLUMNS` bind **fresh
+        databases only** — and a store opened over a database written by a build
+        before this one would fail its first read on a column that is not there.
+
+        **An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
+        :meth:`_migrate_turns` performs**, because that is the whole of what is
+        owed: the three are nullable with no default, so SQLite adds each in
+        constant time without rewriting a row, and every existing turn comes back
+        carrying no delivery — which is exactly what ADR-0205 §3's absence clause
+        says of a turn that did not run on ``converse_spoken``, and true of every
+        turn written before the operation existed.
+
+        Each column is added on its own and only where it is missing, so a database
+        left half-migrated by an interrupted upgrade is finished rather than
+        refused. ``PRAGMA table_info`` is read rather than the stored DDL text, for
+        :meth:`_turns_reference_conversations`' reason: what decides is the shape
+        the table actually has.
+        """
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(turns)")}
+        for column in _DELIVERY_COLUMNS.split(", "):
+            if column.split(" ")[0] not in present:
+                conn.execute("ALTER TABLE turns ADD COLUMN " + column)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -720,6 +876,7 @@ class SqliteConversationStore:
                 episode_id=cls._verified_episode_id(row[0], _ordinal_of(row[1]), row[2]),
                 occurred_at=_instant_from(row[3], what="occurred_at"),
                 parked=parked,
+                delivery=_delivery_from(row[6], row[7], row[8]),
             )
         except (ValidationError, TypeError, OverflowError) as exc:
             msg = f"a stored turn could not be decoded: {exc}"
@@ -805,9 +962,14 @@ class SqliteConversationStore:
         if not rows:
             return None
         row = rows[0]
-        if row[6] is None:
+        # The two joined conversation columns sit **after** every turn column, so
+        # their positions move with :data:`_TURN_SELECT` rather than being written
+        # out twice; a literal 6 and 7 here is what a column added to the turn would
+        # silently break.
+        joined = _TURN_SELECT.count(",") + 1
+        if row[joined] is None:
             raise self._orphan(row[0])
-        if row[7] is not None:
+        if row[joined + 1] is not None:
             return None
         return self._decode_turn(row)
 
@@ -940,6 +1102,7 @@ class SqliteConversationStore:
         *,
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
+        delivery: SpokenDelivery | None = None,
     ) -> ConversationTurn:
         """Allocate the ordinal, derive the episode id, and record the turn.
 
@@ -956,11 +1119,17 @@ class SqliteConversationStore:
             ValueError: If ``occurred_at`` is not a timezone-aware instant.
         """
         async with self._lock:
-            row = await _run_to_completion(self._append_sync, conversation_id, occurred_at, parked)
+            row = await _run_to_completion(
+                self._append_sync, conversation_id, occurred_at, parked, delivery
+            )
         return self._decode_turn(row)
 
     def _append_sync(
-        self, conversation_id: str, occurred_at: datetime, parked: ParkedBinding | None
+        self,
+        conversation_id: str,
+        occurred_at: datetime,
+        parked: ParkedBinding | None,
+        delivery: SpokenDelivery | None,
     ) -> Sequence[Any]:
         with self._transaction("append a turn") as conn:
             row = self._row_of(conn, conversation_id)
@@ -1019,32 +1188,94 @@ class SqliteConversationStore:
                 episode_id=self._episode_id(conversation_id, ordinal),
                 occurred_at=occurred_at,
                 parked=parked,
+                delivery=delivery,
             )
             stamp = _to_micros(turn.occurred_at)
-            conn.execute(
-                "INSERT INTO turns(conversation_id, ordinal, episode_id, "
-                "occurred_at, execution_id, step_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    turn.conversation_id,
-                    turn.ordinal,
-                    turn.episode_id,
-                    stamp,
-                    None if parked is None else parked.execution_id,
-                    None if parked is None else parked.step_id,
-                ),
-            )
-            conn.execute(
-                "UPDATE conversations SET last_turn_at = ? WHERE id = ?",
-                (stamp, conversation_id),
-            )
-            return (
+            row = (
                 turn.conversation_id,
                 turn.ordinal,
                 turn.episode_id,
                 stamp,
                 None if parked is None else parked.execution_id,
                 None if parked is None else parked.step_id,
+                *_delivery_row(delivery),
             )
+            conn.execute(
+                "INSERT INTO turns(conversation_id, ordinal, episode_id, occurred_at, "
+                "execution_id, step_id, delivery_state, delivery_played, delivery_rendered) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+            conn.execute(
+                "UPDATE conversations SET last_turn_at = ? WHERE id = ?",
+                (stamp, conversation_id),
+            )
+            return row
+
+    async def record_delivery(
+        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
+    ) -> ConversationTurn | None:
+        """Stamp the named turn's delivery, if and only if it is still ``UNKNOWN``.
+
+        The read of the three conditions and the write are one ``IMMEDIATE``
+        transaction, so two reports observing ``UNKNOWN`` cannot both write: the
+        second finds a state that is no longer ``UNKNOWN`` and performs nothing,
+        which is ADR-0205 §1's stamped-once rule held across processes and not only
+        across coroutines on one loop.
+
+        The ``UNKNOWN`` refusal is **before the lock and before any I/O**, on
+        ADR-0085 §3's convention for a malformed argument.
+
+        Raises:
+            ValueError: If ``delivery.state`` is ``UNKNOWN``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        _refuse_unknown_delivery(delivery)
+        async with self._lock:
+            row = await _run_to_completion(
+                self._record_delivery_sync, conversation_id, episode_id, delivery
+            )
+        return None if row is None else self._decode_turn(row)
+
+    def _record_delivery_sync(
+        self, conversation_id: str, episode_id: str, delivery: SpokenDelivery
+    ) -> Sequence[Any] | None:
+        with self._transaction("record a turn's delivery") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            # All three of ADR-0205 §3's conditions in one predicate, so the row is
+            # written only where every one of them held at the moment of writing —
+            # the conversation, the episode, and a recorded state of ``UNKNOWN``. A
+            # row carrying no delivery at all fails the third and is left as it
+            # stands: this operation is not a way to give such a turn one.
+            written = conn.execute(
+                "UPDATE turns SET delivery_state = ?, delivery_played = ?, "
+                "delivery_rendered = ? WHERE conversation_id = ? AND episode_id = ? "
+                "AND delivery_state = ?",
+                (
+                    *_delivery_row(delivery),
+                    conversation_id,
+                    episode_id,
+                    SpokenDeliveryState.UNKNOWN.value,
+                ),
+            ).rowcount
+            if not written:
+                return None
+            stamped = self._fetch(
+                conn,
+                "read the stamped turn",
+                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
+                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "FROM turns WHERE conversation_id = ? AND episode_id = ?",
+                (conversation_id, episode_id),
+            )
+            if not stamped:  # pragma: no cover — the row was just updated in this transaction
+                return None
+            written_row: Sequence[Any] = stamped[0]
+            return written_row
 
     async def turns(
         self,
@@ -1082,8 +1313,9 @@ class SqliteConversationStore:
             # in-range integer above every ordinal: `2**63` is one past what a
             # SQLite bind parameter can carry and raises `OverflowError`.
             head = (
-                "SELECT conversation_id, ordinal, episode_id, "
-                "occurred_at, execution_id, step_id FROM turns WHERE conversation_id = ?"
+                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
+                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "FROM turns WHERE conversation_id = ?"
             )
             if before_ordinal is None:
                 rows = self._fetch(
@@ -1408,8 +1640,7 @@ class SqliteConversationStore:
             turns = self._fetch(
                 conn,
                 "export conversation turns",
-                "SELECT t.conversation_id, t.ordinal, t.episode_id, "
-                "t.occurred_at, t.execution_id, t.step_id "
+                "SELECT " + _TURN_SELECT + " "
                 "FROM turns t JOIN conversations c ON c.id = t.conversation_id "
                 "WHERE c.deleted_at IS NULL ORDER BY t.conversation_id ASC, t.ordinal ASC",
             )

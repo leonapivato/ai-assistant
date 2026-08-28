@@ -1050,7 +1050,9 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
     def _hold_then_append(announce: Callable[[], None]) -> str:
         child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
-            allocated = [child._append_sync(conversation.id, _NOW, None)[1] for _ in range(each)]
+            allocated = [
+                child._append_sync(conversation.id, _NOW, None, None)[1] for _ in range(each)
+            ]
         finally:
             child.close()
         return ",".join(str(one) for one in allocated)
@@ -1058,7 +1060,9 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
     def _append(announce: Callable[[], None]) -> str:
         child = SqliteConversationStore(path=path, now=_fixed_now)
         try:
-            allocated = [child._append_sync(conversation.id, _NOW, None)[1] for _ in range(each)]
+            allocated = [
+                child._append_sync(conversation.id, _NOW, None, None)[1] for _ in range(each)
+            ]
         finally:
             child.close()
         return ",".join(str(one) for one in allocated)
@@ -1112,7 +1116,7 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
     def _hold_then_append(announce: Callable[[], None]) -> str:
         child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
-            return str(child._append_sync(conversation.id, _NOW, None)[1])
+            return str(child._append_sync(conversation.id, _NOW, None, None)[1])
         except UnknownConversationError:
             return "REFUSED"
         finally:

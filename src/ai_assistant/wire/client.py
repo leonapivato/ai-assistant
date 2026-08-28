@@ -121,6 +121,7 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenAudioFormat,
+        SpokenDeliveryReport,
         SpokenTurn,
         TurnOutcome,
     )
@@ -309,8 +310,9 @@ class HubClient:
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 - the caller's budget, relayed to the hub (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
-        """Run one spoken turn on the hub (ADR-0200 §3).
+        """Run one spoken turn on the hub (ADR-0200 §3, ADR-0205 §1).
 
         **One frame each way, and nothing under** ``wire/`` **carries audio
         specially** (ADR-0200 §9). The recording travels as
@@ -325,9 +327,17 @@ class HubClient:
             plays: What the caller can render, in preference order. Non-empty.
             timeout: The budget for the whole call.
             conversation_id: The conversation to continue, or ``None``.
+            delivery: What a device played of an earlier turn, naming that turn by
+                the ``episode_id`` a previous call disclosed (ADR-0205 §1). It
+                crosses as the ordinary nested model it is — a frozen value of
+                scalars, a ``StrEnum`` and two durations on ADR-0087 §2e's form — so
+                ``codec``'s ``project`` needs no branch for it and
+                ``wire/surface.py`` derives its adapter from the annotation as it
+                derives every other. This method carries it and reads none of it.
 
         Returns:
-            The transcript, the turn it drove, and the rendering of its answer.
+            The transcript, the turn it drove, the rendering of its answer, and the
+            id of the episode recording it.
 
         Raises:
             ValueError: If ``plays`` is empty or ``conversation_id`` is blank —
@@ -354,6 +364,7 @@ class HubClient:
             plays=plays,
             timeout=timeout,
             conversation_id=selected,
+            delivery=delivery,
         )
 
     async def _stream_call(self, method: str, payload: dict[str, object]) -> AsyncIterator[Any]:

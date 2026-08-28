@@ -186,6 +186,9 @@ from ai_assistant.core.types import (
     SpendTotal,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenDelivery,
+    SpokenDeliveryReport,
+    SpokenDeliveryState,
     SpokenTurn,
     StepOutcome,
     SuccessorLink,
@@ -2252,13 +2255,20 @@ class Gateway:
     async def _ask_spoken(self, request: Request) -> Response:
         """Relay one spoken turn to the hub and render what came back (ADR-0200 §10).
 
-        **Three members read by name, and no fourth.** §10 admits "the **browser-owned**
-        arguments of §3's signature and no others — ``utterance``, ``plays`` and
-        ``conversation_id``". The fourth argument of that signature is the deadline, and
-        the gateway supplies it: a turn budget is the **caller's** (ADR-0029 §4), which
-        ADR-0177 §1's fifth clause makes the one class of argument this adapter supplies
-        of itself and ADR-0200 §12(b) widens to its third member for this call and by
-        this ratified decision alone.
+        **Four members read by name, and no fifth.** ADR-0205 §7 partially supersedes
+        ADR-0200 §10's enumeration in exactly that scope: the body carries "the
+        **browser-owned** arguments of §1's signature and no others — ``utterance``,
+        ``plays``, ``conversation_id`` and ``delivery``". The deadline is still not
+        among them and the gateway still supplies it: a turn budget is the
+        **caller's** (ADR-0029 §4), which ADR-0177 §1's fifth clause makes the one
+        class of argument this adapter supplies of itself and ADR-0200 §12(b) widens
+        to its third member for this call and by that ratified decision alone.
+
+        **The report is the browser's own, whole** (ADR-0205 §7). This gateway
+        derives, defaults, composes and invents no part of it: where the body carries
+        no ``delivery``, no ``delivery`` reaches ``converse_spoken``. So ADR-0177 §1's
+        fourth clause is *satisfied* here rather than widened — the deadline carve-out
+        gains nothing, because nothing of this argument is supplied by the adapter.
 
         **A ``timeout`` in the body is therefore never *read*, rather than refused.** No
         other assistant handler inspects a member it does not use — :meth:`_ask` selects
@@ -2287,6 +2297,7 @@ class Gateway:
                 plays=_plays(payload),
                 timeout=_TURN_BUDGET,
                 conversation_id=_optional_string(payload, "conversation_id"),
+                delivery=_delivery(payload),
             ),
             fault=_spoken_fault,
         )
@@ -3678,6 +3689,105 @@ def _plays(payload: Mapping[str, Any]) -> tuple[SpokenAudioFormat, ...]:
     return selected
 
 
+def _delivery(payload: Mapping[str, Any]) -> SpokenDeliveryReport | None:
+    """The report the page sends about the answer it last played (ADR-0205 §7).
+
+    **The gateway derives, defaults, composes and invents no part of it.** An absent
+    member means no report, and no ``delivery`` then reaches ``converse_spoken`` —
+    which is what keeps ADR-0177 §1's fourth clause satisfied rather than widened: the
+    one class of argument this adapter supplies of itself is still the caller-owned
+    deadline.
+
+    **A member that is present and unusable is refused with this project's own
+    words**, ``from None``, carrying no input value and no chained cause — ADR-0200
+    §9's stated ground for a refused recording, applied here for its second reason
+    rather than its first. A ``ValidationError`` "carries the rejected **input**
+    whatever the message says", and while a report holds no audio it does hold an
+    episode id, which is a durable name of one of this owner's turns and not a value
+    to echo into a fault body a browser will render.
+
+    **Its own condition rather than ``malformed-request``**, on :func:`_utterance`'s
+    test: ``malformed-request`` says the page and the gateway disagree about the
+    *shape* (ADR-0168 §10), and a well-shaped report whose durations do not satisfy
+    ADR-0205 §2's partition is not that disagreement — it is a measurement the page
+    took and this surface will not carry. A member that is not a JSON object, and one
+    whose nested ``delivery`` is not one, *are* that disagreement, so those halves are
+    :func:`_malformed`.
+
+    **The durations are whole microseconds spelled as decimal strings**, which is
+    :func:`_microseconds`' convention on this surface and ``timedelta``'s own
+    resolution: exact in both directions, so what the page measured is what the row
+    records. Each is optional, because ``UNKNOWN`` carries neither — a state this
+    surface does not refuse of its own, since the promoted surface refuses it locally
+    and before any I/O (ADR-0205 §2) and a second rule here could only differ from it.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The report, or ``None`` where the body carries none.
+
+    Raises:
+        _Refused: If the member is present and is not a JSON object, if its nested
+            ``delivery`` is absent or is not one, or if the whole does not construct.
+    """
+    value = payload.get("delivery")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _malformed()
+    played = value.get("delivery")
+    if not isinstance(played, dict):
+        raise _malformed()
+    try:
+        return SpokenDeliveryReport(
+            episode_id=_required_string(value, "episode_id"),
+            delivery=SpokenDelivery(
+                state=_member(played, "state", SpokenDeliveryState),
+                played=_optional_microseconds(played, "played_microseconds"),
+                rendered=_optional_microseconds(played, "rendered_microseconds"),
+            ),
+        )
+    except ValidationError:
+        raise _Refused(
+            _fault(
+                400,
+                "Bad Request",
+                "delivery-unusable",
+                detail=(
+                    "That playback report is not one this gateway can carry. A report "
+                    "says how much of one earlier answer was played and how long the "
+                    "whole of it was, and the two must agree with the state it names "
+                    "(ADR-0205 §2)."
+                ),
+                close=False,
+            )
+        ) from None
+
+
+def _optional_microseconds(payload: Mapping[str, Any], name: str) -> timedelta | None:
+    """One duration that may be absent, refusing one that is present and wrong.
+
+    :func:`_microseconds`' spelling with :func:`_optional_string`'s posture: absent is
+    ``None`` and never a default, and a member that is there and is not a bounded run
+    of decimal digits is the page and the gateway disagreeing about the shape.
+
+    Args:
+        payload: The object to read.
+        name: The member to read.
+
+    Returns:
+        The duration, or ``None`` where the member is absent.
+
+    Raises:
+        _Refused: If the member is present and is not a decimal string, or names a
+            duration ``timedelta`` cannot hold.
+    """
+    if name not in payload:
+        return None
+    return _microseconds(payload, name)
+
+
 def _token(payload: Mapping[str, Any]) -> ContinuationToken:
     """One continuation, relayed opaquely (ADR-0042 §4, ADR-0177 §8).
 
@@ -4091,17 +4201,25 @@ def _spoken_view(turn: SpokenTurn) -> dict[str, Any]:
     one of them is an answer that could not be spoken, so the flag is what lets the page
     tell "there was nothing to say" from "there was, and saying it did not complete".
 
+    **``episode_id`` crosses because the page has to hand it back** (ADR-0205 §1, §7).
+    It is the name of the turn a later report is about, and §7 requires the page to send
+    "the one the response carrying that rendering disclosed and never one it derived,
+    counted or guessed" — so the value has to reach the page for there to be one to
+    send. Disclosing it confers nothing: there is one principal on this hub (ADR-0099
+    §1), no route of this surface takes an episode id, and this decision adds none.
+
     Args:
         turn: What the promoted surface returned.
 
     Returns:
-        The four members, with the outcome rendered by :func:`_outcome_view`.
+        The five members, with the outcome rendered by :func:`_outcome_view`.
     """
     return {
         "heard": turn.heard,
         "outcome": None if turn.outcome is None else _outcome_view(turn.outcome),
         "spoken": None if turn.spoken is None else _audio_view(turn.spoken),
         "spoken_degraded": turn.spoken_degraded,
+        "episode_id": turn.episode_id,
     }
 
 

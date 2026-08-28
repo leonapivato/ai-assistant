@@ -82,7 +82,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -132,6 +132,8 @@ from ai_assistant.core.types import (
     RoutedOperationRecord,
     RouteOutcome,
     SpeechFailure,
+    SpokenDelivery,
+    SpokenDeliveryState,
     SpokenTurn,
     StepOutcome,
     StepStatus,
@@ -183,7 +185,7 @@ from ai_assistant.orchestration.speech import (
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -232,6 +234,7 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenAudioFormat,
+        SpokenDeliveryReport,
         TurnResult,
     )
     from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
@@ -1251,6 +1254,28 @@ def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
 type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply | None"]]
 
 
+#: How an ordinary pass composes its answer: what the turn produced, what became of the
+#: step it drove, the conversation the streaming ceiling is measured against, and the
+#: tail's delivery facts.
+#:
+#: **The fourth member is ADR-0205 §5's supplied fact**, keyed by the episode it
+#: qualifies, and it is an argument rather than a member of the turn for the reason §5
+#: gives: it is a supplied *input* to this stage and not part of the episode's content,
+#: which capture leaves byte-unchanged. It reaches every composer — a turn on
+#: ``converse`` whose tail carries a delivery is a real case, the owner who speaks, is
+#: interrupted, and then types — because the facts are about the tail's deliveries and
+#: not about this turn's channel.
+type _Composer = Callable[
+    [
+        "TurnResult | None",
+        StepOutcome | None,
+        str,
+        "Mapping[str, SpokenDelivery]",
+    ],
+    Awaitable["ComposedReply | None"],
+]
+
+
 @dataclass(frozen=True, slots=True)
 class _RoutedPark:
     """The private state one routed continuation token names (ADR-0197 §7).
@@ -1368,6 +1393,73 @@ class _Settled:
     step_id: str
     tool_id: str | None
     disposition: Disposition
+
+
+def _paired_deliveries(
+    deliveries: Mapping[str, SpokenDelivery], memories: Sequence[MemoryRecord]
+) -> Mapping[str, SpokenDelivery]:
+    """Keep only the delivery facts whose episode reached this turn (ADR-0205 §5).
+
+    **A delivery fact travels with the episode it qualifies and never without it.**
+    Where a supply site withheld a record — under ADR-0199 §3, or under ADR-0204 §3's
+    test on ``Provenance.supplied_withheld_content`` — that record is not in
+    ``memories``, so its fact is not in what this returns and no delivery fact for
+    that turn reaches the composing stage at all. A fact stating how long an answer
+    ran, standing beside no answer, is a value that narrows what was withheld, and
+    ADR-0199 §5's fourth clause forbids one.
+
+    Structural rather than remembered: the composing stage renders what it is given,
+    and what it is given is filtered here, so a renderer that later looked up a
+    withheld episode by id would find nothing to look up.
+
+    Args:
+        deliveries: What the history read holds, keyed by episode id.
+        memories: The supply the turn ran over, after ``narrow`` returned it.
+
+    Returns:
+        The subset whose episode survived, in insertion order. Empty where none did.
+    """
+    if not deliveries:
+        return {}
+    supplied = {record.id for record in memories}
+    return {episode_id: fact for episode_id, fact in deliveries.items() if episode_id in supplied}
+
+
+@dataclass(slots=True)
+class _SpokenCapture:
+    """What ``converse_spoken`` writes at capture, and what it reads back (ADR-0205).
+
+    **One instance per call**, minted by the operation whose capture owes a
+    delivery, exactly as ``Engine._run_turn`` mints one capacity handle per turn and
+    ``converse_spoken`` mints one
+    :class:`~ai_assistant.orchestration.disclosure.UnboundedAudienceSupply`. Two
+    concurrent spoken turns therefore share nothing, and what is recorded here is a
+    fact about *this* call rather than about the engine.
+
+    **Its presence is what §4's "on this operation and no other" means
+    mechanically.** ``_run_turn`` is given one only by ``converse_spoken``, and the
+    capture point writes ``delivery`` from it; ``converse``, ``converse_streaming``
+    and ``resume`` hand none and their rows carry none. Nothing in the capture path
+    asks which operation it is running under, because it is told.
+
+    Attributes:
+        delivery: What capture writes onto the turn's index row —
+            ``SpokenDelivery(state=UNKNOWN)`` unconditionally on this operation (§4),
+            the park, the absent reply and the degraded synthesis included. At
+            capture the hub has produced an answer and knows nothing about what
+            reached anyone, and that is what ``UNKNOWN`` says.
+        episode_id: The id of the episode recording the turn, written back by the
+            capture point so ``SpokenTurn.episode_id`` can disclose it (§1).
+            ``None`` where no index row stands for the turn: it is the
+            :class:`~ai_assistant.orchestration.conversations.CaptureReport`'s own
+            value, which is present even where the *episode* write failed, because
+            the row is what carries the delivery.
+    """
+
+    delivery: SpokenDelivery = field(
+        default_factory=lambda: SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+    )
+    episode_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3038,8 +3130,9 @@ class Engine:
         plays: tuple[SpokenAudioFormat, ...],
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget for the whole call, threaded to each stage (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
-        """Run one turn from a recording and speak its answer (ADR-0200 §3).
+        """Run one turn from a recording and speak its answer (ADR-0200 §3, ADR-0205 §1).
 
         **The whole composition is here** (ADR-0200 §2): transcribe, decide whether
         anything was said, run the ordinary turn with its answer composed for a
@@ -3067,10 +3160,15 @@ class Engine:
             timeout: The budget for the whole call — transcription, the turn and
                 synthesis together — threaded to each stage.
             conversation_id: The conversation to continue, or ``None``.
+            delivery: What a device played of an **earlier** turn of this
+                conversation, naming that turn by the ``episode_id`` a previous call
+                disclosed (ADR-0205 §1). Recorded before anything else this call
+                does; discarded where the conversation carries no turn under that
+                id, or where that turn is already stamped.
 
         Returns:
-            The transcript, the turn it drove, the rendering of its answer, and
-            whether speaking that answer degraded.
+            The transcript, the turn it drove, the rendering of its answer, whether
+            speaking that answer degraded, and the id of the episode recording it.
 
         Raises:
             RuntimeError: If the engine is shutting down, exactly as
@@ -3085,9 +3183,12 @@ class Engine:
                 :class:`~ai_assistant.core.errors.TranscriptionFailedError`, which
                 would report a deployment fact as a seam failure and invite a retry
                 that cannot succeed.
-            ValueError: If ``conversation_id`` is blank, ``plays`` is empty, or the
+            ValueError: If ``conversation_id`` is blank, ``plays`` is empty, the
                 transcriber's ``formats`` does not name the recording's
-                ``media_type`` — refused locally, before any I/O.
+                ``media_type``, a ``delivery`` was supplied beside a
+                ``conversation_id`` of ``None``, or a supplied ``delivery`` carries a
+                state of ``UNKNOWN`` — each refused locally, before any I/O
+                (ADR-0205 §1, §2).
             OversizedValueError: If the recording's decoded length exceeds
                 ``max_spoken_audio_bytes``, refused locally and before any I/O; or if
                 the result breaches ADR-0085 §8c even with no rendering in it.
@@ -3108,6 +3209,7 @@ class Engine:
                 "synthesizer produces (ADR-0200 §3)"
             )
             raise ValueError(msg)
+        self._check_report(delivery, conversation_id=selected)
         check_arguments(
             "converse_spoken",
             max_bytes=self._max_payload_bytes,
@@ -3115,6 +3217,7 @@ class Engine:
             plays=plays,
             timeout=timeout,
             conversation_id=selected,
+            delivery=delivery,
         )
         self._check_recording(utterance, transcriber=transcriber)
         return await self._tracked(
@@ -3125,10 +3228,50 @@ class Engine:
                 conversation_id=selected,
                 transcriber=transcriber,
                 synthesizer=synthesizer,
+                delivery=delivery,
             ),
             "converse_spoken",
             checked=True,
         )
+
+    @staticmethod
+    def _check_report(
+        delivery: SpokenDeliveryReport | None, *, conversation_id: str | None
+    ) -> None:
+        """Refuse a report no conversation can hold, and one that reports nothing.
+
+        ADR-0205 §1's and §2's two local refusals, **before any I/O** and before the
+        recording is looked at, on ADR-0085 §3's convention for a malformed argument.
+
+        A report beside no conversation names a turn that cannot exist — a fresh
+        conversation contains none — and an ``UNKNOWN`` report is a value this hub
+        writes at capture and never one a caller supplies: a device that does not
+        know reports nothing, and the absence of a report is spelled by omitting the
+        argument.
+
+        Args:
+            delivery: The report, or ``None``.
+            conversation_id: The conversation named, already validated.
+
+        Raises:
+            ValueError: If either refusal applies.
+        """
+        if delivery is None:
+            return
+        if conversation_id is None:
+            msg = (
+                "a delivery report names a turn of a conversation, and a fresh "
+                "conversation contains no turn one could name; supply the conversation "
+                "this report is about, or no report (ADR-0205 §1)"
+            )
+            raise ValueError(msg)
+        if delivery.delivery.state is SpokenDeliveryState.UNKNOWN:
+            msg = (
+                "a device that does not know reports nothing: UNKNOWN is what this hub "
+                "writes for an unreported turn, and the absence of a report is spelled "
+                "by omitting the argument (ADR-0205 §2)"
+            )
+            raise ValueError(msg)
 
     def _speech_seams(self) -> tuple[SpeechTranscriber, SpeechSynthesizer]:
         """The two seams, or a refusal naming what this deployment lacks.
@@ -3194,7 +3337,7 @@ class Engine:
                 field="hub_max_spoken_audio_bytes",
             )
 
-    async def _converse_spoken(  # noqa: PLR0913 — the call's four arguments plus the two seams it was checked against
+    async def _converse_spoken(  # noqa: PLR0913 — the call's five arguments plus the two seams it was checked against
         self,
         utterance: SpokenAudio,
         *,
@@ -3203,6 +3346,7 @@ class Engine:
         conversation_id: str | None,
         transcriber: SpeechTranscriber,
         synthesizer: SpeechSynthesizer,
+        delivery: SpokenDeliveryReport | None,
     ) -> SpokenTurn:
         """Compose the three stages under one budget (ADR-0200 §3, §4).
 
@@ -3223,6 +3367,17 @@ class Engine:
         hardest to notice (ADR-0170 §8's own shape). A delivered cancellation is
         neither, and propagates.
 
+        **The report is recorded first of all** (ADR-0205 §1). It is a fact about a
+        turn that has already happened and it does not depend on this one, so it is
+        written before the transcription seam is reached and therefore before the
+        turn plans — which is what keeps a transcription failure, a blank recording,
+        a degradation, an expiry or a cancellation from losing it. The one
+        consequence worth naming is that a report supplied against a conversation
+        this hub does not hold is refused *before* the no-words shape can be
+        returned, where a call carrying no report would have returned it: the id is
+        wrong either way, and the refusal is the one :meth:`_run_turn` would have
+        raised a moment later.
+
         Returns:
             The spoken turn.
 
@@ -3230,6 +3385,8 @@ class Engine:
             TranscriptionFailedError: If transcription failed.
             OversizedValueError: If the result breaches ADR-0085 §8c with no
                 rendering in it.
+            UnknownConversationError: If a report was supplied against a
+                conversation this store does not hold.
         """
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -3238,6 +3395,10 @@ class Engine:
         def remaining() -> float:
             return budget - (loop.time() - started)
 
+        if delivery is not None:
+            # `conversation_id` is not None here: `_check_report` refused that pair
+            # before any I/O.
+            await self._conversations.record_delivery(str(conversation_id), delivery)
         heard, failed = await self._transcribed(transcriber, utterance, seconds=remaining())
         if failed is not None:
             # Raised **outside** the ``except`` block that caught the seam's failure,
@@ -3268,6 +3429,13 @@ class Engine:
         supply = UnboundedAudienceSupply(
             speakable_attested_sources=self._speakable_attested_sources
         )
+        # ADR-0205 §4: every turn of *this* operation is stamped `UNKNOWN` at
+        # capture, and no turn of any other is. One handle is minted per call, as the
+        # applier above is and as the capacity handle is, and it carries the value
+        # capture writes down and the episode id capture allocated back up — so the
+        # fact that this call ran on `converse_spoken` reaches the capture point as
+        # data rather than as a flag `_run_turn` would have to read.
+        recorded = _SpokenCapture()
         outcome = await self._run_turn(
             heard,
             timeout=timedelta(seconds=max(remaining(), 0.0)),
@@ -3275,6 +3443,7 @@ class Engine:
             compose=partial(self._composed_spoken, supply=supply),
             compose_routed=self._composed_routed_spoken,
             supply=supply,
+            spoken=recorded,
         )
         # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
         # that an outcome over ADR-0085 §8c on its own raises exactly as it does on
@@ -3285,7 +3454,13 @@ class Engine:
             outcome.reply, plays=plays, synthesizer=synthesizer, seconds=remaining()
         )
         return self._within_payload_limit(
-            SpokenTurn(heard=heard, outcome=outcome, spoken=spoken, spoken_degraded=degraded)
+            SpokenTurn(
+                heard=heard,
+                outcome=outcome,
+                spoken=spoken,
+                spoken_degraded=degraded,
+                episode_id=recorded.episode_id,
+            )
         )
 
     async def _transcribed(
@@ -3429,7 +3604,16 @@ class Engine:
         except OversizedValueError:
             _log.warning("spoken_rendering_degraded", reason="over_payload_limit")
             return self._checked(
-                SpokenTurn(heard=spoken.heard, outcome=spoken.outcome, spoken_degraded=True),
+                SpokenTurn(
+                    heard=spoken.heard,
+                    outcome=spoken.outcome,
+                    spoken_degraded=True,
+                    # Carried through the one degradation that rebuilds the result:
+                    # `episode_id` is bounded and is never what is dropped to make a
+                    # result fit (ADR-0205 §10b), so the ladder still has exactly one
+                    # step.
+                    episode_id=spoken.episode_id,
+                ),
                 "converse_spoken",
             )
         return spoken
@@ -3439,6 +3623,7 @@ class Engine:
         turn: TurnResult | None,
         step: StepOutcome | None,
         conversation: str,
+        deliveries: Mapping[str, SpokenDelivery],
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -3478,11 +3663,25 @@ class Engine:
         second retrieval, and its context and memories still reach it from the turn
         (ADR-0170 §2, ADR-0203 §2).
 
+        **The tail's delivery facts are the second supplied input, and they are
+        paired with the episodes that reached this stage** (ADR-0205 §5). Where a
+        turn of the tail carries one, the stage is told it — the state, and where a
+        report was received the two durations — so a turn whose episode is in front
+        of it carrying words the device did not play arrives with the fact that it
+        did not. Where a supply site withheld a record, no delivery fact for that
+        turn reaches here either: ``_paired_deliveries`` intersects them before this
+        method is called, so the withholding removes both together (ADR-0199 §5's
+        fourth clause). The stage gains no ``ContextProvider``, no ``MemoryStore``,
+        no second context assembly and no second retrieval for them — they ride the
+        tail ``ConversationLifecycle.history`` already read.
+
         Args:
             turn: What the turn produced, over the subtracted supply. ``None`` on a
                 pass that owes no answer.
             step: What became of the driven step.
             conversation: Accepted and dropped, as :meth:`_composed_whole` drops it.
+            deliveries: What a device reported playing of each surviving turn of the
+                tail, keyed by the episode it qualifies (ADR-0205 §5).
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -3502,6 +3701,7 @@ class Engine:
             undriven=undriven,
             unbounded_audience=True,
             withheld=supply.withheld,
+            deliveries=deliveries,
         )
 
     async def resume(
@@ -5917,9 +6117,12 @@ class Engine:
         """
 
         async def compose(
-            turn: TurnResult | None, step: StepOutcome | None, conversation: str
+            turn: TurnResult | None,
+            step: StepOutcome | None,
+            conversation: str,
+            deliveries: Mapping[str, SpokenDelivery],
         ) -> ComposedReply | None:
-            return await self._compose_streaming(turn, step, conversation, chunks)
+            return await self._compose_streaming(turn, step, conversation, chunks, deliveries)
 
         async def compose_routed(
             routed: RoutedOperation, conversation: str
@@ -5941,7 +6144,11 @@ class Engine:
         )
 
     async def _composed_whole(
-        self, turn: TurnResult | None, step: StepOutcome | None, conversation: str
+        self,
+        turn: TurnResult | None,
+        step: StepOutcome | None,
+        conversation: str,
+        deliveries: Mapping[str, SpokenDelivery],
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -5950,21 +6157,26 @@ class Engine:
         an over-ceiling answer a refusal, because nothing has been published — so it
         is accepted and dropped rather than making :meth:`_run_turn` carry two
         composer shapes.
+
+        **The tail's delivery facts reach this stage too, and that is deliberate**
+        (ADR-0205 §5). A turn on ``converse`` whose tail carries one is a real case —
+        the owner speaks, is interrupted, and then types — and an answer that was not
+        heard is one no turn should build on, whatever channel the next turn arrives
+        by. The facts are about the tail's deliveries, not about this turn's channel.
         """
         del conversation
-        return await self._compose(turn, step)
+        return await self._compose(turn, step, deliveries=deliveries)
 
-    async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers and the supply filter; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
+    async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
-        compose: Callable[
-            [TurnResult | None, StepOutcome | None, str], Awaitable[ComposedReply | None]
-        ],
+        compose: _Composer,
         compose_routed: _RoutedComposer,
         supply: TurnSupply,
+        spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Route the ask, or resolve the conversation, plan the turn and drive its step.
 
@@ -6008,6 +6220,23 @@ class Engine:
         judges. A turn that parks carries it onto the parked entry too, because the
         park's *second* capture renders that same turn's goal and plan (§2's fourth
         clause) from a pass that retrieves nothing of its own.
+
+        **``spoken`` is how ADR-0205 §4's "on this operation and no other" is
+        mechanical rather than remembered.** ``converse_spoken`` hands one; every
+        other conversational operation hands ``None``, so the capture point below
+        writes a ``delivery`` exactly where one is owed and this method never asks
+        which operation it is running under. It is also where the episode id the
+        capture allocated is written back, for ``SpokenTurn.episode_id`` to disclose
+        (§1) — a routed pass included, since a routed spoken pass is a turn of this
+        operation and is captured as one.
+
+        **The tail's delivery facts ride to the composing stage off the history this
+        method already read** (ADR-0205 §5). ``ConversationLifecycle.history`` walks
+        the index rows for the records themselves and holds every one of them, so the
+        facts cost no second store call, no second context assembly and no second
+        retrieval — and they are paired down to the episodes that **survived** the
+        supply filter, so a turn whose episode was withheld under ADR-0199 §3 or
+        ADR-0204 §3 contributes no delivery fact either.
         """
         # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
         # does and a continuation marks the conversation active before a reclaim
@@ -6016,7 +6245,11 @@ class Engine:
         route = None if self._routing is None else await self._routing.route(utterance)
         if route is not None:
             return await self._routed_pass(
-                utterance, route, conversation=conversation.id, compose=compose_routed
+                utterance,
+                route,
+                conversation=conversation.id,
+                compose=compose_routed,
+                spoken=spoken,
             )
         history = await self._conversations.history(conversation.id)
         turn = await self._loop.respond(
@@ -6025,6 +6258,11 @@ class Engine:
             history_degraded=history.degraded,
             narrow=supply,
         )
+        # ADR-0205 §5: the fact travels with the episode it qualifies and never
+        # without it. `turn.memories` is the supply as `narrow` returned it, so
+        # intersecting here is what makes a withheld record's delivery unreachable by
+        # construction rather than by the renderer happening not to look for it.
+        deliveries = _paired_deliveries(history.deliveries, turn.memories)
         # ADR-0204 §2: read once, immediately after the one evaluation that set it,
         # so every capture below stamps the same turn's own value and no branch can
         # recompute it from a supply that has moved on.
@@ -6036,7 +6274,7 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
-            composed = await compose(turn, None, conversation.id)
+            composed = await compose(turn, None, conversation.id, deliveries)
             return await self._capture(
                 conversation.id,
                 turn=turn,
@@ -6044,6 +6282,7 @@ class Engine:
                 resumed=False,
                 composed=composed,
                 supplied_withheld_content=withheld,
+                spoken=spoken,
             )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
@@ -6097,7 +6336,7 @@ class Engine:
         # (#1314) — so composing first is chosen for the reason that the capture
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
-        composed = await compose(turn, step, conversation.id)
+        composed = await compose(turn, step, conversation.id, deliveries)
         return await self._capture(
             conversation.id,
             turn=turn,
@@ -6106,6 +6345,7 @@ class Engine:
             parked=parked,
             composed=composed,
             supplied_withheld_content=withheld,
+            spoken=spoken,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -6117,6 +6357,7 @@ class Engine:
         *,
         conversation: str,
         compose: _RoutedComposer,
+        spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Drive one taken route to its end (ADR-0197 §1, §5, §7, §9).
 
@@ -6147,6 +6388,7 @@ class Engine:
                 utterance,
                 RoutedOperation(operation=operation, outcome=RouteOutcome.UNRECORDED),
                 compose=compose,
+                spoken=spoken,
             )
         registered = False
         try:
@@ -6157,8 +6399,12 @@ class Engine:
             if registered:
                 # §10: a routed park is not composed for. The confirmation is what the
                 # user must answer, and prose beside it competes with the question.
-                return await self._finish_route(conversation, utterance, outcome, compose=None)
-            return await self._finish_route(conversation, utterance, outcome, compose=compose)
+                return await self._finish_route(
+                    conversation, utterance, outcome, compose=None, spoken=spoken
+                )
+            return await self._finish_route(
+                conversation, utterance, outcome, compose=compose, spoken=spoken
+            )
         finally:
             # Held across every await above and released here on every path, which is
             # what `_run_turn` already does with the handle it reserves before driving a
@@ -6599,11 +6845,17 @@ class Engine:
         routed: RoutedOperation,
         *,
         compose: _RoutedComposer | None,
+        spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Compose what the pass owes, then capture the exchange (ADR-0197 §10).
 
         ``compose`` is ``None`` on a routed park, which owes no answer: the composing stage
         is not reached, originates no model call, and ``reply_degraded`` stays ``False``.
+
+        ``spoken`` is carried for the same reason every other capture site carries it:
+        a routed pass on ``converse_spoken`` is a turn of that operation, so ADR-0205
+        §4's "unconditionally on that operation" reaches it, and the episode id it
+        allocates is the one the caller is disclosed.
         """
         composed = None if compose is None else await compose(routed, conversation)
         return await self._capture(
@@ -6614,6 +6866,7 @@ class Engine:
             composed=composed,
             routed=routed,
             utterance=utterance,
+            spoken=spoken,
             # A routed pass reaches no retrieval and no planner, so there is no
             # supply for the predicate to find and nothing in the episode for a
             # stamp to be about (ADR-0204 §2's fifth clause).
@@ -6785,7 +7038,11 @@ class Engine:
         return tuple([await self._project(record) for record in records])
 
     async def _compose(
-        self, turn: TurnResult | None, step: StepOutcome | None
+        self,
+        turn: TurnResult | None,
+        step: StepOutcome | None,
+        *,
+        deliveries: Mapping[str, SpokenDelivery],
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -6821,7 +7078,9 @@ class Engine:
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
-        return await self._composing.compose(turn=turn, step=step, undriven=undriven)
+        return await self._composing.compose(
+            turn=turn, step=step, undriven=undriven, deliveries=deliveries
+        )
 
     async def _compose_streaming(
         self,
@@ -6829,6 +7088,7 @@ class Engine:
         step: StepOutcome | None,
         conversation_id: str,
         chunks: asyncio.Queue[ReplyChunk],
+        deliveries: Mapping[str, SpokenDelivery],
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -6868,6 +7128,7 @@ class Engine:
             step=step,
             undriven=undriven,
             room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id),
+            deliveries=deliveries,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -7014,7 +7275,15 @@ class Engine:
             # describe. ``turn`` ``None`` beside ``reply`` ``None`` and
             # ``reply_degraded`` ``False`` is ADR-0170 §4's second shape exactly.
             return TurnOutcome(turn=None, step=step)
-        composed = await self._compose(parked.turn, step)
+        # **No delivery facts on this path, and none is fetched to make some**
+        # (ADR-0205 §5). The facts ride the replay tail
+        # ``ConversationLifecycle.history`` reads, and a resume reads none: it is
+        # handed the parked turn's own ``TurnResult``, recovered rather than
+        # reassembled, and §5 adds no second store call to any path. So this stage is
+        # told nothing about delivery, which is not the same as being told the tail
+        # was heard — the renderer writes a line only where it has a fact, and asserts
+        # nothing where it has none.
+        composed = await self._compose(parked.turn, step, deliveries={})
         return await self._capture_resumption(parked, step, composed)
 
     async def _resolve_park(
@@ -7269,7 +7538,7 @@ class Engine:
             supplied_withheld_content=parked.supplied_withheld_content,
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry and the turn's disclosure evaluation; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation and its spoken capture; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
@@ -7281,6 +7550,7 @@ class Engine:
         parked: ParkedBinding | None = None,
         routed: RoutedOperation | None = None,
         utterance: str | None = None,
+        spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -7317,6 +7587,16 @@ class Engine:
         which is true of what its episode holds rather than a fallback, because
         ``_routed_exchange_of`` renders the utterance and a phrase for the route's
         outcome with no goal statement and no plan rationale of any turn in it.
+
+        **``spoken`` decides whether this capture writes a delivery at all** (ADR-0205
+        §4). It is present exactly on a turn of ``converse_spoken``, which writes
+        ``UNKNOWN`` unconditionally — the park, the ``reply`` of ``None`` and the
+        degraded synthesis included, because at capture the hub has produced an answer
+        and knows nothing about what reached anyone. ``converse``,
+        ``converse_streaming`` and ``resume`` hand none and their rows carry none, and
+        an absent value is never read as delivered and never read as heard (§3). The
+        episode id the index allocated is written back onto it here, which is the one
+        place that knows it.
         """
         report = await self._conversations.capture(
             conversation_id,
@@ -7328,7 +7608,10 @@ class Engine:
             outcome=_outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome),
             parked=parked,
             supplied_withheld_content=supplied_withheld_content,
+            delivery=None if spoken is None else spoken.delivery,
         )
+        if spoken is not None:
+            spoken.episode_id = report.episode_id
         return TurnOutcome(
             turn=turn,
             step=step,

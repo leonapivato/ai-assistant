@@ -87,11 +87,19 @@ def _outcome_with_no_reply() -> TurnOutcome:
 # --- §4: the four members and the shapes between them ------------------------
 
 
-def test_the_type_has_exactly_the_four_members_adr_0200_names() -> None:
-    # §4 fixes the member set, and the count is what stops a fifth arriving
+def test_the_type_has_exactly_the_five_members_adr_0205_leaves_it_with() -> None:
+    # §4 fixed the member set at four and the count is what stops a sixth arriving
     # unnoticed — a second copy of the spoken words being the one §4 removed by
-    # name when `SpokenReply` was deleted.
-    assert set(SpokenTurn.model_fields) == {"heard", "outcome", "spoken", "spoken_degraded"}
+    # name when `SpokenReply` was deleted. ADR-0205 §10(b) partially supersedes that
+    # count in exactly one scope, "the addition being `episode_id` and nothing else",
+    # so the enumeration moves by that member and by no other.
+    assert set(SpokenTurn.model_fields) == {
+        "heard",
+        "outcome",
+        "spoken",
+        "spoken_degraded",
+        "episode_id",
+    }
 
 
 def test_it_is_frozen_and_forbids_extras() -> None:
@@ -102,12 +110,20 @@ def test_it_is_frozen_and_forbids_extras() -> None:
         turn.spoken_degraded = True
 
 
-def test_a_recording_with_no_words_is_four_absences_and_no_error() -> None:
+def test_a_recording_with_no_words_is_five_absences_and_no_error() -> None:
     # §4's first shape: "nothing was asked, so nothing was answered". It is not an
     # error and no exception is raised for it, so the type must admit it as its own
-    # default rather than as a case a caller assembles.
+    # default rather than as a case a caller assembles. ADR-0205 §1 puts
+    # `episode_id` in that shape too: it is `None` "exactly when the call recorded no
+    # turn", and a recording that carried no words is the first of the two cases it
+    # names.
     empty = SpokenTurn()
-    assert (empty.heard, empty.outcome, empty.spoken) == (None, None, None)
+    assert (empty.heard, empty.outcome, empty.spoken, empty.episode_id) == (
+        None,
+        None,
+        None,
+        None,
+    )
     assert empty.spoken_degraded is False
 
 
@@ -252,21 +268,27 @@ def test_a_classification_outside_the_vocabulary_is_refused() -> None:
 # --- §3: the signature, and the absence of any audience ----------------------
 
 
-def test_the_member_takes_one_positional_subject_and_three_keyword_only() -> None:
+def test_the_member_takes_one_positional_subject_and_four_keyword_only() -> None:
     # ADR-0085 §2's convention, unchanged: "the *subject* of a call is positional,
     # and every other argument is keyword-only". A second optional positional
-    # cannot be joined by another without changing every call site.
+    # cannot be joined by another without changing every call site. ADR-0205 §1
+    # supersedes ADR-0200 §3's *count* alone — "a fifth argument and no others:
+    # `delivery`, keyword-only, a `SpokenDeliveryReport | None` defaulting to
+    # `None`" — so this enumeration is what says the addition was that one and
+    # nothing beside it.
     parameters = inspect.signature(AssistantEngine.converse_spoken).parameters
     assert [name for name in parameters if name != "self"] == [
         "utterance",
         "plays",
         "timeout",
         "conversation_id",
+        "delivery",
     ]
     assert parameters["utterance"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    for name in ("plays", "timeout", "conversation_id"):
+    for name in ("plays", "timeout", "conversation_id", "delivery"):
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["conversation_id"].default is None
+    assert parameters["delivery"].default is None
     assert parameters["plays"].default is inspect.Parameter.empty
     assert parameters["timeout"].default is inspect.Parameter.empty
 

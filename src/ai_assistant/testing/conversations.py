@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     Conversation,
     ConversationExport,
     ConversationTurn,
+    SpokenDeliveryState,
     describe_untrusted,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ParkedBinding
+    from ai_assistant.core.types import ParkedBinding, SpokenDelivery
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
@@ -440,6 +441,7 @@ class FakeConversationStore:
         *,
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
+        delivery: SpokenDelivery | None = None,
     ) -> ConversationTurn:
         """Allocate the ordinal, derive the episode id, and record the turn.
 
@@ -469,6 +471,7 @@ class FakeConversationStore:
                 episode_id=self._episode_id(conversation_id, ordinal),
                 occurred_at=occurred_at,
                 parked=parked,
+                delivery=delivery,
             )
             existing.append(turn)
             self._by_episode[turn.episode_id] = turn
@@ -478,6 +481,58 @@ class FakeConversationStore:
                 update={"last_turn_at": turn.occurred_at}
             )
             return turn
+
+    async def record_delivery(
+        self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
+    ) -> ConversationTurn | None:
+        """Stamp the named turn's delivery, if and only if it is still ``UNKNOWN``.
+
+        **Read and write inside the one exclusion** (ADR-0205 §3), which is what the
+        suite's two-reports-racing case is asserting against: the exclusion hands the
+        loop back before this reads anything, so a second report really has to queue
+        and really does find the state the first left.
+
+        The ``UNKNOWN`` refusal is before the exclusion is taken and before anything
+        is read, which is "locally, before any I/O".
+
+        Raises:
+            ValueError: If ``delivery.state`` is ``UNKNOWN``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        if delivery.state is SpokenDeliveryState.UNKNOWN:
+            msg = (
+                "record_delivery does not carry an UNKNOWN delivery: that value is written "
+                "by capture through append, and a device that does not know reports nothing "
+                "(ADR-0205 §2, §3)"
+            )
+            raise ValueError(msg)
+        async with self._exclusive(conversation_id):
+            self._live(conversation_id)
+            rows = self._turns[conversation_id]
+            found = next(
+                (
+                    (at, turn)
+                    for at, turn in enumerate(rows)
+                    if turn.episode_id == episode_id
+                    and turn.delivery is not None
+                    and turn.delivery.state is SpokenDeliveryState.UNKNOWN
+                ),
+                None,
+            )
+            if found is None:
+                # Any of ADR-0205 §3's three conditions failing: the episode belongs
+                # to another conversation or to nothing, or the row already carries a
+                # stamp, or it carries no delivery at all — a turn that did not run on
+                # ``converse_spoken``, which this operation is not a way to give one.
+                return None
+            at, turn = found
+            stamped = turn.model_copy(update={"delivery": delivery})
+            rows[at] = stamped
+            self._by_episode[stamped.episode_id] = stamped
+            if stamped.parked is not None:
+                self._by_binding[stamped.parked] = stamped
+            return stamped
 
     async def turns(
         self,

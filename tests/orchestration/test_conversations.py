@@ -250,7 +250,11 @@ async def test_an_episode_id_that_is_already_stored_fails_the_capture_loudly() -
     report = await wiring.stage.capture(conversation.id, content="mine")
 
     assert report.degraded is True
-    assert report.episode_id is None
+    # The **index row landed** before the episode write was attempted, and ADR-0205
+    # §1 makes that the whole test of what this id says: it is `None` only where no
+    # row stands, and "not `None` merely because the episode write failed, since the
+    # turn's index row exists either way and is what carries the delivery".
+    assert report.episode_id == squatted
     occupant = await wiring.memory.get(squatted)
     assert occupant is not None
     assert occupant.content == "a record capture did not write", "nothing was overwritten"
@@ -296,9 +300,14 @@ async def test_a_memory_store_fault_leaves_the_turn_recorded_with_no_episode() -
     report = await wiring.stage.capture(conversation.id, content="answered anyway")
 
     assert report.degraded is True
-    assert report.episode_id is None
     # The index entry stands: the turn happened, and the transcript shows a gap.
-    assert [turn.ordinal for turn in await wiring.conversations.turns(conversation.id)] == [1]
+    turns = await wiring.conversations.turns(conversation.id)
+    assert [turn.ordinal for turn in turns] == [1]
+    # And the id is still reported, which is ADR-0205 §1's clause exactly: the row it
+    # names is the one a later delivery report is applied to, so withholding the id
+    # here would make an interrupted answer unreportable for the one failure that
+    # leaves the row perfectly intact.
+    assert report.episode_id == turns[0].episode_id
     replayed = await wiring.stage.history(conversation.id)
     assert replayed.records == (), "an unresolvable episode id is a gap, not an error"
 
