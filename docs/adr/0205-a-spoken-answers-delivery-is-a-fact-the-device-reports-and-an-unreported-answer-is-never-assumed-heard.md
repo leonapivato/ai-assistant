@@ -400,6 +400,16 @@ why one is refused rather than deferred.
 > it as one. A row already carrying `COMPLETE` or `INTERRUPTED` is likewise left
 > exactly as it stands, which is §1's stamped-once rule.
 
+> **Normative.** `record_delivery` **refuses a `delivery` whose state is
+> `UNKNOWN`**, locally and before any I/O, as a malformed argument — `ValueError`,
+> on ADR-0085 §3's convention. `UNKNOWN` is written by capture and only through
+> `append` (§4); it is not a value this operation carries, and the refusal is part
+> of the Protocol's contract and its shared conformance suite rather than a caller's
+> discipline. Without it a consumer holding the Protocol could stamp `UNKNOWN` over
+> `UNKNOWN` — a write the row's own state cannot distinguish from no write, leaving
+> the row eligible afterwards — and §1's stamped-once rule would be a promise the
+> store could not keep against a caller that is not the engine.
+
 > **Normative.** **`UNKNOWN` is the whole of what is stampable, and a turn whose
 > rendering never existed is stampable like any other.** §4 writes `UNKNOWN` on
 > every turn of this operation, the park and the degraded synthesis included, so
@@ -725,7 +735,9 @@ stamps the turn it names and leaves the later one `UNKNOWN`** — the case
 adversarial review's round-1 `blocker` describes, written as an integration test
 with an intervening captured turn rather than as two writes in a row; a second
 report naming an already-stamped turn performs nothing; a report beside
-a turn whose episode a supply site withheld under ADR-0199 §3 or ADR-0204 §3
+`record_delivery` refuses an `UNKNOWN` `delivery` at the Protocol, pinned in its
+conformance suite so every implementation refuses it alike; a turn whose episode a
+supply site withheld under ADR-0199 §3 or ADR-0204 §3
 contributes no delivery fact to that turn's composing input either; a report naming
 a turn that carries no `delivery` at all stamps nothing and leaves
 that row absent; two reports racing on one `UNKNOWN` row leave exactly one stamp,
