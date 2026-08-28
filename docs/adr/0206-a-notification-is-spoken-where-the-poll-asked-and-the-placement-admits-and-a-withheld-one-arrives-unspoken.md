@@ -1,0 +1,920 @@
+# 206. A notification is spoken where the poll asked and the placement admits, and a withheld one arrives unspoken
+
+- Status: Proposed
+- Date: 2026-08-28
+
+## Context
+
+### What milestone 20 asks for, and how little of it is open
+
+`track:voice`'s milestone 20 is *proactive speech*, and its exit test is one
+sentence: "a notification arrives as speech on an idle device, and a class the
+owner ruled unspeakable deflects to an authenticated surface instead" (#1318,
+`docs/roadmap.md`). Milestone 19 shipped everything a spoken *answer* needs —
+two speech Protocols, a promoted operation that composes them, a browser that
+records and plays, and a disclosure rule the composing stage applies. What
+milestone 20 adds is one direction: the assistant says something nobody asked
+for.
+
+Four ratified decisions have already fixed most of the shape, and reading them
+together leaves a much smaller question than the milestone sounds like.
+
+- **ADR-0131 §1** rules that "a disposed notification reaches a device only as
+  the **result payload of a request that device sent**", and that the request is
+  `next_notification`. So there is no unsolicited frame to add, and speech
+  changes nothing about *when* a notification travels.
+- **ADR-0200 §2** rules that transcription, the turn, the disclosure ruling and
+  synthesis "are composed in `orchestration`", and that "no adapter in
+  `interfaces/` transcribes, synthesises, or sequences those stages". §10 adds
+  that the front end "does not call `SpeechRecognition`,
+  `webkitSpeechRecognition` or `speechSynthesis`, and no lane may wire one". So
+  the rendering is the hub's, and it crosses the wire as audio.
+- **ADR-0199 §3**'s fourth clause hands this ADR its central obligation by name:
+  "No notification is placed as speakable on a channel of unbounded audience by
+  this ADR. An ADR admitting a delivery channel of unbounded audience places what
+  it places on the whole of §2's recorded origin for a notification —
+  `NotificationCandidate.producer`, `notification_class` **and** `sensitivity` —
+  and what it does not place stays withheld."
+- **ADR-0199 §5**'s delivery clauses decide the withheld case before this ADR
+  reaches it: such a delivery "is **not emitted on that channel**, and no
+  deflection is spoken in its place", it "stays in the hub's durable outbox
+  (ADR-0131 §3) and is delivered on a channel that can carry it **if and when a
+  device asks on one**", and "Delivery on a channel of bounded audience is
+  unaffected."
+
+So what is genuinely open is narrow: **where the rendering is asked for**, **what
+is placed speakable**, **what the page does with a rendering**, and **what
+"idle" means** when the system holds no fact about the room.
+
+### The tree, read rather than remembered
+
+**One producer exists.** `orchestration/upcoming.py` is the only construction
+site of a `NotificationCandidate` in `src/`, and every candidate it makes carries
+three constants: `PRODUCER` is `"calendar-upcoming"`, `NOTIFICATION_CLASS` is
+`"upcoming_event"`, and `sensitivity` is `DataTier.PERSONAL` — the last stated by
+the producer and, in that module's own words, chosen because "the reader's
+proposals over the identical content state the same tier, and a notification
+carrying a weaker one would be the same content classified two ways". Its
+`summary` is the belief's own rendered sentence and its `detail` is `None`,
+"because the sentence is the whole of what this producer carries".
+
+**The gateway fans one delivery out to many browsers.** `DeliveryFanOut`
+(`interfaces/gateway/delivery.py`) holds one poll against the hub while at least
+one `DeliveryStream` is open, and writes each answer to every open stream. Its
+poll is `next_notification(acknowledging=acknowledging, budget=self._budget)` —
+both arguments the gateway's own, no browser value among them. That is the fact
+which decides §1's shape: there is one value and several readers, so nothing
+about a rendering can be per-browser.
+
+**The page already knows how to play, and already knows when it may not.**
+`assets/app.js` holds one playback in the air (`playing`), ends it when a press
+takes the record over, and decodes a hub-supplied rendering through the Web Audio
+decoder rather than an `<audio>` element — because ADR-0168 §6's `media-src
+'self'` "does not match a `blob:` or a `data:` URL". The decoding context is
+built inside the press gesture, in `readyToPlay`, and resumed there. **That is
+the single most consequential fact in this file for milestone 20**: a page that
+has had no user gesture holds no running audio context, and a browser will not
+give it one. A proactive utterance is therefore not something a page can
+unilaterally produce, and §8 is written around that rather than against it.
+
+### The two things that look open and are not
+
+**The acknowledgement.** It is tempting to make a spoken delivery acknowledged
+when playback ends — an interrupted playback would then not acknowledge, and
+at-least-once would run to the ear rather than to the socket. ADR-0175 §5 has
+already decided it the other way, in two marked clauses: "The gateway
+acknowledges, on its next poll, a delivery it wrote to at least one open delivery
+stream, and it acknowledges no other", and "A `delivery_id` never reaches a
+browser… No browser acknowledges, retires, withdraws or dismisses a delivery."
+Its prose states the cost and takes it: "past the gateway the guarantee is that
+the notification was written to at least one stream, not that a person read it",
+and closing that gap "would mean a browser holding the capability" ADR-0172 §1
+closes its class against. §9 leaves it exactly there.
+
+**Occupancy.** #1318's milestone-20 line says "occupancy-unknown is the default
+posture, not the edge case", and it was written before ADR-0199. That ADR §4's
+fourth clause now rules it outright — "Where occupancy is unknown, the posture is
+the one that applies when the channel's audience is unbounded" — and its §4 prose
+names milestone 20 as the reason. So there is nothing left here to decide: this
+ADR consumes the rule and adds no signal it could be computed from.
+
+### The one thing the milestone's own wording gets slightly wrong
+
+The exit test says "a class the owner ruled unspeakable". ADR-0199 §3 makes
+content withheld from an unbounded channel under **three** limbs — a record whose
+`about_person` is stated, a class the owner recorded as unspeakable under §6, and
+"any content of a class no ratified ADR has placed as speakable on such a
+channel". The owner-record limb needs the surface ADR-0199 §6's last clause
+defers and §9 lists with its firing condition, and this ADR does not build it.
+The behaviour the exit test is after — a class that is not spoken, arriving on an
+authenticated surface instead — is reachable through the third limb, which is
+what §3 and §5 below use. Recording that the milestone's wording moved is better
+than pretending the deferred surface is not deferred.
+
+## Decision
+
+We will let the polling device ask for a rendering, produce it inside the call
+that answers the poll and nowhere else, place exactly one notification triple as
+speakable, deliver a withheld notification unspoken with nothing audible marking
+it, make "idle" a fact about the device rather than about the room, and leave the
+acknowledgement precisely where ADR-0175 §5 put it.
+
+### 1. The rendering is asked for on the poll, and produced when the poll is answered
+
+> **Normative.** `AssistantEngine.next_notification` gains exactly one
+> keyword-only argument, `plays`, a `tuple[SpokenAudioFormat, ...]` defaulting to
+> the empty tuple. It is the formats the caller can render, in preference order,
+> and it is the whole of what this ADR adds to that method's arguments.
+
+The signature that describes, shown rather than marked (ADR-0089 §2):
+
+```text
+async def next_notification(
+    self,
+    *,
+    acknowledging: Identifier | None = None,
+    plays: tuple[SpokenAudioFormat, ...] = (),
+    budget: timedelta,
+) -> NotificationDelivery | None
+```
+
+> **Normative.** An empty `plays` asks for no rendering, and none is produced: no
+> placement is decided, no synthesizer is called, and nothing about the poll's
+> behaviour differs from what ADR-0131 §4 already fixes. A caller that cannot
+> play audio omits the argument and is unaffected by every other clause of this
+> ADR.
+
+> **Normative.** A rendering is produced **inside the call that answers the
+> poll**, after the entry has been selected, and never before. No entry is
+> rendered in advance of a poll that asked for one, no rendering is retained
+> between polls, and a redelivery of the same entry renders afresh.
+
+> **Normative.** No rendering is written to the outbox, to any store, index,
+> trail, trace, audit trail or log, in either tier. ADR-0200 §8's first clause
+> binds this path in the terms it is already written in — "It exists in memory
+> for the duration of the call and nowhere else. No setting enables retention and
+> no configuration value can" — and this ADR adds no exception to it.
+
+**An argument rather than a sibling operation, which is the opposite of what
+ADR-0200 §3 did for the same question one surface over.** That section put a
+spoken *turn* on its own member, `converse_spoken`, and its ground was that "a
+channel's audience reaches the composing stage from the *operation the engine is
+executing*". The ground does not transfer, and the reason it does not is
+ADR-0199 §5's own: "A notification is not composed by ADR-0170's stage: ADR-0131
+§1 rules that a delivery is 'the result payload of a request that device sent'
+and ADR-0130 decides the artifact long before any device asks." There is no
+composing stage here for an audience to reach. A spoken answer and a written one
+are two different texts — §7 of that ADR makes `outcome.reply` *itself* the
+deflection — so two operations were needed to compose two answers. A spoken
+notification and a written one are the **same** `NotificationCandidate`: one is
+rendered as audio and one is not, and nothing is composed differently either way.
+A second operation would buy a second name for one artifact.
+
+**And the fan-out settles it independently.** ADR-0175 §4 writes one delivery "to
+**every** delivery stream open at the moment it returned, unchanged". A second
+operation, or a per-browser format list, would ask the gateway to produce a
+different value per reader — which it has one poll and one answer to do it with.
+One value for every reader is what the carrier already is, so `plays` is one
+value the *gateway* supplies, and §2 says so.
+
+**Rendered at the poll rather than at disposition, for three reasons that each
+suffice.** ADR-0200 §8 forbids audio in an outbox, so a pre-rendered entry has
+nowhere to live. The great majority of entries are never polled by a caller that
+can play them — the command line polls, and a browser with no running audio
+context polls — so pre-rendering spends inference on renderings nobody hears.
+And an entry can be delivered more than once (ADR-0131 §3's at-least-once, and
+§4's per-delivery identifier), so "the rendering" is not a property of an entry
+at all.
+
+### 2. `plays` is the gateway's own value, and no browser argument reaches this poll
+
+> **Normative.** On the gateway, `plays` is a value the gateway supplies of its
+> own, fixed and identical on every poll. No browser request carries it, no
+> browser value reaches it, and no browser narrows, widens or reorders it.
+> ADR-0175 §6's second clause and ADR-0177 §1's second clause — "`next_notification`
+> is the gateway's own poll, no browser request resolves to it, no browser argument
+> reaches it" — bind unchanged.
+
+> **Normative.** The gateway's `plays` names every member of `SpokenAudioFormat`,
+> in that enumeration's declared order. It is not derived from a `User-Agent`, from
+> a capability a page reported, from which streams are open, or from anything a
+> browser said.
+
+> **Normative.** A browser that cannot decode the rendering it is written plays
+> nothing and renders the notification on the page. That is a **device fact**, and
+> no component reports it, records it, or treats it as a disclosure outcome.
+
+**A browser-supplied format list is the shape a reader reaches for first, and it
+is unavailable twice over.** ADR-0177 §1's second clause forbids a browser
+argument reaching this poll at all — and even without that clause, ADR-0175 §4's
+fan-out gives the gateway one answer for every open stream, so a list assembled
+from two browsers with different capabilities has no value it could take. Naming
+the whole enumeration is what makes the one answer serve every reader that can
+decode either member, and `SpokenAudioFormat`'s membership is already bounded by
+ADR-0200 §9 to "IANA media types a browser can produce with `MediaRecorder`
+without transcoding", with exactly two members at this rung.
+
+**ADR-0177 §1's deadline carve-out is not widened, and the argument is worth
+making rather than asserting.** That clause reads "The one class of argument the
+gateway supplies of its own is a **caller-owned deadline**… On this surface the
+class has exactly two members", and a reader could take it as forbidding the
+gateway any non-deadline argument of its own. It does not, and the tree at this
+ADR's base is what shows why: `DeliveryFanOut` already calls
+`next_notification(acknowledging=acknowledging, budget=self._budget)`, where
+`acknowledging` is a `delivery_id` that ADR-0175 §5 requires never to reach a
+browser and therefore requires the gateway to supply of its own. So a non-deadline
+gateway-supplied argument on this poll is ratified, shipped, and older than
+ADR-0177. The clause is about the **deadline** class on the browser control
+surface — the thirty-one operations §1's first clause enumerates, of which
+ADR-0177 §1's second clause says `next_notification` "is not one" — and it names
+this poll's budget because ADR-0175 §8's budget was the second shipped instance of
+a gateway-chosen deadline, not to bring the poll under the browser surface's
+argument rule. `plays` is not a deadline, so the class is unchanged; §11 records
+that no header note is owed on ADR-0177.
+
+### 3. What is placed as speakable, on the whole of the recorded origin
+
+> **Normative.** This ADR is the ADR ADR-0199 §3's fourth clause names — the one
+> "admitting a delivery channel of unbounded audience" — and it places on the whole
+> of §2's recorded origin for a notification. **Exactly one triple is placed as
+> speakable on a channel of unbounded audience:** a candidate whose
+> `NotificationCandidate.producer` is `"calendar-upcoming"`, whose
+> `notification_class` is `"upcoming_event"`, and whose `sensitivity` is
+> `DataTier.PERSONAL`.
+
+> **Normative.** Every other triple is withheld. That includes the same producer
+> and the same class at any other `sensitivity`, every class of a producer this
+> ADR does not name, and every producer that does not exist yet. No implementation
+> reads this placement as reaching a tier, a class or a producer it did not name,
+> and no lane widens it by resemblance.
+
+> **Normative.** No placement here names `DataTier.SECRET`, which ADR-0199 §3's
+> fifth clause forbids and which ADR-0130 §2 already refuses at validation, so no
+> candidate carrying one reaches this path in any case.
+
+> **Normative.** The placement is decided from those three recorded fields and
+> from nothing else. No implementation decides it by reading
+> `NotificationCandidate.summary`, `detail`, `references`, `goal_id`,
+> `confidence`, or any other span of the content — not by keyword, not by
+> pattern, not by a classifier, and not by asking a model. That is ADR-0199 §2's
+> second clause applied at this supply site, and this ADR adds no exception to it.
+
+> **Normative.** A candidate whose producer recorded no origin has no class and is
+> withheld, on ADR-0199 §2's third clause. This path contains no route by which a
+> candidate reaches it without those three fields, because
+> `NotificationCandidate` requires all three; the clause is stated so that a later
+> producer cannot be admitted here by a default.
+
+**One triple, because one triple is what the tree can carry.** The placement is
+the smallest set that makes the exit test's spoken half demonstrable, and it is
+exactly the set `orchestration/upcoming.py` produces: three constants, none of
+them derived from an entry's title, location or duration, which is the property
+ADR-0130 §2 and ADR-0199 §2 both want of a value a disclosure rule keys on. The
+calendar is also the class ADR-0199 §3 already placed on the *reply* path — "a
+belief whose band is `ATTESTED` and whose `Attestation.reported_by` names the
+calendar source ADR-0093 §7 configures" — so nothing becomes speakable here that
+was not already speakable when the owner asked about it aloud. What changes is
+the direction, and the direction is the whole of what this ADR is for.
+
+**The tier is named and it is `PERSONAL`, which reads backwards against ADR-0199
+§3's own worked example, so the difference is stated rather than glossed.** That
+example is a producer whose tier varies with content — "'your build finished' and
+'your build failed on the branch you pushed from the clinic' are the same producer
+and the same class" — and the clause exists so that placing the `OPERATIONAL` one
+does not admit the `PERSONAL` one. `calendar-upcoming` is not such a producer: its
+sensitivity is a module constant, stated once, identical on every candidate, and
+tied to the band the reader states over the same content. So there is no narrower
+sibling here whose placement could be borrowed. There is one tier this producer
+emits; it is placed; and a candidate from this producer at any other tier did not
+come from the producer as built and is withheld, which is the fail-closed answer
+rather than an inversion of the example.
+
+**And that is what makes the withheld half demonstrable without inventing a
+producer.** A candidate carrying `"calendar-upcoming"`, `"upcoming_event"` and
+`DataTier.OPERATIONAL` is constructible today — the type admits it — and it is
+withheld by the clause above. So the exit test's second half can be driven against
+the producer the tree actually has, rather than against a fixture that exists only
+to be refused.
+
+### 4. What is spoken is the summary, byte for byte, and nothing composes it
+
+> **Normative.** Where a rendering is produced, the text handed to
+> `SpeechSynthesizer.synthesize` is `NotificationCandidate.summary` and nothing
+> else. It travels **byte-for-byte**: no prefix, no announcement, no salutation,
+> no punctuation added or removed, no case folding, no trimming, and no second
+> value composed from it.
+
+> **Normative.** `NotificationCandidate.detail` is **not** spoken, on any
+> candidate, under any placement. It is delivered as it is today and rendered on
+> the page.
+
+> **Normative.** No model is called on this path and no stage composes anything.
+> ADR-0170's composing stage has no subject here, and no lane adds one: an
+> unprompted utterance is the producer's own sentence or it is nothing.
+
+**Byte-for-byte because `summary` is already the sentence the user would be
+told.** ADR-0130 §2 makes it so — "the summary and detail are the only free text a
+candidate carries, and they are what the user would be shown rather than a copy of
+a record" — and `orchestration/upcoming.py` takes it "as written rather than
+re-rendered… That is what keeps the notification and the belief from disagreeing
+about the same entry." A stage that prefixed "you have a notification" would be
+composing an utterance no producer wrote and no disclosure rule ruled on, which is
+the failure ADR-0200 §10 refuses `speechSynthesis` for, performed by us instead of
+by the browser. It is also `NonBlankEncodableText` already, which is exactly what
+`synthesize` requires, so nothing on this path constructs a text at all.
+
+**`detail` is left on the page for a reason, and it is not squeamishness.** A
+notification is an interruption, and ADR-0130's whole argument is that only a
+perishable one earns one; an interruption that runs to a second paragraph has
+stopped being an interruption. Speaking the one line and rendering the whole keeps
+the page strictly more informative than the room, which is the direction every
+clause of ADR-0199 §5 pushes and the direction a mistake here should fail in.
+
+### 5. A withheld notification arrives unspoken, and nothing audible marks it
+
+> **Normative.** Where the placement of §3 withholds a candidate, **no rendering
+> is produced**: no synthesizer is called, nothing is spent, and the delivery
+> carries no audio. That is ADR-0199 §5's clause taken as written — "not emitted
+> on that channel, and no deflection is spoken in its place" — and this ADR adds
+> no audible substitute of any kind, chime, tone or spoken notice included.
+
+> **Normative.** The delivery is still returned by the poll, and the browser
+> renders it on the page. ADR-0199 §5's "Delivery on a channel of bounded audience
+> is unaffected" is what this discharges, and its clause that such a notification
+> "stays in the hub's durable outbox and is delivered on a channel that can carry
+> it **if and when a device asks on one**" is satisfied by the very request that
+> asked: one poll serves both of that device's channels, so the withheld
+> notification is delivered at once rather than waiting for a second one.
+
+> **Normative.** **The rendered page the gateway serves to an admitted session is
+> a channel whose audience is bounded**, and this ADR declares it. It is
+> ADR-0199 §1's test satisfied on both limbs: what it emits reaches a person only
+> by that person being positioned at and looking at a rendered surface, and the
+> gateway holds the session fact ADR-0168 §3 and §6 tie that surface to. This
+> declaration reaches this ADR's own subject — the delivery a poll returns — and
+> declares the audience of no other channel.
+
+> **Normative.** **The rendering is emitted on a channel whose audience is
+> unbounded, always.** It is played out of a device into a room, which is
+> ADR-0199 §1's "reaches whoever is within range of the device with no act of
+> theirs". No caller supplies that audience and no value on this surface expresses
+> it: `plays` says what the caller can render, not who can hear, and omitting it
+> declines to open the unbounded channel rather than declaring a bounded one. No
+> implementation, lane or later ADR reads a `plays`, a transport, a session or a
+> device as raising this channel's audience from unbounded to bounded (ADR-0199 §8's
+> third clause).
+
+> **Normative.** Because the two channels differ in audience, the component that
+> fans one delivery out satisfies ADR-0199 §5's last clause by construction: the
+> rendering is written only where it will be played, the delivery's own text only
+> where it will be rendered, and neither is emitted on the other's channel.
+> ADR-0175 §4's "filters nothing… withholds nothing" binds unchanged — the gateway
+> re-judges nothing and withholds nothing the hub gave it, because the hub gives it
+> no rendering to withhold.
+
+> **Normative.** No signal about who is present enters this path. No occupancy,
+> presence, diarization, speaker identification or paired-device evidence is read,
+> computed, requested or reported, and none could change what is spoken if it
+> were. ADR-0199 §4 binds whole, and its fourth clause — "Where occupancy is
+> unknown, the posture is the one that applies when the channel's audience is
+> unbounded" — is the posture this path is always in.
+
+**"Deflects to an authenticated surface" is the exit test's phrase and this is
+what it turns out to be.** There is no deflection *composed* here, because
+ADR-0199 §5's silence clause forbids one: "Where nothing was addressed to the
+assistant — a delivery, or any other emission on a channel nobody asked on — and §3
+withholds the whole of what would be emitted, the outcome on that channel is
+**silence**. Nothing is emitted announcing that something was withheld." What
+"deflects to an authenticated surface" describes is the outcome rather than an
+utterance: the notification reaches the owner on the surface the gateway
+authenticated, and does not reach the room. A chime saying "there is something I
+am not saying" is the one shape this section positively forbids, and §5's prose
+gives the reason — an emission whose entire content is the existence of withheld
+content, "delivered to a room that did not ask, with no answer to compensate it".
+
+**The bounded-channel declaration is small and it is load-bearing.** ADR-0199 §8's
+second clause gates shipping an unbounded channel on "a ratified ADR [having]
+decided the surface by which a channel's audience reaches the composing stage",
+and ADR-0200 §3 discharged that for the operation it added. On this path there is
+no composing stage to reach, so what is owed instead is that the audience of each
+emission be *declared* rather than computed — §8's third clause's requirement, met
+here by two sentences in a ratified document rather than by a value anything
+asserts. And without the bounded half stated, §5's "delivered on a channel that
+can carry it" would name a channel no marked clause says can carry it. ADR-0200 §3's
+prose already reads the page this way — "The rendered page is bounded: what it
+emits reaches the owner through an act of theirs, looking at a surface the gateway
+tied to the session it admitted" — but prose beside a mark supplies no obligation
+(ADR-0089 §3), so the mark is made here where a rule depends on it.
+
+### 6. What the poll returns, and where the line between withholding and degrading falls
+
+> **Normative.** `NotificationDelivery` (`core/types.py`) gains exactly two
+> members and no more: `spoken`, a `SpokenAudio | None`; and `spoken_rendering`, a
+> `SpokenRendering`. Its `model_config` is unchanged — `extra="forbid"` and
+> `frozen=True` — and ADR-0131 §4's reason for the first of those binds unchanged.
+
+> **Normative.** `SpokenRendering` is a new closed `StrEnum` in `core/types.py`
+> with exactly four members: `NOT_REQUESTED`, `RENDERED`, `WITHHELD` and
+> `DEGRADED`. A lane adds a member only with an ADR deciding it; removing one is a
+> change to what was decided and takes a superseding ADR.
+
+> **Normative.** The four members are exhaustive and mutually exclusive, and each
+> names one cause. `NOT_REQUESTED`: `plays` was empty, so no placement was decided
+> and no synthesizer was called. `WITHHELD`: `plays` was non-empty and §3 withheld
+> the candidate, so no synthesizer was called. `DEGRADED`: `plays` was non-empty
+> and §3 placed the candidate, and speaking it did not complete. `RENDERED`: the
+> rendering is in `spoken`.
+
+> **Normative.** `spoken` is not `None` **exactly when** `spoken_rendering` is
+> `RENDERED`, and a validator states that invariant in both directions.
+
+> **Normative.** `spoken` is the rendering of `NotificationCandidate.summary` and
+> of nothing else, and its `media_type` equals the format the engine asked for —
+> the **first** member of `plays` that the synthesizer's `formats` property also
+> names (ADR-0200 §1, §3). That the audio is an audible rendering of that text is
+> the synthesizer's obligation, discharged in its conformance suite; no component
+> decodes, re-transcribes or otherwise inspects a rendering to check it.
+
+> **Normative.** `spoken_rendering` is `DEGRADED` in exactly four cases and no
+> others: synthesis raised a `SpeechError`; the intersection of `plays` with the
+> synthesizer's `formats` was empty; the rendering breached ADR-0200 §6's
+> `hub_max_spoken_audio_bytes`; or the whole projected `NotificationDelivery`
+> carrying that rendering would breach ADR-0085 §8c's payload limit. In every one
+> the delivery travels without the rendering.
+
+> **Normative.** **A withholding is never reported as a degradation and a
+> degradation is never reported as a withholding.** No implementation collapses
+> the two, and none retries a `WITHHELD` delivery into speech on any subsequent
+> poll, because the placement of §3 is a property of the candidate and not of the
+> attempt.
+
+> **Normative.** A failure to speak never fails the poll. A `SpeechError` out of
+> `synthesize` — and nothing else — degrades under this section; **every other
+> exception propagates unchanged**, so the stage catches `SpeechError` and does
+> not catch `Exception`. That is ADR-0200 §4's translation rule at a second site
+> and for its stated reason.
+
+> **Normative.** A cancellation delivered while the poll is outstanding is
+> neither a withholding nor a degradation. It propagates after cancellation-safe
+> cleanup under ADR-0060's clause, exactly as it does on every other method of
+> this surface, and it never sets `spoken_rendering`.
+
+> **Normative.** ADR-0200 §8's authorship clause binds this path whole: no
+> component on it writes an exception message it did not author, to either log
+> tier, to a store, trail or trace, or into a surfaced error. What may be written
+> for a synthesis failure is that it degraded and this project's own message for
+> it.
+
+**The degradation line is ADR-0200 §4's, and it lands the same way for the same
+reason.** There, "a transcription failure **fails the call**; a synthesis failure
+**degrades it**", because "a failure before there is [an answer] leaves nothing
+worth returning, and a failure after there is one would throw away an answer the
+user already has". Here there is never a stage before the answer: the notification
+exists, has been disposed, and has been leased. A poll that raised because a
+synthesizer failed would spend an entry's lease on a fault, and the owner would
+see the notification later or not at all — losing a notification to a speech
+engine, which is precisely what ADR-0131 §3's durability exists to prevent.
+
+**A closed enumeration rather than ADR-0200 §4's boolean pair, and the difference
+is not aesthetic.** `SpokenTurn` carries `spoken_degraded` beside `heard` and
+`outcome`, which between them already distinguish every shape that ADR admits;
+and on that surface there is no disclosure fork at all, because §7 makes
+`outcome.reply` *itself* the deflection. Here there are four states and one of
+them — the withholding — must never be confusable with a fault. A fault invites a
+retry, and a withholding retried is a disclosure rule defeated by a loop. Two
+booleans would admit two combinations a validator would then have to forbid; an
+enumeration admits none, and the member names are what a page renders its own
+behaviour from.
+
+**Why the delivery reserve ADR-0131 §4 fixed does not have to move, with the
+arithmetic so a reviewer can check it rather than take it.** That section forbids
+delivering a candidate whose canonical encoding exceeds the contract limit "less a
+256-byte delivery reserve", covering a wrapper it computed at "130 bytes at most:
+34 structural… plus at most 96 for the identifier". The two members above add, in
+ADR-0087 §2's canonical form, `,"spoken":null` — 14 bytes — and
+`,"spoken_rendering":"not_requested"` — 35 bytes, taking the longest member value
+of the four. That is 49 bytes, for a worst case of 179 against a reserve of 256,
+with 77 bytes still in hand. **So the reserve stands and is not superseded**, and
+`offer`'s refusal is unchanged.
+
+**The rendering is what does not fit in a reserve, which is why it degrades
+instead.** `hub_max_spoken_audio_bytes` defaults to 512 KiB of decoded audio,
+about 683 KiB base64-encoded on ADR-0200 §6's own 4:3 arithmetic, and no reserve
+of any size accommodates that. So the fourth degradation case above measures the
+**whole projected result** and drops the rendering, which is ADR-0200 §4's fourth
+case reaching a second surface. **The second measurement that section needs has no
+subject here**: a delivery with `spoken` `None` is the value ADR-0131 §4's reserve
+already guarantees fits, as the arithmetic above shows, so a rendering-free
+delivery cannot be over §8c and there is nothing further to drop.
+
+### 7. The budget bounds the whole call, and the rendering takes what the wait left
+
+> **Normative.** `budget` bounds the whole call — the wait for an entry and the
+> rendering together — and the hub answers within it. ADR-0131 §4's `budget`
+> clauses bind unchanged: the closed range from zero to
+> `hub_max_notification_budget`, the refusal rather than a clamp outside it, and
+> the immediate poll at zero.
+
+> **Normative.** The rendering is bounded by what remains of `budget` when the
+> entry was selected, and by the deadline decorator the composition root wires
+> over the synthesizer (ADR-0200 §1) — whichever is the lesser, which is ADR-0200
+> §3's threading rule at a second call site. Where nothing remains, no synthesizer
+> is called and `spoken_rendering` is `DEGRADED`.
+
+> **Normative.** ADR-0131 §4's ordering rule binds unchanged and comes first: a
+> request whose arguments are refused has no effect on the outbox, and arguments
+> are validated "before the acknowledgement is applied, before any entry is
+> selected, and before any other outbox state changes". A malformed `plays` is
+> such an argument.
+
+> **Normative.** ADR-0175 §4's cadence binds unchanged. Because the answer arrives
+> within `budget`, the gateway still "writes on every open delivery stream at
+> least once per `gateway_notification_budget`", and no lane reads this ADR as
+> relaxing it.
+
+**Threading rather than reserving, and the cost is named rather than hidden.** At
+the shipped defaults the gateway polls with `gateway_notification_budget` of 20
+seconds and the speech decorator's default bound is 30, so what actually bounds a
+rendering is almost always the remainder of the poll window. An entry arriving
+near the window's edge therefore leaves too little to render in and degrades — it
+arrives on the page, silently, and the owner reads it. The alternative is to
+reserve a slice of `budget` for the rendering and shorten the wait by it, which
+buys reliability at the cost of a new `Settings` duration and a wait halved at the
+defaults. §10 defers that with the measurement that would fire it. What is *not*
+available is letting the answer run past `budget`: that would move ADR-0131 §4's
+immediate poll and ADR-0175 §4's cadence, two clauses in two ADRs, for a
+convenience.
+
+### 8. An idle device is a fact about the device, and the page queues no rendering
+
+> **Normative.** "Idle", for the browser this milestone speaks from, is a
+> conjunction of facts about the **device** and never about the room: the page
+> holds a running audio context established by a user gesture in this document,
+> and it holds no playback in the air. It is not an audience fact, and no clause
+> of this ADR is conditioned on who is present or on whether anyone is.
+
+> **Normative.** The page plays a rendering only while both hold. Where either
+> does not — no running context, or a playback already sounding — it plays
+> nothing and renders the notification on the page.
+
+> **Normative.** A rendering the page does not play is **dropped**. The page holds
+> no rendering for later, queues nothing behind a playback, and plays no
+> notification after the delivery that carried it has been rendered on screen.
+
+> **Normative.** A rendering never interrupts a playback in the air, and a press
+> to talk always interrupts a notification's playback. Nothing in this ADR
+> weakens ADR-0200's push-to-talk path or the interrupt the page already
+> performs; a notification is the interruptible one of the two.
+
+> **Normative.** None of the facts above is reported to the gateway or to the
+> hub. No component sends, records or infers whether a page had a context, was
+> playing, played, finished playing or was interrupted, and no clause of this ADR
+> is conditioned on any of them.
+
+**The audio context is the constraint that decides this section, and it is a
+property of browsers rather than of this design.** `assets/app.js` builds and
+resumes its decoding context inside the press gesture, in `readyToPlay`, because
+that is the only place a browser will let it; a page that has had no gesture since
+load holds no running context and cannot make one. So an unprompted utterance is
+possible exactly on a page the owner has already spoken to, and the honest
+statement of the milestone is that the device speaks *proactively* rather than
+*spontaneously*. Stating it as a device fact is also what keeps it out of ADR-0199
+§4's way: a page that cannot play is not evidence about a room, and it must never
+become a reason a rendering was or was not produced.
+
+**Dropping rather than queueing, which is ADR-0175 §4's discipline one hop
+further out.** That section rules that "the gateway retains no notification", that
+"a delivery stream opened after a delivery was written carries no replay of it",
+and that it "holds at most one value pending per stream and queues nothing behind
+one". A page that held renderings would be the buffer ADR-0175 §4 refuses,
+rebuilt in JavaScript, bounded by nothing, and aging against an artifact ADR-0130
+says is about a moment — "something that keeps is not an interruption, it is a
+message". The notification is not lost by dropping the audio: it is on the page,
+which under §5 is the channel that carries it.
+
+**And the interrupt direction is chosen rather than inherited.** A press is the
+owner addressing the assistant, and ADR-0199 §5's asymmetry — an addressed turn
+always answers, an unaddressed emission stays silent — is the same asymmetry seen
+from the playback side. The utterance nobody asked for yields to the one they did.
+
+### 9. The acknowledgement does not move, and this path reports nothing about the room
+
+> **Normative.** ADR-0175 §5 binds unchanged. The gateway acknowledges, on its
+> next poll, a delivery it wrote to at least one open delivery stream and
+> acknowledges no other; a `delivery_id` reaches no browser; and no browser
+> acknowledges, retires, withdraws or dismisses a delivery. Playback is **not** an
+> acknowledgement, and an interrupted, dropped, unplayed or undecodable rendering
+> changes nothing about what is acknowledged or when.
+
+> **Normative.** No lane cites this ADR toward moving the acknowledgement to
+> playback, toward a playback report from a browser, or toward any value by which
+> a device tells the hub what it played.
+
+> **Normative.** ADR-0078 §8's refusal binds unchanged, in the terms
+> `core/types.py` already carries: whether contact was attempted, reached a
+> device, or was seen is not a field of a candidate, of a disposition or of a held
+> record, and this ADR places none there. `spoken_rendering` is a fact about a
+> **delivery attempt's rendering** and lives on `NotificationDelivery`, which is
+> the seam's own value and not a stored record.
+
+> **Normative.** Whether a spoken *answer's* delivery is a fact the device
+> reports is the subject of another lane's ADR in this batch and is not decided
+> here. Nothing in this section is read as deciding it, and nothing in it is read
+> as refusing it: its subject is a turn the owner asked for, and this ADR's is a
+> delivery nobody asked for.
+
+**Moving the acknowledgement is the most tempting change this ADR could make and
+it is the one ADR-0175 §5 has already priced.** The appeal is real: a notification
+spoken over is a notification the owner did not hear, and at-least-once that
+stopped at the ear would redeliver it. The price is stated in §5's own prose and
+does not change because the delivery is audio. A browser reporting playback needs
+either the `delivery_id` — "a credential this system minted, held in a browser,
+spendable against the hub", which ADR-0172 §1 closes its class against — or a
+gateway holding the token "for a period bounded by nothing the gateway controls,
+because a browser may never come back". Neither is worth a duplicate this system
+already tolerates by design: ADR-0131 §3's guarantee is at-least-once, and the
+owner seeing one notification twice is that guarantee working.
+
+**And the fact would have nowhere true to live.** ADR-0078 §8's refusal is not
+incidental; it is the reason ADR-0130 §2 states "A candidate carries no delivery
+state" and the reason ADR-0131 keeps transport state in the outbox rather than on
+the artifact. A playback report would be delivery state arriving from the far side
+of a fan-out that cannot tell two browsers apart (ADR-0175 §5's fourth clause), so
+the hub would be recording that "a device" played something without being able to
+say which, or how many did not.
+
+### 10. Deferred, by name, each with the condition that fires it
+
+- **A reserved slice of `budget` for the rendering** (§7). One `Settings`
+  duration, and a wait shortened by it. **Fires** on a measurement that the
+  edge-of-window degradation is frequent enough to matter in use — which is a
+  figure the implementing lane can produce and this ADR cannot.
+- **Streamed speech on the delivery path.** The rendering comes back whole, as
+  ADR-0200 §11 already defers it for a turn. **Fires** with that deferral, which
+  it presupposes: a streamed delivery needs a streamed rendering first.
+- **A rendering for a channel of bounded audience** — a worn earpiece, ADR-0199
+  §1's own example. §5 declares this path's rendering unbounded outright and admits
+  no value that could say otherwise. **Fires** with the first device satisfying
+  ADR-0199 §1's bounded test, or with the spoke surface ADR-0094 §10 defers,
+  whichever comes first, and it arrives as its own declared channel rather than as
+  an argument here.
+- **The surface carrying ADR-0199 §6's "may be spoken" records.** §3's placement
+  is the whole of the posture until it exists, exactly as ADR-0199 §9's second
+  deferral says. **Fires** with the first posture the owner wants that differs
+  from §3's placement — this ADR does not build it and the milestone-20 exit test
+  does not need it (Context, last subsection).
+- **A second notification producer's posture.** §3's second clause withholds every
+  triple it does not name, and ADR-0199 §3's sixth clause already obliges the ADR
+  admitting a producer to state its posture. **Fires** with that producer.
+- **Playback as a reported fact** (§9). **Fires** on a decision that has a home
+  for delivery state which is not a candidate, a disposition or a held record —
+  which ADR-0078 §8 refuses and which this ADR does not reopen.
+- **A page that speaks with no prior gesture** (§8). Not deferred so much as
+  unavailable: it is a browser's rule, not ours. **Fires**, if ever, at
+  milestone 21's native spoke, which holds its own audio device.
+
+### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 requires the judgement in the later ADR's text, naming the clause and
+applying ADR-0070 §1's test: would a reader holding only the earlier ADR now act
+differently, or read one of its clauses more widely than it now holds?
+
+> **Normative.** This ADR **partially supersedes ADR-0131**, in ADR-0070 §3's
+> sense, and supersedes nothing else wholly or partially. The scope is exactly two
+> clauses of ADR-0131 §4 and no other clause of that ADR or of any other:
+>
+> **(a) §4's method declaration.** The signature it fixes gains one keyword-only
+> argument, `plays`, defaulting to the empty tuple, and gains nothing else. Every
+> other clause §4 places on that method binds the amended signature exactly as it
+> binds the original — the keyword-only convention, the budget range and its
+> refusal, the ordering of validation before effects, and the rule that no
+> argument carries a device identity.
+>
+> **(b) §4's `NotificationDelivery` declaration.** The model "declared exactly as
+> below" gains exactly two members, `spoken` and `spoken_rendering`, and gains
+> nothing else. Its `model_config` is unchanged and §4's reason for `extra="forbid"`
+> binds unchanged.
+
+**Both are supersessions rather than stacked additions because §4 declares
+closed shapes.** A reader holding only ADR-0131 builds a method with two arguments
+and a model with two members, and a peer built that way and a peer built from this
+ADR do not interoperate — which is ADR-0070 §1's first limb without argument.
+Calling either an amendment would be the mis-declaration ADR-0082 §1 warns of.
+
+**Adding the member bumps `PROTOCOL_VERSION`**, on ADR-0124 §9's rule as
+`wire/envelope.py` records it, and §12 puts that obligation on the lane that makes
+the change.
+
+Six near misses, named so a reviewer can check them rather than take them:
+
+- **ADR-0131 §4's 256-byte delivery reserve is untouched.** §6's arithmetic shows
+  the two new members cost 49 bytes against 77 bytes of margin, so a reader holding
+  only ADR-0131 computes the same ceiling and `offer` refuses the same candidates.
+  Had the figure moved, this would have been a third scope item and would have said
+  so.
+- **ADR-0131 §1, §2, §2a, §3 and §3a are untouched.** Delivery is still the result
+  payload of a request the device sent; the delivery connection still carries one
+  request; the outbox, the lease, the at-least-once guarantee and the
+  per-delivery identifier are all read and used as given. A reader holding only
+  them builds the same seam.
+- **ADR-0130 gains and loses no sentence.** §3's placement reads `producer`,
+  `notification_class` and `sensitivity` — three fields ADR-0130 §2 put on the
+  candidate — for a purpose it did not name and does not exclude, which is exactly
+  what ADR-0199 §10 already recorded of its own reading of the same three fields.
+  §4 speaks `summary` and leaves `detail`, both of which ADR-0130 §2 makes "what the
+  user would be shown"; §9 restates §2's "A candidate carries no delivery state"
+  rather than moving it. A reader holding only ADR-0130 produces the same artifact,
+  so **no record is owed on it**.
+- **ADR-0199 is consumed and discharged, not touched.** §3 places on the whole of
+  the recorded origin its §3's fourth clause names; §5 takes its §5's delivery
+  clauses as written and adds the audience declarations its §8 asks an admitting
+  ADR for; §4 binds whole and unweakened. Every rule of it binds this path exactly
+  as ratified and this ADR reads none of them more widely, which is ADR-0200 §12's
+  finding about the same ADR reached again on the delivery path. **No record is
+  owed on it.**
+- **ADR-0175 §4, §5 and §6 are untouched, and §9 says why for the one that
+  matters.** §4's fan-out clause is satisfied by the gateway relaying one value
+  unchanged; its retention clause and its cadence clause bind unchanged (§7, §8);
+  §5's acknowledgement rule is left exactly where it stands (§9); §6's second
+  clause — that this poll is the gateway's own — is what §2 depends on rather than
+  what it changes, and its closed enumeration of five browser-reached operations
+  gains nothing, because this ADR adds no browser-reached operation at all.
+- **ADR-0177 §1 is untouched, and §2 argues it rather than asserting it.** §1's
+  thirty-one-operation enumeration gains nothing: `next_notification` is expressly
+  "not one of the thirty" and this ADR adds no operation. §1's deadline carve-out
+  gains nothing either: `plays` is not a deadline, and the class of arguments the
+  gateway supplies of its own already holds `acknowledging` under ADR-0175 §5,
+  ratified and shipped before ADR-0177 was written.
+
+**ADR-0200 is consumed on every clause this path touches.** Its §1 Protocols and
+its `SpokenAudio`, `SpokenAudioFormat` and `Base64Audio` types are used as
+declared; §3's format-choice rule and its budget-threading rule are applied at a
+second call site on their own stated terms; §4's translation, degradation and
+cancellation lines are applied at a second site; §6's byte bound and §8's
+retention and authorship rules bind this path whole; §10's "the front end runs no
+speech engine" binds unchanged. One of its deferrals is checked and does **not**
+fire: §11's spoken confirmation "**Fires** at the first channel with no screen —
+milestone 20's idle device", and milestone 20's idle device is a browser with a
+screen, so a parked turn still renders its confirmation where §11 leaves it.
+
+**No *amendment* record is owed anywhere.** ADR-0082 §1 owes one "when the later
+ADR amends a named clause — and not otherwise", and this ADR amends none: the two
+things it changes it *supersedes*, and the record ADR-0131 owes is made in this
+change, on ADR-0082 §7's reading that §1's condition is that the superseding ADR
+**exists** rather than that it is ratified, and on ADR-0201 §8's consequence that
+"a lane whose fence admits both files may make it atomically."
+
+**This ADR marks its rulings** (ADR-0089 §5), so the marked clauses above are the
+whole of what it obligates and the prose beside them is read to determine what a
+marked clause means.
+
+**Status.** Drafted, reviewed and revised while `Proposed`. The required set is
+**adversarial and architecture**: §1 and §6 decide `core/protocols.py` and
+`core/types.py` surface, which `CONTRIBUTING.md` → "Stop when the required reviews
+are green" puts in the contract-surface case. The status is flipped only once both
+return clean on one tree, by the one-line flip ADR-0165 §2 exempts, and nothing
+implements against this ADR until it merges (ADR-0015 §5, golden rule 5).
+
+### 12. What the implementing lane owes
+
+**Which of the rows below ride in one lane is ADR-0137's question and not this
+ADR's**, on ADR-0143 §9's precedent for leaving a lane-shape call to the
+dispatcher. What is decided here is what each must contain if it exists.
+
+> **Normative.** The `next_notification` argument of §1, the two members and the
+> `SpokenRendering` enumeration of §6, the `orchestration` rendering behind the
+> poll, and the wire client's matching member land in **one** lane, because a
+> member changed on a *provided* contract with two implementations cannot change
+> in one of them and leave the gate green. That lane carries the
+> `PROTOCOL_VERSION` bump.
+
+> **Normative.** The gateway's fixed `plays` (§2) and the page's idle-device
+> playback (§8) land in a lane fenced to `interfaces/gateway/`, briefed against
+> the merged text of the lane above, under `track:web-client`'s concurrency rule
+> (#1226 §3).
+
+> **Normative.** A lane satisfies the rows of this table that fall inside its
+> fence and adds none: a deliverable this table does not name is out of that lane
+> and is filed as an issue.
+
+| Clause | Deliverable | Test item |
+| --- | --- | --- |
+| §1 | `plays` on `next_notification`, keyword-only, defaulting to `()` | An argument-order test; a test that an omitted `plays` produces `NOT_REQUESTED`, calls no synthesizer and changes no other behaviour of the poll |
+| §1 (no pre-render) | The rendering is produced inside the answering call | A test that no synthesizer is called at `offer`, at disposition or at reconsideration; a test that a redelivery renders afresh |
+| §1 (retention) | No audio in the outbox, any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken delivery |
+| §2 | The gateway's `plays` names every `SpokenAudioFormat` member in declared order | A test asserting the gateway's poll argument; a test that no browser value reaches it, over a delivery-stream request that carries one |
+| §3 | The placement decided from the three recorded fields | A test per triple: the placed one renders; the same producer and class at `OPERATIONAL` is `WITHHELD`; an unnamed producer is `WITHHELD` |
+| §3 (no inspection) | No content read to decide a placement | A test that a candidate whose `summary` names an unplaced subject still renders where its triple is placed |
+| §4 | `summary` handed to `synthesize` byte-for-byte; `detail` never spoken | A test that the value handed to `synthesize` is byte-identical to `summary`, including leading and trailing spaces; a test that a candidate with a `detail` speaks only the summary |
+| §5 | A withheld candidate calls no synthesizer and emits no audio | A test that a `WITHHELD` delivery carries `spoken` `None`, that no synthesizer was called, and that no substitute value of any kind is produced |
+| §5 (delivery) | A withheld notification is still returned and still acknowledgeable | A test that the poll returns it, that it is acknowledged normally, and that the outbox holds nothing after |
+| §6 | The two members, the enumeration, and the validator stating §6's invariant both ways | Tests constructing each admissible shape and rejecting each inadmissible one, `spoken` beside every non-`RENDERED` member included |
+| §6 (degradation) | The four `DEGRADED` cases | Four tests, one per case, each asserting the delivery still travels |
+| §6 (no collapse) | A withholding is never a degradation | A test that a `WITHHELD` delivery is not retried into speech on the next poll |
+| §6 (translation) | `SpeechError` degrades; every other exception propagates | Two tests, one each direction, over a synthesizer made to fail |
+| §6 (ceiling) | The whole projected delivery measured; the rendering dropped | A near-ceiling test: a candidate lawful for `offer` plus a rendering degrades rather than raising |
+| §7 | The budget threaded; the answer inside `budget` | A test that a poll answers within `budget` where synthesis would outlast it, with `DEGRADED`; a test that a zero budget answers at once |
+| §7 (ordering) | A malformed `plays` refused before any outbox effect | A test that such a poll retires nothing, leases nothing and mints nothing |
+| §8 | The page plays only with a running context and nothing in the air | A test that a delivery arriving during a playback is rendered and not queued; a test that a page with no context renders and does not play |
+| §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
+| §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
+| §11 | ADR-0131's record is made in this ADR's own change | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0131 reaches ADR-0206 from its header |
+
+## Consequences
+
+**Easier.** Milestone 20 becomes a small change rather than a new subsystem: one
+argument, two members on a value that already crosses the wire, one enumeration,
+and a page that already knows how to decode audio and already holds one playback
+at a time. The disclosure question is answered by a table of three fields rather
+than by anything that reads a sentence, which is what makes it auditable — a
+reviewer can check §3's placement against `orchestration/upcoming.py` in a minute.
+And ADR-0199's fourth clause is discharged in the shape it asked for, so the next
+producer to land inherits a stated default rather than a habit.
+
+**Harder, and stated plainly.** Every notification producer that lands from now on
+is silent by default and stays silent until an ADR places it, which is a tax
+ADR-0199 §3 already imposed and this ADR makes concrete rather than theoretical.
+A rendering that arrives near the edge of a poll window is not spoken (§7), which
+is a real and measurable shortfall with a named remedy rather than a mystery. And
+a page that has had no user gesture will not speak at all (§8) — the honest shape
+of "proactive speech" on a browser is that the owner has to have spoken to it
+first, and no clause here can change a browser's autoplay rule.
+
+The owner also gains nothing here about a class they want *silenced*: ADR-0199
+§6's record surface is still deferred, so the only postures available are the ones
+§3 writes down. That is a workable steady state and not a good one, and §10 names
+the condition that ends it.
+
+**Revisit if** a producer arrives whose sensitivity genuinely varies with its
+content, since §3's argument for placing a single tier rests on
+`calendar-upcoming`'s being a constant; if the edge-of-window degradation turns
+out to be common, which is §10's first deferral; or if a channel arrives that is
+both a delivery target and bounded, since §5 declares this path's rendering
+unbounded outright and a bounded one has to arrive as its own declared channel.
+
+## Alternatives considered
+
+**A sibling operation — `next_spoken_notification` — mirroring ADR-0200 §3.** The
+symmetry is real and the precedent is one ADR old. Rejected because the ground
+ADR-0200 §3 gave does not transfer: there, two operations exist because two
+*answers* are composed, one for each channel, and the operation is where the
+composing stage learns which. A notification is not composed at all, so both
+operations would return the same artifact and differ only in whether audio rode
+along — which is what an argument expresses. It would also have put a second
+member on the seam ADR-0131 §4 declares, for no capability the argument does not
+give.
+
+**Pre-render at disposition and keep the audio in the outbox.** Attractive
+because the rendering would then be ready the instant a device asked, which is
+exactly the shortfall §7 admits. Rejected outright by ADR-0200 §8, which forbids
+audio in an outbox in terms, and independently by cost: the overwhelming majority
+of entries are polled by callers that cannot play them, and an entry can be
+delivered more than once.
+
+**Let the browser declare the formats it can play.** The technically correct thing
+to know, and the shape ADR-0200 §10 already uses for `/ask/spoken`, where `plays`
+is a browser-owned argument. Rejected twice: ADR-0177 §1's second clause forbids a
+browser argument reaching this poll, and ADR-0175 §4's fan-out gives the gateway
+one answer for every open stream, so two browsers with different capabilities
+would have no single value to be served by. Naming the whole enumeration is what
+one answer for many readers actually looks like.
+
+**Speak a marker where a class was withheld — a chime, or "there is something on
+your phone".** The most requested-sounding behaviour, and the one that makes the
+milestone's phrase "deflects to an authenticated surface" feel honoured out loud.
+Rejected in terms by ADR-0199 §5's silence clause, whose reasoning this ADR has no
+answer to: an emission whose entire content is that something was withheld is pure
+signal about the existence of withheld content, delivered into a room that did not
+ask, with no answer to compensate it. The deflection is that the notification is on
+the page, and the page is the authenticated surface.
+
+**Acknowledge when playback ends, so an unheard notification is redelivered.**
+The change this ADR most wanted to make. Rejected on ADR-0175 §5's own terms: it
+needs either a `delivery_id` in a browser — a minted capability held by a browser,
+which ADR-0172 §1 closes its class against — or a gateway holding a token for a
+period nothing bounds. Both were weighed and declined when §5 was written, and a
+spoken delivery changes neither argument. The cost is a notification spoken over
+being one the owner reads rather than hears, which is what the page is for.
+
+**Let the page hold a rendering and play it when the device next goes idle.** The
+brief for this lane recommended it and it is the intuitive shape. Rejected because
+it is a buffer: unbounded in age, held in a page nothing can inspect, and aging
+against an artifact ADR-0130 says is about a moment — "something that keeps is not
+an interruption, it is a message". ADR-0175 §4 refused the same buffer one hop in,
+for the same reason, and the owner loses nothing by the refusal because the
+notification is already on their screen.
+
+**Place every non-secret tier of the calendar producer's class rather than one.**
+A one-line change that would make the placement robust to a producer that later
+lowered its tier. Rejected because it places a triple no candidate carries,
+because ADR-0199 §3's fifth clause is written precisely against a placement
+reaching a tier it did not name, and because the withheld half of the milestone's
+exit test would then need a producer that does not exist to demonstrate it.
+
+**Rule the whole thing hub-side and leave the browser to a later ADR.** It would
+have kept this decision inside `core` and `orchestration` and avoided every
+gateway clause. Rejected because milestone 20's exit test is a device speaking in
+a room, and a decision that ruled the rendering and not the playing would have
+left the two facts that actually decide the behaviour — the audio context, and
+what happens to a rendering nobody can play — to be discovered in an
+implementation lane rather than ruled here.

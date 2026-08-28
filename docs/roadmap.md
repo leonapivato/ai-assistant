@@ -265,7 +265,14 @@ the lane this track opens with and it waits on nothing else here.
 - **20 — proactive speech.** Voice as a delivery surface: a pushed notification
   (ADR-0131's answer-shaped delivery) rendered as speech. The disclosure rules
   bite hardest here — an unprompted utterance into a room nobody addressed, so
-  occupancy-unknown is the default posture and not the edge case.
+  occupancy-unknown is the default posture and not the edge case, which ADR-0199
+  §4 now rules outright rather than leaving to this milestone. **ADR-0206 is the
+  mechanism decision**: the polling device asks for a rendering on
+  `next_notification`, the hub produces it inside the call that answers the poll
+  and nowhere else, one notification triple is placed speakable on the whole of
+  the recorded origin ADR-0199 §3 requires, a withheld notification arrives
+  unspoken with nothing audible marking it, and "idle" is a fact about the device
+  rather than about the room.
   *Exit: a notification arrives as speech on an idle device, and a class the
   owner ruled unspeakable deflects to an authenticated surface instead.*
 - **21 — the native spoke and buffered explicit capture.** The always-listening
