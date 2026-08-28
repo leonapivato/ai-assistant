@@ -267,7 +267,9 @@ mention that is not a definition tells a PR nothing it could act on.
 > when it equals such an endpoint's basename; a `symbol` token when the whole
 > token occurs as a word in an added or removed line of that diff, or — for a
 > dotted token — when its **last** part occurs as a word in such a line **and**
-> every other part occurs as a word in one of the PR's files.
+> every other part occurs as a word in one of the PR's files, or as a component
+> of a path that diff touches — a directory name, or a filename with its
+> extension removed.
 
 **A dotted symbol is split, because a definition never carries its own
 qualification.** ADR-0088 §1's citation form is `MemoryStore.ingest` — the class
@@ -289,6 +291,15 @@ names `MemoryStore` in that file whether the class header sits three lines above
 the hunk or three hundred, so nothing here turns on how much context `git diff`
 was asked for. A PR adding an unrelated `ingest` to a file that never mentions
 `MemoryStore` binds nothing.
+
+**A qualifier may be a module rather than a class, so the path answers too.**
+`classify` returns a symbol for `memory.store.SqliteStore` exactly as it does for
+`MemoryStore.ingest`, and there the qualifier names where the symbol lives. A PR
+adding `class SqliteStore` to `src/ai_assistant/memory/store.py` need not write
+the words `memory` or `store` anywhere in that file: the module path is the
+statement, and it is carried by the filename. So a qualifier part is satisfied by
+a path component of a file the diff touches as well as by a word in one — the
+same question asked of the other place the answer is written.
 
 **Two rules were considered and are not what is decided.** Reading the
 qualifier from the diff's *context lines* is the one this section carried for a
@@ -511,7 +522,11 @@ documents that restate the rule:
   to an existing `class Class` whose header is **outside** the hunk's context
   window (owed — the case a context-line reading clears, and the one that must be
   written with a class long enough to put the header out of any default window),
-  against a PR adding `def member` to a file that never names `Class` (free),
+  against a PR adding `def member` to a file that never names `Class` (free); a
+  moved ADR citing `pkg.mod.Symbol` against a PR adding `class Symbol` to
+  `src/ai_assistant/pkg/mod.py` whose contents name neither `pkg` nor `mod`
+  (owed — the path supplies both qualifiers, and a contents-only reading clears
+  it),
   against a PR that touches a file naming `Class` without adding or removing
   `member` (free), and against a PR whose diff names only the qualifier (free);
   an unreadable PR file, an unreadable endpoint and an unretrievable PR
