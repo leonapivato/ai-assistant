@@ -200,9 +200,11 @@ async def converse_spoken(
 > degradation, expiry or cancellation later in the call does not lose it. It is a
 > fact about a turn that has already happened and it does not depend on this one.
 
-> **Normative.** A turn's delivery is stamped **once**. A second report naming a
-> turn whose recorded state is no longer `UNKNOWN` performs nothing: the row is left
-> exactly as it stands and no error is raised. Because a report names its turn, a
+> **Normative.** A turn's delivery is stamped **once**, and §3 makes that a single
+> indivisible transition out of `UNKNOWN` rather than a promise an implementation
+> keeps by care. A second report naming a turn whose recorded delivery is no longer
+> `UNKNOWN` — or was never `UNKNOWN`, a turn no rendering was produced for —
+> performs nothing: the row is left exactly as it stands and no error is raised. Because a report names its turn, a
 > resend of one is idempotent in the strong sense — it reaches the same row and
 > either finds it unstamped and stamps it, or finds it stamped and does nothing —
 > and it can never be applied to a turn captured since.
@@ -359,14 +361,36 @@ why one is refused rather than deferred.
 
 > **Normative.** `ConversationStore` gains exactly one operation, `record_delivery`,
 > which stamps the turn a given `episode_id` names with a `SpokenDelivery` and
-> returns the turn it stamped, or `None` where the named conversation carries no
-> turn under that id. The turn must belong to the conversation the caller names: a
-> report is never applied across conversations, and the store — which derives every
-> episode id from a conversation and an ordinal (ADR-0074 §3) — is where that is
-> checked, so no caller re-derives the relation. It raises
+> returns the turn it stamped, or `None` where it stamped none. It raises
 > `UnknownConversationError` where the conversation is absent or stamped deleted,
 > and `ConversationStoreError` where the store cannot be written — the same two
 > refusals `append` carries. A caller still supplies no ordinal.
+
+> **Normative.** It stamps a row **if and only if** three conditions hold together:
+> the row belongs to the conversation the caller named; its `episode_id` is the one
+> the caller named; and its recorded `delivery` is a `SpokenDelivery` whose state is
+> `UNKNOWN`. Where any fails the operation **performs nothing and returns `None`** —
+> no row is written, and no error is raised. A report is never applied across
+> conversations, and the store, which derives every episode id from a conversation
+> and an ordinal (ADR-0074 §3), is where that is checked so no caller re-derives the
+> relation.
+
+> **Normative.** The third condition is what keeps §4's reservation true against a
+> report rather than only against capture. A row whose `delivery` is **absent** is a
+> turn no spoken rendering was produced for (§3), and a report naming one is
+> answered by doing nothing: `record_delivery` is not a way to give a text turn a
+> delivery, and no lane reads it as one. A row already carrying `COMPLETE` or
+> `INTERRUPTED` is likewise left exactly as it stands, which is §1's stamped-once
+> rule.
+
+> **Normative.** Reading the three conditions and writing the row are **one
+> indivisible step**, decided by the store under the same per-conversation exclusion
+> its other mutations run under, and never a read the caller composes with a write.
+> That is `append`'s own posture — "allocate, derive and write are one indivisible
+> step" — taken for the same reason one step further: two reports observing
+> `UNKNOWN` and both writing would each believe it had stamped the turn once, and
+> §1's rule would be true of neither. Which of two concurrent reports wins is not
+> decided here and does not need to be; that exactly one does is.
 
 > **Normative.** `ConversationStore.append` gains exactly one keyword-only argument,
 > `delivery`, a `SpokenDelivery | None` defaulting to `None`, written onto the row it
@@ -659,7 +683,11 @@ stamps the turn it names and leaves the later one `UNKNOWN`** — the case
 adversarial review's round-1 `blocker` describes, written as an integration test
 with an intervening captured turn rather than as two writes in a row; a second
 report naming an already-stamped turn performs nothing; a report beside
-`conversation_id` `None` is refused before any seam is called; an `UNKNOWN` report
+a report naming a turn that carries no `delivery` at all stamps nothing and leaves
+that row absent; two reports racing on one `UNKNOWN` row leave exactly one stamp,
+pinned in the `ConversationStore` conformance suite beside the store's other
+concurrent-mutation rows; a report beside `conversation_id` `None` is refused before
+any seam is called; an `UNKNOWN` report
 is refused, and so is every value outside §2's partition — `COMPLETE` with `played`
 below `rendered`, `INTERRUPTED` with the two equal, either state with a duration
 missing, `UNKNOWN` with one present — at validation and again end to end through the
