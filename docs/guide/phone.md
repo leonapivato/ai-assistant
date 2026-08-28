@@ -375,11 +375,18 @@ You get three things back, and they are three different statements.
   of staying stopped. The recording still goes up and comes back empty, because
   that is how the page learns you said nothing, so there is the ordinary
   `Sending…` gap first and then the answer plays on from where it was. It is the
-  same answer continued, not a new one: nothing is re-asked and no turn runs. The
-  page swaps its "this answer stopped being spoken" sentence for one saying so.
-  Where it cannot pick up — the recording never came back, the browser has taken
-  the audio away, or a later answer has replaced that one — the earlier sentence
-  stands and the answer is simply the one on screen.
+  same answer continued, not a new one: nothing is re-asked and no turn runs, and
+  the page swaps its "this answer stopped being spoken" sentence for one saying
+  so.
+
+  **The press has to have recorded something**, though. A tap too brief to record
+  at all is answered by the page rather than the hub — "that press was too short
+  to record anything, so nothing was sent" — and there is nothing coming back for
+  the answer to resume on. The same holds wherever the recording is not sent or
+  the answer cannot be taken up again: a press that ran past the longest
+  recording this page holds, a request that never came back, a browser that has
+  taken the audio away, a later answer that has replaced that one. In each of
+  those the earlier sentence stands and the answer is simply the one on screen.
 
 **And the assistant is told what you actually heard.** When you press again, the
 page tells the hub how much of the previous answer played — "3.2 of 9.8 seconds,
