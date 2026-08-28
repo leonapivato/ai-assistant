@@ -40,8 +40,16 @@ performs one `MemoryStore.search` call at a caller-supplied `query` and `limit`.
 is band-blind: no band precedence, no per-band budget, no kind filter, none of the
 machinery ADR-0072 §5 and ADR-0113 §6 put in `assemble_by_band` because a
 band-neutral single read let "a flood of low-confidence inferences … displace an
-assertion *below the cut*". So the second read is a strictly weaker read of the
-same rows the first read has already placed in the prompt.
+assertion *below the cut*". And its query is the plan's, not the goal statement the
+retrieval stage searched, so the two share a store rather than a result set: the
+second read *may* surface a row the first did not.
+
+**That possibility is the tool's one real argument, and it is not being waved
+away.** What it is not is an argument for the tool, because a row it surfaces is
+surfaced without the precedence, budget and kind filter that decided what the first
+read kept, and — as the next section establishes — is surfaced into a payload no
+reply is composed from. A find nobody can read is not a find. §4 states the same
+thing from the other side, and #1732 is where the capability is actually decided.
 
 ### What the tool's result reaches, and what it does not
 
