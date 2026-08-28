@@ -27,6 +27,7 @@ from enum import StrEnum
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
+from threading import Lock
 from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
 from uuid import uuid4
@@ -6063,7 +6064,7 @@ def _root_type_defect(document: Mapping[str, FrozenJson]) -> str | None:
 
 
 _MAX_CACHED_SCHEMAS: Final = 128
-"""How many answers :data:`_schema_defects` keeps before it starts over.
+"""How many digests :data:`_readable_schemas` keeps before it starts over.
 
 Bounded rather than unbounded, because under ADR-0145 §7's threat model the
 documents are chosen by a server this repository does not control: an unbounded
@@ -6073,16 +6074,21 @@ tool set fits inside it several times over and the cost of a miss is one
 meta-validation, not a failure.
 """
 
-_schema_defects: dict[bytes, tuple[str | None]] = {}
-"""ADR-0145 §6's answer per schema document, keyed by a digest of it.
+_readable_schemas: set[bytes] = set()
+"""Digests of schema documents ADR-0145 §6 has already found readable.
 
-**Nothing of the document is kept.** The key is a 32-byte digest and the value is
-one of a closed set of short sentences, so an entry costs a fixed few dozen bytes
-however large the schema it answers about. That is what lets
+**The memo holds digests and nothing else, and it remembers only the readable
+answer.** Both halves are the memory bound rather than decoration on it. A digest
+is 32 bytes whatever it is taken over, which is what lets
 :data:`_MAX_CACHED_SCHEMAS` be an entry count: a ``parameters_schema`` is bounded
-in depth (§6) but in neither breadth nor bytes, so a memo that retained documents
-would bound entries and not memory, and would keep a provider's schemas alive
-past the definitions that carried them.
+in depth (§6) and in neither breadth nor bytes, so a memo retaining documents
+would bound entries without bounding memory. And a *defect* is not a fixed size
+either — ``SchemaError.json_path`` names the failing keyword's location, so a
+property name a provider made 200 kB long comes back inside the reason — so
+refusals are recomputed rather than remembered, and no §7-untrusted byte is kept
+anywhere. The refusal is unchanged either way: it is rendered from the document
+in hand every time, which is also the fail-closed direction, since the memo can
+say a document was readable and can never say one was refused.
 
 **The digest is over ADR-0021 §1's canonical encoding**, which is the identity
 this module already stakes an authorisation on:
@@ -6098,8 +6104,21 @@ excludes ``bool``. A Python-equality key would answer the second from the first'
 entry and load a schema §6 refuses. The canonical encoding spells them ``1`` and
 ``true``.
 
-The value is a 1-tuple so that "remembered as readable" — ``(None,)``, the
-common answer — and "not remembered" are two states one lookup tells apart.
+Nothing that has an answer loses it: what the memo forgets, the next construction
+recomputes, at the price the whole check cost before there was a memo.
+"""
+
+_schema_memo_lock: Final = Lock()
+"""Makes :data:`_readable_schemas`'s bound true rather than typical.
+
+Testing the capacity and adding are one critical section, because separately they
+are not: several threads observing 127 entries each add a distinct digest and the
+set ends above the bound — and this repository runs store work in threads
+(``_run_to_completion``), so a bound that only holds single-threaded is not the
+bound the docstring above claims. The lock is never held across the
+meta-validation itself, which is pure: two threads that race on the same unseen
+document both compute the same answer, and one of them adds a digest the other
+was about to.
 """
 
 
@@ -6142,7 +6161,7 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     included, which is why the memo begins after the bound rather than in front of
     it. :func:`_schema_defect` carries the order of everything after.
 
-    **The rest of the answer is memoised** in :data:`_schema_defects`, because
+    **A readable answer is memoised** in :data:`_readable_schemas`, because
     meta-validating the same document again yields the same answer at a price that
     dominates construction: walking the draft 2020-12 metaschema costs roughly
     fifty times what encoding the document does, and the shape it is charged for
@@ -6162,14 +6181,12 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     through ``object.__setattr__`` carries a different document, so it digests
     differently, misses the memo and is meta-validated afresh.
 
-    **No lock, because there is nothing here a race could corrupt.** Each step
-    below is a single dict operation; a thread that loses one recomputes a pure
-    function, or starts the memo over a moment early, and neither changes an
-    answer. The memo is cleared wholesale rather than evicted entry by entry: the
-    working set is a registry's declarations, a handful fixed for the life of a
-    process, so a 129th distinct document says the working set is not what this
+    **The memo is emptied wholesale rather than evicted entry by entry**, because
+    the working set is a registry's declarations — a handful, fixed for the life of
+    a process — so a 129th distinct document says the working set is not what this
     memo is for. An eviction order is state that can be wrong; starting over
-    cannot be.
+    cannot be, and what is forgotten is recomputed at the price it cost before
+    there was a memo.
 
     Every reason returned describes the *schema*, which is Tier 2 configuration
     authored by the tool's provider; nothing here reads a call's arguments, so
@@ -6186,20 +6203,26 @@ def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None
     try:
         digest = sha256(_canonical_bytes(_thaw_json(schema))).digest()
     except TypeError, ValueError:
-        # A value with no canonical encoding has no key, so it is answered
-        # uncached rather than answered differently. Pydantic refuses such a
+        # A value with no canonical encoding has no digest, so it is answered
+        # unmemoised rather than answered differently. Pydantic refuses such a
         # `parameters_schema` before this validator sees it; what reaches here is
         # the corrupted instance ADR-0145 §6's revalidation clause exists for, and
         # it must still get the answer it got before there was a memo.
         return _schema_defect(schema)
-    remembered = _schema_defects.get(digest)
-    if remembered is not None:
-        return remembered[0]
+    with _schema_memo_lock:
+        if digest in _readable_schemas:
+            return None
     reason = _schema_defect(schema)
-    if len(_schema_defects) >= _MAX_CACHED_SCHEMAS:
-        _schema_defects.clear()
-    _schema_defects[digest] = (reason,)
-    return reason
+    if reason is not None:
+        # Deliberately not remembered: the reason is rendered from a
+        # provider-authored document and is not a bounded string, so keeping it
+        # would bound entries without bounding memory.
+        return reason
+    with _schema_memo_lock:
+        if len(_readable_schemas) >= _MAX_CACHED_SCHEMAS:
+            _readable_schemas.clear()
+        _readable_schemas.add(digest)
+    return None
 
 
 class ParameterViolation(BaseModel):
