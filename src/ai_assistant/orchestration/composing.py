@@ -235,19 +235,18 @@ _WITHHELD_LINE: Final = (
 #: introduced by a colon, asides set off by dashes, and one 5,449-character answer
 #: that reached 86% of ``hub_max_spoken_audio_bytes`` — a document, read out.
 _SPOKEN_REGISTER: Final = """\
-Say it the way you would say it aloud, not the way you would write it down. A \
-listener cannot see punctuation and cannot look back over a sentence, so keep each \
-sentence short and to one idea, put the part that answers the question first, and \
-use the contractions a person actually speaks in. Nothing may stand in for \
-structure the ear will not hear — no parentheses, no aside set off by dashes, no \
-colon introducing a list. Where there are two things to say, say two sentences. Say \
-a number, a time, a date or a duration the way a person says it — "half past four", \
-"the twenty-eighth of August", "an hour and a half" — rather than the way it is \
-written down. That is a different way of saying the same value and never a rounder \
-or a hedged one: say what you were given. Length is what a listener can hold rather \
-than what a screen can show. A sentence or two is usually \
-the whole answer, and where there is genuinely more than that, say what was asked \
-and stop."""
+Say it the way you would say it aloud, not the way you would write it down. A listener \
+cannot see punctuation and cannot look back over a sentence, so keep each sentence short and \
+to one idea, put the part that answers the question first, and use the contractions a person \
+actually speaks in. Nothing may stand in for structure the ear will not hear — no \
+parentheses, no aside set off by dashes, no colon introducing a list. Where there are two \
+things to say, say two sentences. Say a number, a time, a date or a duration the way a \
+person says it — "half past four in the afternoon", "the twenty-eighth of August, twenty \
+twenty-six", "an hour and a half" — rather than the way it is written down. Saying it \
+differently is not saying something different: carry over every part of the value that \
+decides which one it is, and never round it, hedge it or leave a part of it out. Length is \
+what a listener can hold rather than what a screen can show. A sentence or two is usually \
+the whole answer, and where there is genuinely more than that, say what was asked and stop."""
 
 #: What is added to a system prompt where the answer is bound for a channel of
 #: **unbounded** audience — ADR-0200 §3's spoken turn, and today nothing else.
