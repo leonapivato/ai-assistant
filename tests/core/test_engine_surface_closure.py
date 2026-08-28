@@ -201,8 +201,17 @@ _NAMESPACE: Final = {
 #: ``wire/errors.py``'s reconstruction, which
 #: ``test_every_error_s_structured_state_round_trips_through_its_constructor``
 #: exercises over every subtype.
+#:
+#: ``SpokenRendering`` is ADR-0206 §6's, reached through the ``spoken_rendering``
+#: member it gives ``NotificationDelivery``, and it is the second type this roster
+#: gains through that already-promoted wrapper. It is a closed ``StrEnum`` whose four
+#: serialized values §6 fixes by name, so the walk terminates at it immediately — the
+#: shape ``SpokenAudioFormat`` already has here. The member beside it, ``spoken``, is
+#: a ``SpokenAudio | None``, and ``SpokenAudio`` is already on this roster, so the
+#: rest of ADR-0206 §6's addition reaches no type this list did not already name.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "SpokenRendering",
         "SpokenTurn",
         "SpokenAudio",
         "SpokenAudioFormat",
@@ -740,6 +749,27 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ADR-0205's concurrent bump — "whichever lands second reads the constant as it then
     stands and adds one, and each writes its own note".
 
+    **ADR-0206 §1 and §6 are under both limbs at once**, the fourth bump with two
+    grounds after 9, 15 and 16, and they move only the version, to 21 against the
+    same forty methods. The **first** limb reaches "any change to the promoted
+    surface's method set **or to a method's arguments or results**", which is the
+    clause ADR-0205 §1's entry at 19 is the precedent for, and this decision changes
+    both halves of it on one method: ``next_notification`` gains a keyword-only
+    ``plays``, and ``NotificationDelivery`` gains ``spoken`` and ``spoken_rendering``.
+    It bites in both directions for 19's reasons — ``wire.surface``'s argument adapter
+    is derived from the signature, so a version 21 client sending ``plays`` to a
+    version 20 hub is refused there; and ``NotificationDelivery`` is ``extra="forbid"``
+    while ``project`` renders a model by ``model_dump()``, so a version 21 hub emits
+    both members on **every** delivery and a version 20 client fails
+    ``extra_forbidden`` on them. The **second** limb is reached as well, because
+    ``SpokenRendering`` is a new wire-carried ``core`` type minted by this decision
+    rather than one already crossing — ADR-0087 §2c's scalar table gains no row for it,
+    a ``StrEnum`` being a shape the codec already carries, which is why naming the limb
+    costs nothing beyond saying so. The **method set does not move**: §1 adds an
+    argument to an operation that already exists and declines a sibling operation
+    outright, and ADR-0177 §1's browser enumeration stands at thirty-one, since
+    ``next_notification`` "is not one" of those and ADR-0206 §2 keeps it that way.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -748,7 +778,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 20), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 21), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
