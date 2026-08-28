@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _repo_template import seed_bare_repo, seed_repo
 from test_ship import _VERDICT, _fake_gh, _git, _record_review, _run_ship
 from test_ship_base_drift import _advance_base
 
@@ -80,14 +81,9 @@ def _init(
     """
     origin = repo.parent / "origin.git"
     assert shutil.which("git") is not None
-    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-        [str(shutil.which("git")), "init", "-q", "--bare", "-b", "main", str(origin)], check=True
-    )
+    seed_bare_repo(origin)
     repo.mkdir(parents=True)
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     _seed(repo, base)
     (repo / ".gitignore").write_text(".review/\n")
     _git(repo, "add", "-A")

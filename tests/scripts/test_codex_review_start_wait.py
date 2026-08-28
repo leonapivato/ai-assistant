@@ -41,6 +41,7 @@ from _fake_codex import (  # path-inserted shared test helper
     review_env,
     run_review,
 )
+from _repo_template import seed_repo
 
 _GIT = shutil.which("git")
 
@@ -61,10 +62,7 @@ def _git(repo: Path, *args: str) -> str:
 
 def _init_repo(repo: Path) -> None:
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
     (repo / ".gitignore").write_text(".review/\n")

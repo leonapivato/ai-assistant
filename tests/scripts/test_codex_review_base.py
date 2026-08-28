@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import run_review
+from _repo_template import seed_repo
 
 _GIT = shutil.which("git")
 
@@ -42,10 +43,7 @@ def _init_repo(repo: Path, *, with_origin_main: bool) -> None:
     """
     assert _GIT is not None
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
     # .review/ is git-ignored in the real repo, so the driver's own session and

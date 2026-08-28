@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _repo_template import seed_bare_repo, seed_repo
 from test_ship import (
     _DIFF_FLAGS,
     _DIFF_OPTS,
@@ -122,14 +123,9 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
     """
     origin = repo.parent / "origin.git"
     assert shutil.which("git") is not None
-    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-        [str(shutil.which("git")), "init", "-q", "--bare", "-b", "main", str(origin)], check=True
-    )
+    seed_bare_repo(origin)
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     for path in (*_FLOOR, _REVIEWED, "src/ai_assistant/orchestration/loop.py", "notes/thing.md"):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)

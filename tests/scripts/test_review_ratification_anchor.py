@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import require_artifact, run_review
+from _repo_template import seed_bare_repo, seed_repo
 from test_codex_review_start_wait import _env, _run
 from test_ship import _fake_gh, _git, _run_ship
 
@@ -75,14 +76,9 @@ def _adr_repo(tmp_path: Path) -> Path:
     assert _GIT is not None
     repo = tmp_path / "repo"
     origin = tmp_path / "origin.git"
-    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-        [_GIT, "init", "-q", "--bare", "-b", "main", str(origin)], check=True
-    )
+    seed_bare_repo(origin)
     repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
     (repo / "docs" / "adr").mkdir(parents=True)

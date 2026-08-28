@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _repo_template import seed_bare_repo, seed_repo
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from types import ModuleType
@@ -66,19 +69,14 @@ def init_repo(repo: Path, *, with_origin: bool = False) -> None:
         with_origin: Also create a bare origin and push ``main`` to it, so
             ``origin/main`` resolves.
     """
-    repo.mkdir(parents=True, exist_ok=True)
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "Test")
+    seed_repo(repo)
     (repo / "f.txt").write_text("one\n")
     (repo / ".gitignore").write_text(".review/\n")
     git(repo, "add", "f.txt", ".gitignore")
     git(repo, "commit", "-qm", "base")
     if with_origin:
         origin = repo.parent / f"{repo.name}-origin.git"
-        subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-            [GIT, "init", "-q", "--bare", "-b", "main", str(origin)], check=True
-        )
+        seed_bare_repo(origin)
         git(repo, "remote", "add", "origin", str(origin))
         git(repo, "push", "-q", "origin", "main")
 
