@@ -6,7 +6,7 @@
   every entry "invalidates the artifact outright". The scope, written verbatim on
   ADR-0027's `Status` line by this change (§9): **§3's floor clause, narrowed — its
   `docs/adr/**` and contract-surface entries invalidate an artifact only where one
-  of four citation tests binds; §3's refusal of path disjointness, its rename-aware
+  of four tests binds; §3's refusal of path disjointness, its rename-aware
   both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and
   `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand.** §9 applies
   ADR-0070 §1's test and shows why this is a supersession and not an amendment.
@@ -488,7 +488,7 @@ live.
 ADR-0027's `Status` line therefore becomes, in this change:
 
 ```text
-- Status: Partially superseded by ADR-0209 (§3's floor clause, narrowed — its `docs/adr/**` and contract-surface entries invalidate an artifact only where one of four citation tests binds; §3's refusal of path disjointness, its rename-aware both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand)
+- Status: Partially superseded by ADR-0209 (§3's floor clause, narrowed — its `docs/adr/**` and contract-surface entries invalidate an artifact only where one of four tests binds; §3's refusal of path disjointness, its rename-aware both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand)
 ```
 
 **The `- Status: Accepted` token is dropped and the ADR-0165 qualifier moves off
