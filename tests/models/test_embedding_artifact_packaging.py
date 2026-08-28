@@ -114,7 +114,8 @@ _SHARED_BUILD = "packaging-distributions"
 
 #: Written last, inside the lock, recording what was built. Its presence is what
 #: tells the next worker the build *finished* rather than merely started, so a
-#: build that died halfway is rebuilt rather than half-read.
+#: build that died halfway is rebuilt rather than half-read. It is renamed into
+#: place rather than written there, so its own presence cannot be half-true.
 _BUILT = "built.json"
 
 
@@ -195,8 +196,14 @@ def built_distributions(
 
     The first worker to arrive builds them; the rest block on the lock and then
     read what it left. Nothing mutates the built files afterwards, so reading them
-    outside the lock is safe — and the recorded names are read *inside* it, so a
-    reader cannot see a half-written record.
+    outside the lock is safe — and the record is read *inside* it, so a reader
+    cannot see one written by a build still in progress.
+
+    The record is renamed into place rather than written there, which is what
+    makes its presence mean "finished". A worker killed between creating that file
+    and filling it would otherwise leave an empty marker that every later worker
+    trusted and none could parse — one truncated write turning a slow run into a
+    failing one, on a path whose whole job is to survive a worker dying.
     """
     _require_the_staged_artifact()
     root = _run_root(request, tmp_path_factory)
@@ -206,7 +213,8 @@ def built_distributions(
     with _exclusively(root / f"{_SHARED_BUILD}.lock"):
         if not built.is_file():
             distributions = _build_the_distributions(shared)
-            built.write_text(
+            staged = shared / f"{_BUILT}.partial"
+            staged.write_text(
                 json.dumps(
                     {
                         "checkout_wheel": distributions.checkout_wheel.relative_to(
@@ -217,6 +225,7 @@ def built_distributions(
                     }
                 )
             )
+            staged.replace(built)  # one atomic step: the whole record, or no record
         recorded: dict[str, str] = json.loads(built.read_text())
     return _Distributions(
         checkout_wheel=shared / recorded["checkout_wheel"],
