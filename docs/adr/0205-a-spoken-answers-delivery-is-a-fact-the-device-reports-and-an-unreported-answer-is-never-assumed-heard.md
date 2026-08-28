@@ -279,13 +279,15 @@ implementation may.
 > a change to what was decided and takes its own ratified decision, as does removing
 > one.
 
-> **Normative.** The three states are coherent with the two durations, refused at
-> validation where they are not. `UNKNOWN` carries `played` and `rendered` both
-> `None`. `COMPLETE` and `INTERRUPTED` each carry both, with `rendered` strictly
-> positive and `0 <= played <= rendered`; `INTERRUPTED` additionally requires
-> `played < rendered`. This is `DeferredProposal`'s coherence-validator shape, taken
-> for ADR-0130 §2's stated reason: a value that has already contradicted itself is
-> not a report, it is a defect.
+> **Normative.** The three states **partition** the durations, and a value outside
+> the partition is refused at validation. `UNKNOWN` carries `played` and `rendered`
+> both `None`. `COMPLETE` and `INTERRUPTED` each carry both, with `rendered`
+> strictly positive and `played` not negative; `COMPLETE` requires `played ==
+> rendered` and `INTERRUPTED` requires `played < rendered`. No value satisfies two
+> of the three and none satisfies none of them, so the state is derivable from the
+> durations and cannot disagree with them. This is `DeferredProposal`'s
+> coherence-validator shape, taken for ADR-0130 §2's stated reason: a value that has
+> already contradicted itself is not a report, it is a defect.
 
 > **Normative.** A report whose `delivery.state` is `UNKNOWN` is refused locally as
 > malformed, before any I/O. A device that does not know reports nothing, and the
@@ -307,6 +309,17 @@ implementation may.
 > rendering, measures it, re-times it, or compares a reported duration against
 > anything, and no lane adds an operation that does. ADR-0200 §9's refusal of a
 > declared duration on `SpokenAudio` is not read as forbidding this one.
+
+**Why `COMPLETE` is `played == rendered` and not `played <= rendered`.**
+Adversarial review, round 3, `blocker`. An earlier draft required only
+`0 <= played <= rendered` there, which admits `COMPLETE` beside `played` of zero —
+a report saying in one member that nothing was heard and in another that the answer
+was delivered. §5 permits a `COMPLETE` turn to be rendered as nothing, so that
+value would have made an entirely unheard answer disappear from the prompt as
+delivered: the exact failure this ADR exists to remove, arriving through the type
+meant to prevent it. Equality closes it, and it costs the device nothing — a source
+that ended of its own accord played the buffer, so the buffer's own duration is both
+numbers (§7).
 
 **That last clause needs its argument stated, because ADR-0200 §9 refused a
 duration on exactly this path.** Its reason was that "the hub cannot verify one
@@ -555,7 +568,10 @@ every ratified clause true.
 > where that response disclosed `None`, there is nothing to report. It reports
 > `COMPLETE` where the source ended of its own accord and `INTERRUPTED` where a
 > press ended it — a distinction the front end already draws (`playbackInterrupted`
-> against the `ended` listener in `playSpoken`) — and it invents neither.
+> against the `ended` listener in `playSpoken`) — and it invents neither. On
+> `COMPLETE` both durations are the decoded buffer's own, which is what §2's
+> equality requires and what a source that ran to its end played; a measured elapsed
+> is read only where the playback was cut short.
 
 > **Normative.** The report is derived from the decoded buffer the page already
 > holds: its `duration` is `rendered`, and the elapsed playback time is `played`. No
@@ -633,7 +649,10 @@ adversarial review's round-1 `blocker` describes, written as an integration test
 with an intervening captured turn rather than as two writes in a row; a second
 report naming an already-stamped turn performs nothing; a report beside
 `conversation_id` `None` is refused before any seam is called; an `UNKNOWN` report
-is refused; a degraded synthesis leaves `UNKNOWN`; `SpokenTurn.episode_id` is `None`
+is refused, and so is every value outside §2's partition — `COMPLETE` with `played`
+below `rendered`, `INTERRUPTED` with the two equal, either state with a duration
+missing, `UNKNOWN` with one present — at validation and again end to end through the
+route; a degraded synthesis leaves `UNKNOWN`; `SpokenTurn.episode_id` is `None`
 exactly on the two shapes §1 names and is otherwise the id `record_delivery` accepts
 back; the composing stage is told an `UNKNOWN` turn of the tail is unknown; **a
 report about turn 1 that arrives on turn 3 reaches turn 3's composing input paired
