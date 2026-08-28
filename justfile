@@ -159,6 +159,29 @@ test-fast *args:
              "you know one is dead, remove it by hand:" >&2
         ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
     fi
+    # At most TEST_FAST_SLOTS runs of this recipe per machine at once (default 3).
+    # The suite is `-n auto`, one worker per core, and a run holds 3-5G; on a WSL
+    # VM with 16G and a RAM-backed `/tmp`, four clones gating at once (the ordinary
+    # shape of a dispatched wave) did not so much slow each other down as take the
+    # VM down (2026-08-28, twice). One run alone keeps only ~4 of 8 cores busy, so
+    # a few overlap usefully; beyond that they only contend. Three fits a 24G VM
+    # (`.wslconfig`) -- on the 16G default, `TEST_FAST_SLOTS=2`. Taken BEFORE the
+    # temp tree, so a run that is only waiting holds nothing in `/tmp`; released by
+    # the kernel when this shell exits, killed or not. The names are not `pt-*`,
+    # so the reaper above never sees them.
+    slots="${TEST_FAST_SLOTS:-3}"
+    gate=""
+    while :; do
+        for ((i = 0; i < slots; i++)); do
+            exec {fd}>"/tmp/ai-assistant-test-fast.slot$i"
+            if flock -n "$fd"; then gate="$fd"; break; fi
+            exec {fd}>&-
+        done
+        [ -n "$gate" ] && break
+        [ -n "${waited:-}" ] || echo "just test-fast: all $slots slots on this machine are taken by other runs; waiting for one..." >&2
+        waited=1
+        sleep 2
+    done
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
     # Take this tree's lease and hold it on an open descriptor for the rest of the
     # recipe, so another clone's reaper cannot take this run's tree out from under
