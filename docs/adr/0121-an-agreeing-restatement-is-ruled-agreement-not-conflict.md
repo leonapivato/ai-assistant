@@ -1,7 +1,38 @@
 # 121. An agreeing restatement is ruled agreement, not conflict
 
-- Status: Accepted
+- Status: Accepted, §5 amended by ADR-0214
 - Date: 2026-08-09
+- Amended: 2026-08-29 by ADR-0214 — **§5's "one exception, and one only" widens
+  in one condition; §11's second deferral is discharged.** §5 rules that
+  `_refuse_unsafe_fold`'s clause 1 "gains one exception, and one only: a
+  `REINFORCE` whose incoming record's source is `USER_ASSERTED` and which
+  **agrees** with the target under §1 is permitted. Every other fold onto a
+  `USER_ASSERTED` target is refused exactly as before, including every
+  `SUPERSEDE` outside ADR-0078 §5b's confirmation exception and every fold from a
+  non-asserted proposal." The final clause becomes false.
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §3 widens this exception's incoming-source condition to `USER_ASSERTED`,
+  `OBSERVED` or `INFERRED`, keeping the `REINFORCE` and agreement conditions and
+  adding **no third exception** — the widening rests on the same fact this
+  exception already rested on, that the fold writes the target's own bytes back
+  at the target's own id, which ADR-0214 §4 makes a property of the *target*
+  rather than of the incoming record's source.
+
+  **What stands, and it is the rest of §5.** The verification-at-the-writer
+  requirement, the record-keyed property and its ADR-0078 §5b precedent, the
+  reinforce-safe class at `{OBSERVED, INFERRED, USER_ASSERTED}`, `EXTERNAL`'s
+  exclusion for ADR-0092 §5's reason, and the retirement class untouched at
+  `{OBSERVED, INFERRED, EXTERNAL}`. **§4 is untouched**: its second clause rules
+  what ADR-0214 §4 rules for a wider population, so no reader of §4 acts
+  differently and ADR-0214 records it as ADR-0082 §1's stacked addition. **§2 is
+  untouched**: its arm is stated for a `USER_ASSERTED` proposal and ADR-0214 §1
+  is a sibling arm on the other side of that branch. **§11's second bullet is
+  discharged, not amended** — "A non-asserted proposal that agrees with a user
+  assertion […] Out of scope and filed" is the question ADR-0214 answers, by the
+  extension that bullet predicted; a deferral discharged by the lane it named is
+  the mechanism working (ADR-0102 §13). §11's paraphrase (#868), `EXTERNAL`
+  (#870) and multi-member (#871) bullets stay open and ADR-0214 §9 re-files them.
+  ADR-0214 §7 applies ADR-0070 §1's test and records this ruling. Refs #869.
 - **Not a contract change under golden rule 5.** No Protocol in
   `core/protocols.py` gains a member or changes a signature, no type or enum
   member is added to `core/types.py`, and in particular **no
@@ -336,6 +367,16 @@ at the target's own id. Not similar bytes, not normalised bytes: the same ones.
 
 ### 5. Clause 1 gains a verified exception and stays record-keyed
 
+> **Amended by ADR-0214 (2026-08-29).** "One exception, and one only" is widened
+> in one condition: the incoming record's source may be `USER_ASSERTED`,
+> `OBSERVED` or `INFERRED`, so the sentence below excluding "every fold from a
+> non-asserted proposal" no longer holds. Clause 1 still carries **two**
+> exceptions and not three — the widening rests on the same fact this exception
+> already rested on, which ADR-0214 §4 makes a property of the target rather than
+> of the incoming record's source. Everything else here stands: the verification
+> at the writer, the record-keyed property, the reinforce-safe class, and
+> `EXTERNAL`'s exclusion.
+
 ADR-0045 §5 clause 1 refuses **any** fold onto a `USER_ASSERTED` target, for both
 rulings, and states two justifications for the refusal:
 
@@ -610,6 +651,12 @@ and it is one subsystem's change.
   or `interfaces/`.
 
 ### 11. What this ADR does not decide
+
+> **Second bullet discharged by ADR-0214 (2026-08-29).** "A non-asserted proposal
+> that agrees with a user assertion" is decided there, by the extension to
+> ADR-0103 §6's corroboration rule that the bullet predicted. The paraphrase
+> (#868), `EXTERNAL` (#870) and multi-member (#871) bullets stay open, and
+> ADR-0214 §9 re-files them.
 
 - **Paraphrase.** Whether a model-judged agreement test belongs on the ingest
   path, and what it would cost (§1). Filed.

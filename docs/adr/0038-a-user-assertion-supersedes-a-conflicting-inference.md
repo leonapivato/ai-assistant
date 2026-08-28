@@ -2,6 +2,38 @@
 
 - Status: Partially superseded by ADR-0092 (§2a's policy-side exclusion of `EXTERNAL` from the supersedable set)
 - Date: 2026-07-22
+- Amended: 2026-08-29 by ADR-0214 — **§3's ratification of an unconditional
+  `ASK_USER` becomes over-wide, and §2a's first fold refusal admits one more
+  incoming source class inside the exception ADR-0121 already carved.** §3
+  records that "`DefaultMemoryPolicy` already returns `ASK_USER` when a
+  non-asserted proposal conflicts with a user-asserted record — and this ADR
+  ratifies that rule as the counterpart of §1".
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §1 rules that an `OBSERVED` or `INFERRED` proposal **agreeing** with the
+  conflict set's assertions under ADR-0121 §1 rules `REINFORCE` instead, ahead of
+  that deferral; where any asserted member disagrees, §3's ruling stands
+  unchanged. §2a's refusal of "**any** fold onto a `USER_ASSERTED` target,
+  whatever the proposal's source" widens by the same case: ADR-0214 §4 makes
+  **every** `REINFORCE` onto a `USER_ASSERTED` target corroborate, so the
+  survivor keeps the target's content, source, confidence, attestation, window
+  and expiry.
+
+  **What stands, and it is the whole of §3's substance.** "An assertion may
+  displace an inference; an inference may **never** displace an assertion,
+  silently or otherwise" is true word for word of ADR-0214, and its §4 is what
+  keeps it true — nothing of the assertion is displaced. §3's scan past a
+  user-asserted conflict rather than taking `conflicts[0]` is untouched and
+  ADR-0214 §1's arm scans for the same reason. Both halves of §2a's stated reason
+  survive as the reason the exception has to *prove* it does not apply: the write
+  replaces nothing, and — the half specific to a non-asserted proposal — it
+  "downgrades the record's provenance out of the profile" is false of a fold that
+  keeps the target's `provenance.source`. §2a's allow-list shape, its keyed-on-the-records
+  argument, its second refusal onto an `EXTERNAL` target and its
+  "enforced at the ingestor, not only chosen by the policy" rule are all
+  untouched — the last is why ADR-0214 §3 requires the widened exception to be
+  recomputed at the writer. ADR-0214 §7 applies ADR-0070 §1's test and records
+  this ruling; the `Status` line is unchanged because ADR-0082 §2 puts the record
+  in this note alone on a line led by `Partially superseded by`. Refs #869.
 - Amended: 2026-08-09 by ADR-0121 — **§2a's first fold refusal — "**any** fold
   onto a `USER_ASSERTED` target, whatever the proposal's source" — gains one
   exception, and §2a's reason for the refusal is what grants it.** §2a refuses
@@ -329,6 +361,16 @@ against assertions, and rule 3 below is what keeps it away from them.
 > verified at the ingestor as this section requires. Everything else here is in
 > force, including the `EXTERNAL` refusal and the allow-list shape.
 
+> **Amended by ADR-0214 (2026-08-29).** That same exception now admits an
+> incoming `OBSERVED` or `INFERRED` record as well as a `USER_ASSERTED` one, on
+> the same fact: ADR-0214 §4 makes **every** `REINFORCE` onto a `USER_ASSERTED`
+> target corroborate, so the survivor keeps the target's content, source,
+> confidence, attestation, window and expiry. The second half of this section's
+> reason — that a non-asserted proposal "downgrades the record's provenance out
+> of the profile" — is what the corroboration arm makes false, and it is the half
+> ADR-0121 did not have to answer. Everything else here is in force, and the
+> refusal is still recomputed at the ingestor.
+
 The rule tests membership of those two sources, **not** `is not USER_ASSERTED`.
 Both readings agree on every source ADR-0005 §2 defines except `EXTERNAL`, which
 is neither derived by us nor given by the user, and which may carry confidence
@@ -389,6 +431,17 @@ superseding correction off the external key, or the validity window of issue
 #112 — not a policy rule. Filed as issue #254.
 
 ### 3. An inference may never supersede an assertion
+
+> **Amended by ADR-0214 (2026-08-29).** This section's ratification of
+> `DefaultMemoryPolicy`'s unconditional `ASK_USER` — quoted below as "already
+> returns `ASK_USER` when a non-asserted proposal conflicts with a user-asserted
+> record" — becomes over-wide. ADR-0214 §1 rules `REINFORCE` instead where the
+> proposal is `OBSERVED` or `INFERRED` and **every** `USER_ASSERTED` member of
+> the conflict set **agrees** with it under ADR-0121 §1; where any asserted
+> member disagrees, this section's ruling stands unchanged. The one-way
+> principle below is untouched and ADR-0214 §4 is what keeps it true: the fold
+> displaces nothing of the assertion. The scan past a user-asserted conflict is
+> untouched too.
 
 Stated even though it is obvious, because the whole rule rests on it — and §2a
 enforces it at the ingestor for *any* policy, not only for the one whose rule 2

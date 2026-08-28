@@ -2,6 +2,38 @@
 
 - Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch)
 - Date: 2026-08-09
+- Note (2026-08-29): **§6's `observe` reinforcement share gains a producer and
+  carries a discontinuity §8 does not partition on. No clause of this ADR
+  changes.** §6's fourth normative clause defines the share over the population
+  its third clause excludes from the repeated-explanation rate, and its fifth
+  requires the report to state it "labelled as the observation stage's re-mining
+  overlap".
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §1 rules `REINFORCE` where `DefaultMemoryPolicy` previously ruled `ASK_USER` —
+  for an `OBSERVED` or `INFERRED` proposal agreeing with the assertions in its
+  conflict set — so the share's numerator gains that population and the figure
+  rises at the change. Issue #869 inferred from §6's third clause that "nothing
+  in the instrument moves"; ADR-0214 §6 records that the inference is wrong and
+  that the exclusion it rests on is not.
+
+  **What does not move.** §5's correction rate: `observe` is in §3's **user**
+  seam set, but the numerator is `decisions_supersede` alone and the denominator
+  is the sum of the six `decisions_*` values, and the change moves rulings from
+  `decisions_ask_user` to `decisions_reinforce` — both among the six. §6's
+  repeated-explanation rate: its population is §3's **direct** set, `learn` and
+  `answer`, whose proposals are `USER_ASSERTED`, so ADR-0214's arm is
+  structurally unreachable there and the producer ADR-0121 gave that numerator
+  remains its only one.
+
+  **Why no record is owed under ADR-0082 §1.** Every normative clause of §2, §3,
+  §5, §6 and §8 stays literally true and computable; ADR-0214 adds no metric key,
+  removes none and redefines none. What changes is the frequency of the events
+  the keys count. This note is written under ADR-0070 §1's unconditional
+  permission to append a dated note, because a reader of §6 needs the
+  discontinuity and can get it nowhere else. **A window spanning the change is
+  not internally comparable in the `observe` reinforcement share**, and §8 does
+  not partition it: §8 partitions at a `CONFIGURATION` trace diff and a policy
+  change emits none. Refs #869, #1782.
 - Note (2026-08-10): **§7's #824 shortfall watch is retired by ADR-0128; §7's
   other two diagnostics, §7's second normative clause and every measure below
   stand.** §7's first normative clause rules that "the report carries three

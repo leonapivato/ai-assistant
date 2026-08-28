@@ -2,6 +2,33 @@
 
 - Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
 - Date: 2026-07-22
+- Amended: 2026-08-29 by ADR-0214 — **§5's clause 1 gains one more incoming
+  source class inside the second exception, and its two justifications are
+  untouched.** Clause 1 refuses "**no fold of any kind onto a `USER_ASSERTED`
+  target**" and ADR-0121 §5 narrowed it by one verified exception.
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §3 widens that same exception in one condition — the incoming record's source
+  may be `USER_ASSERTED`, `OBSERVED` or `INFERRED`, where ADR-0121 §5 required
+  `USER_ASSERTED` — and adds no third exception. Clause 1's stated justifications
+  are quoted there and neither reaches the permitted fold: *destructiveness* is
+  false of it because ADR-0214 §4 makes every `REINFORCE` onto a `USER_ASSERTED`
+  target write the target's own content, source, confidence, attestation and
+  window back at the target's own id, retiring nothing and closing no window; and
+  *signal strength* is false of it because the ruling does not run on the 0.75
+  score at all — the conflict set supplies a candidate and ADR-0121 §1's
+  predicate, which reads no score, decides.
+
+  **What stands.** Clause 1 for every other pairing, including every `SUPERSEDE`
+  outside ADR-0078 §5b's confirmation exception, every `REINFORCE` whose records
+  do not agree, and every fold whose incoming record is `EXTERNAL`. Clause 1
+  stays **record-keyed** — ADR-0214 §3's predicate reads the two records' source,
+  `kind` and `content` and never the relation between them — which is the
+  property this section foreclosed a relation-split to protect. §5a's rewritten
+  id clause, §5b's `EXTERNAL` narrowing to `REINFORCE`, and §5's ruling that the
+  shipped policy's supersedable set is not widened here are all untouched.
+  ADR-0214 §7 applies ADR-0070 §1's test and records this ruling; the `Status`
+  line is unchanged because ADR-0082 §2 puts the record in this note alone on a
+  line led by `Partially superseded by`. Refs #869.
 - Amended: 2026-08-10 by ADR-0128 — **§6's sentence placing the `valid_from` end
   "in the post-filter step, not the SQL pre-filter" stops being true of the tree;
   §6's read semantics are untouched.**
@@ -524,6 +551,16 @@ Steps 1 and 2 are two writes and **must be atomic** (§8).
 > retrieval score — and clause 1 stays record-keyed. Everything else in this
 > section, including §5b's `EXTERNAL` narrowing and clause 1 for every other
 > pairing, is in force as written.
+
+> **Amended by ADR-0214 (2026-08-29).** That second exception is widened in one
+> condition and no other: the incoming record's source may be `USER_ASSERTED`,
+> `OBSERVED` or `INFERRED` (ADR-0214 §3). Clause 1 gains **no third exception**.
+> Its two justifications below are untouched and still do not reach the permitted
+> fold — ADR-0214 §4 makes every `REINFORCE` onto a `USER_ASSERTED` target write
+> the target's own content, source, confidence, attestation and window back at
+> the target's own id, and the ruling runs on ADR-0121 §1's predicate rather than
+> on the 0.75 score. Clause 1 stays record-keyed, and everything else in this
+> section is in force as written.
 
 ADR-0040 §6 named exactly two clauses a validity window rewrites, both in the
 `MemoryWriter` conformance suite. This ADR makes them.
