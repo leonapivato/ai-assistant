@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from base64 import b64encode
 from datetime import timedelta
 from pathlib import Path
@@ -23,10 +24,12 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 import structlog
-from test_engine import PATIENT, Harness, NoStepPlanner, confirmable, tool
+from test_engine import AT, PATIENT, Harness, NoStepPlanner, confirmable, tool
+from test_engine_delivery import RecordingOutbox
 
 from ai_assistant.core.errors import (
     ConfigurationError,
+    ModelUnavailableError,
     OversizedValueError,
     PlanningError,
     SpeechError,
@@ -35,23 +38,34 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     EpisodicMemory,
+    MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
+    Provenance,
+    RoutableOperation,
+    SemanticMemory,
     SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
+    Validity,
+    is_live_confirmation_park,
 )
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.payloads import canonical_payload
-from ai_assistant.orchestration.speech import classify_speech_failure
+from ai_assistant.orchestration.routing import RoutingStage
+from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE, classify_speech_failure
 from ai_assistant.testing import (
+    FakeMemoryStore,
     FakeModelProvider,
+    FakeRoutingRecorder,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import (
@@ -59,9 +73,14 @@ if TYPE_CHECKING:
         CurrentContext,
         Goal,
         MemoryRecord,
+        Message,
         ToolCall,
         ToolResult,
+        TurnOutcome,
     )
+
+    #: A builder for one of ADR-0207 §1's two park shapes, so both parametrise alike.
+    type _ParkSubject = Callable[..., Awaitable[Harness]]
 
 _WEBM: Final = SpokenAudioFormat.WEBM_OPUS
 _MP4: Final = SpokenAudioFormat.MP4
@@ -79,13 +98,19 @@ def _recording(media_type: SpokenAudioFormat = _MP4, *, payload: str = _CLIP) ->
     return SpokenAudio(content=b64encode(payload.encode()).decode("ascii"), media_type=media_type)
 
 
-def _wired(model: ModelProvider | None = None, **knobs: object) -> Harness:
+def _wired(model: ModelProvider | None = None, /, **knobs: object) -> Harness:
     """A harness whose composing stage runs over ``model`` (or over a fixed answer)."""
     stage = ComposingStage(
         model=FakeModelProvider(_ANSWER) if model is None else model,
         streaming=FakeStreamingCompleter(),
     )
     return Harness(composing=stage, **knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
+
+
+def _refusing(_messages: Sequence[Message]) -> str:
+    """A composer whose call raises, which is ADR-0170 §8's composition failure."""
+    msg = "the route is exhausted"
+    raise ModelUnavailableError(msg)
 
 
 # --- §4: a recording that carried no words -----------------------------------
@@ -251,23 +276,393 @@ async def test_the_value_handed_to_the_seam_is_byte_identical_to_the_reply() -> 
     assert synthesizer.spoken_texts == (spoken.outcome.reply,)
 
 
-async def test_a_parked_pass_renders_nothing_and_does_not_degrade() -> None:
-    """§4: "a park ... leaves nothing to say", and nothing is invented to fill it.
+async def test_a_composition_failure_renders_nothing_and_does_not_degrade() -> None:
+    """§4, and ADR-0207 §3's row (d): "nothing to say" is still not a degradation.
 
     The shape where an implementation treating "no rendering" as a degradation
     would be wrong: nothing was withheld, nothing failed, and there was simply no
-    answer — what the user must answer is the confirmation (ADR-0170 §4).
+    answer to speak. ADR-0207 reaches neither this shape nor a recovered resume —
+    both "keep ADR-0200 §4's silence in full", which is what makes deciding the park
+    from two recorded enum members rather than from ``reply is None`` load-bearing.
     """
     synthesizer = FakeSpeechSynthesizer()
-    harness = _wired(tools=(confirmable(),), synthesizer=synthesizer)
+    harness = _wired(FakeModelProvider(_refusing), planner=NoStepPlanner(), synthesizer=synthesizer)
 
     spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
 
     assert spoken.outcome is not None
     assert spoken.outcome.reply is None
+    assert spoken.outcome.reply_degraded is True, "a composition failure, not a park"
     assert spoken.spoken is None
     assert spoken.spoken_degraded is False
     assert synthesizer.call_count == 0
+
+
+# --- ADR-0207 §§1-2: a park says the sentence, on both of §1's shapes --------
+
+#: What the router is scripted to name, the belief its ``forget`` resolves to, and
+#: that belief's content — the values a routed park's card carries and which §2's
+#: sentence must not.
+_ROUTED_QUERY: Final = "jazz"
+_ROUTED_BELIEF: Final = "rec-preference"
+_ROUTED_CONTENT: Final = "the user likes jazz"
+
+#: What the transcriber returns where a case needs the transcript itself to be a
+#: findable marker, so "no part of what the user said" is checked rather than assumed.
+_UTTERED: Final = "WHAT-THE-OWNER-ASKED-ALOUD"
+
+
+def _declining_router() -> FakeModelProvider:
+    """A router that declines every utterance (ADR-0197 §4).
+
+    Wired into the **step**-park subject so both of §1's shapes run over a real
+    routing stage with a real trail behind it. A decline "leaves no trace of the
+    stage having run" and writes no row, which is exactly what makes the retention
+    case's reading of that trail meaningful on this shape rather than vacuous.
+    """
+    return FakeModelProvider(json.dumps({"no_operation": True}))
+
+
+async def _step_park(*, recorder: FakeRoutingRecorder | None = None, **knobs: object) -> Harness:
+    """§1's first shape: the permission gate parked the step (ADR-0037 §4).
+
+    The shape #1699 measured — the planner reaches for a tool the policy confirms,
+    the step parks, no answer is composed, and the card is minted on the same result.
+    """
+    held = FakeRoutingRecorder() if recorder is None else recorder
+    return _wired(
+        tools=(confirmable(),),
+        routing=RoutingStage(model=_declining_router(), recorder=held),
+        **knobs,
+    )
+
+
+async def _routed_park(*, recorder: FakeRoutingRecorder | None = None, **knobs: object) -> Harness:
+    """§1's second shape: a confirm-owed route parked (ADR-0197 §7).
+
+    The half #1699 did **not** measure, and the one §1 rules together with the step
+    park "because they are one thing to the person who asked". The router is
+    scripted, so the transcript never has to name the operation; the belief is seeded
+    because ADR-0197 §5's lookup reads the store the operation itself reads, and a
+    route with nothing in it ends in ``NOT_FOUND`` rather than parking.
+    """
+    held = FakeRoutingRecorder() if recorder is None else recorder
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.write_atomic(
+        [
+            MemoryWrite(
+                record=SemanticMemory(
+                    id=_ROUTED_BELIEF,
+                    content=_ROUTED_CONTENT,
+                    fact=_ROUTED_CONTENT,
+                    validity=Validity(),
+                    provenance=Provenance(
+                        source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                    ),
+                ),
+                mode=MemoryWriteMode.INSERT_IF_ABSENT,
+            )
+        ]
+    )
+    envelope = json.dumps({"operation": RoutableOperation.FORGET.value, "query": _ROUTED_QUERY})
+    return _wired(
+        planner=NoStepPlanner(),
+        memory=memory,
+        routing=RoutingStage(model=FakeModelProvider(envelope), recorder=held),
+        **knobs,
+    )
+
+
+#: §1's two shapes. **Every** case about a park below runs over both: §1 defines a
+#: live confirmation park as exactly two shapes and no others, and every clause of
+#: ADR-0207 ranges over that definition rather than over one member of it — so a
+#: suite exercising only the step park would certify half of §1 while leaving
+#: untested the routed operations ``track:voice`` exists to make reachable by voice.
+_PARKS: Final = pytest.mark.parametrize("park", [_step_park, _routed_park], ids=["step", "routed"])
+
+
+def _card_strings(outcome: TurnOutcome) -> tuple[str, ...]:
+    """What the park's card says, which is content this channel may not speak.
+
+    A step park's :class:`~ai_assistant.core.types.Confirmation` carries the tool
+    declaration and the policy's recorded ``reason``; a routed park's
+    :class:`~ai_assistant.core.types.OperationConfirmation` carries the operation and
+    the resolved subject. "It is the most useful thing that could be said and it is
+    the one thing this channel may not say" (ADR-0207, Alternatives considered).
+    """
+    step = outcome.step
+    if step is not None:
+        confirmation = step.confirmation
+        assert confirmation is not None, "a parked step carries its card (ADR-0042 §4)"
+        return (confirmation.tool_id, confirmation.tool_description, confirmation.reason)
+    routed = outcome.routed
+    assert routed is not None, "one of the two shapes, or the subject is not a park"
+    assert routed.confirmation is not None, "a parked route carries its card (ADR-0197 §7)"
+    return (routed.operation.value, _ROUTED_BELIEF, _ROUTED_CONTENT, _ROUTED_QUERY)
+
+
+def _carries_a_card(outcome: TurnOutcome) -> bool:
+    """Whether the park's card travels on this same result (ADR-0207 §5)."""
+    if outcome.step is not None:
+        return outcome.step.confirmation is not None
+    return outcome.routed is not None and outcome.routed.confirmation is not None
+
+
+@_PARKS
+async def test_a_parked_pass_speaks_the_fixed_sentence(park: _ParkSubject) -> None:
+    """§1, §2 — rows (a), (b) and (c): both parks render, in §2's bytes.
+
+    "hold, ask, release, hear nothing" is what #1699 measured and what this closes.
+    ``outcome.reply`` is untouched at ``None``: the sentence is not an answer, is
+    never written there, and no component copies it there (§3), so every consumer of
+    :class:`~ai_assistant.core.types.TurnOutcome` sees exactly what it saw before.
+    """
+    synthesizer = FakeSpeechSynthesizer()
+    harness = await park(synthesizer=synthesizer)
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert is_live_confirmation_park(spoken.outcome), "the pass reached one of §1's two shapes"
+    assert spoken.outcome.reply is None
+    assert spoken.outcome.reply_degraded is False
+    assert spoken.spoken is not None
+    assert spoken.spoken.media_type is _MP4
+    assert spoken.spoken_degraded is False
+    assert synthesizer.spoken_texts == (SPOKEN_PARK_SENTENCE,)
+    assert _carries_a_card(spoken.outcome), "the card travels on the same result (§5)"
+
+
+@_PARKS
+async def test_nothing_derived_from_the_park_reaches_the_synthesizer(park: _ParkSubject) -> None:
+    """§1, §2 — row (f): the seam is handed a constant and nothing else.
+
+    The equality is already total; what this adds is *why* it is sufficient. §2's
+    bytes are checked against everything the park could have leaked — the tool, the
+    policy's recorded reason, the operation, the resolved subject and the transcript
+    — so a helpful implementation that interpolated any of them could not satisfy it.
+    The disclosure property is a property of this string and "of no rule that could
+    be stated about a family of strings".
+    """
+    transcriber = FakeSpeechTranscriber(transcripts=[_UTTERED])
+    synthesizer = FakeSpeechSynthesizer()
+    harness = await park(transcriber=transcriber, synthesizer=synthesizer)
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    said = "".join(synthesizer.spoken_texts)
+    assert said == SPOKEN_PARK_SENTENCE
+    assert spoken.outcome is not None
+    for withheld in (_UTTERED, _CLIP, *_card_strings(spoken.outcome)):
+        assert withheld not in said
+
+
+@_PARKS
+async def test_a_park_whose_synthesis_raises_degrades(park: _ParkSubject) -> None:
+    """§4's first case, over the wider subject: the same ladder, not a second one.
+
+    Pinning ``False`` here instead would report a park whose synthesizer raised
+    identically to a park whose synthesizer succeeded — "the state ADR-0200 §4 built
+    the flag to prevent".
+    """
+    synthesizer = FakeSpeechSynthesizer()
+    synthesizer.fail_next_synthesize(SpeechError("the engine wedged"))
+    harness = await park(synthesizer=synthesizer)
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.spoken is None
+    assert spoken.spoken_degraded is True
+    assert spoken.outcome is not None
+    assert spoken.outcome.reply is None
+
+
+@_PARKS
+async def test_a_park_with_no_shared_format_degrades_and_spends_nothing(
+    park: _ParkSubject,
+) -> None:
+    """§4's second case: an empty intersection is discovered before the call."""
+    synthesizer = FakeSpeechSynthesizer(formats=[_WEBM])
+    harness = await park(synthesizer=synthesizer)
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.spoken is None
+    assert spoken.spoken_degraded is True
+    assert synthesizer.call_count == 0
+
+
+@_PARKS
+async def test_a_parks_oversized_rendering_degrades_rather_than_refusing(
+    park: _ParkSubject,
+) -> None:
+    """§4's third case: ADR-0200 §6's bound, measured over §2's sentence.
+
+    A **short** recording and a long rendering, so the bound this case sets binds
+    only the rendering: an oversized *utterance* is refused before any I/O, which is
+    the opposite outcome and would pass a test that never reached the seam.
+    """
+    harness = await park(max_spoken_audio_bytes=8)
+
+    spoken = await harness.engine.converse_spoken(
+        _recording(payload="ab"), plays=(_MP4,), timeout=PATIENT
+    )
+
+    assert spoken.spoken is None
+    assert spoken.spoken_degraded is True
+    assert spoken.outcome is not None
+    assert spoken.outcome.reply is None
+
+
+@_PARKS
+async def test_a_parked_result_over_the_payload_limit_drops_its_rendering(
+    park: _ParkSubject,
+) -> None:
+    """§4's fourth case, measured on the whole projected result (ADR-0085 §8c).
+
+    Two of §4's four cases "had no subject on a park before this decision", and this
+    is one of them — so an implementation that handled the two obvious ones and
+    dropped an oversized park rendering with ``spoken_degraded`` ``False`` would
+    breach §4 while passing every other row here.
+    """
+    lawful = await (await park()).engine.converse_spoken(
+        _recording(), plays=(_MP4,), timeout=PATIENT
+    )
+    assert lawful.spoken is not None
+    with_rendering = len(canonical_payload(lawful))
+    assert len(canonical_payload(lawful.model_copy(update={"spoken": None}))) < with_rendering
+
+    tight = await park(max_payload_bytes=with_rendering - 1)
+    degraded = await tight.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert degraded.spoken is None
+    assert degraded.spoken_degraded is True
+    assert degraded.outcome is not None
+    assert degraded.outcome.reply is None
+    assert degraded.heard == lawful.heard
+
+
+@_PARKS
+async def test_a_parked_result_still_over_the_limit_with_no_rendering_raises(
+    park: _ParkSubject,
+) -> None:
+    """§4's one-step re-measure on a park: nothing further is dropped.
+
+    ``heard`` is owed to the caller by ADR-0200 §4's disclosure clause and the card
+    is what the user must answer, so there is no third thing to give up — and
+    shortening either would be truncating a result rather than degrading a rendering.
+    """
+    lawful = await (await park()).engine.converse_spoken(
+        _recording(), plays=(_MP4,), timeout=PATIENT
+    )
+    # The *degraded* shape's size and not the lawful one's with its rendering
+    # blanked: ``spoken_degraded`` flips to ``true``, and a limit computed from the
+    # wrong shape would admit exactly the value this case needs refused.
+    degraded_shape = lawful.model_copy(update={"spoken": None, "spoken_degraded": True})
+    without = len(canonical_payload(degraded_shape))
+    assert lawful.outcome is not None
+    assert len(canonical_payload(lawful.outcome)) < without - 1
+
+    tight = await park(max_payload_bytes=without - 1)
+    with pytest.raises(OversizedValueError):
+        await tight.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+
+@_PARKS
+async def test_no_audio_from_a_park_reaches_any_store_trail_or_log(park: _ParkSubject) -> None:
+    """§5's retention clause over its **whole** enumeration — row (h).
+
+    Read over "any store, index, trace, audit trail, routing trail, outbox or log",
+    which is longer than the surfaces an *answered* turn can reach: a routed park
+    runs the routing stage, so a routing record is written on this path and no
+    answered-turn test has ever had a reason to read that trail. Row (f) guards the
+    way *in* to the synthesizer; this guards the way *out* of it.
+
+    The outbox is pinned as an **absence** and not as a sink: neither park enqueues a
+    notification, the sentence is never spoken on a delivery, and nothing here gives
+    ``converse_spoken`` an edge to it (ADR-0206 §5). So the subject holds an outbox
+    that *would* have recorded the call, and what is asserted is that it recorded
+    none — which is a check that this path acquired no such edge rather than a check
+    on a path it uses.
+    """
+    recorder = FakeRoutingRecorder()
+    outbox = RecordingOutbox()
+    harness = await park(recorder=recorder, notification_outbox=outbox)
+
+    with structlog.testing.capture_logs() as captured:
+        spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.spoken is not None
+    written = repr(
+        (
+            captured,
+            await harness.memory.export(),
+            await harness.trail.recent(),
+            await harness.reads.recent(),
+            await harness.conversation_store.recent(),
+            recorder.written,
+            outbox.calls,
+        )
+    )
+    assert _CLIP not in written, "the recording reached no sink"
+    assert spoken.spoken.content not in written, "and neither did the rendering"
+    assert outbox.calls == [], "a park enqueues nothing: this path has no outbox edge"
+
+
+@_PARKS
+async def test_a_parked_turn_is_stamped_and_captured_exactly_as_before(
+    park: _ParkSubject,
+) -> None:
+    """§5: the park itself is unchanged, and ADR-0205's machinery binds it unchanged.
+
+    ``episode_id`` is **not** ``None`` on a park: ADR-0205 §1 makes it ``None``
+    exactly where the call recorded no turn, and a park is neither of those two cases
+    — capture writes ``UNKNOWN`` "unconditionally on that operation — including where
+    the answer was parked" (§4). Nothing ADR-0207 decides writes, reads, defaults or
+    infers a delivery state, and nothing reads one to decide what is spoken.
+    """
+    harness = await park()
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.episode_id is not None
+    assert spoken.outcome is not None
+    assert spoken.outcome.capture_degraded is False
+
+
+# --- ADR-0207 §2, §5: the bytes, spelled once and owned by one package -------
+
+
+def test_the_sentence_is_the_bytes_adr_0207_fixes() -> None:
+    """§2: "those bytes, that punctuation, that terminal full stop".
+
+    The **one** place the literal is written down; every other case refers to the
+    constant, so a wording change looks like one decision rather than a dozen. It is
+    the owner's product ruling on #1699 carried into the ADR unchanged: different
+    words are a product decision needing an ADR that supersedes §2, not an editorial
+    pass over a test.
+    """
+    assert SPOKEN_PARK_SENTENCE == "I need you to confirm something on your screen."
+
+
+def test_only_the_orchestration_constant_spells_the_sentence() -> None:
+    """§5: ``ai_assistant.orchestration`` **owns** it, and no other package copies it.
+
+    A constant an adapter could copy is a rule an adapter has re-decided: to render
+    it, ``interfaces/`` would have to hold both the literal and §1's park test, which
+    is business logic in a layer supposed to have none, and the two copies would
+    drift the first time either moved. The canonical fake satisfies §5's third
+    exception by **naming** this object, and that is checked here as an absence
+    rather than trusted.
+    """
+    root = Path(engine_module.__file__).resolve().parents[1]
+    spelling = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.py")
+        if SPOKEN_PARK_SENTENCE in path.read_text(encoding="utf-8")
+    }
+
+    assert spelling == {"orchestration/speech.py"}
 
 
 # --- §4: the translation is total, and stated both ways ----------------------
