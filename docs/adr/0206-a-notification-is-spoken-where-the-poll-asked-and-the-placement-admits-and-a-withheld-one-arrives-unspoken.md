@@ -195,24 +195,47 @@ at all.
 > is the gateway's own poll, no browser request resolves to it, no browser argument
 > reaches it" — bind unchanged.
 
-> **Normative.** The gateway's `plays` names every member of `SpokenAudioFormat`,
-> in that enumeration's declared order. It is not derived from a `User-Agent`, from
-> a capability a page reported, from which streams are open, or from anything a
+> **Normative.** The gateway's `plays` names **every** member of
+> `SpokenAudioFormat`, so no format the synthesizer can produce is excluded by the
+> caller. Their order is a constant the gateway holds, set by the implementing lane
+> from a recorded measurement of what browsers decode and changeable on a further
+> measurement without an ADR. It is not derived from a `User-Agent`, from a
+> capability a page reported, from which streams are open, or from anything a
 > browser said.
 
-> **Normative.** A browser that cannot decode the rendering it is written plays
-> nothing and renders the notification on the page. That is a **device fact**, and
-> no component reports it, records it, or treats it as a disclosure outcome.
+> **Normative.** **One delivery carries one rendering in one format, and a browser
+> that cannot decode that format is silent.** The engine picks the first member of
+> `plays` the synthesizer's `formats` also names (ADR-0200 §3, unchanged), and the
+> gateway has one poll and one answer for every open delivery stream (ADR-0175 §4),
+> so there is no per-browser format to choose and no second rendering to send. A
+> browser that could have decoded a member the engine did not pick plays nothing
+> and renders the notification on the page, exactly as one that could decode
+> neither does.
+
+> **Normative.** That a browser played nothing is a **device fact**. No component
+> reports it, records it, retries on it, or treats it as a disclosure outcome, and
+> no clause of this ADR is conditioned on it.
 
 **A browser-supplied format list is the shape a reader reaches for first, and it
 is unavailable twice over.** ADR-0177 §1's second clause forbids a browser
 argument reaching this poll at all — and even without that clause, ADR-0175 §4's
 fan-out gives the gateway one answer for every open stream, so a list assembled
-from two browsers with different capabilities has no value it could take. Naming
-the whole enumeration is what makes the one answer serve every reader that can
-decode either member, and `SpokenAudioFormat`'s membership is already bounded by
-ADR-0200 §9 to "IANA media types a browser can produce with `MediaRecorder`
-without transcoding", with exactly two members at this rung.
+from two browsers with different capabilities has no value it could take.
+
+**What naming the whole enumeration does and does not buy, stated exactly,
+because the loose version of this sentence was wrong.** It guarantees that the
+*synthesizer's* choice is never narrowed by the caller — whatever it can produce,
+it may produce. It does **not** guarantee that every browser can play the result:
+the engine picks one member (ADR-0200 §3), the gateway writes that one rendering
+to every stream, and a browser whose decoder covers only the other member hears
+nothing. Adversarial review found the overclaim on the second round, and the
+clause above answers its question rather than softening it — such a browser is
+**intentionally silent**, because the alternative is a per-stream answer this
+carrier does not have. The exposure is bounded by `SpokenAudioFormat`'s own
+membership, which ADR-0200 §9 confines to "IANA media types a browser can produce
+with `MediaRecorder` without transcoding" and fixes at two members at this rung,
+and it is paid where every other cost of a browser's capabilities is paid: the
+notification is on the page either way.
 
 **ADR-0177 §1's deadline carve-out is not widened, and the argument is worth
 making rather than asserting.** That clause reads "The one class of argument the
@@ -689,6 +712,12 @@ say which, or how many did not.
   deferral says. **Fires** with the first posture the owner wants that differs
   from §3's placement — this ADR does not build it and the milestone-20 exit test
   does not need it (Context, last subsection).
+- **A second rendering, or a per-browser one** (§2). One delivery carries one
+  format, so a browser whose decoder covers only the other member is silent.
+  **Fires** on a measurement that a browser the owner actually uses cannot decode
+  the ordered first format — at which point the cheap remedy is reordering the
+  gateway's constant, which §2 admits without an ADR, and the expensive one is a
+  carrier that answers per stream, which is one.
 - **A second notification producer's posture.** §3's second clause withholds every
   triple it does not name, and ADR-0199 §3's sixth clause already obliges the ADR
   admitting a producer to state its posture. **Fires** with that producer.
@@ -828,7 +857,8 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §1 | `plays` on `next_notification`, keyword-only, defaulting to `()` | An argument-order test; a test that an omitted `plays` produces `NOT_REQUESTED`, calls no synthesizer and changes no other behaviour of the poll |
 | §1 (no pre-render) | The rendering is produced inside the answering call | A test that no synthesizer is called at `offer`, at disposition or at reconsideration; a test that a redelivery renders afresh |
 | §1 (retention) | No audio in the outbox, any store, trail, trace or log | A test asserting the data directory and both log tiers hold no audio after a spoken delivery |
-| §2 | The gateway's `plays` names every `SpokenAudioFormat` member in declared order | A test asserting the gateway's poll argument; a test that no browser value reaches it, over a delivery-stream request that carries one |
+| §2 | The gateway's `plays` names every `SpokenAudioFormat` member, ordered by a constant the lane records a measurement for | A test asserting the poll argument names every member; a test that no browser value reaches it, over a delivery-stream request that carries one; the measurement recorded beside the constant |
+| §2 (one format) | A browser that cannot decode the rendering renders and plays nothing | A page test over a rendering in the member that browser does not decode, asserting the notification is rendered, nothing is played, and nothing is reported |
 | §3 | The placement decided from the three recorded fields | A test per triple: the placed one renders; the same producer and class at `OPERATIONAL` is `WITHHELD`; an unnamed producer is `WITHHELD` |
 | §3 (no inspection) | No content read to decide a placement | A test that a candidate whose `summary` names an unplaced subject still renders where its triple is placed |
 | §4 | `summary` handed to `synthesize` byte-for-byte; `detail` never spoken | A test that the value handed to `synthesize` is byte-identical to `summary`, including leading and trailing spaces; a test that a candidate with a `detail` speaks only the summary |
