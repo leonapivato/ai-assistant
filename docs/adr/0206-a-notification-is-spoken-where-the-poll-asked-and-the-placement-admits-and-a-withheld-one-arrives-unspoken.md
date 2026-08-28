@@ -319,6 +319,47 @@ withheld by the clause above. So the exit test's second half can be driven again
 the producer the tree actually has, rather than against a fixture that exists only
 to be refused.
 
+> **Normative.** This ADR admits a **delivery-side supply for a channel of
+> unbounded audience**, which is one of the components ADR-0204 §3's second clause
+> names, and it states what that clause requires of one rather than settling the
+> question by silence. The stamp test binds this path, and it binds it as a
+> condition of the placement above rather than as a read performed at delivery.
+
+> **Normative.** The producer placed above emits a candidate whose `summary` is
+> derived from what a `Reader` proposed over a configured calendar source, and not
+> from records of this store. ADR-0204 §5's last clause governs such a producer —
+> "A producer whose inputs are not records of this store has nothing to inherit and
+> writes `False`" — so nothing this ADR places as speakable can carry, or be derived
+> from, a warrant `Provenance.supplied_withheld_content` stamps.
+
+> **Normative.** That is a **condition of the placement and not an observation about
+> it.** No ADR places as speakable on a channel of unbounded audience a producer
+> whose inputs are records of this store without stating, in its own text, how
+> ADR-0204 §3's test reaches this path for what that producer emits — over which
+> records it is applied, and where. Until such an ADR exists no such producer is
+> placed, and this section's withholding clause withholds it.
+
+> **Normative.** No implementation satisfies that condition by resolving
+> `NotificationCandidate.references` at delivery. The delivery path issues no store
+> query, holds no `MemoryStore` and no `ContextProvider`, and reads no record.
+
+**Why the obligation lands on the placement rather than on the delivery, and why
+that is the stronger place for it.** ADR-0204 §2's evaluation is cheap because it
+is a predicate over what a turn already holds — a few field reads per record over a
+supply in hand — and it is explicitly one that "reaches no `ContextProvider` and no
+`MemoryStore`, performs no second context assembly and no second retrieval, and
+issues no store query of any kind". A delivery has nothing in hand: ADR-0130 §2
+makes a candidate one that "references what it is about and does not contain it",
+so a test over the records it references would be a fresh store read on a path that
+has never had one, performed after an entry is leased and inside a budget §7
+already bounds. And it would still not reach the value that is actually spoken,
+because `summary` is free text the producer composed rather than a record this path
+could test at all. The producer is where both problems disappear: it holds the
+records, it writes the sentence, and ADR-0204 §5 already tells it what to inherit.
+So the test stays where ADR-0204 §5 puts it, and what this ADR adds is the rule
+that a producer which *could* carry a stamp is not placed until an ADR says how —
+ADR-0199 §3's sixth clause and ADR-0204 §3's second clause pointing at one sentence.
+
 ### 4. What is spoken is the summary, byte for byte, and nothing composes it
 
 > **Normative.** Where a rendering is produced, the text handed to
@@ -524,15 +565,28 @@ see the notification later or not at all — losing a notification to a speech
 engine, which is precisely what ADR-0131 §3's durability exists to prevent.
 
 **A closed enumeration rather than ADR-0200 §4's boolean pair, and the difference
-is not aesthetic.** `SpokenTurn` carries `spoken_degraded` beside `heard` and
-`outcome`, which between them already distinguish every shape that ADR admits;
-and on that surface there is no disclosure fork at all, because §7 makes
+is not aesthetic.** `SpokenTurn` carries `spoken_degraded` beside `heard`,
+`outcome` and — since ADR-0205 §1 — `episode_id`, which between them already
+distinguish every shape that surface admits; and on it there is no disclosure fork
+at all, because ADR-0200 §7 makes
 `outcome.reply` *itself* the deflection. Here there are four states and one of
 them — the withholding — must never be confusable with a fault. A fault invites a
 retry, and a withholding retried is a disclosure rule defeated by a loop. Two
 booleans would admit two combinations a validator would then have to forbid; an
 enumeration admits none, and the member names are what a page renders its own
 behaviour from.
+
+**`SpokenRendering` is not `SpokenDeliveryState`, and no lane merges them.**
+ADR-0205 §2 mints a closed `SpokenDeliveryState` — `UNKNOWN`, `COMPLETE`,
+`INTERRUPTED` — for what a **device reports** about a spoken answer it played. This
+enumeration is about what the **hub produced** for a delivery nobody asked for, and
+nothing on this path reports anything back (§9). Neither is derivable from the
+other and the two never appear on one value: `RENDERED` says the audio left the hub
+and says nothing about whether it was heard, which on this path is precisely the
+question ADR-0205 §8 leaves open. Its own first deferral — a fourth state "for a
+rendering that never existed", firing "when a stage needs to distinguish 'nobody
+reported' from 'there was nothing to report'" — is a distinction this enumeration
+already draws, because it has no report to be confused with.
 
 **Why the delivery reserve ADR-0131 §4 fixed does not have to move, with the
 arithmetic so a reviewer can check it rather than take it.** That section forbids
@@ -666,11 +720,12 @@ from the playback side. The utterance nobody asked for yields to the one they di
 > **delivery attempt's rendering** and lives on `NotificationDelivery`, which is
 > the seam's own value and not a stored record.
 
-> **Normative.** Whether a spoken *answer's* delivery is a fact the device
-> reports is the subject of another lane's ADR in this batch and is not decided
-> here. Nothing in this section is read as deciding it, and nothing in it is read
-> as refusing it: its subject is a turn the owner asked for, and this ADR's is a
-> delivery nobody asked for.
+> **Normative.** Whether a spoken *answer's* delivery is a fact the device reports
+> is **ADR-0205's** subject and is not decided here. Its §8 leaves "delivery on any
+> other channel… a notification" open by name, firing "with a channel that can
+> report and a consumer that needs it", and this section neither decides that
+> question nor refuses it: ADR-0205's subject is a turn the owner asked for, and
+> this ADR's is a delivery nobody asked for.
 
 **Moving the acknowledgement is the most tempting change this ADR could make and
 it is the one ADR-0175 §5 has already priced.** The appeal is real: a notification
@@ -683,6 +738,18 @@ gateway holding the token "for a period bounded by nothing the gateway controls,
 because a browser may never come back". Neither is worth a duplicate this system
 already tolerates by design: ADR-0131 §3's guarantee is at-least-once, and the
 owner seeing one notification twice is that guarantee working.
+
+**ADR-0205 is the contrast that makes this refusal legible rather than merely
+conservative.** A spoken answer's delivery is reportable because `converse_spoken`
+has a next call to carry the report: ADR-0205 §1 puts it on that call precisely so
+that it arrives "with the next press, in the round trip that already exists, and
+reaches that stage without a second frame, a second admission, a second refusal
+path or a second gateway route". A notification's playback has no such round trip.
+The gateway's poll loop is the only one, ADR-0175 §5 has already ruled what rides
+it, and its write-then-disconnect arm is the case where there is no next poll at
+all. So the two decisions differ because their carriers differ, not because one is
+more cautious than the other — and ADR-0205 §8's second deferral says so from its
+own side.
 
 **And the fact would have nowhere true to live.** ADR-0078 §8's refusal is not
 incidental; it is the reason ADR-0130 §2 states "A candidate carries no delivery
@@ -721,9 +788,15 @@ say which, or how many did not.
 - **A second notification producer's posture.** §3's second clause withholds every
   triple it does not name, and ADR-0199 §3's sixth clause already obliges the ADR
   admitting a producer to state its posture. **Fires** with that producer.
-- **Playback as a reported fact** (§9). **Fires** on a decision that has a home
-  for delivery state which is not a candidate, a disposition or a held record —
-  which ADR-0078 §8 refuses and which this ADR does not reopen.
+- **Playback as a reported fact** (§9). **Fires** as ADR-0205 §8's second deferral
+  says — "with a channel that can report and a consumer that needs it" — and it
+  needs a home for delivery state that is not a candidate, a disposition or a held
+  record, which ADR-0078 §8 refuses and this ADR does not reopen.
+- **A placed producer whose inputs are records of this store** (§3). ADR-0204 §3's
+  stamp test has no subject on this path while every placed producer's inputs sit
+  outside the store, which is a property of the placement rather than luck.
+  **Fires** with the first ADR that would place such a producer, which owes the
+  statement §3 requires of it before it may.
 - **A page that speaks with no prior gesture** (§8). Not deferred so much as
   unavailable: it is a browser's rule, not ours. **Fires**, if ever, at
   milestone 21's native spoke, which holds its own audio device.
@@ -801,6 +874,22 @@ Six near misses, named so a reviewer can check them rather than take them:
   gateway supplies of its own already holds `acknowledging` under ADR-0175 §5,
   ratified and shipped before ADR-0177 was written.
 
+- **ADR-0204 is consumed and discharged, not touched.** §3 states what its §3's
+  second clause requires of an ADR admitting a delivery-side supply, and states it
+  in the direction that withholds. No clause of it is read more widely: the stamp is
+  still set only at capture (§2), still inherited only by a producer over records of
+  this store (§5), and still applied at a supply site rather than anywhere this ADR
+  adds one. A reader holding only ADR-0204 stamps the same records and withholds the
+  same ones, so **no record is owed on it**.
+- **ADR-0205 is read and left where it stands.** §9 cites its subject and its §8's
+  second deferral rather than deciding either; §6 keeps `SpokenRendering` and
+  `SpokenDeliveryState` distinct and adds no member to `SpokenDelivery`,
+  `SpokenDeliveryReport` or `SpokenTurn`. Its own supersessions — ADR-0200 §3, §4
+  and §10, and ADR-0074 §9 — are untouched, and its §10 confirms the figure the
+  bullet above rests on: ADR-0177 §1's enumeration is **still thirty-one
+  operations**, because `record_delivery` lands on `ConversationStore` rather than
+  on the promoted surface. **No record is owed on it.**
+
 **ADR-0200 is consumed on every clause this path touches.** Its §1 Protocols and
 its `SpokenAudio`, `SpokenAudioFormat` and `Base64Audio` types are used as
 declared; §3's format-choice rule and its budget-threading rule are applied at a
@@ -860,6 +949,7 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §2 | The gateway's `plays` names every `SpokenAudioFormat` member, ordered by a constant the lane records a measurement for | A test asserting the poll argument names every member; a test that no browser value reaches it, over a delivery-stream request that carries one; the measurement recorded beside the constant |
 | §2 (one format) | A browser that cannot decode the rendering renders and plays nothing | A page test over a rendering in the member that browser does not decode, asserting the notification is rendered, nothing is played, and nothing is reported |
 | §3 | The placement decided from the three recorded fields | A test per triple: the placed one renders; the same producer and class at `OPERATIONAL` is `WITHHELD`; an unnamed producer is `WITHHELD` |
+| §3 (stamp) | The placement's condition on ADR-0204 §3 stated and kept | A test that the placed producer's proposals carry `supplied_withheld_content` `False`; a test that the delivery path holds no `MemoryStore` and no `ContextProvider` and issues no store query while answering a poll |
 | §3 (no inspection) | No content read to decide a placement | A test that a candidate whose `summary` names an unplaced subject still renders where its triple is placed |
 | §4 | `summary` handed to `synthesize` byte-for-byte; `detail` never spoken | A test that the value handed to `synthesize` is byte-identical to `summary`, including leading and trailing spaces; a test that a candidate with a `detail` speaks only the summary |
 | §5 | A withheld candidate calls no synthesizer and emits no audio | A test that a `WITHHELD` delivery carries `spoken` `None`, that no synthesizer was called, and that no substitute value of any kind is produced |
