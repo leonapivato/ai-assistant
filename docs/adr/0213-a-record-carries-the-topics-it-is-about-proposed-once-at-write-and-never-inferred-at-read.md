@@ -398,153 +398,95 @@ data that it had. `MAX_EVIDENCE_CITATIONS` is a fixed constant for the adjacent
 reason (ADR-0086 §1), and the observer's own `max_batch_size` and `max_proposals` are
 knobs for the opposite one — they bound a *run*, not the shape of what is stored.
 
-### 5. The vocabulary a proposer is supplied, the one seam that carries it, and the producer it does not reach
+### 5. The vocabulary a proposer is supplied comes from the records it is already reading
 
-> **Normative.** `MemoryStore` (`core/protocols.py`) gains one additive read,
-> `async def topics(self, *, limit: int = DEFAULT_PAGE_SIZE) -> Sequence[TopicLabel]`.
-> It returns the distinct labels carried by the live records the store holds,
-> ordered by the number of records carrying each label descending and then by the
-> label ascending, at most `limit` of them. It writes nothing and creates nothing.
+> **Normative.** `ConsolidationStage` (`orchestration/consolidation.py`) accumulates,
+> **in memory and for the duration of one run**, the distinct topic labels carried by
+> the records that run has already read, and puts them in the prompt it already sends.
+> It proposes against them: it uses an existing label where one fits and mints a new
+> one only where none does.
 
-> **Normative.** An implementation answers `topics` **without reading or decoding a
-> record**, from storage it maintains for this read as records are written. Its cost
-> is a function of how many topic labels the store carries, not of how many records it
-> holds, and an implementation that answers it by walking and decoding the store's
-> records does not conform. That storage is owed by the implementing lane (§11, §13),
-> and it is what makes the read bounded rather than merely small today.
+> **Normative.** The supplied set is the labels the run has read so far, bounded to at
+> most `DEFAULT_PAGE_SIZE` of them and selected by the number of read records carrying
+> each, descending, ties broken by label ascending. The count is over what this run
+> read and nothing else. The first chunk of a run is supplied nothing, because nothing
+> has been read yet.
 
-> **Normative.** `limit` is refused with `ValueError` unless it is **exactly** an
-> `int` satisfying `1 <= limit < 2**63`; `bool` is refused with the rest. Every
-> implementation checks on entry, before the value reaches a query, so the refusal is
-> the same on every backend. A value outside the domain is not clamped and does not
-> yield an empty sequence.
+> **Normative.** The accumulation is **per run and never durable**. Nothing is
+> written, no cursor, count, index, column or table records it, it does not survive the
+> run that built it, and no later run inherits it. A run's vocabulary is a property of
+> the walk it just performed.
 
-**The domain is `MemoryStore.walk_records`', not `list_beliefs`', and the difference
-is what a wrong answer would do here.** `walk_records` refuses "anything that is not
-exactly an `int`" outside `1 <= limit < 2**63`, and refuses `bool` because "`True`
-satisfies every range comparison and would quietly become a one-record chunk"; it
-refuses `-1` because "SQLite reads `LIMIT -1` as *no limit*, so a forwarded argument
-returns the whole store from inside a job whose entire purpose is to be bounded". Both
-reasons apply unchanged. Zero is refused too, where `list_beliefs` answers it with an
-empty page, because an empty page is a harmless answer about records and an empty
-vocabulary is not: a producer reads it as "the store holds no labels" and mints a new
-one, so a misconfigured zero would silently produce the fragmentation §5 exists to
-prevent while looking like a store that had nothing to say.
+> **Normative.** **No Protocol changes.** This ADR adds no member to `MemoryStore`, no
+> argument to any of its reads, and no member or argument to `Observer`,
+> `MemoryWriter`, `MemoryPolicy`, `ConversationStore`, `ContextProvider`, `Planner`,
+> `Reader` or any other Protocol. Nothing in `core/protocols.py` changes.
 
-> **Normative.** `ConsolidationStage` (`orchestration/consolidation.py`) reads that
-> vocabulary from the `MemoryStore` it already holds and puts it in the prompt it
-> already sends, and proposes against it: it uses an existing label where one fits and
-> mints a new one only where none does. The supply is a **hint** and never an
-> authority — the producer is not obliged to use a supplied label, and a supplied
-> vocabulary neither widens nor narrows what that producer may propose about.
+> **Normative.** The supply is a **hint** and never an authority. The producer is not
+> obliged to use a supplied label, a supplied vocabulary neither widens nor narrows
+> what it may propose about, and no record is refused, altered or ranked for carrying a
+> label the vocabulary did not offer.
 
-> **Normative.** The read happens **once per run, before the chunk walk begins**, and
-> the value is reused for every chunk of that run. It is not a chunk operation, no
-> chunk performs it, and no implementation moves it inside the walk. A run's chunks
-> therefore perform exactly the operations they performed before this decision, and
-> ADR-0111 §4's clause that "A job may be chunked only if every operation it performs
-> inside one chunk is itself bounded by a deadline" is satisfied twice over: the read
-> is not one of them, and by the clause above it is bounded anyway.
+> **Normative.** **No vocabulary is supplied to the `Observer`.** No belief, label
+> derived from a belief, profile, facet or plan enters an observation prompt on this
+> ADR's authority. `ModelBackedObserver` proposes topics from the batch it was handed
+> and from nothing else.
 
-> **Normative.** What a run holds is therefore a **snapshot**, and it may be stale
-> before the run ends. A write, fold or owner act that changes the store's labels
-> during a run reaches the **next** run's vocabulary and not this one's; no clause of
-> this ADR obliges a run to re-read, invalidate or coordinate, and none permits a
-> chunk to be delayed waiting for one. Staleness is affordable exactly because the
-> supply is a hint: a stale vocabulary steers a producer toward a label that was
-> current a minute ago, which is a worse suggestion and never a wrong record.
+**The observer is excluded because ADR-0077 §3 rules its payload, and this ADR is not
+the instrument that changes it.** That section is titled "Which model reads the
+episodes: a named route, no fallback, minimal payload", and its third part is explicit:
+"**The payload is the batch and nothing else.** The prompt carries the episodes'
+canonical `content` … and what the model needs to cite them. It does **not** carry the
+user's existing beliefs, the profile, the context facet, or a plan. Sending beliefs
+would be the obvious way to stop the observer re-proposing what is already known — and
+it is refused, because de-duplication is the gate's job and the gate is deterministic
+and local … Paying for that with a second class of Tier 1 data in the prompt would be
+minimisation (ADR-0004 §7) traded away for something already solved."
 
-> **Normative.** A vocabulary read that fails or is unavailable yields **no
-> vocabulary**, and the run proceeds without one. A `MemoryStoreError` from
-> `MemoryStore.topics` is caught by the stage, the pass continues, and no chunk, ruling
-> or proposal is lost for it — the supply is a hint, and a hint that cannot be fetched
-> is a hint that is absent. This ADR adds no failure mode to consolidation.
-
-**Swallowing that error hides nothing, which is the only reason it is allowed.** The
-run is about to walk the same store through `MemoryStore.walk_records`, so a store
-that cannot answer `topics` will fail the walk and be reported by ADR-0111 §5's own
-rule — "A run halts at the first chunk it cannot record as done" — one operation
-later. What the catch prevents is a run that could have done its work being ended by
-a read that only steers it.
-
-> **Normative.** **No vocabulary is supplied to the `Observer`, and
-> `Observer.observe` is unchanged.** No Protocol member other than
-> `MemoryStore.topics` is added or altered by this ADR, and no belief, label derived
-> from a belief, profile, facet or plan enters an observation prompt on this ADR's
-> authority. `ModelBackedObserver` proposes topics from the batch it was handed and
-> from nothing else.
-
-**The observer is excluded because ADR-0077 §3 rules its payload, and this ADR is
-not the instrument that changes it.** That section is titled "Which model reads the
-episodes: a named route, no fallback, minimal payload", and its third part is
-explicit: "**The payload is the batch and nothing else.** The prompt carries the
-episodes' canonical `content` … and what the model needs to cite them. It does
-**not** carry the user's existing beliefs, the profile, the context facet, or a
-plan. Sending beliefs would be the obvious way to stop the observer
-re-proposing what is already known — and it is refused, because de-duplication is the
-gate's job and the gate is deterministic and local … Paying for that with a second
-class of Tier 1 data in the prompt would be minimisation (ADR-0004 §7) traded away
-for something already solved."
-
-A vocabulary derived from every live belief is exactly that second class of Tier 1
+A vocabulary derived from the user's beliefs is exactly that second class of Tier 1
 data, arriving for exactly the reason ADR-0077 §3 refuses it — to stop the producer
-re-minting what the store already has. The argument transfers without weakening, and it points
-the same way. **Supplying it anyway would be a change to ADR-0077 §3 requiring a
-record under ADR-0070 §1 and ADR-0082 §1, and this ADR makes none** (§16): a reader
-holding only ADR-0077 sends the same payload after this decision as before.
+re-minting what the store already has. The argument transfers without weakening.
+**Supplying it anyway would be a change to ADR-0077 §3 requiring a record under
+ADR-0070 §1 and ADR-0082 §1, and this ADR makes none** (§16): a reader holding only
+ADR-0077 sends the same payload after this decision as before.
 
-**Once per run, and bounded — two separate obligations, because either alone is
-insufficient.** An exact global ordering by usage cannot be computed from one chunk:
-ADR-0111's walk shows each run a slice, so a chunk-local count would rank the labels of
-fifty records as though they were the store's. But moving a *scan* out of the chunk
-would not bound anything either — it would only move the unbounded work to a place
-ADR-0111 §4's clause does not name, and a run that cannot return is a run that starves
-its siblings on the serial loop whichever side of the first chunk boundary the delay
-sits on. So the read is both taken once per run **and** required to be answerable
-without decoding a record: its cost is the store's label count, which is bounded by the
-number of distinct labels the owner's world has, not by how long they have been using
-the assistant. ADR-0201 §3 makes the same distinction for the same reason —
-"Projection is not free … Filtering after the read would pay that read for every
-captured turn in the store and then throw the result away" — and the answer here is
-the same answer: do not make a bounded question walk an unbounded set.
+**Consolidation is a different payload, and the labels it is supplied are drawn from
+the very records already in front of it.** `ConsolidationStage` prompts with a whole
+chunk of stored records — its own composition notes that "a consolidation prompt
+carries a whole chunk of stored records" — so labels of records this run has read are
+the class of data that prompt already carries, from the same records, for the same
+recipient. ADR-0004 §7's minimisation test is met on its own terms rather than waived:
+no new class of data, no new recipient, and at most `DEFAULT_PAGE_SIZE` short strings
+against a chunk of full records.
 
-**What that obliges the store to keep is real work, and §11 owes it rather than
-permitting it.** The sqlite store already maintains derived storage on write for
-exactly this kind of read — `about_person` is a column beside the record's blob, and
-ADR-0100 §8 added it by `ALTER TABLE ... ADD COLUMN` for the filtered read that was
-coming. This read wants the same treatment one level over, and the shape is the lane's:
-a child table with an index, a maintained count, or a column the aggregate can group
-on. What is *not* available is answering it by walking the store, because that is the
-cost this clause exists to refuse.
+**Reading the walk rather than the store is what makes this free, and three rounds of
+review are why it is stated that way.** An earlier draft added a `MemoryStore` read
+returning the store's whole vocabulary, and it could not be made to hold: an
+exact global ordering costs a walk of every record, moving that walk before the first
+chunk relocates the cost without bounding it (ADR-0111 §4), and requiring it to be
+served from write-maintained storage collides head-on with liveness — a record leaves
+the live set when a clock passes its `expires_at` or its `validity` window, with no
+write to maintain anything, so a maintained count and `MemoryStore.get` would disagree
+about what the store holds. The Alternatives record that path and why it was abandoned.
+Reading what the walk already decoded has none of those problems: the records are in
+hand, they were returned by a read that already applied the store's own liveness
+predicate, and the cost is a dictionary update per record.
 
-**The consolidation prompt is a different payload, and that is why the supply lands
-there.** `ConsolidationStage` already prompts with a whole chunk of stored records —
-its own composition notes that "a consolidation prompt carries a whole chunk of
-stored records". Labels derived from stored beliefs are the class of data that
-prompt already carries, bounded to at most `DEFAULT_PAGE_SIZE` strings of at most
-`MAX_TOPIC_LABEL_LENGTH` characters, and strictly less content than the records
-beside them. ADR-0004 §7's minimisation test is met on its own terms rather than
-waived: nothing of a new class reaches a new recipient, the volume added is a few
-hundred bytes against a chunk of full records, and what it buys is the one thing
-this producer exists for — coherence across chunks that no chunk-local view can
-reach, since ADR-0111's walk shows each producer a slice.
+**What it buys, and what it does not.** Within a run, every chunk after the first is
+supplied the labels the earlier chunks carried, so a run converges on itself rather
+than minting a synonym per chunk. Across runs, ADR-0111's cursor walks the whole store,
+so a later run reads records earlier runs labelled and is steered by them. What it does
+**not** buy is a store-wide vocabulary at the first prompt of a run, and it buys the
+observer nothing at all — so an unmerged store will carry `"health"` and `"wellbeing"`
+side by side until consolidation or the owner brings them together. Both residues are
+named in §15 with the instrument that would close each.
 
-**So convergence has one instrument here and two elsewhere, and the ADR says which
-is which.** The canonical form of §3 removes spelling variation at construction.
-The consolidation supply above steers the producer that folds the store toward
-coherence. The owner's merge act (§9) collapses a vocabulary that fragmented anyway.
-What is **not** available is steering the observer, which is the largest belief
-producer in the system — so an unmerged store will carry `"health"` and
-`"wellbeing"` side by side until consolidation or the owner brings them together.
-That residue is named in §15 with the instrument that would close it, which is an
-ADR amending ADR-0077 §3 and arguing the minimisation trade there, where it belongs.
-
-**A hint and not an authority, stated because the opposite reading is available.**
-A producer obliged to choose from the supplied set would file a genuinely new subject
-under the nearest old label, and the first hundred records would fix the vocabulary
-of the store forever. The merge act is the instrument for collapsing a vocabulary
-that fragmented; nothing is the instrument for recovering a distinction that was
-never recorded.
+**A hint and not an authority, stated because the opposite reading is available.** A
+producer obliged to choose from the supplied set would file a genuinely new subject
+under the nearest old label, and the first hundred records would fix the vocabulary of
+the store forever. The merge act of §9 is the instrument for collapsing a vocabulary
+that fragmented; nothing is the instrument for recovering a distinction that was never
+recorded.
 
 ### 6. Every producer's answer, stated by name
 
@@ -740,8 +682,9 @@ preference §9 captures, not a second belief id.
 > rejected-to-corrected mapping — and no implementation may read a preference into it,
 > because the labels it carries are the store's distinct labels and nothing else. What
 > steers the next proposal is the **merge act above**: after it, the abandoned label
-> is in no live record and therefore in no vocabulary **read after it**, and the
-> corrected one is. A run holding an earlier snapshot (§5) keeps it to its end.
+> is on no live record, so no later run reads it and no later prompt is supplied it,
+> and the corrected one takes its place. A run already under way keeps the vocabulary
+> it has accumulated (§5); the correction reaches the next one.
 
 > **Normative.** A merge is an edit of the store and **not a prohibition on a label**.
 > No clause of this ADR forbids any producer from minting an admissible label the owner
@@ -840,15 +783,14 @@ proposal against a target it matches; if two labellings of one belief were two
 questions, they would rarely reach a fold at all, and the union would be a rule
 about a case that does not arise.
 
-### 11. Scope: one field, one contract member, and no `PROTOCOL_VERSION` bump
+### 11. Scope: one `core` file, no Protocol, and no `PROTOCOL_VERSION` bump
 
-> **Normative.** This ADR adds one field to one `core` type, three names to
-> `core/types.py` (`TopicLabel`, `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL`)
-> and one additive member to `core/protocols.py` (`MemoryStore.topics`). It adds no
-> new Protocol, no `Settings` field, no member of the promoted `AssistantEngine`
-> surface, no wire operation, no tool and no `RoutableOperation` member. `Observer`,
-> `MemoryWriter`, `MemoryPolicy`, `ContextProvider`, `ConversationStore`, `Planner`
-> and `Reader` are unchanged in signature and in meaning.
+> **Normative.** This ADR adds one field to one `core` type and three names to
+> `core/types.py` (`TopicLabel`, `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL`),
+> and changes nothing else in `core`. **`core/protocols.py` is untouched**: no new
+> Protocol, no new member on one, no changed signature. It adds no `Settings` field, no
+> member of the promoted `AssistantEngine` surface, no wire operation, no tool and no
+> `RoutableOperation` member.
 
 > **Normative.** `PROTOCOL_VERSION` does not move for this change.
 
@@ -857,13 +799,12 @@ about a case that does not arise.
 > gain no topic argument, and no surface, consumer or later lane may add one without
 > the ADR that decides it.
 
-> **Normative.** This ADR requires exactly the storage `MemoryStore.topics` needs to
-> satisfy §5's no-decode bound — a column, a child table, an index, a maintained count,
-> or whatever the implementation chooses — and the choice of shape is the implementing
-> lane's. It requires no storage for a **filtered record read**, because it adds none;
-> that shape is the consumer lane's, decided in its own ADR alongside the read it
-> serves. A record's own tuple round-trips through whatever the store already persists
-> a record's fields with.
+> **Normative.** This ADR requires **no column, index, migration or derived storage
+> of any kind**, and forbids none. A record's tuple round-trips through whatever the
+> store already persists a record's fields with; §5's vocabulary is accumulated in
+> memory from records already read and is never stored. The storage a **filtered record
+> read** would need is the consumer lane's, decided in its own ADR alongside the read
+> it serves.
 
 > **Normative.** Nothing here authorises egress, relaxes a permission floor, widens
 > a grant, or is cited toward a designation, a registration or a destination.
@@ -882,22 +823,16 @@ ADR-0204 §7 applied to `Provenance` and reached the same answer, and it is what
 distinguishes both from ADR-0181 §3's field, which was required with no default on a
 model that sets `extra="forbid"`.
 
-**The new contract member is not on the wire.** `MemoryStore` is an in-process
-seam the composition root wires; no client calls it, and the vocabulary never leaves
-the hub except inside the consolidation prompt §5 bounds.
-
-**Two storage questions, and only one of them is answered here.** ADR-0100 §8 gave
+**No storage, because nothing reads the field from the store.** ADR-0100 §8 gave
 `about_person` a nullable column because a filtered read was that axis's first
-consumer, and the same reasoning splits this one in two. The read this ADR *adds* —
-`MemoryStore.topics` — is owed storage now, because §5's bound is unmeetable without
-it and a contract nothing can satisfy cheaply is a contract that will be satisfied
-expensively. The read this ADR *does not* add — a record listing filtered by label —
-is owed nothing, because fixing its shape before the read that uses it exists is how
-a schema gets chosen for the wrong query. §15's deferral is that second question and
-only that one. ADR-0201 §3's reasoning is what that lane will owe — "the
-exclusion is expressed as the `kinds` argument of the `MemoryStore.list_beliefs` read
-behind the lookup, so it is applied by the store before the page cut" — and it cannot
-be discharged by a decision taken before the read exists.
+consumer. Here there is no such read: §5's vocabulary is built from records the walk
+already decoded, and every record-filtering consumer is deferred. Fixing a schema
+before the read that has to use it exists is how a schema gets chosen for the wrong
+query, and the lane that adds the read is the one that will know whether it wants a
+column, a child table or an index. ADR-0201 §3's reasoning is what that lane will owe
+— "the exclusion is expressed as the `kinds` argument of the `MemoryStore.list_beliefs`
+read behind the lookup, so it is applied by the store before the page cut" — and it
+cannot be discharged by a decision taken before the read exists.
 
 ### 12. The representative-input tests this decision owes
 
@@ -931,31 +866,30 @@ layout. Each names an input and the outcome it fixes.
    number of entries the model emitted.
 7. **A provider failure yields no topics and no record.** The observation pass
    raises and writes nothing, rather than writing unlabelled beliefs.
-8. **The vocabulary is ordered and bounded.** With three labels on five records,
-   `MemoryStore.topics` returns them commonest first, ties broken by label ascending,
-   and a `limit` below the distinct count returns exactly `limit` of them from the
-   head of that order.
-9. **`MemoryStore.topics` refuses a limit outside its domain.** `0`, `-1`, `2**63`,
-   `True` and `1.0` each raise, in the `MemoryStore` conformance suite so every
-   implementation refuses alike; `1` and `2**63 - 1` are accepted.
-10. **The consolidation prompt carries the vocabulary and the observation prompt does
-    not.** A consolidation run over a store holding labels puts them in its prompt;
-    an observation pass over the same store sends the batch and nothing derived from a
-    belief, which is the assertion that keeps ADR-0077 §3 true.
-11. **The vocabulary is read once per run.** A consolidation run that commits three
-    chunks calls `MemoryStore.topics` exactly once, and every chunk's prompt carries
-    the same labels.
-12. **A failing vocabulary read does not fail the run.** A store whose `topics` raises
-    `MemoryStoreError` yields a run that commits its chunks with no vocabulary in the
-    prompt, and a report indistinguishable in its rulings from a run over a store with
-    no labels.
-13. **A change committed mid-run reaches the next run.** A label removed from the
-    store after a run's first chunk still appears in that run's remaining prompts, and
-    is absent from the next run's first prompt — the snapshot stated rather than an
-    invalidation nobody implemented.
-14. **`topics` decodes no record.** In the sqlite store's own tests, answering
-    `topics` over a store of many records issues no read of the column a record's
-    fields are serialised into, which is the observable form of §5's bound.
+8. **The vocabulary is accumulated across a run's chunks.** A consolidation run whose
+   first chunk carries records labelled `("health",)` sends no vocabulary in that
+   chunk's prompt and sends `["health"]` in the next chunk's.
+9. **The vocabulary is ordered and bounded.** With three labels across the records a
+   run has read, they are supplied commonest first, ties broken by label ascending; a
+   run that has read more than `DEFAULT_PAGE_SIZE` distinct labels supplies exactly
+   `DEFAULT_PAGE_SIZE` of them from the head of that order.
+10. **The vocabulary counts only what this run read.** Two consecutive runs over
+    disjoint chunks supply disjoint vocabularies; the second run's first prompt carries
+    nothing, whatever the first run read.
+11. **Nothing durable records it.** A run leaves the store byte-identical to a run of
+    the same chunks with the field absent, apart from the records it wrote: no new
+    table, column, row or cursor, and a second process reading the store concurrently
+    sees no vocabulary state.
+12. **The consolidation prompt carries the vocabulary and the observation prompt does
+    not.** An observation pass over a store full of labels sends the batch and nothing
+    derived from a belief, which is the assertion that keeps ADR-0077 §3 true.
+13. **A record that leaves the live set leaves the vocabulary with it.** A run reads
+    only what the store returns, so a record whose `validity` window has closed or
+    whose `expires_at` has passed contributes no label — asserted by driving the walk
+    over such a store rather than by a rule about a cache, because there is no cache.
+14. **A supplied label is a hint and not a constraint.** A producer that proposes a
+    label the vocabulary did not offer has its proposal accepted unchanged, and one
+    that proposes nothing is not made to.
 15. **The fold takes the union, on both arms.** A target carrying `("health",)`
     reinforced by an incoming record carrying `("sleep",)` survives with
     `("health", "sleep")`. The direction that must be exercised is the one an
@@ -987,32 +921,27 @@ rule 5). It owes:
 1. **The three names and the field** in `core/types.py`, documented in place with
    what a value means and what an empty tuple means, and the canonical fakes and
    record builders in `ai_assistant.testing` extended to carry them.
-2. **The one contract member** in `core/protocols.py` — `MemoryStore.topics` — with
-   the `MemoryStore` conformance suite pinning the field's round-trip, `topics`'
-   ordering and bound, and its refusal of a limit outside its domain, and every
-   implementation and canonical fake in `ai_assistant.testing` moving together. **No
-   new Protocol is added, so no new triad is owed** (`CONTRIBUTING.md` → "Adding a
-   Protocol"). `Observer` is untouched.
+2. **The `MemoryStore` conformance suite** pinning the field's round-trip, so every
+   implementation persists and returns it rather than silently dropping it. **No
+   Protocol changes and no new Protocol is added, so no triad is owed**
+   (`CONTRIBUTING.md` → "Adding a Protocol"); `core/protocols.py` is not edited.
 3. **The producer half**: the topics entry in `ModelBackedObserver`'s envelope and in
    `ConsolidationStage`'s, ignored rather than counted where it cannot be used (§4),
    with the canonical form applied by the producer before construction.
-4. **The vocabulary read** in `ConsolidationStage` alone, taken once before the chunk
-   walk and reused across chunks, with its `MemoryStoreError` caught (§5).
-5. **The storage `MemoryStore.topics` is answered from**, maintained as records are
-   written so the read decodes none, with the sqlite migration that adds it on
-   ADR-0100 §8's own pattern — additive, applied on open, and leaving existing rows
-   correct without a backfill, since a record written before the field carries no
-   labels to index.
-6. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
+4. **The run-scoped accumulation** in `ConsolidationStage` alone: an in-memory count
+   over the labels of records the run has read, bounded and ordered as §5 states, reset
+   per run, and threaded into the prompt the stage already builds. No store read, no
+   migration and no durable state.
+5. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
    computations that already take a disjunction there.
-7. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
+6. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
    projection.
-8. **The twenty-two tests of §12.**
+7. **The twenty-two tests of §12.**
 
 > **Normative.** The owner's acts of §9 are **not** in the implementing lane above.
 > They need a surface, the surface is a promoted-surface change, and it is therefore
 > its own ADR and its own lane (golden rule 5, ADR-0015 §5). A lane implementing the
-> eight items above and adding an owner-facing relabel or merge operation has exceeded
+> seven items above and adding an owner-facing relabel or merge operation has exceeded
 > this decision.
 
 ### 14. What a topic is not
@@ -1111,11 +1040,16 @@ noticing it was a decision.
   is dropped and a recorded count of the loss. §1 above says why neither is available
   for this field today, so a lane taking this on owes an answer to both rather than a
   `max_length`.
-- **The storage a filtered record read needs.** §11 owes storage for
-  `MemoryStore.topics` now and owes none for a record listing selected by label, which
-  no read in this ADR performs. **Fires** with the lane that adds that read, which is
-  the lane that knows whether it wants a column, a child table or an index — and which
-  is free to reuse whatever §11's storage turned out to be.
+- **A store-wide vocabulary read.** §5 supplies a producer the labels of the records
+  its own run walked, and nothing wider, because a `MemoryStore` read returning the
+  store's whole vocabulary could not be made both cheap and honest about liveness (§5,
+  and the Alternatives). **Fires** with a measured store in which the run-scoped
+  vocabulary demonstrably fails to converge, and it owes what this ADR could not
+  supply: a bound that survives a store of millions of labels, and a liveness rule that
+  cannot disagree with `MemoryStore.get`.
+- **The storage a filtered record read needs.** §11 requires none, because no read here
+  filters records by label. **Fires** with the lane that adds that read, which is the
+  lane that knows whether it wants a column, a child table or an index.
 
 ### 16. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1192,9 +1126,9 @@ that unacceptable has one honest remedy — giving a provider-free producer a ro
 label, which is §15's owner-stated topic — and one dishonest one, inferring the label
 at read, which §4 forbids.
 
-**What this costs at run time.** One store read per consolidation *run* and a
-slightly longer prompt per consolidation chunk, and a few more tokens in each
-producer's response. The
+**What this costs at run time.** A dictionary update per record a consolidation run
+reads, a slightly longer prompt per consolidation chunk after the first, and a few more
+tokens in each producer's response. No store read is added and no schema changes. The
 observation prompt does not grow at all. No new call, no new provider dependency, no
 new failure mode on any path that had none: the three producers that hold no provider
 are untouched, and the two that do already end their pass on a `ModelError`.
@@ -1246,6 +1180,22 @@ against the same shape: the empty tuple already is the unrecorded state, and a t
 state would oblige every consumer to hold a rule about data no producer will ever
 write.
 
+**A `MemoryStore` read returning the store's whole vocabulary.** Three rounds of
+review were spent on this and it does not hold, so it is recorded rather than quietly
+dropped. Its promise was the distinct labels of every live record, ordered by usage.
+Ordering by usage costs a walk of the store; moving that walk before the first chunk
+relocates the cost without bounding it, which is ADR-0111 §4's concern wherever the
+delay sits on a serial loop; and the only way to bound it — answering from storage
+maintained as records are written — contradicts liveness, because a record leaves the
+live set when a clock passes its `expires_at` or its `validity` window with no write to
+maintain anything, so the maintained answer and `MemoryStore.get` would disagree about
+what the store holds. A derived table would additionally have to join every write path,
+`write_atomic`'s rollback included, to avoid a failed batch leaving the index ahead of
+the records. Each of those is soluble; together they are a storage subsystem bought for
+a prompt hint. §5 takes the labels the walk already decoded instead, which is exact
+about liveness by construction, costs a dictionary update, and needs no contract at
+all. §15 names what a later ADR would have to supply to take the wider read.
+
 **Supplying the vocabulary to the observer as well.** This was the first draft, and
 it read well until ADR-0077 §3 was quoted rather than remembered: "The payload is the
 batch and nothing else … Sending beliefs would be the obvious way to stop the observer
@@ -1257,12 +1207,11 @@ its own argument rather than a paragraph here. It is deferred in §15 with the
 instrument that may take it. What is *not* an alternative is taking the payload
 quietly and leaving §16 saying nothing changed.
 
-**Dropping the vocabulary supply altogether.** The smaller ADR still, and it was
-rejected for the opposite reason: the supply is free on the consolidation prompt,
-which already carries a whole chunk of stored records, and it is the only instrument
-this decision has for pulling a fragmented vocabulary back together without the owner
-doing it by hand. Declining it would leave §9's merge act as the sole remedy and make
-the axis's usefulness a function of how often the owner tidies it.
+**Dropping the vocabulary supply altogether.** The smallest ADR of all, and it was
+rejected because the supply is genuinely free in the form §5 takes: the records are
+already decoded, the prompt already carries them, and the accumulation is a dictionary.
+Declining it would leave §9's merge act as the sole convergence instrument and make the
+axis's usefulness a function of how often the owner tidies it.
 
 **Putting the field on `Provenance`.** Rejected in §2 on ADR-0100 §2's own test.
 The tell is that it would sit beside `derived_from_external` and
