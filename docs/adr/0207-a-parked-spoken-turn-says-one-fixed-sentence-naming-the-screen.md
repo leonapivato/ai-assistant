@@ -481,8 +481,11 @@ ADR-0203 moved.
 > to speak it. No other component declares it, holds a second copy of it, persists
 > it, displays it, substitutes another for it, or decides when it is spoken: no
 > adapter under `interfaces/`, no client under `wire/`, no page, no `Settings`
-> field and no later spoke. A surface that cannot play audio shows the card, which
-> is what it shows today.
+> field and no later spoke. A surface that cannot play audio is given no substitute
+> for the sentence: what it holds is the card, exactly as it holds one today. That
+> is a description of the state this decision leaves such a surface in and not an
+> obligation on it — the ordering clause above governs, and this ADR adds no
+> rendering obligation to any client.
 
 > **Normative.** That ownership rule bounds **authorship and selection**, and three
 > things it does not reach are named so the contract is satisfiable. **(a) The
