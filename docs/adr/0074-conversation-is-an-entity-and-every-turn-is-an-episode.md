@@ -198,10 +198,14 @@
   and — where the turn parked — the execution and step ids of the binding it parked
   on …)" gains one member, `delivery`, a `SpokenDelivery | None` defaulting to
   `None`. And the list of what `ConversationStore` owes gains one operation — stamp
-  the conversation's most recent turn with a delivery, the store resolving which
-  turn that is — while `append` gains one keyword-only argument carrying the value
-  written at capture. A reader holding only this ADR builds a turn row with no place
-  to put the fact and a store with no way to move it, which is ADR-0070 §1's test.
+  the turn a given `episode_id` names, provided that turn belongs to the
+  conversation the caller named, and answer with nothing where the conversation
+  carries no turn under that id — while `append` gains one keyword-only argument
+  carrying the value written at capture. A report names its own turn rather than
+  being resolved from position, so a report that arrives after a later turn has been
+  captured is applied to the turn it names and never to that later one. A reader
+  holding only this ADR builds a turn row with no place to put the fact and a store
+  with no way to move it, which is ADR-0070 §1's test.
 
   **Not replaced — everything §9 decides about why the store exists and what it
   holds.** The index still holds no content: a turn's content is still exactly one
@@ -209,7 +213,9 @@
   state about the turn rather than any part of the exchange. The store still mints
   the id, allocates the ordinal and derives the episode id with no caller supplying
   any of the three — `record_delivery` follows that posture rather than bending it,
-  taking no ordinal. The intent-log ordering, the two-store coordinator, the
+  taking no ordinal and re-deriving no relation: the store already owes both
+  directions of the episode-to-turn relation (§9), which is what resolves a report's
+  `episode_id`. The intent-log ordering, the two-store coordinator, the
   unresolvable-`episode_id` gap, and every other obligation on the list stand as
   they stood.
 
