@@ -1,6 +1,6 @@
 # 207. A parked spoken turn says one fixed sentence naming the screen, and nothing else fills the silence
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0200](0200-a-spoken-turn-is-one-operation-on-the-promoted-surface-and-speech-is-two-seams-beside-the-model-provider.md)
