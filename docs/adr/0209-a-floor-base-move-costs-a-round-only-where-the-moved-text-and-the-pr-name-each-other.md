@@ -538,7 +538,11 @@ as qualified, as ADR-0027 left it.
 > **Normative.** Those tests include at least the following cases, each
 > asserting what is named for it.
 >
-> - A base move merging an ADR the PR names by number (owed).
+> - A base move merging an ADR the PR names by number in its diff (owed).
+> - The same move where the only such reference is in a PR description that was
+>   retrieved successfully, the diff carrying none (owed — §5 admits the
+>   description into the PR's text, and this is the path a diff-only reading
+>   clears).
 > - The same move with no such reference anywhere in the PR's text (free).
 > - A moved ADR naming a path the PR's diff touches (owed).
 > - A moved ADR naming a symbol the PR's diff adds (owed).
