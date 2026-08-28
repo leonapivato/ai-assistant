@@ -5960,11 +5960,12 @@ def test_a_report_for_one_conversation_survives_a_playback_in_another() -> None:
 
     writing = functions["reportDelivery"]
     assert "pendingDeliveries.set(mine.conversation" in writing
-    assert "pendingDeliveries.delete(mine.conversation)" in writing, (
-        "re-inserted so the freshest report is not the first evicted"
-    )
-    assert "PENDING_DELIVERY_LIMIT" in writing, "the store is bounded"
-    assert "pendingDeliveries.keys().next().value" in writing, "and the oldest goes first"
+    # And nothing is evicted. Both lenses, round 3, `blocker`, on a bound this page had
+    # put here of its own accord: ADR-0205 §7 admits exactly one case for reporting
+    # nothing — "where it holds no such pair" — and an eviction manufactures a second,
+    # losing a report the page had genuinely measured.
+    assert "PENDING_DELIVERY_LIMIT" not in script
+    assert "keys().next().value" not in writing, "nothing is evicted"
 
     taking = functions["takeDelivery"]
     assert "pendingDeliveries.delete(conversation)" in taking

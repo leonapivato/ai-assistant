@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import socket
+from base64 import b64encode
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,13 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     SpendUndeterminedError,
     UnresolvedEvidenceError,
+)
+from ai_assistant.core.types import (
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenDelivery,
+    SpokenDeliveryReport,
+    SpokenDeliveryState,
 )
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import ENVELOPE_RESERVE_BYTES, HubEngineClient, serve_connection
@@ -108,6 +116,67 @@ async def test_a_closed_door_is_never_a_fallback(tmp_path: Path) -> None:
         await client.pending_confirmations()
     with pytest.raises(HubUnavailableError):
         await client.forget("rec-1")
+    assert not (tmp_path / "hub.sock").exists()
+
+
+async def test_an_unusable_delivery_report_never_reaches_a_socket(tmp_path: Path) -> None:
+    """ADR-0205 §1, §2: both refusals are local, "before any I/O".
+
+    Adversarial review, round 3, ``blocker``. The client hand-implements the promoted
+    surface, so a value the engine refuses locally must be refused here too — and on
+    *this* method the cost of deferring it is not a wasted round trip but a
+    **recording** crossing the network for a call the hub is bound to refuse.
+
+    **The socket does not exist**, which is what makes this an assertion about I/O
+    rather than about a message: any attempt to connect raises
+    :class:`~ai_assistant.wire.errors.HubUnavailableError`, so a ``ValueError``
+    arriving instead proves nothing was sent. The third case is the control — a
+    well-formed report is *not* refused here, and reaches for the socket that is not
+    there.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+    recording = SpokenAudio(
+        content=b64encode(b"an utterance").decode("ascii"), media_type=SpokenAudioFormat.MP4
+    )
+    plays = (SpokenAudioFormat.MP4,)
+    interrupted = SpokenDelivery(
+        state=SpokenDeliveryState.INTERRUPTED,
+        played=timedelta(seconds=3),
+        rendered=timedelta(seconds=9),
+    )
+
+    # §1: a report beside no conversation names a turn that cannot exist.
+    with pytest.raises(ValueError, match="fresh conversation"):
+        await client.converse_spoken(
+            recording,
+            plays=plays,
+            timeout=_PATIENT,
+            delivery=SpokenDeliveryReport(episode_id="conv:c-1:1", delivery=interrupted),
+        )
+
+    # §2: UNKNOWN is what the hub writes, never what a caller supplies.
+    with pytest.raises(ValueError, match="reports nothing"):
+        await client.converse_spoken(
+            recording,
+            plays=plays,
+            timeout=_PATIENT,
+            conversation_id="c-1",
+            delivery=SpokenDeliveryReport(
+                episode_id="conv:c-1:1",
+                delivery=SpokenDelivery(state=SpokenDeliveryState.UNKNOWN),
+            ),
+        )
+
+    # The control: a usable report is not refused here, and looks for the hub.
+    with pytest.raises(HubUnavailableError):
+        await client.converse_spoken(
+            recording,
+            plays=plays,
+            timeout=_PATIENT,
+            conversation_id="c-1",
+            delivery=SpokenDeliveryReport(episode_id="conv:c-1:1", delivery=interrupted),
+        )
+
     assert not (tmp_path / "hub.sock").exists()
 
 
