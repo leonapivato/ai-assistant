@@ -284,11 +284,13 @@ mention that is not a definition tells a PR nothing it could act on.
 > extension removed.
 
 > **Normative.** The PR description is admitted to the PR's text so that it can
-> add a binding, never so that it can remove one. A lane that deletes from its
-> description a citation which would bind a test owes that round whatever the
-> acceptance rule then computes over the description it left behind. The
-> acceptance rule cannot detect this and §6 does not reach it; the obligation is
-> the lane's, and the review and the coordinator are what read it.
+> add a binding, never so that it can remove one. Where a review artifact has
+> been recorded for this PR, a lane that then removes from its description,
+> before the acceptance rule next runs, a citation which would have bound a test
+> against the base move being published owes that round — whatever the
+> acceptance rule computes over the description the lane leaves behind. An edit
+> made before any artifact was recorded is outside this clause, and so is one
+> that removes a citation binding no test.
 
 **Each input is its own clause, because each moves separately.** ADR-0089 §2 is
 explicit that a passage stating two separable obligations is two clauses, and
@@ -363,7 +365,20 @@ between the recorded review and `ship` is simply the description the test reads
 — and a lane could edit out a citation that a base move has since made binding.
 The clause above is the answer this ADR gives, and it is an obligation on the
 lane rather than a computation: under ADR-0089 §3 the paragraph alone would have
-obligated nothing at all. Binding the description *mechanically* to the recorded
+obligated nothing at all.
+
+**The window and the exceptions are inside the clause, because they have to be.**
+ADR-0089 §3 requires a marked clause to state its own scope, and an unbounded
+reading of this one would charge a lane for tidying a draft description months
+before any review existed. So the clause opens only once an artifact has been
+recorded and closes when the acceptance rule next runs, and it exempts both the
+pre-artifact edit and the removal of a citation that bound nothing. What follows
+is a lane's obligation and **not** a claim that the acceptance rule got the
+answer wrong: the rule reads the description in front of it and is right to, the
+removal is not observable to it, and §6 does not reach it because nothing failed
+to be read. A PR can therefore be cleared by the rule and still owe the round
+under this clause — which is the ordinary shape of a conduct rule, not a
+contradiction, and it is why the obligation names the lane rather than `ship`. Binding the description *mechanically* to the recorded
 artifact — snapshotting the retrieved body and refusing a cleared floor when it
 has changed — is the stronger answer and is deliberately not taken here: it
 would put a second input into every review artifact, which is a change to what
