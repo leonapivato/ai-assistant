@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     TurnResult,
     Warrant,
     encodable_text,
+    is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
 )
@@ -115,6 +116,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
+from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
@@ -576,10 +578,21 @@ class FakeAssistantEngine:
         does for :meth:`converse`.
 
         The rendering is the first member of ``plays`` that :attr:`spoken_formats`
-        also names, and its octets are a hash of the answer — deterministic,
+        also names, and its octets are a hash of what was said — deterministic,
         opaque, and not to be decoded by anything. An empty intersection degrades
         exactly as ADR-0200 §4 rules: ``spoken`` ``None``, ``spoken_degraded``
         ``True``, and no rendering attempted.
+
+        **A scripted turn that parks says ADR-0207 §2's sentence** rather than
+        falling silent, on both of §1's shapes — a ``turn_outcome`` whose step reached
+        ``AWAITING_CONFIRMATION`` and one whose routed operation did — by the same rule
+        and under the same ladder as an answer, so this double satisfies the widened
+        validator rather than being exempted from it. The sentence is the
+        ``orchestration`` constant itself, imported and never re-declared (ADR-0207
+        §5): a copied literal here would be exactly the drift golden rule 1 exists to
+        prevent, arriving through the package whose job is to make the contract
+        testable. Every other ``reply``-less outcome — a composition failure, a
+        recovered resume — is silent as before (§3).
 
         Args:
             utterance: The recording. Carried no further than this call — nothing
@@ -653,7 +666,14 @@ class FakeAssistantEngine:
         # the park and the degraded synthesis included, so the id is minted before
         # the rendering is decided and reaches every shape below that recorded one.
         episode = self._spoken_episode(held)
-        if outcome.reply is None:
+        # ADR-0207 §1: a live confirmation park speaks §2's sentence rather than
+        # falling silent, and the constant is **named** rather than copied (§5's
+        # third arm), so this double cannot drift from the engine it stands in for.
+        # Every other `reply`-less shape keeps ADR-0200 §4's silence (§3).
+        text = outcome.reply
+        if text is None and is_live_confirmation_park(outcome):
+            text = SPOKEN_PARK_SENTENCE
+        if text is None:
             return self._checked(
                 SpokenTurn(heard=heard, outcome=outcome, episode_id=episode), "converse_spoken"
             )
@@ -662,7 +682,7 @@ class FakeAssistantEngine:
                 SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True, episode_id=episode),
                 "converse_spoken",
             )
-        rendering = SpokenAudio(content=_pseudo_audio(outcome.reply, chosen), media_type=chosen)
+        rendering = SpokenAudio(content=_pseudo_audio(text, chosen), media_type=chosen)
         return self._checked(
             SpokenTurn(heard=heard, outcome=outcome, spoken=rendering, episode_id=episode),
             "converse_spoken",

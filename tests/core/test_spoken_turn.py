@@ -16,7 +16,7 @@ from __future__ import annotations
 import inspect
 from base64 import b64encode
 from datetime import UTC, datetime
-from typing import Final, get_type_hints
+from typing import TYPE_CHECKING, Final, get_type_hints
 
 import pytest
 from pydantic import ValidationError
@@ -32,18 +32,33 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import (
     ActionPlan,
+    Belief,
+    BeliefBand,
+    Confirmation,
+    ContinuationToken,
     CurrentContext,
+    Disposition,
+    ExecutionState,
     Goal,
+    MemoryKind,
     MemorySource,
+    OperationConfirmation,
     Provenance,
+    RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenTurn,
+    StepOutcome,
     TimeOfDay,
     TurnOutcome,
     TurnResult,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _AUDIO: Final = SpokenAudio(
     content=b64encode(b"not really audio").decode("ascii"),
@@ -80,8 +95,72 @@ def _outcome_with_a_reply() -> TurnOutcome:
 
 
 def _outcome_with_no_reply() -> TurnOutcome:
-    """A park's shape: an answered call that has nothing to say (ADR-0170 §4)."""
+    """A ``reply``-less outcome that is **not** a park (ADR-0170 §4, ADR-0207 §1).
+
+    A recovered resume: no turn, no step, no route, nothing composed. ADR-0207 §3
+    keeps ADR-0200 §4's silence over this shape and over a composition failure word
+    for word, so it is the subject of the two refusals the widened validator still
+    makes — and it is deliberately *not* a park, which is what makes those two cases
+    about the arm rather than about the widening.
+    """
     return TurnOutcome(turn=None, step=None, conversation_id="c-1", reply=None)
+
+
+def _state() -> ExecutionState:
+    """One durable execution state, with no step to speak of."""
+    return ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=_AT)
+
+
+def _step_park() -> TurnOutcome:
+    """ADR-0207 §1's first shape: the permission gate parked the step (ADR-0037 §4)."""
+    return TurnOutcome(
+        turn=_turn(),
+        step=StepOutcome(
+            disposition=Disposition.AWAITING_CONFIRMATION,
+            state=_state(),
+            step_id="s-1",
+            confirmation=Confirmation(
+                tool_id="t-1",
+                tool_description="send",
+                parameters={},
+                reason="an off-device disclosure",
+                token=ContinuationToken(handle="h-1"),
+                egress=None,
+            ),
+        ),
+        conversation_id="c-1",
+    )
+
+
+def _routed_park() -> TurnOutcome:
+    """ADR-0207 §1's second shape: the routing stage parked a confirm-owed route.
+
+    Reached by a different stage and carrying a different card, and §1 rules the two
+    together because they are one event to the person who asked: a confirmation was
+    minted, nothing was composed, and the owner heard nothing.
+    """
+    return TurnOutcome(
+        turn=None,
+        conversation_id="c-1",
+        routed=RoutedOperation(
+            operation=RoutableOperation.FORGET,
+            outcome=RouteOutcome.AWAITING_CONFIRMATION,
+            confirmation=OperationConfirmation(
+                operation=RoutableOperation.FORGET,
+                subject=(
+                    Belief(
+                        id="rec-1",
+                        band=BeliefBand.ASSERTED,
+                        kind=MemoryKind.SEMANTIC,
+                        content="the user likes jazz",
+                        confidence=1.0,
+                        last_updated=_AT,
+                    ),
+                ),
+                token=ContinuationToken(handle="h-2"),
+            ),
+        ),
+    )
 
 
 # --- §4: the four members and the shapes between them ------------------------
@@ -186,18 +265,80 @@ def test_a_rendering_beside_a_degradation_is_refused() -> None:
         )
 
 
-def test_a_rendering_with_no_answer_to_render_is_refused() -> None:
-    # §4: "`spoken` is `None` wherever `outcome.reply` is `None`" — a park, a
-    # recovered resume, and a composition failure each leave nothing to say, and
-    # nothing is invented to fill the silence.
-    with pytest.raises(ValidationError, match="rendering of the outcome"):
+def test_a_rendering_with_no_answer_and_no_park_is_refused() -> None:
+    # ADR-0207 §6 widens the admissibility test and does not delete it: a rendering
+    # beside a `reply`-less outcome that is **not** a park — a recovered resume or a
+    # composition failure — is refused exactly as ADR-0200 §4 refused it, because
+    # those two keep §4's silence in full (§3). The cheap implementation of §1 drops
+    # this check, and it would readmit "audio of something this type does not hold".
+    with pytest.raises(ValidationError, match="neither to render"):
         SpokenTurn(heard="what did I do", outcome=_outcome_with_no_reply(), spoken=_AUDIO)
 
 
-def test_a_degradation_with_no_answer_is_refused() -> None:
-    # The same shape's other half: "On those shapes `spoken_degraded` is `False`."
-    with pytest.raises(ValidationError, match="no answer"):
+def test_a_degradation_with_no_answer_and_no_park_is_refused() -> None:
+    # The same shape's other half, likewise narrowed to the non-park shapes: with
+    # nothing to say there is nothing whose speaking could have failed.
+    with pytest.raises(ValidationError, match="neither an answer nor a park"):
         SpokenTurn(heard="what did I do", outcome=_outcome_with_no_reply(), spoken_degraded=True)
+
+
+# --- ADR-0207 §6: the park's shapes, admitted and required -------------------
+
+
+@pytest.mark.parametrize("parked", [_step_park, _routed_park], ids=["step", "routed"])
+def test_a_live_confirmation_park_may_carry_its_rendering(
+    parked: Callable[[], TurnOutcome],
+) -> None:
+    """§6, row (e): the widening, over **both** of §1's shapes.
+
+    §1 defines a live confirmation park as exactly two shapes, and every clause of
+    ADR-0207 ranges over that definition rather than over one member of it — a suite
+    that exercised only the step park would certify half of §1 and leave untested the
+    routed operations ``track:voice`` exists to make reachable by voice.
+    """
+    outcome = parked()
+    assert outcome.reply is None, "a park composes no answer (ADR-0207 §3)"
+    turn = SpokenTurn(heard="what did I do", outcome=outcome, spoken=_AUDIO)
+
+    assert turn.spoken is _AUDIO
+    assert turn.spoken_degraded is False
+
+
+@pytest.mark.parametrize("parked", [_step_park, _routed_park], ids=["step", "routed"])
+def test_a_park_whose_sentence_could_not_be_spoken_is_admitted(
+    parked: Callable[[], TurnOutcome],
+) -> None:
+    """§4: ``spoken`` ``None`` with ``spoken_degraded`` ``True`` beside a ``reply``-less
+    outcome — "a shape ADR-0200 §4 pinned to ``False`` and this ADR admits"."""
+    turn = SpokenTurn(heard="what did I do", outcome=parked(), spoken_degraded=True)
+
+    assert turn.spoken is None
+    assert turn.spoken_degraded is True
+
+
+@pytest.mark.parametrize("parked", [_step_park, _routed_park], ids=["step", "routed"])
+def test_a_silent_park_is_refused_at_construction(parked: Callable[[], TurnOutcome]) -> None:
+    """§6's third arm, row (g): the shape #1699 measured is one the type does not admit.
+
+    Widening admissibility alone would leave the silent park a legal value — and a
+    regression that skipped the park branch would construct it, project it and cross
+    the wire as an ordinary result, with only a test of the engine to catch it. Pinned
+    over **both** shapes, because an arm that refused the silent step park while
+    admitting the silent routed one would pass a singular test while letting #1699's
+    silence cross on exactly the routed operations §1 was widened to reach.
+    """
+    with pytest.raises(ValidationError, match="one fixed sentence"):
+        SpokenTurn(heard="what did I do", outcome=parked())
+
+
+def test_the_no_words_shape_is_not_caught_by_the_parks_arm() -> None:
+    """The third arm reads ``outcome``, so a call with none is untouched by it.
+
+    ADR-0200 §4's no-words shape has no outcome, is not a park, and is still the
+    type's own default — which is what stops §6's third arm from turning "nothing was
+    asked" into a refusal.
+    """
+    assert SpokenTurn().spoken_degraded is False
 
 
 def test_a_blank_transcript_cannot_be_carried_as_a_transcript() -> None:

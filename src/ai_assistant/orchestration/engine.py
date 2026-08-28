@@ -140,6 +140,7 @@ from ai_assistant.core.types import (
     TraceOutcome,
     TurnOutcome,
     band_of,
+    is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
 )
@@ -178,6 +179,7 @@ from ai_assistant.orchestration.routing import (
 )
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
+    SPOKEN_PARK_SENTENCE,
     classify_speech_failure,
     synthesize_within,
     transcribe_within,
@@ -1460,6 +1462,41 @@ class _SpokenCapture:
         default_factory=lambda: SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
     )
     episode_id: str | None = None
+
+
+def _spoken_text(outcome: TurnOutcome) -> str | None:
+    """What this pass says aloud, or ``None`` where it says nothing (ADR-0207 §1).
+
+    **Three answers, and the middle one is this ADR's whole addition.** A pass that
+    composed an answer speaks that answer and nothing else, byte for byte, as it
+    always has (ADR-0200 §4). A pass that reached a **live confirmation park** speaks
+    :data:`~ai_assistant.orchestration.speech.SPOKEN_PARK_SENTENCE` — the constant
+    ADR-0207 §2 fixes, on both of §1's shapes: a step the permission gate parked and
+    a confirm-owed route the routing stage parked. Everything else is silent: a
+    composition failure and a resume recovered from durable state each keep ADR-0200
+    §4's silence in full, and nothing is invented to fill it (ADR-0207 §3).
+
+    **The park is read from two recorded enum members and from nothing else**
+    (:func:`~ai_assistant.core.types.is_live_confirmation_park`), so no confirmation,
+    tool declaration, policy reason, resolved subject or part of the transcript is
+    inspected to reach this answer, and none can reach the synthesizer through it:
+    what this returns on a park is a constant.
+
+    **It answers with the text rather than with the decision**, which is what keeps
+    the rendering stage unable to see the park at all — the stage is handed a string
+    and renders it, exactly as it renders an answer.
+
+    Args:
+        outcome: The turn this pass produced.
+
+    Returns:
+        The answer, ADR-0207 §2's sentence, or ``None``.
+    """
+    if outcome.reply is not None:
+        return outcome.reply
+    if is_live_confirmation_park(outcome):
+        return SPOKEN_PARK_SENTENCE
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3151,6 +3188,16 @@ class Engine:
         episode is captured, no conversation is created, and the result is four
         members saying so.
 
+        **A turn that parks on a confirmation is spoken, not silent** (ADR-0207 §1).
+        On both of §1's shapes — a step the permission gate parked and a confirm-owed
+        route the routing stage parked — no answer is composed and ``outcome.reply``
+        stays ``None``, and what is rendered is the one fixed sentence §2 fixes,
+        synthesised by this same stage under the same bounds and the same degradation
+        ladder as an answer. Silence on a push-to-talk surface is indistinguishable
+        from a hub that is down (#1699). The park itself is unchanged: the same
+        confirmation is minted and carried on the same result, and the order in which
+        a caller presents the card and the audio is the caller's own.
+
         Args:
             utterance: The recording.
             plays: What the caller can render, in **preference order**. Required,
@@ -3167,8 +3214,9 @@ class Engine:
                 id, or where that turn is already stamped.
 
         Returns:
-            The transcript, the turn it drove, the rendering of its answer, whether
-            speaking that answer degraded, and the id of the episode recording it.
+            The transcript, the turn it drove, the rendering of its answer — or of
+            ADR-0207 §2's sentence where the turn parked — whether speaking it
+            degraded, and the id of the episode recording the turn.
 
         Raises:
             RuntimeError: If the engine is shutting down, exactly as
@@ -3451,7 +3499,7 @@ class Engine:
         # tries."
         self._checked(outcome, "converse_spoken")
         spoken, degraded = await self._spoken_rendering(
-            outcome.reply, plays=plays, synthesizer=synthesizer, seconds=remaining()
+            _spoken_text(outcome), plays=plays, synthesizer=synthesizer, seconds=remaining()
         )
         return self._within_payload_limit(
             SpokenTurn(
@@ -3496,22 +3544,30 @@ class Engine:
 
     async def _spoken_rendering(
         self,
-        reply: str | None,
+        text: str | None,
         *,
         plays: tuple[SpokenAudioFormat, ...],
         synthesizer: SpeechSynthesizer,
         seconds: float,
     ) -> tuple[SpokenAudio | None, bool]:
-        """Render the answer, or say that speaking it did not complete (ADR-0200 §4).
+        """Render what this pass has to say, or say that speaking it did not complete.
 
-        Three of ``spoken_degraded``'s four cases live here — an empty format
-        intersection, a synthesis failure, and a rendering over ADR-0200 §6's bound
-        — and the fourth is the payload measurement one level up, which needs the
-        whole result to make its judgement.
+        Three of ``spoken_degraded``'s four cases live here (ADR-0200 §4) — an empty
+        format intersection, a synthesis failure, and a rendering over ADR-0200 §6's
+        bound — and the fourth is the payload measurement one level up, which needs
+        the whole result to make its judgement. ADR-0207 §4 reads the same ladder over
+        a wider subject and adds no case to it: the antecedent on a park is §2's fixed
+        sentence rather than an answer, and every consequent is untouched.
 
-        **Nothing to say is not a degradation.** A park, a recovered resume and a
-        composition failure each leave ``reply`` ``None``, and nothing is invented to
-        fill the silence: ``spoken`` is ``None`` and ``spoken_degraded`` is ``False``.
+        **Nothing to say is still not a degradation.** A composition failure and a
+        resume recovered from durable state leave nothing for :func:`_spoken_text` to
+        return, and nothing is invented to fill the silence: ``spoken`` is ``None``
+        and ``spoken_degraded`` is ``False``.
+
+        **This stage never learns which of the three it is rendering.** It is handed
+        a string, so an answer and ADR-0207 §2's constant reach the seam by exactly
+        one path and under exactly one ladder — and no part of a park can arrive here
+        to be interpolated into either.
 
         **The format is the first member of ``plays`` this synthesizer names**
         (ADR-0200 §3) — the caller's preference honoured as far as the seam can, and
@@ -3520,9 +3576,10 @@ class Engine:
         which is why nothing is spent on it.
 
         Args:
-            reply: The answer, which is the only thing that is ever rendered
-                (ADR-0200 §4) — handed to the seam byte for byte, with nothing
-                derived from it and no second copy anywhere.
+            text: What this pass says — the composed answer, or ADR-0207 §2's
+                sentence on a live confirmation park, or ``None`` where it says
+                nothing. Handed to the seam byte for byte, with nothing derived from
+                it and no second copy anywhere.
             plays: The caller's preference order.
             synthesizer: The seam.
             seconds: What is left of the call's budget.
@@ -3534,9 +3591,9 @@ class Engine:
         Raises:
             Exception: Anything that is not a ``SpeechError``. ADR-0200 §4 keeps the
                 degradation set closed, so a defect propagates rather than arriving
-                as an ordinary "the answer could not be spoken".
+                as an ordinary "it could not be spoken".
         """
-        if reply is None:
+        if text is None:
             return None, False
         chosen = next((member for member in plays if member in synthesizer.formats), None)
         if chosen is None:
@@ -3544,7 +3601,7 @@ class Engine:
             return None, True
         try:
             rendering = await synthesize_within(
-                synthesizer, reply, media_type=chosen, seconds=seconds
+                synthesizer, text, media_type=chosen, seconds=seconds
             )
         except SpeechError as exc:
             # The classification is logged; the seam's message is not (ADR-0200 §8).
