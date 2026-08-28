@@ -163,6 +163,7 @@ if TYPE_CHECKING:
         MemorySearchResult,
         MemoryWrite,
     )
+    from ai_assistant.orchestration.delivery import DeliveryOutbox
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
@@ -465,6 +466,7 @@ class Harness:
         routed_confirmation_ttl: timedelta = ROUTED_TTL,
         max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        notification_outbox: DeliveryOutbox | None = None,
         now: Clock | None = None,
         id_factory: Callable[[], str] | None = None,
         epoch_factory: Callable[[], str] | None = None,
@@ -705,6 +707,12 @@ class Harness:
             # case can *advance* past.
             now=self.clock,
             drain_timeout=drain_timeout,
+            # ADR-0131 §3's durable delivery queue. ``None`` by default, which is the
+            # in-process deployment that serves no poll — and a knob because an
+            # *absence* is only assertable against an outbox that would have recorded
+            # the call: ADR-0207's park cases pin that the spoken path acquired no
+            # edge to it, which a subject holding no outbox at all cannot show.
+            notification_outbox=notification_outbox,
         )
 
 
