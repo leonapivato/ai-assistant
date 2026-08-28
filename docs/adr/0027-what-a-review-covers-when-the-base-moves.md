@@ -1,6 +1,6 @@
 # 27. What a review covers when the base moves
 
-- Status: Accepted, §2's acceptance loop amended by ADR-0165
+- Status: Partially superseded by ADR-0209 (§3's floor clause, narrowed — its `docs/adr/**` and contract-surface entries invalidate an artifact only where one of four citation tests binds; §3's refusal of path disjointness, its rename-aware both-endpoints reading, its `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, and §§1–2 and 4–7 all stand)
 - Date: 2026-07-21
 - Amends on ratification: ADR-0020 §3, the content anchor — the section
   ADR-0025 §4 already amended once. The edit is **not** made by this change; §7
@@ -21,6 +21,33 @@
   requirement and the rules making (b) unavailable are untouched, as are §§1 and
   3–7 — in particular §3's floor and §4's disclosure, which govern a base move and
   not a commit the PR itself carries.
+- **Partially superseded: 2026-08-28 by ADR-0209 — §3's floor clause, narrowed.**
+  §3's `docs/adr/**` and contract-surface entries no longer invalidate an artifact
+  on the fact of the move alone. Under ADR-0209 §2 such a move invalidates only
+  where one of four tests binds: the PR's text names the moved ADR by number
+  (§3), the moved ADR's text at either endpoint names a path the PR's diff touches
+  or a symbol its diff adds or removes (§3), the move adds a `Protocol` class or a
+  method to one (§4), or the move touches the contract surface and the PR's diff
+  touches `src/ai_assistant/core/` or names a definition the move changed (§4).
+  Where none binds, the floor here reads **clear** and §2(b) may accept.
+
+  **Not replaced.** §3's refusal of path disjointness, and its whole argument for
+  that refusal, stand. So do its rename-aware both-endpoints reading of the base
+  move, its withdrawal of a per-persona floor, and its `docs/review/**`,
+  `CLAUDE.md`, `CONTRIBUTING.md` and `scripts/codex-review.sh` entries, which
+  ADR-0209 §1 keeps absolute. §§1–2 and 4–7 are untouched: the coverage/currency
+  split, the patch identity and its two properties, §4's whole-set disclosure —
+  which ADR-0209 §6 extends with a per-path reason rather than narrowing — the
+  un-ratified interim rule, the artifact naming, and the records §7 applied.
+  A reader acting on ADR-0209 §2 refuses to ship where this ADR's §3 refuses on
+  every ground but the one narrowed above.
+
+  **The `Accepted` token and the ADR-0165 qualifier came off the `Status` line in
+  the same change**, per ADR-0082 §2: on a line carrying the leading `Partially
+  superseded by` token no amendment qualifier is written, because ADR-0070 §4
+  reads every `ADR-NNNN` after that token as a supersession target and ADR-0165 is
+  not one. The record of that amendment is unchanged and is the dated note
+  directly above.
 
 ## Context
 
