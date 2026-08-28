@@ -369,6 +369,16 @@ You get three things back, and they are three different statements.
   you can talk over rather than wait out. The page says where the sound stopped,
   because the words on screen are the same either way.
 
+  **A press that then asks nothing gives the answer back.** Let go without having
+  said anything — the brush against the button in a pocket, which is the way this
+  usually happens — and the answer picks up from where the sound stopped instead
+  of staying stopped. It is the same answer played on from there, not a new one:
+  nothing is re-asked, no turn runs, and nothing goes to the hub, so it happens
+  right here with no waiting. The page swaps its "this answer stopped being
+  spoken" sentence for one saying so. Where it cannot pick up — the browser has
+  taken the audio away, or a later answer has replaced that one — the earlier
+  sentence stands and the answer is simply the one on screen.
+
 **And the assistant is told what you actually heard.** When you press again, the
 page tells the hub how much of the previous answer played — "3.2 of 9.8 seconds,
 interrupted" — and the hub records that against that turn. So the assistant does
@@ -390,7 +400,9 @@ page able to tell.
 Two things it says instead, and neither is something going wrong.
 
 - **"I heard nothing in that recording"** — the press caught no words. Nothing
-  was asked, so nothing was answered and no conversation was started.
+  was asked, so nothing was answered and no conversation was started. If that
+  press stopped an answer being spoken, this is the case above where the answer
+  picks up again.
 - **"That answer is shown here and was not spoken"** — the answer is complete
   and on screen, and only the audio is missing. Speech is composed after the
   answer is, so a failure there costs you the sound and never the answer.
