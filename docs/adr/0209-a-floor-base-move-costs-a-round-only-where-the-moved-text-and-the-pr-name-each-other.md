@@ -177,8 +177,13 @@ narrows that.
 ### 4. A moved contract file binds where new surface lands, or where the PR reaches the moved surface
 
 > **Normative.** A base move that adds a `Protocol` class to
-> `src/ai_assistant/core/protocols.py`, or adds a method to one, binds
-> unconditionally.
+> `src/ai_assistant/core/protocols.py`, or adds any member to one — a method, a
+> property, or an annotated attribute — binds unconditionally.
+
+> **Normative.** That limb is decided by reading the file structurally at both
+> endpoints of the move and comparing the members each `Protocol` class declares,
+> never by matching the move's hunk lines against a pattern. An endpoint that
+> cannot be parsed binds.
 
 > **Normative.** Any other move touching `src/ai_assistant/core/protocols.py` or
 > `src/ai_assistant/core/types.py` binds where the PR's diff touches a path under
@@ -195,6 +200,25 @@ citation test cannot see that case, so the case is not given to a citation test.
 New Protocol surface is rare — golden rule 5 and ADR-0015 §5 make each instance
 its own PR behind its own merged ADR — so the limb costs little and closes the
 one fail-open §3 argued for by name.
+
+**Every new member, not only a new method, and the reason is the same one.** An
+annotated attribute or a property added to an existing `Protocol` is a new
+structural requirement on every implementation of it: a lane whose open PR
+implements that Protocol outside `core/` now fails to satisfy it, and its diff
+names nothing about the member because the member did not exist when the diff was
+written. That is "or now should" exactly, so the limb reaches it. What the limb
+does not reach is a member's *removal* or a change to an existing one, which the
+second limb and §3's tests judge on their merits.
+
+**Structurally, because the two spellings differ and only one of them is safe.**
+ADR-0027 §2 fixed `git patch-id --verbatim` in the ADR rather than leaving it to
+the implementation, for the reason that the safe and unsafe spellings looked
+alike. The same holds here: a pattern over the move's hunk lines cannot tell a
+member added to a `Protocol` from one added to a neighbouring dataclass, from a
+line that merely moved, or from one inside a docstring, and it reads a hunk
+rather than a class. Comparing the declared members of each `Protocol` at the two
+endpoints answers the question that is actually asked, and an endpoint that
+cannot be parsed binds rather than clears, on the same fail-closed footing as §6.
 
 **The limb is scoped to `core/protocols.py` deliberately.** A field added to a
 `core/types.py` model, or a new value class there, obliges no open PR to do
@@ -223,8 +247,24 @@ mention that is not a definition tells a PR nothing it could act on.
 > their classification into a path, a bare filename or a symbol by `classify`.
 > A `path` token names a path the PR's diff touches when it equals, or is a
 > directory prefix of, either endpoint of an entry of that diff; a `file` token
-> when it equals such an endpoint's basename; a `symbol` token when it occurs as
-> a whole word in an added or removed line of that diff.
+> when it equals such an endpoint's basename; a `symbol` token when the whole
+> token occurs as a word in an added or removed line of that diff, or when **every
+> one of its dot-separated parts** occurs as a word somewhere in those lines,
+> whether or not on one line.
+
+**A dotted symbol is matched part by part, because a definition never carries
+its own qualification.** ADR-0088 §1's citation form is
+`MemoryStore.ingest` — the class and the member — and `classify` keeps that as a
+single token. A PR adding that member writes `class MemoryStore` on one line and
+`async def ingest(...)` on another, and no line of its diff carries the dotted
+string; matching the whole token would clear the floor on exactly the PR the
+moved ADR is about. Matching the last part alone is the other error: a bare
+`ingest`, `close` or `read` would bind almost every diff and the rule would buy
+nothing. Requiring every part, anywhere in the diff's added and removed lines, is
+what separates them — it binds the PR that names both the class and the member
+and leaves the one that names neither. It over-binds where a diff happens to
+carry both parts unrelatedly, which is the direction this section already
+prices.
 
 **The PR description is admitted because it can only cost rounds.** It is
 author-controlled and mutable, which would be disqualifying for an input that
@@ -423,10 +463,17 @@ documents that restate the rule:
   both endpoints (owed where either name's text binds); a `docs/review/**` move
   and a `scripts/codex-review.sh` move (owed, no test consulted); a
   `core/protocols.py` move adding a Protocol, against a PR touching nothing in
-  `core/` (owed); a `core/types.py` move the PR neither touches `core/` for nor
-  names (free); a move changing a definition the PR's text names (owed); an
-  unreadable endpoint and an unretrievable PR description (owed); and every
-  existing ADR-0027 §§2–4 case still refusing exactly as it does today.
+  `core/` (owed); the same against a move adding an annotated attribute and
+  against one adding a property to an existing Protocol (owed under §4's first
+  limb, which a method-only reading would clear); a `core/protocols.py` endpoint
+  that will not parse (owed); a `core/types.py` move the PR neither touches
+  `core/` for nor names (free); a move changing a definition the PR's text names
+  (owed); a moved ADR citing `Class.member` against a PR whose diff adds
+  `class Class` on one line and `def member` on another (owed under §5's
+  part-by-part rule, which whole-token matching would clear) and against a PR
+  whose diff names only one of the two parts (free); an unreadable endpoint and an
+  unretrievable PR description (owed); and every existing ADR-0027 §§2–4 case
+  still refusing exactly as it does today.
 
 ## Alternatives considered
 
