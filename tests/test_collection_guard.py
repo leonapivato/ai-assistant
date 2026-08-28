@@ -57,8 +57,8 @@ class TestUnboundWidget(WidgetContract):
 '''
 
 #: An abstract class under a collected name that carries no test at all, in both
-#: spellings: with pytest's explicit ``__test__ = False`` opt-out and without it.
-#: Neither takes anything down with it, so neither is this guard's business.
+#: spellings: with pytest's ``__test__ = False`` and without it. Neither takes
+#: anything down with it, so neither is this guard's business.
 _LOSES_NOTHING = '''\
 """Abstract helpers that carry no test."""
 
@@ -87,16 +87,77 @@ def test_something_else() -> None:
     assert True
 '''
 
-#: The incomplete binding again, this time carrying the opt-out. It loses exactly
-#: the same inherited obligations, so the flag changes nothing about it.
-_OPTED_OUT_BINDING = _CORPUS.replace(
-    '''class TestUnboundWidget(WidgetContract):
-    """Implements nothing, so it stays abstract."""''',
-    '''class TestUnboundWidget(WidgetContract):
-    """Implements nothing, so it stays abstract."""
+#: The same suite bound by a *complete* class -- nothing abstract about it --
+#: which then removes every inherited obligation with the flag instead.
+_OPTED_OUT_BINDING = '''\
+"""A complete binding that silences itself."""
 
-    __test__ = False''',
-)
+from abc import ABC, abstractmethod
+
+import pytest
+
+
+class WidgetContract(ABC):
+    @pytest.fixture
+    @abstractmethod
+    def widget(self) -> int:
+        """The subject."""
+
+    def test_the_obligation(self, widget: int) -> None:
+        assert widget == 1
+
+
+class TestBoundWidget(WidgetContract):
+    __test__ = False
+
+    @pytest.fixture
+    def widget(self) -> int:
+        return 1
+'''
+
+#: An incomplete binding whose inherited obligation is a ``classmethod``, and a
+#: complete one that shadows its own inherited obligation with a non-callable.
+#: pytest unwraps the first and collects it; it collects nothing under the second.
+_DESCRIPTORS = '''\
+"""Obligations pytest reads through a descriptor, and one shadowed away."""
+
+from abc import ABC, abstractmethod
+
+import pytest
+
+
+class GadgetContract(ABC):
+    @pytest.fixture
+    @abstractmethod
+    def gadget(self) -> int:
+        """The subject."""
+
+    @classmethod
+    def test_the_class_obligation(cls) -> None:
+        assert True
+
+
+class TestGadget(GadgetContract):
+    """Implements nothing, so it stays abstract -- and the obligation is a classmethod."""
+
+
+class ShadowContract(ABC):
+    @pytest.fixture
+    @abstractmethod
+    def shadowed(self) -> int:
+        """The subject."""
+
+    def test_the_shadowed_obligation(self, shadowed: int) -> None:
+        assert shadowed == 1
+
+
+class TestShadowed(ShadowContract):
+    test_the_shadowed_obligation = None
+
+
+def test_something_else() -> None:
+    assert True
+'''
 
 
 def _run_nested(corpus: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -177,14 +238,13 @@ def test_the_guard_leaves_a_complete_binding_alone(tmp_path: Path) -> None:
     assert "1 passed" in result.stdout
 
 
-def test_an_abstract_class_that_carries_no_test_is_not_refused(tmp_path: Path) -> None:
+def test_a_class_that_carries_no_test_is_not_refused(tmp_path: Path) -> None:
     """The guard's subject is the loss, so a class with nothing to lose is left alone.
 
     Both spellings are in this corpus: an abstract helper carrying pytest's
-    explicit ``__test__ = False`` opt-out, and one carrying nothing. Neither
-    inherits a test function, so neither stops contributing anything by being
-    abstract, and refusing either would break the ordinary way to write a base
-    under a name pytest collects.
+    ``__test__ = False`` and one carrying nothing. Neither inherits a test
+    function, so neither stops contributing anything, and refusing either would
+    break the ordinary way to write a base under a name pytest collects.
     """
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -198,24 +258,47 @@ def test_an_abstract_class_that_carries_no_test_is_not_refused(tmp_path: Path) -
     assert "TestOtherBase" not in result.stdout + result.stderr
 
 
-def test_an_opted_out_binding_that_loses_obligations_is_still_refused(tmp_path: Path) -> None:
-    """``__test__ = False`` does not buy a binding out of this: it removes the same tests.
+def test_a_complete_binding_that_silences_itself_is_refused(tmp_path: Path) -> None:
+    """``__test__ = False`` is not an opt-out on a class carrying obligations.
 
-    pytest reads the flag in ``Class.collect``, one step past the abstractness
-    check, and returns no items for the class either way. So an incomplete
-    binding carrying it loses exactly the inherited obligations an incomplete
-    binding without it loses -- and the suite stays green, because
-    `tests/core/test_protocol_triad.py` needs only *a* binding per Protocol, not
-    every one. The flag cannot change the answer where there is something to
-    lose, which is why the guard does not ask about it.
+    Nothing here is abstract: the binding implements its fixture and then removes
+    every inherited obligation with the flag, which pytest honours in
+    ``Class.collect``. The loss is identical to the unimplemented-fixture one --
+    and invisible to `tests/core/test_protocol_triad.py`, which needs only *a*
+    binding per Protocol. So the guard asks what is lost rather than which line
+    of pytest does the losing.
     """
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    (corpus / "test_widget_bindings.py").write_text(_OPTED_OUT_BINDING)
+    (corpus / "test_opted_out_binding.py").write_text(_OPTED_OUT_BINDING)
 
     result = _run_nested(corpus, "-p", "collection_guard")
     output = result.stdout + result.stderr
 
     assert result.returncode != 0, output
-    assert "TestUnboundWidget" in output
+    assert "TestBoundWidget" in output
+    assert "it sets `__test__ = False`" in output
     assert "would stop running: test_the_obligation" in output
+
+
+def test_the_scan_reads_obligations_the_way_pytest_collects_them(tmp_path: Path) -> None:
+    """A ``classmethod`` obligation counts; one shadowed by a non-callable does not.
+
+    Both are cases a prefix-and-``callable`` scan gets wrong, in opposite
+    directions: it misses the ``classmethod`` -- a raw one is not callable, though
+    pytest unwraps and collects it -- and it refuses ``TestShadowed``, which
+    inherits a name pytest collects nothing under because the class's own value
+    for it wins and is not a function. Asking ``istestfunction`` over an
+    MRO walk where the first definition wins is what makes both come out right,
+    so this corpus must produce exactly one refusal, naming only the first.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "test_descriptors.py").write_text(_DESCRIPTORS)
+
+    result = _run_nested(corpus, "-p", "collection_guard")
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, output
+    assert "TestShadowed" not in output
+    assert "would stop running: test_the_class_obligation" in output
