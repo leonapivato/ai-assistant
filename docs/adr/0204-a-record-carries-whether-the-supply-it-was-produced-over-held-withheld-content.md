@@ -228,10 +228,19 @@ lands. §6 states the one place where the two-state field is genuinely a residue
 > is applied to the turn's supply — ADR-0203 §1, unchanged — and never whether the
 > evaluation is made.
 
-> **Normative.** The value carried to capture is `True` exactly when that
-> evaluation found at least one record or one context facet that ADR-0199 §3
-> withholds from a channel of unbounded audience, in the supply **as assembled and
-> retrieved** and before any subtraction. It is `False` otherwise.
+> **Normative.** The value carried to capture is the **disjunction of two terms
+> over the one supply the turn already holds**, and is `True` where either is. The
+> first is §2's direct route: that evaluation found at least one record or one
+> context facet ADR-0199 §3 withholds from a channel of unbounded audience, in the
+> supply **as assembled and retrieved** and before any subtraction. The second is
+> §5's inherited route: at least one record in that same supply carries
+> `supplied_withheld_content` already. It is `False` only where neither holds.
+
+> **Normative.** The second term is §5's rule applied to the turn, which is a
+> producer deriving a record from the records it was supplied, and it is not a
+> second evaluation: it is one field read per record over a supply already in hand,
+> and it reaches no `ContextProvider`, no `MemoryStore` and no store query. A turn
+> that plans over a stamped record captures a stamped episode, on every channel.
 
 > **Normative.** The value is a property of the **turn whose rendering the episode
 > carries**, not of the pass that performs the capture. Where a pass captures an
@@ -278,7 +287,16 @@ lives in one module, which is where a reader will look for it".
 channel nothing.** The typed turn's answer, its plan, its `TurnResult` and its
 persisted plan are all untouched (§4). What it gains is a boolean about material it
 was already handed, computed from fields it already carries — three field reads per
-record over a supply the turn already holds in memory.
+record for the first term and a fourth for the second, over a supply the turn
+already holds in memory.
+
+**And the second term is what stops the bounded channel becoming a laundry.** §3
+leaves a stamped record in a bounded turn's supply on purpose, so that turn plans
+over it and answers from it — which means its own captured episode is a value
+derived from a stamped record. Without the disjunction the direct evaluation reads
+that episode as `OBSERVED` with `about_person` unset, ADR-0199 §3 places it
+speakable, and one more typed turn is all it takes to strip the stamp off the whole
+warrant. The rule is §5's, and a turn is a producer like any other.
 
 **A routed pass carries `False`, and that is true of it rather than convenient.**
 ADR-0197's routed operation produces no `TurnResult`, and `_routed_exchange_of`
@@ -547,6 +565,14 @@ layout. Each names an input and the outcome it fixes.
     input set none of which carries the field emits a belief carrying `False`, so
     §5's disjunction is pinned in the direction that would otherwise stamp
     everything and empty ADR-0199 §3's speakable set by a different route.
+14. **A bounded turn supplied a stamped episode captures a stamped episode.** A
+    `converse` turn whose retrieval returns the stamped episode of test 1 — which §3
+    leaves in a bounded channel's supply, deliberately — captures an episode whose
+    own `supplied_withheld_content` is `True`, and a later `converse_spoken` turn is
+    supplied neither. This is §2's second term pinned: the direct evaluation alone
+    reads that episode as `OBSERVED` with `about_person` unset, places it speakable
+    and yields `False`, so an implementation without the disjunction launders the
+    whole warrant through one bounded turn and one extra hop.
 
 ### 9. What the implementing lane owes
 
@@ -573,7 +599,7 @@ rule 5). It owes:
 4. **The fold's disjunction** and the derivation rule of §5, alongside the sibling
    computation `orchestration/consolidation.py` and the writer already perform for
    `derived_from_external`.
-5. **The thirteen tests of §8.**
+5. **The fourteen tests of §8.**
 6. **Closing #1703 and #1708**, which this decision answers and that lane fixes.
 
 > **Normative.** The records this decision owes on ADR-0203 and on ADR-0199 are made
@@ -774,7 +800,7 @@ the fact is recorded at the one moment it is decidable.
 defaulted, so a producer that forgets it writes `False` and a record is supplied
 that should have been withheld — the fail-open direction, and the one this ADR
 accepts deliberately in §1's third clause because the alternative empties ADR-0199
-§3's speakable set. §5's disjunction and §8's tests are the mitigation — tests 9, 11 and 12
+§3's speakable set. §5's disjunction and §8's tests are the mitigation — tests 9, 11, 12 and 14
 in particular, which pin the two paths on which a value travels without a fresh
 evaluation to compute it — and a producer review obligation is the rest of it.
 
