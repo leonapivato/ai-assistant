@@ -44,7 +44,8 @@ from ai_assistant.core.types import (
     ToolDefinition,
     parameter_violations,
 )
-from ai_assistant.tools.builtin import CURRENT_TIME, RECALL_MEMORY
+from ai_assistant.tools.builtin import CURRENT_TIME
+from ai_assistant.tools.send_email import SEND_EMAIL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -684,16 +685,35 @@ def test_an_empty_schema_is_distinguishable_from_checked_and_passed() -> None:
 def test_todays_shipped_definitions_still_load() -> None:
     """The corpus this decision lands on is not refused by it (§6, §13).
 
-    Imported rather than restated: a copy of the two schemas would drift silently,
-    which is the thing this check exists to catch.
+    Imported rather than restated: a copy of these schemas would drift silently,
+    which is the thing this check exists to catch. The pair is ``current_time`` and
+    ``send_email`` since ADR-0208 §2 deleted ``recall_memory``, and ``send_email``
+    carries the richer of the two schemas — a nested array with an item pattern —
+    so the corpus this asserts over is no thinner than it was.
     """
-    for tool in (CURRENT_TIME, RECALL_MEMORY):
+    for tool in (CURRENT_TIME, SEND_EMAIL):
         assert ToolDefinition.model_validate(tool.model_dump()) == tool
 
 
-def test_a_stored_decision_carrying_a_shipped_definition_round_trips() -> None:
-    """A record whose tool carried a refused schema would become unreadable (§6)."""
-    request = ActionRequest(tool=RECALL_MEMORY, parameters={"query": "when", "limit": 3})
+def test_a_stored_decision_carrying_a_definition_with_parameters_round_trips() -> None:
+    """A record whose tool carried a refused schema would become unreadable (§6).
+
+    The definition is **constructed here** rather than imported, which is ADR-0208
+    §2's instruction for a test needing a definition with parameters: what this case
+    needs is any tool declaring a parameters schema, and borrowing a shipped one
+    would make the case fail whenever that tool's own arguments changed.
+    """
+    request = ActionRequest(
+        tool=_definition(
+            parameters_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            }
+        ),
+        parameters={"query": "when", "limit": 3},
+    )
     decision = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="read-only"),

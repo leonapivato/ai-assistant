@@ -16,9 +16,24 @@ from ai_assistant.orchestration.capability_alias import (
     resolve_capability,
 )
 
-#: The two capabilities ADR-0048's tools advertise, the vocabulary these tests
-#: resolve onto.
-ADVERTISED = ("recall_memory", "report_current_time")
+#: The capability the shipped local tool advertises, the vocabulary these tests
+#: resolve onto. One name since ADR-0208 §1 unregistered ``recall_memory``; the
+#: configured egress tool is a deployment fact rather than a package one, so it is
+#: deliberately absent from the *default* vocabulary these unit cases resolve over.
+ADVERTISED = ("report_current_time",)
+
+#: The capabilities the eight rows ADR-0208 §2 deleted used to serve, plus the
+#: capability the tool itself advertised.
+DELETED_MEMORY_SYNONYMS = (
+    "recall",
+    "recall_memories",
+    "search_memory",
+    "search_memories",
+    "retrieve_memory",
+    "memory_recall",
+    "memory_search",
+    "lookup_memory",
+)
 
 
 def test_an_exact_advertised_capability_is_returned_unchanged() -> None:
@@ -42,9 +57,6 @@ def test_a_case_or_separator_variant_folds_onto_the_advertised_name(emitted: str
         ("tell_time", "report_current_time"),
         ("what_time_is_it", "report_current_time"),
         ("current_time", "report_current_time"),
-        ("recall", "recall_memory"),
-        ("search_memory", "recall_memory"),
-        ("retrieve_memory", "recall_memory"),
     ],
 )
 def test_a_curated_synonym_resolves_onto_its_advertised_target(emitted: str, expected: str) -> None:
@@ -67,10 +79,10 @@ def test_a_synonym_is_inert_when_its_target_is_not_advertised() -> None:
     """A rewrite never lands on a capability no tool serves.
 
     ``get_time`` is a curated synonym of ``report_current_time``, but with only
-    ``recall_memory`` advertised the target is absent, so nothing is rewritten and
-    the emitted string passes through to an honest ``NO_CAPABLE_TOOL``.
+    ``send_email`` advertised the target is absent, so nothing is rewritten and the
+    emitted string passes through to an honest ``NO_CAPABLE_TOOL``.
     """
-    assert resolve_capability("get_time", ("recall_memory",)) == "get_time"
+    assert resolve_capability("get_time", ("send_email",)) == "get_time"
 
 
 def test_resolution_lands_only_on_an_advertised_capability_or_the_input() -> None:
@@ -100,18 +112,49 @@ def test_every_curated_target_is_a_capability_the_shipped_tools_advertise() -> N
     assert set(CAPABILITY_ALIASES.values()) <= set(ADVERTISED)
 
 
+def test_no_row_targets_the_departed_memory_capability() -> None:
+    """ADR-0208 §2's deletion, asserted over the table's *values* (ADR-0208 §6).
+
+    Over the values rather than the keys, so a surviving row fails this test
+    whatever key it is written under — which is why §6 owes it separately from the
+    selection-path test in ``tests/tools/test_builtin.py``. That one cannot see a
+    row left behind: with the tool unbound, ADR-0053's live-registry check makes
+    every surviving row inert, selection reports ``NO_CAPABLE_TOOL`` anyway, and
+    eight dead claims stand while every other test passes.
+
+    This pins §2's deletion and **nothing wider**. It is not a rule that the table
+    may hold no inert entry — ADR-0053 declined to make that rule and ADR-0208 §6
+    declines to make it for ADR-0053.
+    """
+    assert "recall_memory" not in set(CAPABILITY_ALIASES.values())
+
+
+@pytest.mark.parametrize("emitted", DELETED_MEMORY_SYNONYMS)
+def test_a_deleted_memory_synonym_is_no_longer_a_key(emitted: str) -> None:
+    """Each of the eight rows is gone, and its capability resolves to itself.
+
+    The key-side statement of the same deletion: a planner emitting ``recall`` or
+    ``search_memory`` gets its own string back, so selection reports
+    ``NO_CAPABLE_TOOL`` about the name the plan actually named (ADR-0037 §1,
+    ADR-0208 §3) rather than about a capability nothing advertises.
+    """
+    assert emitted not in CAPABILITY_ALIASES
+    assert resolve_capability(emitted, ADVERTISED) == emitted
+
+
 def test_empty_advertised_vocabulary_rewrites_nothing() -> None:
     """With no tools registered, every capability passes through unchanged."""
     assert resolve_capability("get_time", ()) == "get_time"
     assert resolve_capability("report_current_time", ()) == "report_current_time"
 
 
-def test_a_write_synonym_is_not_aliased_onto_the_read_capability() -> None:
-    """ "remember" is a store-intent, not a synonym of the read-only recall.
+def test_a_write_synonym_is_not_aliased_onto_a_memory_capability() -> None:
+    """ "remember" is a store-intent, and no row has ever carried it.
 
-    ADR-0048 ships no memory writer, and aliasing a write-shaped capability onto
-    ``recall_memory`` would fire the wrong tool — the exact hazard the layer
-    disclaims — so ``remember`` stays unresolved and skips ``NO_CAPABLE_TOOL``.
+    ADR-0048 §1's deferral of a memory writer stands untouched (ADR-0208 §8), and
+    ADR-0053's refusal to alias a store-intent onto a read stands with it — now
+    vacuously, since ADR-0208 §2 removed the read it would have fired. Either way
+    ``remember`` stays unresolved and skips ``NO_CAPABLE_TOOL``.
     """
     assert "remember" not in CAPABILITY_ALIASES
     assert resolve_capability("remember", ADVERTISED) == "remember"

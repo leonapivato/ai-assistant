@@ -401,10 +401,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     in-flight work, then closes them (ADR-0042 §2); the caller (an adapter) owns
     calling ``aclose``.
 
-    The tool registry is populated with the first **local, no-egress** tools
-    (ADR-0048): ``current_time`` and ``recall_memory``. So a planned step naming
-    one of their capabilities selects, gates and executes; a step naming any other
-    capability still finds no capable tool and is skipped (``NO_CAPABLE_TOOL``).
+    The tool registry is populated with the one **local, no-egress** tool ADR-0048
+    left standing: ``current_time`` (ADR-0208 §1 removed ``recall_memory``). So a
+    planned step naming its capability selects, gates and executes; a step naming
+    any other capability — a memory lookup included — finds no capable tool and is
+    skipped (``NO_CAPABLE_TOOL``), which ADR-0208 §3 rules is the correct outcome
+    rather than a gap to close by re-registering a tool.
     Whether the planner names a tool's exact capability string is not guaranteed
     (ADR-0014 §2 keeps planning blind to the tool set), which is the model↔tool
     alignment follow-up ADR-0048 records rather than solves.
@@ -1001,9 +1003,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         )
 
         # One object as both the selecting registry and the acting invoker
-        # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
-        # memory-backed `recall_memory` reads the *same* store the loop retrieves
-        # from, so a recall sees what the user's memory holds.
+        # (ADR-0029 §8). Populated with `current_time` (ADR-0048) and, where a
+        # deployment connected an account, `send_email`. **No memory tool**: the
+        # turn's supply is retrieved once, in the retrieval stage, and no store is
+        # injected here for a tool to re-read it band-blind (ADR-0208 §1).
         #
         # **The invoker is handed the ledger face of `trail`, and never the trail**
         # (ADR-0192 §9's wiring clause). One object satisfies `AuditTrail`,
@@ -1028,7 +1031,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # totals projection has acquired a permissions-owned history it has no use
         # for, which is ADR-0029 §1's argument one seam over. The engine below gets
         # the ledger face and never the gate, for the mirror reason.
-        tools = build_default_registry(memory=memory, egress=egress, ledger=trail, gate=trail)
+        tools = build_default_registry(egress=egress, ledger=trail, gate=trail)
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read

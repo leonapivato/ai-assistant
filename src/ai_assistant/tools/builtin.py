@@ -1,6 +1,6 @@
 """The registry's contents, and the default-registry factory (ADR-0048 §3).
 
-Two local read-only tools, the one *configured* egress integration, and the
+One local read-only tool, the one *configured* egress integration, and the
 factory that binds them into the canonical one-object registry+invoker
 (:class:`~ai_assistant.tools.registry.InMemoryToolRegistry`). Registration is
 internal to this subsystem (ADR-0016 §5, ADR-0029 §1, ADR-0152 §10); the
@@ -19,10 +19,13 @@ through it holds a one-method Protocol instead
 (:class:`~ai_assistant.tools.send_email.BoundTransport`), and
 ``tests/tools/test_egress_seam.py`` holds the tree to both.
 
-**The two local tools transmit nothing.** Both are read-only —
+**The local tool transmits nothing.** ``current_time`` is read-only —
 non-``side_effecting``, non-disclosing, ``NATURAL`` idempotency, ``FREE`` cost —
-which keeps them clear of the idempotency-window machinery ADR-0029 §5 reserves
-for ``KEYED`` writes and of the spend policy a paid tool would need.
+which keeps it clear of the idempotency-window machinery ADR-0029 §5 reserves for
+``KEYED`` writes and of the spend policy a paid tool would need. It is the whole
+of the local set: ADR-0208 §1 removed ``recall_memory``, because the turn's supply
+is retrieved at one site and a tool reading the same store band-blind added a
+confirmation and a payload nothing renders.
 
 **The egress tool is present only where a deployment configured one, and both
 halves of that come from one value.** ADR-0148 §6 binds a registered tool to at
@@ -49,7 +52,6 @@ from typing import TYPE_CHECKING
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
     CostBasis,
-    DataTier,
     Idempotency,
     Reversibility,
     RiskLevel,
@@ -67,7 +69,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         InvocationLedger,
-        MemoryStore,
         OutboundTransport,
         Secrets,
         SpendGate,
@@ -75,19 +76,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.tools.egress_binder import ConnectionRecords
     from ai_assistant.tools.invocation import BoundImplementation, EgressToolImplementation
-
-#: Default number of memory records ``recall_memory`` returns when the call names
-#: no ``limit``. Small, because a recall folds into a turn a person reads.
-_DEFAULT_RECALL_LIMIT = 5
-
-#: Upper bound on ``recall_memory``'s ``limit``. Low double digits — a few times
-#: the default of 5 — because a recall exists to fold into a turn a person reads,
-#: not to page a corpus; a plan naming a larger ``limit`` is refused rather than
-#: forwarded. The cap also keeps the argument well inside SQLite's integer range
-#: (#298), so a huge ``limit`` cannot reach a backend as an out-of-range bind —
-#: which no longer needs headroom for an over-fetch multiplier, since ADR-0128 §1
-#: removed it, but is still the cheaper of the two guards to keep.
-_MAX_RECALL_LIMIT = 25
 
 
 def _utcnow() -> datetime:
@@ -180,93 +168,6 @@ class CurrentTime:
         """
         _reject_unknown(parameters, (), CURRENT_TIME.id)
         return {"utc": self._now().isoformat()}
-
-
-# --- recall_memory: a read backed by an injected MemoryStore ------------
-
-RECALL_MEMORY = ToolDefinition(
-    id="recall_memory",
-    capability="recall_memory",
-    description="Search the user's long-term memory for records relevant to a query.",
-    risk_level=RiskLevel.MEDIUM,
-    reversibility=Reversibility.REVERSIBLE,
-    side_effecting=False,
-    reads=(DataTier.PERSONAL,),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NATURAL,
-    parameters_schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_RECALL_LIMIT},
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-)
-"""Declaration for :class:`RecallMemory` (ADR-0048 §2).
-
-``MEDIUM`` risk because it reads Tier 1 data, and read-only because it changes
-nothing and transmits nothing off-device (``discloses`` is empty — records return
-*into* the local pipeline). ADR-0016 §3 keeps risk unconstrained by
-``side_effecting`` precisely so an honest read can say it is sensitive.
-"""
-
-
-class RecallMemory:
-    """Search long-term memory through an injected :class:`MemoryStore` (ADR-0048 §1).
-
-    Structurally a :class:`~ai_assistant.tools.invocation.ToolImplementation`.
-    It depends on `memory` only through the ``MemoryStore`` Protocol, wired at the
-    composition root — never by importing the concrete store (golden rule 1).
-    """
-
-    def __init__(self, memory: MemoryStore) -> None:
-        """Bind the store this tool reads from."""
-        self._memory = memory
-
-    async def __call__(
-        self,
-        parameters: Mapping[str, FrozenJson],
-        *,
-        idempotency_key: str | None,  # noqa: ARG002 — NATURAL, so the key is always None
-    ) -> FrozenJson:
-        """Return records matching ``query`` (most relevant first) as JSON.
-
-        Validates its own arguments, because ``parameters_schema`` enforcement is
-        deferred (ADR-0016 §7). A bad argument raises ``ValueError``, which the
-        seam turns into an ``INTERNAL`` result; the messages name no parameter
-        value, so nothing untrusted reaches the failure text (ADR-0029 §3).
-
-        Raises:
-            ValueError: If an unexpected argument is given, ``query`` is absent
-                or not a string, or ``limit`` is present and not an integer in
-                ``[1, _MAX_RECALL_LIMIT]``.
-        """
-        _reject_unknown(parameters, ("query", "limit"), RECALL_MEMORY.id)
-        query = parameters.get("query")
-        if not isinstance(query, str):
-            msg = "recall_memory requires a string 'query' argument"
-            raise ValueError(msg)
-        limit = parameters.get("limit", _DEFAULT_RECALL_LIMIT)
-        # A bool is an int subclass and is not a count; reject it like the rest.
-        # The upper bound enforces the schema this tool advertises (ADR-0016 §7):
-        # an over-cap limit is refused here, never forwarded to the store (#298).
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or limit < 1
-            or limit > _MAX_RECALL_LIMIT
-        ):
-            msg = f"recall_memory 'limit' must be an integer in [1, {_MAX_RECALL_LIMIT}]"
-            raise ValueError(msg)
-        # ``capped`` is unwrapped and not acted on (ADR-0128 §6): this lookup wants
-        # what there is, and a served prefix is a usable answer to "recall what you
-        # know about X". Whether it should degrade on the signal is its own lane.
-        found = await self._memory.search(query, limit=limit)
-        return [record.model_dump(mode="json") for record in found.records]
 
 
 # --- the configured egress integration ----------------------------------
@@ -419,7 +320,6 @@ def egress_registrations(integration: EgressIntegration | None) -> RegistrationT
 
 def build_default_registry(
     *,
-    memory: MemoryStore,
     now: Clock = _utcnow,
     egress: EgressIntegration | None = None,
     ledger: InvocationLedger,
@@ -439,10 +339,6 @@ def build_default_registry(
     tool needs and takes back a ready registry.
 
     Args:
-        memory: The store ``recall_memory`` reads from — the *same* instance the
-            learning loop retrieves from, so a recall sees what the user's memory
-            holds (a composition-root obligation, as ADR-0028 §4's writer/store
-            rule is). Depended on only through its Protocol.
         now: Clock ``current_time`` reads; defaults to ``datetime.now(UTC)``.
             Injectable so a test is deterministic.
         ledger: The ``InvocationLedger`` the returned invoker claims and
@@ -472,12 +368,13 @@ def build_default_registry(
             and offer.
 
     Returns:
-        A registry holding ``current_time`` and ``recall_memory``, and
-        ``send_email`` where one is configured — ready to select from and invoke.
+        A registry holding ``current_time``, and ``send_email`` where one is
+        configured — ready to select from and invoke. **No memory tool is among
+        them** (ADR-0208 §1), and no lane re-binds one under any id without an ADR
+        deciding the question ADR-0208 leaves to #1732.
     """
     tools: list[tuple[ToolDefinition, BoundImplementation]] = [
         (CURRENT_TIME, CurrentTime(now=now)),
-        (RECALL_MEMORY, RecallMemory(memory)),
     ]
     if egress is not None:
         tools.append((egress.definition, egress.implementation))
@@ -486,10 +383,8 @@ def build_default_registry(
 
 __all__ = [
     "CURRENT_TIME",
-    "RECALL_MEMORY",
     "CurrentTime",
     "EgressIntegration",
-    "RecallMemory",
     "build_default_registry",
     "build_send_email_integration",
     "egress_registrations",

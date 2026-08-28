@@ -1,37 +1,40 @@
-"""The first local tools and the default-registry factory (ADR-0048).
+"""The local tool and the default-registry factory (ADR-0048, ADR-0208).
 
-Three things are proven here: each tool's callable does what its declaration
-says; :func:`build_default_registry` returns a populated one-object
-registry+invoker; and — end to end — a plan naming a tool's advertised capability
-drives the real ``StepRunner``/``StepExecutor`` through selection, permission and
-execution to a ``SUCCEEDED`` step.
+Three things are proven here: the tool's callable does what its declaration says;
+:func:`build_default_registry` returns a populated one-object registry+invoker
+advertising ``current_time`` **and no memory capability** (ADR-0208 §1, §6); and —
+end to end — a plan naming an advertised capability drives the real
+``StepRunner``/``StepExecutor`` through selection, permission and execution to a
+``SUCCEEDED`` step, while a plan naming a *memory lookup* reaches
+``NO_CAPABLE_TOOL`` instead (ADR-0208 §3, §6).
 
-The end-to-end test wires the *real* registry against canonical fakes for the
+The end-to-end tests wire the *real* registry against canonical fakes for the
 other subsystems (``ai_assistant.testing``), because the point is to exercise the
 tool and the pipeline, not to re-test the fakes.
+
+ADR-0208 §6 asks for the registry assertion "for a call with an egress integration
+and for one without". The *without* half is here, where the factory's default is;
+the *with* half is in ``test_send_email_registration.py``, which owns the
+configured branch and the machinery that builds a real integration.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
     ActionPlan,
-    BeliefBand,
     Disposition,
     ExecutionState,
     FrozenJson,
     Goal,
-    MemoryKind,
-    MemorySearchResult,
     MemorySource,
     PlanStep,
     Provenance,
-    SemanticMemory,
     StepStatus,
     ToolDefinition,
 )
@@ -39,17 +42,33 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.capability_alias import resolve_capability
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
-from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakeMemoryStore, FakePlanStore
+from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore
 from ai_assistant.tools import (
     CURRENT_TIME,
-    RECALL_MEMORY,
     CurrentTime,
     InMemoryToolRegistry,
-    RecallMemory,
     build_default_registry,
 )
-from ai_assistant.tools.builtin import _MAX_RECALL_LIMIT
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+#: The capability names the eight deleted alias rows used to serve (ADR-0208 §2),
+#: plus the id and capability the tool itself advertised. A plan may still emit any
+#: of them; none of them may reach a tool.
+MEMORY_SYNONYMS = (
+    "recall",
+    "recall_memories",
+    "recall_memory",
+    "search_memory",
+    "search_memories",
+    "retrieve_memory",
+    "memory_recall",
+    "memory_search",
+    "lookup_memory",
+)
 
 #: A fixed instant, so nothing here depends on how fast the suite runs.
 AT = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
@@ -65,24 +84,38 @@ def _at() -> datetime:
 # --- the declarations ---------------------------------------------------
 
 
-def test_the_two_declarations_are_well_formed_and_local() -> None:
-    """Both tools are read-only and disclose nothing off-device (ADR-0048 §2)."""
-    for definition in (CURRENT_TIME, RECALL_MEMORY):
-        assert isinstance(definition, ToolDefinition)
-        assert definition.side_effecting is False
-        assert definition.discloses == ()  # nothing leaves the device
-        assert definition.writes == ()
+def test_the_local_declaration_is_well_formed_and_local() -> None:
+    """The surviving local tool is read-only and discloses nothing (ADR-0048 §2)."""
+    assert isinstance(CURRENT_TIME, ToolDefinition)
+    assert CURRENT_TIME.side_effecting is False
+    assert CURRENT_TIME.discloses == ()  # nothing leaves the device
+    assert CURRENT_TIME.writes == ()
 
 
-async def test_build_default_registry_advertises_both_capabilities() -> None:
-    """Selection can find each tool by the capability it advertises."""
-    registry = build_default_registry(
-        memory=FakeMemoryStore(now=_at), now=_at, ledger=FakeAuditTrail(), gate=FakeAuditTrail()
-    )
+async def test_build_default_registry_advertises_no_memory_capability() -> None:
+    """The unconfigured registry is ``current_time`` and nothing else (ADR-0208 §1, §6).
 
-    assert await registry.capabilities() == ("recall_memory", "report_current_time")
+    Asserted over the registry's *advertised capabilities and its tool ids*, not by
+    the absence of an import: ADR-0208 §6 asks for the property a selection stage
+    can observe, and a module that imported nothing could still register a memory
+    tool built somewhere else. The exhaustive equalities are the strong half — a
+    re-added tool under any id or capability fails them — and the synonym sweep
+    below states the same fact in the vocabulary #1715 was filed about.
+
+    The configured half of §6 (a call *with* an egress integration) is
+    ``test_send_email_registration.py``'s
+    ``test_no_memory_capability_is_advertised_with_an_integration_either``.
+    """
+    registry = build_default_registry(now=_at, ledger=FakeAuditTrail(), gate=FakeAuditTrail())
+
+    capabilities = await registry.capabilities()
     ids = [definition.id for definition in await registry.all_tools()]
-    assert ids == ["current_time", "recall_memory"]
+
+    assert capabilities == ("report_current_time",)
+    assert ids == ["current_time"]
+    for synonym in MEMORY_SYNONYMS:
+        assert synonym not in capabilities
+        assert synonym not in ids
 
 
 # --- current_time -------------------------------------------------------
@@ -108,149 +141,16 @@ async def test_current_time_rejects_a_non_conforming_clock() -> None:
         await naive({}, idempotency_key=None)
 
 
-# --- recall_memory ------------------------------------------------------
-
-
-async def test_recall_memory_returns_matching_records() -> None:
-    """The memory-backed tool reads its injected store and returns records as JSON."""
-    store = FakeMemoryStore(now=_at)
-    await store.add(
-        SemanticMemory(
-            id="m-1",
-            content="the wifi password is on the fridge",
-            fact="wifi password location",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-        )
-    )
-
-    output = await RecallMemory(store)({"query": "wifi"}, idempotency_key=None)
-
-    assert isinstance(output, list)
-    assert len(output) == 1
-    assert output[0]["id"] == "m-1"
-    assert output[0]["content"] == "the wifi password is on the fridge"
-
-
-async def test_recall_memory_returns_nothing_for_an_unmatched_query() -> None:
-    """A query nothing matches is an empty list, not an error."""
-    output = await RecallMemory(FakeMemoryStore(now=_at))(
-        {"query": "nothing here"}, idempotency_key=None
-    )
-
-    assert output == []
-
-
-async def test_recall_memory_rejects_a_missing_query() -> None:
-    """A bad argument raises, which the seam classifies INTERNAL (ADR-0029 §3)."""
-    with pytest.raises(ValueError, match="query"):
-        await RecallMemory(FakeMemoryStore(now=_at))({}, idempotency_key=None)
-
-
-async def test_recall_memory_rejects_a_non_positive_limit() -> None:
-    """`limit` must be a positive integer; a bool is not a count."""
-    tool = RecallMemory(FakeMemoryStore(now=_at))
-    with pytest.raises(ValueError, match="limit"):
-        await tool({"query": "x", "limit": 0}, idempotency_key=None)
-    with pytest.raises(ValueError, match="limit"):
-        await tool({"query": "x", "limit": True}, idempotency_key=None)
-
-
-class _SearchRecordingStore(FakeMemoryStore):
-    """A store that records every `search` limit, to prove validation runs first.
-
-    The over-cap rejection's whole point is that an out-of-range `limit` never
-    reaches the store (#298): a bare `FakeMemoryStore` accepts the huge value
-    harmlessly, so a `pytest.raises(ValueError)` alone cannot tell "rejected
-    before search" from "searched, then raised". This records the `limit` of
-    every `search` call so a test can assert the store was never touched.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(now=_at)
-        self.search_limits: list[int] = []
-
-    async def search(
-        self,
-        query: str,
-        *,
-        limit: int = 10,
-        kinds: Sequence[MemoryKind] | None = None,
-        bands: Sequence[BeliefBand] | None = None,
-    ) -> MemorySearchResult:
-        self.search_limits.append(limit)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
-
-
-@pytest.mark.parametrize("over_cap", [_MAX_RECALL_LIMIT + 1, 2_500_000_000_000_000_000])
-async def test_recall_memory_rejects_an_over_cap_limit_before_any_search(over_cap: int) -> None:
-    """A `limit` above the cap is refused before the store is ever searched (#298)."""
-    store = _SearchRecordingStore()
-    tool = RecallMemory(store)
-
-    with pytest.raises(ValueError, match="limit"):
-        await tool({"query": "x", "limit": over_cap}, idempotency_key=None)
-
-    # The unbounded value from the issue never reaches the store's integer bind:
-    # validation raised before any search ran.
-    assert store.search_limits == []
-
-
-async def test_recall_memory_accepts_the_cap_boundary() -> None:
-    """`limit` exactly at the cap is in bounds and drives a real search."""
-    store = FakeMemoryStore(now=_at)
-    await store.add(
-        SemanticMemory(
-            id="m-1",
-            content="the wifi password is on the fridge",
-            fact="wifi password location",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-        )
-    )
-
-    output = await RecallMemory(store)(
-        {"query": "wifi", "limit": _MAX_RECALL_LIMIT}, idempotency_key=None
-    )
-
-    assert isinstance(output, list)
-    assert len(output) == 1
-    assert output[0]["id"] == "m-1"
-
-
-def test_recall_memory_schema_advertises_the_cap() -> None:
-    """The advertised schema declares the same maximum the callable enforces."""
-    schema = RECALL_MEMORY.parameters_schema
-    assert isinstance(schema, Mapping)
-    properties = schema["properties"]
-    assert isinstance(properties, Mapping)
-    limit_schema = properties["limit"]
-    assert isinstance(limit_schema, Mapping)
-
-    assert limit_schema["maximum"] == _MAX_RECALL_LIMIT
-    assert limit_schema["minimum"] == 1
-
-
-async def test_recall_memory_rejects_an_unexpected_argument() -> None:
-    """A key outside {query, limit} is refused (additionalProperties: false)."""
-    tool = RecallMemory(FakeMemoryStore(now=_at))
-    with pytest.raises(ValueError, match="unexpected argument"):
-        await tool({"query": "x", "surprise": 1}, idempotency_key=None)
-
-
 # --- end to end: a plan drives selection -> permission -> execute --------
 
 
-def _runner(
-    registry: object, trail: FakeAuditTrail, *, allow_everything: bool = False
-) -> tuple[StepRunner, FakePlanStore]:
+def _runner(registry: object, trail: FakeAuditTrail) -> tuple[StepRunner, FakePlanStore]:
     """Wire the real StepRunner/StepExecutor over the real registry and fakes.
 
     The registry is the *same* object as the invoker (ADR-0029 §8): one binding
-    selects and acts. The policy allows the tool under test — the default fake
-    confirms at ``MEDIUM``, so ``recall_memory`` needs ``confirm_at=None``.
+    selects and acts, under the default fake policy — which is all these cases
+    need, because ``current_time`` is ``LOW`` and the memory-lookup case reaches no
+    tool to be ruled on at all.
 
     ``trail`` is the **same object** the registry claims through (ADR-0192 §9's
     wiring clause), so these cases run the production sequence end to end: the
@@ -258,11 +158,10 @@ def _runner(
     recorded. A second trail here would refuse every claim.
     """
     plans = FakePlanStore(now=_at)
-    policy = FakeActionPolicy(confirm_at=None) if allow_everything else FakeActionPolicy()
     runner = StepRunner(
         plans=plans,
         registry=registry,  # type: ignore[arg-type]  # the real InMemoryToolRegistry
-        policy=policy,
+        policy=FakeActionPolicy(),
         trail=trail,
         executor=StepExecutor(plans=plans, registry=registry, invoker=registry, now=_at),  # type: ignore[arg-type]
         now=_at,
@@ -288,9 +187,7 @@ async def _execution_for(plans: FakePlanStore, step: PlanStep) -> ExecutionState
 async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     """The capability the tool advertises drives selection -> execute (ADR-0048)."""
     trail = FakeAuditTrail()
-    registry = build_default_registry(
-        memory=FakeMemoryStore(now=_at), now=_at, ledger=trail, gate=trail
-    )
+    registry = build_default_registry(now=_at, ledger=trail, gate=trail)
     runner, plans = _runner(registry, trail)  # LOW risk: the default policy allows it
     step = PlanStep(id="step-1", intent="what time is it", capability="report_current_time")
     state = await _execution_for(plans, step)
@@ -370,38 +267,60 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     assert stored.output is None
 
 
-async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
-    """The injected-dependency tool runs through the pipeline against its store."""
-    store = FakeMemoryStore(now=_at)
-    await store.add(
-        SemanticMemory(
-            id="m-1",
-            content="the meeting is on tuesday",
-            fact="meeting day",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-        )
-    )
+# --- a memory lookup reaches no tool (ADR-0208 §3, §6) -------------------
+
+
+@pytest.mark.parametrize("emitted", MEMORY_SYNONYMS)
+async def test_a_plan_naming_a_memory_lookup_reaches_no_capable_tool(emitted: str) -> None:
+    """A lookup-shaped step is skipped, not selected and not parked (ADR-0208 §3).
+
+    Driven through the **real** selection path — the same ``StepRunner`` the two
+    cases above use, which resolves the emitted capability through the alias layer
+    before it looks for a tool (ADR-0053). That is what makes this the test ADR-0208
+    §6 asks for rather than a restatement of the registry assertion: a lane that
+    deleted the eight alias rows but left the tool bound would still select it here,
+    where a table-shaped assertion alone would pass.
+
+    ``AWAITING_CONFIRMATION`` is called out because it is the outcome #1715 was
+    filed about: the owner asked what they take in their coffee, the step parked at
+    ``CONFIRM``, and the turn said nothing. Nothing parks now because nothing is
+    selected.
+    """
     trail = FakeAuditTrail()
-    registry = build_default_registry(memory=store, now=_at, ledger=trail, gate=trail)
-    # MEDIUM risk, so the default fake would confirm; allow it to prove execution.
-    runner, plans = _runner(registry, trail, allow_everything=True)
-    step = PlanStep(
-        id="step-1",
-        intent="when is the meeting",
-        capability="recall_memory",
-        parameters={"query": "meeting"},
-    )
+    registry = build_default_registry(now=_at, ledger=trail, gate=trail)
+    runner, plans = _runner(registry, trail)
+    step = PlanStep(id="step-1", intent="what do i take in my coffee", capability=emitted)
     state = await _execution_for(plans, step)
 
     disposition = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
-    assert disposition.disposition is Disposition.EXECUTED
-    assert disposition.tool_id == "recall_memory"
+    assert disposition.disposition is Disposition.NO_CAPABLE_TOOL
+    assert disposition.tool_id is None
+    # Nothing was ruled on, so there was nothing to park: the trail holds no
+    # decision at all, which is the state #1715's `AWAITING_CONFIRMATION` was the
+    # absence of. An enum comparison could not say this — the disposition above
+    # already excludes that member — and "no decision recorded" is the fact.
+    assert await trail.export() == []
     stored = (await plans.get_execution(state.id)).step("step-1")  # type: ignore[union-attr]
     assert stored is not None
-    assert stored.status is StepStatus.SUCCEEDED
-    # The seam freezes JSON, so the recorded output is a tuple of frozen mappings.
-    assert isinstance(stored.output, tuple)
-    assert stored.output[0]["id"] == "m-1"
+    assert stored.status is StepStatus.SKIPPED
+    assert stored.output is None
+
+
+@pytest.mark.parametrize("emitted", MEMORY_SYNONYMS)
+async def test_a_memory_synonym_resolves_to_itself_against_the_live_registry(
+    emitted: str,
+) -> None:
+    """ADR-0053's branch 4, over the capabilities the factory actually advertises.
+
+    This is what makes ADR-0208 §2's deletion honest rather than merely tidy: the
+    resolver is handed the **live** advertised set — read off the registry the
+    composition root builds, not a literal — and every synonym the deleted rows
+    served comes back unchanged, so selection reports ``NO_CAPABLE_TOOL`` about the
+    name the planner actually emitted (ADR-0037 §1).
+    """
+    registry = build_default_registry(now=_at, ledger=FakeAuditTrail(), gate=FakeAuditTrail())
+
+    advertised = await registry.capabilities()
+
+    assert resolve_capability(emitted, advertised) == emitted
