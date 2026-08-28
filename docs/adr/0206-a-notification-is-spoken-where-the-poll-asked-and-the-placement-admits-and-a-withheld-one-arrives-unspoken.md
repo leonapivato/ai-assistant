@@ -798,13 +798,20 @@ that prices this, unchanged, and costs the abandoned browser a reconnect.
 > the cadence it writes it at today; a keep-alive is emitted only where a poll has
 > outrun the interval, which before this ADR could not happen.
 
-> **Normative.** **A delivery and a keep-alive never contend, and the delivery
-> wins.** Restarting the interval discards any keep-alive already due, already
-> scheduled or in flight for it: where a poll returns as the interval elapses, the
-> delivery **is** that interval's write and no keep-alive is written beside it.
-> An implementation serialises the two rather than letting both offer a value, so
-> no stream is ever abandoned under ADR-0175 §4's pending-value clause on account
-> of a keep-alive falling due beside a delivery that did not delay it.
+> **Normative.** **A delivery and a keep-alive are arbitrated at one point, and
+> that point is before either is handed to any stream.** The gateway decides there
+> which value it writes for the elapsing interval, and where a poll has returned
+> the delivery is that value: a keep-alive due or scheduled but **not yet handed to
+> a stream** is discarded, and for one interval the two never both reach one
+> stream.
+
+> **Normative.** **A keep-alive already handed to a stream is not retracted**,
+> because a value a stream has taken is a value a browser may already be reading.
+> Where a delivery arrives behind one a browser has not yet drained, ADR-0175 §4's
+> pending-value clause governs unchanged and its outcome is unchanged: the delivery
+> is the next value due on that stream, the stream is abandoned and ended, and the
+> browser reconnects. This ADR grants no exception to that clause, adds no queue
+> behind it, and gives no stream a second slot.
 
 > **Normative.** That write is the gateway's own, on ADR-0175 §4's terms and
 > nothing more: it carries no part of any notification, is not a delivery, is
@@ -860,15 +867,32 @@ by the same figure is what keeps §8's obligation true in that case rather than
 letting it lapse. A reader holding only ADR-0175 sets the same field to the same
 default and observes the same cadence.
 
-**The two writes are serialised because the abandonment clause is unforgiving and
-correct to be.** ADR-0175 §4 ends a stream whose pending write has not completed
-when the next value is due, and a delivery is up to 683 KiB where a keep-alive is a
-few bytes — so a stale tick arriving behind a delivery would end a healthy stream
-in the instant after it was given the notification it was waiting for, costing a
-reconnect for a liveness signal the delivery had just supplied. The clause above
-removes the contention rather than softening the abandonment: nothing about §4's
-rule changes, and what changes is that the gateway never offers a second value it
-did not need to. Adversarial review found this on the ninth round.
+**Arbitrating before the hand-off rather than trying to recall a value, and the
+two rounds that got this to its right shape.** Adversarial review found on the
+ninth that a keep-alive falling due beside a delivery could put two values at one
+stream's single pending slot, whereupon ADR-0175 §4 would end a healthy stream in
+the instant after it was given the notification it was waiting for — a reconnect
+spent on a liveness signal the delivery had just supplied. The first answer said
+the delivery discards a keep-alive "already due, scheduled or in flight", and
+architecture review blocked it on the tenth: a stream's slot is filled by a hand-off
+the gateway cannot undo, so "in flight" named a retraction no implementation can
+perform, and a clause obliging one would have been unsatisfiable. The two clauses
+above split the case at the only line that is real. Before the hand-off there is a
+decision, and the gateway makes it once and writes one value; after it there is a
+browser that may already be reading, and §4's rule applies exactly as it applies to
+any other pair of values, unsoftened.
+
+**And the remaining window is the stalled reader §4 already prices, not a new
+fragility.** Because the arbitration precedes the hand-off, the only way a
+keep-alive occupies a slot when a delivery arrives is that a browser has not
+drained a value of a few dozen bytes in the time between the interval elapsing and
+the poll returning. A browser doing that is the one §4 was written about — "a
+browser that stops reading cannot delay another browser's delivery" — and the
+remedy it fixes, a reconnect, is the one §4 prices as free "because a session
+outlives its connections". What this ADR must not do is buy that browser an
+exception, and it does not: the notification it misses is not lost, because
+ADR-0131 §3's outbox holds an unacknowledged entry until its lease expires and
+offers it again, which is at-least-once behaving as built.
 
 **And the keep-alive matters most in exactly the state this ADR creates.** §4's
 own ground for it is that "a stream that writes nothing for an hour is a stream
@@ -1229,7 +1253,8 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §8 (interrupt) | A press interrupts a notification's playback | A test driving the press against a sounding notification |
 | §8 (keep-alive) | The gateway's keep-alive paced by `gateway_notification_budget` and not by the poll's return | A test that with a poll outstanding beyond that interval, every open delivery stream still receives a value within it; a test that the value is the one carrying nothing but its own kind, that it is not a delivery and acknowledges nothing, and that a gateway whose polls complete within budget writes no extra value |
 | §8 (keep-alive, stalled) | A stream stalled behind a rendering is abandoned and ended when the keep-alive falls due | A test asserting the abandonment, that nothing is queued behind the pending value, and that no other stream's cadence is delayed by it |
-| §8 (keep-alive, coincidence) | A delivery returning as the interval elapses writes once, as the delivery | A test over a deterministic clock making the poll's return and the interval's expiry coincide, asserting exactly one value on each open stream, that it is the delivery, that no keep-alive follows it, and that no stream is abandoned |
+| §8 (keep-alive, coincidence) | One arbitration point before any hand-off; the delivery is the interval's value | A test over a deterministic clock making the poll's return and the interval's expiry coincide with the keep-alive not yet handed to a stream, asserting exactly one value on each open stream, that it is the delivery, that no keep-alive follows it, and that no stream is abandoned |
+| §8 (keep-alive, already handed over) | A keep-alive already taken by a stream is not retracted, and ADR-0175 §4 governs | A test whose browser does not drain a keep-alive before a delivery arrives, asserting the stream is abandoned and ended under §4 rather than queued behind, that no other open stream is affected, and that the entry is re-offered after its lease expires where no stream took the delivery |
 | §8 (keep-alive, lifetime) | The keep-alive dropped with the last stream and on shutdown, beside the poll | A test that closes the last stream while a poll is outstanding in synthesis, asserting the poll is cancelled, that whatever carries the keep-alive is cancelled or released with it, that nothing of it is left running, and that no value is written on any stream after; the same over `shutdown` |
 | §9 | ADR-0175 §5's acknowledgement unchanged | A test that the acknowledgement rides the next poll whatever the page did with the rendering |
 | §11 | ADR-0131's record is made in this ADR's own change | `tests/scripts/test_adr_citations_corpus.py`; a reader of ADR-0131 reaches ADR-0206 from its header |
