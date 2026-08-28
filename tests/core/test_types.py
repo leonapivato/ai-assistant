@@ -1580,3 +1580,68 @@ def test_there_is_no_expired_deferral_state() -> None:
     # being answerable, and there is no sweep whose failure re-opens one
     # (ADR-0078 §2, §6).
     assert "EXPIRED" not in DeferralState.__members__
+
+
+# --- ADR-0204 §1: what a record's warrant held ------------------------------
+
+
+def test_a_provenance_stored_before_the_field_existed_decodes_false() -> None:
+    """ADR-0204 §8 case 8: §1's fourth clause and §6's first clause, pinned together.
+
+    Validated from the **mapping** a store written before this decision
+    deserialises from — rather than merely constructed without it, because the
+    claim is about the *read* path. The record decodes rather than failing, and its
+    ``False`` is a decode default and not a measurement: no producer recorded an
+    answer, so where the producing turn's supply in fact held withheld content that
+    ``False`` is wrong about it, and nothing cites it as evidence about the record
+    carrying it. No supply site is given a second test either — ADR-0204 §3's is
+    the whole of what one applies, to every record alike, because nothing in the
+    data distinguishes the two cases.
+    """
+    stored = {"source": MemorySource.OBSERVED.value, "confidence": 0.6, "last_updated": _WHEN}
+
+    prov = Provenance.model_validate(stored)
+
+    assert prov.supplied_withheld_content is False
+
+
+def test_the_stamp_survives_a_json_round_trip() -> None:
+    """It is durable state on a stored record, not a transient of the write path.
+
+    The supply-side test ADR-0204 §3 states runs over records read back out of a
+    store, so a field that did not survive the encoding would leave every stamped
+    record speakable one restart later.
+    """
+    prov = Provenance(
+        source=MemorySource.OBSERVED,
+        confidence=0.6,
+        last_updated=_WHEN,
+        supplied_withheld_content=True,
+    )
+
+    restored = Provenance.model_validate_json(prov.model_dump_json())
+
+    assert restored.supplied_withheld_content is True
+    assert restored == prov
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+@pytest.mark.parametrize("source", list(MemorySource), ids=str)
+def test_no_validator_conditions_the_stamp_on_the_band(source: MemorySource, stamped: bool) -> None:
+    """Every band constructs both ways, because the question is about supply.
+
+    ADR-0204 §1 asks what stood in a record's warrant, and that question has an
+    answer for a record of any band — an episode capture stamps, a belief a
+    producer derived inherits, and a calendar import writes ``False`` because its
+    producer's inputs are not records of this store. Stated over the whole enum so
+    a ``MemorySource`` added later is covered without an edit here.
+    """
+    prov = Provenance(
+        source=source,
+        confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
+        last_updated=_WHEN,
+        attestation=_attestation_for(source),
+        supplied_withheld_content=stamped,
+    )
+
+    assert prov.supplied_withheld_content is stamped
