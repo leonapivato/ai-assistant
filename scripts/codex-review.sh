@@ -178,11 +178,60 @@ sha="$(git rev-parse HEAD)"
 # from here on.
 base_sha="$(git merge-base "$base" "$sha")"
 
+# --- A ratification flip is reviewed as its parent (ADR-0165 §3) -------------
+#
+# `ship` does not compare an artifact against HEAD when HEAD is a ratification
+# flip. ADR-0165 §3 is normative that "ADR-0027 §2's acceptance loop is evaluated
+# against `HEAD`'s parent — its tree and its patch identity — and paths (a) and
+# (b) then run exactly as written". A round run on such a HEAD therefore has to
+# record the PARENT's content, or it records evidence the rule is required to
+# look past: the paid round covers strictly more than `ship` asks for, and `ship`
+# refuses it all the same (issue #1672, PR #1660).
+#
+# That order is reachable rather than exotic. `just adr-ratify` runs before
+# `ship`, so HEAD is already the flip when the base moves; any `docs/adr/**`
+# merge landing on the base breaches ADR-0027 §3's floor and genuinely owes a
+# round; and every ADR lane that is not first in its merge order meets both.
+#
+# So the RECOGNISER's re-anchoring is mirrored here in the PRODUCER, by calling
+# the same `scripts/adr_ratify.py check-shape` that `ship` calls — one
+# implementation of the shape, for the reason ship.sh gives at length. What moves
+# is exactly what `ship` compares: the reviewed range's right edge, the recorded
+# tree and the recorded patch identity. `sha` does NOT move. It stays HEAD,
+# because it is what the settled-checkout guard re-reads when the round finishes
+# and what `ship` ranks a matching artifact by.
+#
+# Nothing is relaxed and no acceptance path is added. The single line the
+# reviewer no longer sees is the line ADR-0165 §2 defines as carrying no
+# reviewable content; the decision text it ratifies is in the range either way.
+# The alternative — teaching `ship` to accept an artifact recorded against HEAD's
+# own tree as well — would be the "third acceptance path" ADR-0165 §3 says this
+# is not, and it is not this script's to grant.
+#
+# Fails CLOSED in every direction, exactly as ship.sh's copy does: no python, a
+# missing script or a non-zero exit leaves `content_sha` at `$sha`, which is the
+# behaviour that predates this block.
+content_sha="$sha"
+ratify_adr=""
+_ratify_python="$(command -v python3 || command -v python || true)"
+if [[ -n "$_ratify_python" && -f "${repo_root}/scripts/adr_ratify.py" ]]; then
+    ratify_adr="$("$_ratify_python" "${repo_root}/scripts/adr_ratify.py" \
+        check-shape "$sha" 2>/dev/null || true)"
+fi
+if [[ -n "$ratify_adr" ]]; then
+    content_sha="$(git rev-parse "${sha}^")"
+    echo "HEAD ${sha:0:12} is the one-line ratification flip of ${ratify_adr};" >&2
+    echo "  reviewing and recording its parent ${content_sha:0:12}, which is the" >&2
+    echo "  content 'just ship' judges coverage over (ADR-0165 §3)." >&2
+fi
+
 # The tree is the anchor ship.sh checks (ADR-0020 §3): it identifies the content
 # reviewed, where the SHA identifies only the commit that happened to carry it.
 # Pinned here with the other two edges, and for the same reason — everything the
-# artifact certifies is resolved before the review starts, never after it.
-tree="$(git rev-parse "${sha}^{tree}")"
+# artifact certifies is resolved before the review starts, never after it. Taken
+# from `content_sha`, so it is the tree of what was actually reviewed on a
+# ratification flip as much as anywhere else.
+tree="$(git rev-parse "${content_sha}^{tree}")"
 
 # The branch is what scopes the round count below to *this* review loop, and it
 # is recorded in the artifact for that reason. Unlike the SHA or the base, it
@@ -1005,9 +1054,15 @@ patch_identity() {
 }
 # <<< shared-patch-identity
 
-diff="$(git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv "${base_sha}...${sha}")"
+diff="$(git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv "${base_sha}...${content_sha}")"
 if [[ -z "$diff" ]]; then
-    echo "no changes between ${base_sha} and ${sha} to review" >&2
+    echo "no changes between ${base_sha} and ${content_sha} to review" >&2
+    if [[ -n "$ratify_adr" ]]; then
+        echo "  (HEAD is the ratification flip of ${ratify_adr}, so the reviewed range" >&2
+        echo "   is its parent's — and this PR carries nothing but the flip. There is" >&2
+        echo "   no content for a round to cover, and none for 'just ship' to ask" >&2
+        echo "   about either; ADR-0165 §3 anchors both on that parent.)" >&2
+    fi
     exit 0
 fi
 
@@ -1018,7 +1073,7 @@ fi
 # the reviewer read this content (ADR-0027 §2). Recorded empty when the range has
 # no trustworthy identity, which is what makes the moved-base path unavailable
 # rather than accepted.
-patch_id="$(patch_identity "$base_sha" "$sha")"
+patch_id="$(patch_identity "$base_sha" "$content_sha")"
 
 # --- Aggregate (ADR-0020 §2) -------------------------------------------------
 #
@@ -1554,7 +1609,7 @@ _effective_sandbox() {
 # Classification is then a glob rather than a regex, since there is no longer a
 # text stream to match against.
 mapfile -d '' -t changed_paths < <(
-    git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv -z --name-only "${base_sha}...${sha}"
+    git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv -z --name-only "${base_sha}...${content_sha}"
 )
 
 # One list item per path. Reading NUL-delimited keeps a path with a newline in
@@ -1598,7 +1653,7 @@ _write_prompt() {
     echo
     echo "## Change under review"
     echo
-    echo "Review ONLY the committed diff below (${sha} vs ${base}). You may read full"
+    echo "Review ONLY the committed diff below (${content_sha} vs ${base}). You may read full"
     echo "files in the repo for context, but do not modify anything. Output exactly the"
     echo "ranked findings and verdict from docs/review/guide.md."
     echo
