@@ -225,9 +225,20 @@ lands. §6 states the one place where the two-state field is genuinely a residue
 > **Normative.** The value carried to capture is `True` exactly when that
 > evaluation found at least one record or one context facet that ADR-0199 §3
 > withholds from a channel of unbounded audience, in the supply **as assembled and
-> retrieved** and before any subtraction. It is `False` otherwise, and a pass that
-> assembles no context and retrieves nothing has an empty supply and carries
-> `False`.
+> retrieved** and before any subtraction. It is `False` otherwise.
+
+> **Normative.** The value is a property of the **turn whose rendering the episode
+> carries**, not of the pass that performs the capture. Where a pass captures an
+> episode rendered from a turn produced by an earlier pass — the resolution of a
+> parked turn, which ADR-0074 §3 captures a second time — the value carried is that
+> turn's own evaluation, retained with the parked turn and applied unchanged. No
+> implementation re-evaluates, recomputes or defaults it at the second capture.
+
+> **Normative.** A pass that carries no turn carries `False`, and that is true of
+> what its episode holds rather than a default it falls back on: a routed pass and a
+> resumption recovered from durable state each render an episode from the utterance
+> or from the bare fact of the resumption, with no goal statement and no plan
+> rationale of any turn in it (`_exchange_of`, `_routed_exchange_of`, ADR-0197 §10).
 
 > **Normative.** Capture writes that value into the captured episode's
 > `Provenance.supplied_withheld_content` and stamps every other field exactly as
@@ -499,6 +510,24 @@ layout. Each names an input and the outcome it fixes.
    serialised without the member — the pre-field shape — round-trips to `False`
    rather than failing, which is §1's third clause and §6's first clause pinned
    together.
+9. **A parked turn's resolution inherits its stamp, and a later spoken turn is not
+   supplied either episode.** A turn supplied a withheld record that parks for
+   confirmation, then resumes: both the episode captured at the park and the episode
+   captured at the resolution carry `True`, and neither reaches a subsequent
+   `converse_spoken` turn's `turn.memories`. The second half is what §2's third
+   clause exists for — the resolution's own pass retrieves nothing, and its episode
+   nevertheless renders the parking turn's goal and plan.
+10. **A resumption recovered from durable state, and a routed pass, carry `False`.**
+    A resumption whose parked turn is `None`, and a routed pass, each capture an
+    episode whose stamp is `False` — and the same test reads the captured `content`
+    to show that neither carries a goal statement or a plan rationale, which is what
+    makes the `False` true of it rather than a hole.
+11. **A record derived from a stamped one is stamped, and is itself withheld.** A
+    producer deriving a belief from a stamped episode produces a record whose
+    `supplied_withheld_content` is `True`, and that belief is absent from a later
+    `converse_spoken` turn's `turn.memories`. This is §5's second clause pinned end
+    to end: without it an implementation passes every test above while the second
+    hop launders the value.
 
 ### 9. What the implementing lane owes
 
@@ -514,14 +543,18 @@ rule 5). It owes:
 2. **The capture-side stamp** in `orchestration`: the evaluation of §2 made once per
    turn between retrieval and planning on every conversational operation, and the
    resulting boolean threaded to `Engine._capture` and through
-   `ConversationLifecycle.capture` into `_episode`.
+   `ConversationLifecycle.capture` into `_episode`. **Including the park's second
+   capture**: `Engine._capture_resumption` hands `_capture` the parked turn itself,
+   so `_exchange_of` renders that turn's goal and plan into a *second* episode, and
+   the value has to ride on `_Parked` beside the `TurnResult` it belongs to rather
+   than being recomputed from a pass that retrieves nothing.
 3. **The supply-side read** in `orchestration/disclosure.py`: one further field read
    in `_speakable`, with the module docstring's account of what it reads extended to
    name it.
 4. **The fold's disjunction** and the derivation rule of §5, alongside the sibling
    computation `orchestration/consolidation.py` and the writer already perform for
    `derived_from_external`.
-5. **The eight tests of §8.**
+5. **The eleven tests of §8.**
 6. **Closing #1703 and #1708**, which this decision answers and that lane fixes.
 
 > **Normative.** The records this decision owes on ADR-0203 and on ADR-0199 are made
@@ -720,8 +753,9 @@ the fact is recorded at the one moment it is decidable.
 defaulted, so a producer that forgets it writes `False` and a record is supplied
 that should have been withheld — the fail-open direction, and the one this ADR
 accepts deliberately in §1's third clause because the alternative empties ADR-0199
-§3's speakable set. §5's disjunction and §8's tests are the mitigation; a producer
-review obligation is the rest of it.
+§3's speakable set. §5's disjunction and §8's tests are the mitigation — tests 9 and 11
+in particular, which pin the two paths on which a value travels without a fresh
+evaluation to compute it — and a producer review obligation is the rest of it.
 
 **Deployment is one redeploy of the hub with no version handshake to coordinate**
 (§7). Existing stores read back with the field `False`, which is right about every
