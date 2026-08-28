@@ -1,7 +1,37 @@
 # 130. A notification is a proposal, and only a perishable one earns an interruption
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0215 (the population §8's duplicate lookup reads — §3's atomicity phrase naming the absence of an actionable record for one key, §5's third `DROP` condition, §7's sentence "§8's duplicate rule reads the same population" in its **dismissed** half, §7's purge clause, §8's duplicate-lookup clause, and the two clauses of §9's conformance list that pin them)
 - Date: 2026-08-10
+- Partially superseded: 2026-08-29 by ADR-0215 — **a dismissal ended the
+  suppression §8 promised, and a delivery is a dismissal.** ADR-0131 §3b rules
+  that every way an entry leaves the delivery outbox dismisses this ADR's record,
+  and §7 above ties §8's duplicate lookup to the same population the cap counts.
+  Composed, a notification suppressed its own duplicates for exactly as long as it
+  was *undelivered*. The milestone-14 phone QA measured the consequence over one
+  planted calendar event and a cursorless producer: noticed and delivered at
+  23:06, re-noticed and delivered again at 23:07, and again at 23:08, where §6's
+  default budget of three per rolling twenty-four hours was exhausted — one event,
+  three interruptions (#1372). ADR-0215 §1 replaces that population with the
+  **suppressing** set: a record suppresses while it is actionable, and after a
+  dismissal until its candidate's own declared expiry. ADR-0215 §4 moves §7's
+  purge guard onto the same set, so retention cannot purge a record out from under
+  the lookup — which is this section's own argument for measuring retention from
+  cessation, applied to the clause that moved. What is replaced is named on the
+  `Status` line above and quoted clause by clause in ADR-0215's header.
+
+  **The rest of this ADR stands, and is the ground of that decision rather than
+  its casualty.** §5's ruling order, its `INTERRUPT` conjunction and its
+  reconsideration are untouched; §6's three standing settings, its two re-ruling
+  sweeps and the interruption budget are untouched, and no unit is refunded;
+  §7's cap still counts **actionable** records, so a dismissal still frees capacity
+  at once, and the retention duration is still stamped at admission and still runs
+  from the instant the record ceased to be actionable; §7's expired half — "a fact
+  that recurs after its notification expired … is a new candidate and not a
+  duplicate" — is true as written and is not superseded; and §8's guarantee that
+  "No producer may require a durable cursor in order to be correct" is the promise
+  ADR-0215 repairs rather than narrows. §2's refusal of delivery state on the
+  candidate is kept expressly (ADR-0215 §5), and is why ADR-0215 adds a predicate
+  over the record's existing stamps rather than a `delivered` state.
 
 ## Context
 
