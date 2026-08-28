@@ -177,11 +177,13 @@ narrows that.
 ### 4. A moved contract file binds where new surface lands, or where the PR reaches the moved surface
 
 > **Normative.** A base move that adds a `Protocol` class to
-> `src/ai_assistant/core/protocols.py`, or adds any member to one — a method, a
-> property, or an annotated attribute — binds unconditionally.
+> `src/ai_assistant/core/protocols.py`, or that widens any `Protocol`'s
+> **effective member surface** — the members it declares, a method, a property or
+> an annotated attribute, together with those it inherits from its `Protocol`
+> bases — binds unconditionally.
 
 > **Normative.** That limb is decided by reading the file structurally at both
-> endpoints of the move and comparing the members each `Protocol` class declares,
+> endpoints of the move and comparing each `Protocol`'s effective member surface,
 > never by matching the move's hunk lines against a pattern. An endpoint that
 > cannot be parsed binds.
 
@@ -209,6 +211,20 @@ names nothing about the member because the member did not exist when the diff wa
 written. That is "or now should" exactly, so the limb reaches it. What the limb
 does not reach is a member's *removal* or a change to an existing one, which the
 second limb and §3's tests judge on their merits.
+
+**The surface is the effective one, because this repository composes Protocols.**
+`InvocationLedger(InvocationCompleter, Protocol)`,
+`TraceStore(TraceSink, TraceRetention, Protocol)` and
+`SecretStore(Secrets, Protocol)` each acquire their bases' members without
+declaring them. A base move that adds a `Protocol` base to an existing `Protocol`
+therefore adds every member of that base to what an implementation must satisfy,
+while adding neither a class nor a member in the child's own body. Comparing
+declared members alone would clear the floor on that move, and the open lane
+implementing that Protocol outside `core/` would reuse a review taken before its
+required interface expanded — the same fail-open the limb exists to close,
+reached through inheritance instead of through a new `def`. So the comparison is
+of the effective surface at each endpoint, and adding a base is a widening like
+any other.
 
 **Structurally, because the two spellings differ and only one of them is safe.**
 ADR-0027 §2 fixed `git patch-id --verbatim` in the ADR rather than leaving it to
@@ -249,8 +265,9 @@ mention that is not a definition tells a PR nothing it could act on.
 > directory prefix of, either endpoint of an entry of that diff; a `file` token
 > when it equals such an endpoint's basename; a `symbol` token when the whole
 > token occurs as a word in an added or removed line of that diff, or when **every
-> one of its dot-separated parts** occurs as a word somewhere in those lines,
-> whether or not on one line.
+> one of its dot-separated parts** occurs as a word somewhere in that diff — its
+> context lines included — **and at least one part occurs in an added or removed
+> line.**
 
 **A dotted symbol is matched part by part, because a definition never carries
 its own qualification.** ADR-0088 §1's citation form is
@@ -260,11 +277,30 @@ single token. A PR adding that member writes `class MemoryStore` on one line and
 string; matching the whole token would clear the floor on exactly the PR the
 moved ADR is about. Matching the last part alone is the other error: a bare
 `ingest`, `close` or `read` would bind almost every diff and the rule would buy
-nothing. Requiring every part, anywhere in the diff's added and removed lines, is
-what separates them — it binds the PR that names both the class and the member
-and leaves the one that names neither. It over-binds where a diff happens to
-carry both parts unrelatedly, which is the direction this section already
-prices.
+nothing. Requiring every part is what separates them — it binds the PR that names
+both the class and the member and leaves the one that names neither. It
+over-binds where a diff happens to carry both parts unrelatedly, which is the
+direction this section already prices.
+
+**The qualifier is read from the context lines, and this is the load-bearing
+half.** The common case is a PR adding a member to a class that already exists:
+it writes `async def ingest(...)` as an added line while `class MemoryStore` sits
+in the hunk's unchanged context. A rule reading only added and removed lines
+finds `ingest` and not `MemoryStore`, and clears the floor on exactly the PR the
+moved ADR is about — the failure is the same one whole-token matching had, one
+level down. So a part may be found anywhere in the diff, context included, and
+what keeps this from binding on mere proximity is the second half: at least one
+part must be added or removed, so a hunk that merely passes near a class binds
+nothing.
+
+**Resolving the enclosing class instead was considered and is not what is
+decided.** A rule that parsed each hunk to bind a member definition to its
+enclosing class would be more precise, and it would have to parse a *fragment* —
+a diff is not a Python file, its context is truncated at the hunk boundary, and
+the enclosing class can be a hundred lines above the first context line. A
+mechanism that fails to resolve on a large class would clear the floor, which is
+the wrong direction to fail in. Reading the two parts as words costs precision
+this rule already spends and cannot fail open.
 
 **The PR description is admitted because it can only cost rounds.** It is
 author-controlled and mutable, which would be disqualifying for an input that
@@ -465,15 +501,19 @@ documents that restate the rule:
   `core/protocols.py` move adding a Protocol, against a PR touching nothing in
   `core/` (owed); the same against a move adding an annotated attribute and
   against one adding a property to an existing Protocol (owed under §4's first
-  limb, which a method-only reading would clear); a `core/protocols.py` endpoint
-  that will not parse (owed); a `core/types.py` move the PR neither touches
-  `core/` for nor names (free); a move changing a definition the PR's text names
-  (owed); a moved ADR citing `Class.member` against a PR whose diff adds
-  `class Class` on one line and `def member` on another (owed under §5's
-  part-by-part rule, which whole-token matching would clear) and against a PR
-  whose diff names only one of the two parts (free); an unreadable endpoint and an
-  unretrievable PR description (owed); and every existing ADR-0027 §§2–4 case
-  still refusing exactly as it does today.
+  limb, which a method-only reading would clear); a move adding a `Protocol` base
+  to an existing `Protocol` and declaring nothing in its body (owed, which a
+  declared-members-only reading would clear); a `core/protocols.py` endpoint that
+  will not parse (owed); a `core/types.py` move the PR neither touches `core/`
+  for nor names (free); a move changing a definition the PR's text names (owed);
+  a moved ADR citing `Class.member` against a PR whose diff adds `class Class` on
+  one line and `def member` on another (owed), against a PR adding `def member`
+  inside an existing `class Class` that appears only in the hunk's context (owed,
+  which a rule reading added and removed lines alone would clear), against a PR
+  whose diff carries `Class` in context and touches neither part (free, since no
+  part is added or removed), and against a PR whose diff names only one of the two
+  parts (free); an unreadable endpoint and an unretrievable PR description (owed);
+  and every existing ADR-0027 §§2–4 case still refusing exactly as it does today.
 
 ## Alternatives considered
 
