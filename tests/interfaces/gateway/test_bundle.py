@@ -5910,8 +5910,13 @@ def test_the_page_obtains_the_report_from_no_new_browser_capability() -> None:
     assert "speechSynthesis" not in script
     assert "new Audio(" not in script
     assert "createMediaElementSource" not in script
-    # One decoder and one context, as before.
-    assert script.count("decodeAudioData") == 1
+    # **One decoder and one context, as before** — stated as the invariant rather than
+    # as a count of call sites, because ADR-0206 §8 gave the page a second thing to
+    # play (a notification's rendering) and a count would have read that as a new
+    # capability. What "no new capability" means is that every decode is the same
+    # `AudioContext`'s and there is still exactly one context, which `readyToPlay`
+    # builds inside the press gesture and holds for the life of the page.
+    assert script.count("decodeAudioData") == script.count("context.decodeAudioData(")
     assert script.count("new AudioContext(") == 1
 
 
@@ -6014,3 +6019,152 @@ def test_a_report_whose_request_the_hub_never_saw_is_put_back() -> None:
     # A newer measurement wins: §7 asks for the playback last in the air.
     restoring = functions["restoreDelivery"]
     assert "pendingDeliveries.has(conversation)" in restoring
+
+
+# --- ADR-0206 §8: an idle device speaks a notification, and no other does -----
+
+
+def test_a_notification_is_rendered_first_and_played_only_second() -> None:
+    """§8: wherever the page cannot play, "it plays nothing and renders the
+    notification on the page".
+
+    So the render is what always happens and the playback is what sometimes does,
+    and the order in the reader says so: a page that played first and rendered on
+    the way out would lose the notification altogether on the throw the decoder can
+    make. ADR-0206 §5 is what makes that the right way round — the page "is the
+    channel that carries it", and the audio is the part that may be missing.
+    """
+    script = _code("app.js")
+    reading = _functions(script)["readDeliveries"]
+
+    assert reading.index("renderNotification(value)") < reading.index(
+        "playNotification(value.spoken)"
+    )
+    assert script.count("playNotification(") == 2, "one declaration, one call"
+
+
+def test_a_notification_plays_only_into_a_running_context_with_nothing_in_the_air() -> None:
+    """§8: "'Idle'… is a conjunction of facts about the **device** and never about the
+    room: the page holds a running audio context established by a user gesture in this
+    document, and it holds no playback in the air… The page plays a rendering only
+    while both hold."
+
+    **And it never resumes.** ``readyToPlay`` builds and resumes the context inside the
+    press gesture because that is the only place a browser will let it (#1690), so a
+    ``resume`` reached from a delivery — which arrives on no gesture at all — is the
+    defect that fix exists to remove. A page that has had no gesture since load holds
+    no running context and plays nothing, which is why §8's own prose calls this
+    *proactive* rather than *spontaneous*.
+
+    **Neither fact is an audience fact.** Nothing here asks or infers who is present:
+    §8 forbids conditioning any clause on the room, which is what keeps this out of
+    ADR-0199 §4's way.
+    """
+    script = _code("app.js")
+    playing = _functions(script)["playNotification"]
+
+    assert 'context.state !== "running"' in playing
+    assert "playing !== null" in playing
+    assert "context.resume()" not in playing
+    assert "new AudioContext(" not in playing, "the context is readyToPlay's alone"
+    # The record is built only after both facts hold, so a page that cannot play has
+    # taken nothing over and the answer's own playback is untouched.
+    assert playing.index("playing !== null") < playing.index("playing = mine")
+
+
+def test_a_rendering_the_page_does_not_play_is_dropped_and_never_queued() -> None:
+    """§8: "A rendering the page does not play is **dropped**. The page holds no
+    rendering for later, queues nothing behind a playback, and plays no notification
+    after the delivery that carried it has been rendered on screen."
+
+    A page that held renderings would be the buffer ADR-0175 §4 refuses, rebuilt in
+    JavaScript, bounded by nothing and aging against an artifact ADR-0130 says is
+    about a moment. So the refusal is a bare ``return`` and there is nowhere for a
+    rendering to be put: no array, no map and no field on any record but the decoded
+    buffer of the playback actually in the air.
+    """
+    script = _code("app.js")
+    playing = _functions(script)["playNotification"]
+
+    assert playing.count("return;") == 2, "the null rendering and the busy device"
+    for holder in ("push(", "unshift(", "setTimeout(", "pendingDeliveries", "held ="):
+        assert holder not in playing
+
+
+def test_a_browser_that_cannot_decode_the_rendering_plays_nothing_and_says_nothing() -> None:
+    """§2: "One delivery carries one rendering in one format, and a browser that cannot
+    decode that format is silent… A browser that could have decoded a member the engine
+    did not pick plays nothing and renders the notification on the page, exactly as one
+    that could decode neither does."
+
+    **And it is not reported** (§2, §9): "That a browser played nothing is a **device
+    fact**. No component reports it, records it, retries on it, or treats it as a
+    disclosure outcome." So the rejected decode lets the record go and writes nothing —
+    no notice, no fault, and nothing sent anywhere. That is the one place a notification
+    differs from an answer, whose ``playSpoken`` writes ``couldNotPlay`` into the turn
+    that owed it.
+    """
+    script = _code("app.js")
+    decoding = _functions(script)["decodeNotification"]
+
+    assert "await context.decodeAudioData(" in decoding
+    assert "catch (_)" in decoding
+    assert "forgetPlaying(mine)" in decoding
+    for reported in ("couldNotPlay(", "fault(", "reportDelivery(", "line(", "fetch("):
+        assert reported not in decoding
+
+
+def test_a_press_landing_during_the_decode_starts_no_notification() -> None:
+    """The half of §8's interrupt that stopping a live source does not reach, and the
+    same defect ``playSpoken`` carries for an answer (#1696).
+
+    ``interruptPlayback`` clears the record **before** it stops anything, so a press
+    that landed while this was decoding leaves ``playing !== mine`` — and starting a
+    source then would be the utterance the owner interrupted beginning to speak after
+    they had begun.
+    """
+    script = _code("app.js")
+    decoding = _functions(script)["decodeNotification"]
+
+    assert decoding.index("if (playing !== mine)") < decoding.index("soundFrom(context, mine, 0)")
+
+
+def test_a_press_interrupts_a_notification_and_reports_nothing_about_it() -> None:
+    """§8: "a press to talk always interrupts a notification's playback… a notification
+    is the interruptible one of the two"; §9: "No component sends, records or infers
+    whether a page had a context, was playing, played, finished playing or was
+    interrupted."
+
+    The interrupt itself is inherited whole — ``interruptPlayback`` runs ahead of every
+    one of ``startTalking``'s guards and ``stopPlaying`` ends whatever is in the air,
+    neither of which asks what kind of playback it is. What this pins is the three
+    things that must *not* follow for a notification: no ADR-0205 report at either
+    ending, no notice written under an answer this playback was not about, and no hold
+    for #1701's resume — §8 forbids the page holding a rendering for later in terms.
+
+    Refused explicitly rather than by ``reportDelivery``'s own guard on a missing
+    ``episode_id``: a clause §9 states in terms should not depend on a record happening
+    to lack two members.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    interrupting = functions["interruptPlayback"]
+    sounding = functions["soundFrom"]
+    playing = functions["playNotification"]
+
+    assert "if (ended.notification) {" in interrupting
+    assert interrupting.index("held = null") < interrupting.index("if (ended.notification)")
+    assert interrupting.index("if (ended.notification)") < interrupting.index("reportDelivery(")
+    assert interrupting.index("if (ended.notification)") < interrupting.index(
+        "playbackInterrupted("
+    )
+    assert interrupting.index("if (ended.notification)") < interrupting.index("held = ended")
+    assert "if (!mine.notification) {" in sounding
+    assert sounding.index("if (!mine.notification)") < sounding.index('reportDelivery(mine, "com')
+    # The record says what it is, and says it in all three places a record is built, so
+    # neither reader has to infer the kind from what the record happens to lack.
+    assert "notification: true" in playing
+    assert script.count("notification: false") == 2
+    assert playing.count("episode: null") == 1
+    assert playing.count("conversation: null") == 1
+    assert "slot: null" in playing

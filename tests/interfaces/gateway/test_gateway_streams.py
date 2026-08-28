@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
 )
+from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS
 from ai_assistant.interfaces.gateway.http import Request, Response
 from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, Gateway
 from ai_assistant.testing import FakeAssistantEngine
@@ -597,6 +598,10 @@ async def test_a_delivery_reaches_the_browser_without_its_token() -> None:
             "notification_class": "calendar-upcoming",
             "summary": "notification 1",
             "detail": "the detail",
+            # ADR-0206 §8's one added member, `null` here because this delivery carries
+            # no rendering — "the member is never omitted, so a page reads one key
+            # rather than testing for a key's presence".
+            "spoken": None,
         }
         assert _TOKEN not in json.dumps(value)
 
@@ -638,11 +643,36 @@ async def test_a_delivery_streams_head_states_the_cadence_it_will_be_written_at(
         await engine.polling.wait()
         assert engine.calls[-1] == (
             "next_notification",
-            # ``plays`` is empty because this gateway supplies none yet: ADR-0206 §2's
-            # fixed value is the gateway lane's, and until it lands this poll asks for
-            # no rendering (ADR-0206 §1).
-            {"acknowledging": None, "plays": (), "budget": budget},
+            # ADR-0206 §2's fixed value, which the gateway supplies of its own on every
+            # poll. It is the module constant rather than a literal here, because what
+            # the constant *is* is pinned beside it in ``test_delivery.py`` — against
+            # ``SpokenAudioFormat``'s own membership, so a third member added on
+            # ADR-0200 §9's measurement clause fails there and not silently here.
+            {"acknowledging": None, "plays": GATEWAY_PLAYS, "budget": budget},
         )
+
+
+async def test_no_browser_value_reaches_the_poll_however_a_request_carries_one() -> None:
+    """ADR-0206 §2: ``plays`` is "a value the gateway supplies of its own, fixed and
+    identical on every poll. No browser request carries it, no browser value reaches
+    it, and no browser narrows, widens or reorders it."
+
+    Driven over a delivery-stream request that carries one anyway — a ``plays`` in the
+    body and a ``plays`` in the query — because "no browser value reaches it" is a
+    claim about what happens when one is *offered*, not about a page that behaves. The
+    poll is the gateway's own (ADR-0175 §6, ADR-0177 §1: "no browser request resolves
+    to it, no browser argument reaches it"), so the request is answered exactly as one
+    carrying nothing is and the argument is unchanged.
+    """
+    engine = _Delivering([None])
+    async with _harness(engine) as one:
+        _, _, status = await one.send(
+            "GET", "/deliveries?plays=audio/mp4", {"plays": ["audio/mp4"]}
+        )
+
+        assert status == 200
+        await engine.polling.wait()
+        assert engine.calls[-1][1]["plays"] == GATEWAY_PLAYS
 
 
 async def test_the_cadence_is_stated_on_the_delivery_stream_and_on_nothing_else() -> None:

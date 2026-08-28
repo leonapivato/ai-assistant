@@ -409,6 +409,46 @@ usual cause is the origin: a browser hands a microphone only to a page it
 considers secure, which is this `https://` one and the laptop's own
 `http://127.0.0.1` one — and no other. Typing works everywhere.
 
+## 9. It can speak a notification, but only after you have spoken to it
+
+A notification arrives in the panel while the page is open, and some of them are
+spoken aloud as well. Which ones is the assistant's ruling and not the page's:
+one kind of notification is placed as speakable — an upcoming event from your
+calendar — and every other kind arrives on screen without a sound. Nothing you
+can set here changes that, and a notification the ruling withheld from the
+loudspeaker is not marked as withheld: it simply arrives the way a notification
+arrived before any of this.
+
+**It will not speak until you have held the button at least once since the page
+loaded.** That is a browser rule rather than a choice. A page may only build the
+audio machinery it needs inside a gesture you made — a press, a tap — so a tab
+you opened and never spoke to has no way to make a sound at all, however much it
+would like to. The honest description is that the assistant speaks *proactively*
+and never *spontaneously*: it speaks up in a conversation you have already
+started, not out of a page you left open on a shelf.
+
+**And it will not speak over anything.** If an answer is still being spoken, or
+another notification is, the new one arrives on screen and stays silent — it is
+not queued up to be said afterwards, and it is not saved for later. The words
+are on the page, which is where a notification lives either way.
+
+**Holding the button stops it**, exactly as it stops an answer. A notification is
+the interruptible one of the two: what you are saying wins over what the
+assistant volunteered.
+
+**Nothing about any of this goes anywhere.** Whether this page was able to play,
+whether it played, whether it finished, whether you cut it off — none of it is
+sent to the hub, recorded, or used to decide anything. Playing a notification is
+not the same as acknowledging it, and the assistant learns nothing from the
+loudspeaker.
+
+**If you hear nothing at all**, the ring/silent switch is the first thing to
+check, for the same reason it is for an answer. The second is whether this
+browser can play the audio it was sent: one notification carries one recording in
+one format, and a browser that cannot decode that format shows the notification
+and says nothing. There is no message for that case, because there is nothing
+wrong — the notification arrived, and you are reading it.
+
 ## Why your phone had to be listed
 
 Being on the overlay gets your phone the page. It does not get it a session.

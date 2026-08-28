@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -22,8 +23,17 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     SpokenAudioFormat,
 )
-from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.interfaces.gateway import delivery
+from ai_assistant.interfaces.gateway.delivery import (
+    GATEWAY_PLAYS,
+    DeliveryFanOut,
+    DeliveryStream,
+)
+from ai_assistant.testing import (
+    FakeAssistantEngine,
+    FakeNotificationOutbox,
+    FakeNotificationStore,
+)
 from ai_assistant.wire.errors import HubUnavailableError
 
 if TYPE_CHECKING:
@@ -627,3 +637,454 @@ async def test_a_stalled_stream_is_abandoned_rather_than_queued_behind_a_termina
         {"kind": "alive"},
         {"kind": "fault", "fault": "hub-unreachable", "detail": "no hub there"},
     ]
+
+
+# --- ADR-0206 §2: the gateway's own `plays`, and no browser's -----------------
+
+
+def test_the_gateways_plays_names_every_spoken_audio_format_member() -> None:
+    """§2: the gateway's ``plays`` names **every** member of ``SpokenAudioFormat``,
+    "so no format the synthesizer can produce is excluded by the caller".
+
+    Compared against the enumeration itself rather than against a literal list, which
+    is the whole of what makes it hold: a third member added to ``SpokenAudioFormat``
+    on ADR-0200 §9's measurement clause fails this until the gateway names it, which
+    is the state §2 forbids.
+    """
+    assert set(GATEWAY_PLAYS) == set(SpokenAudioFormat)
+    assert len(GATEWAY_PLAYS) == len(SpokenAudioFormat)
+
+
+def test_the_order_is_a_constant_this_module_holds_with_its_measurement() -> None:
+    """§2: "Their order is a constant the gateway holds, set by the implementing lane
+    from a recorded measurement of what browsers decode and changeable on a further
+    measurement without an ADR."
+
+    The measurement is in the constant's own docstring, beside the value it decided —
+    which is what "recorded" has to mean for a later lane to be able to check it
+    against a fresh one. Pinned here so that a lane reordering the tuple and leaving
+    the figures behind fails rather than passes: the two engines, their versions and
+    the call the page actually decodes through are what a re-measurement replaces.
+    """
+    recorded = delivery.__doc__ or ""
+    source = Path(delivery.__file__ or "").read_text(encoding="utf-8")
+    measured = source[source.index("#: What the gateway asks") : source.index("GATEWAY_PLAYS:")]
+    assert "decodeAudioData" in measured
+    assert "Chromium 151.0.7922.34" in measured
+    assert "WebKit 26.5" in measured
+    assert "2026-08-28" in measured
+    assert recorded != ""
+
+
+async def test_every_poll_carries_that_value_and_nothing_derived_from_a_browser() -> None:
+    """§2: ``plays`` is "a value the gateway supplies of its own, fixed and identical
+    on every poll", and no browser "narrows, widens or reorders it".
+
+    Two streams, two polls: the argument is the module constant on each, so it is
+    neither assembled from how many streams are open nor recomputed per poll. §2
+    records why a browser-supplied list is unavailable twice over — ADR-0177 §1's
+    second clause forbids a browser argument reaching this poll at all, and even
+    without it ADR-0175 §4's fan-out gives the gateway one answer for every open
+    stream, so a list assembled from two browsers with different capabilities has no
+    value it could take.
+    """
+    fan_out, engine, _ = _fan_out([None, None])
+    first, second = fan_out.open(), fan_out.open()
+    assert first is not None
+    assert second is not None
+
+    await engine.answer_one_poll()
+    await engine.polling.wait()
+
+    assert [call[1]["plays"] for call in engine.calls] == [GATEWAY_PLAYS, GATEWAY_PLAYS]
+    fan_out.shutdown()
+
+
+# --- §8: the keep-alive is paced by the interval, not by the poll -------------
+
+
+async def test_a_poll_that_outruns_the_interval_still_writes_on_every_stream() -> None:
+    """§8: "The gateway writes on every open delivery stream at least once per
+    ``gateway_notification_budget`` **whether or not a poll has returned**."
+
+    The state ADR-0206 §7 creates and this clause exists to keep ADR-0175 §4's
+    obligation true in: a browser holding a delivery stream cannot tell a gateway
+    waiting on a long synthesis from a gateway that has stopped, and tying the
+    keep-alive to the poll's return would have made this ADR's one new source of
+    delay the one condition the keep-alive could not report.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([None], timers=timers)
+    one, two = fan_out.open(), fan_out.open()
+    assert one is not None
+    assert two is not None
+    here: list[Mapping[str, Any]] = []
+    there: list[Mapping[str, Any]] = []
+    reading = asyncio.gather(_drain(one, here), _drain(two, there))
+    await engine.polling.wait()
+
+    assert [timer.delay for timer in timers.armed] == [_BUDGET.total_seconds()]
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert here == [{"kind": "alive"}]
+    assert there == [{"kind": "alive"}]
+    fan_out.shutdown()
+    await reading
+
+
+async def test_the_keep_alive_is_the_value_carrying_nothing_but_its_own_kind() -> None:
+    """§8: "the gateway writes 'a value carrying nothing but its own kind'… That write
+    is the gateway's own, on ADR-0175 §4's terms and nothing more: it carries no part
+    of any notification, is not a delivery, is acknowledged by nothing".
+
+    So the value is ``alive`` and the *next* poll acknowledges nothing on its account:
+    §5 acknowledges a delivery written to at least one open stream, and a keep-alive
+    is not one.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([None], timers=timers)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+    await engine.polling.wait()
+
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await engine.answer_one_poll()
+
+    assert read == [{"kind": "alive"}, {"kind": "alive"}]
+    assert engine.acknowledged == [None, None]
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_gateway_whose_polls_complete_within_budget_writes_no_extra_value() -> None:
+    """§8: "A write of either kind restarts the interval, so a gateway whose polls
+    complete within their budget writes exactly what it writes today and at exactly
+    the cadence it writes it at today; a keep-alive is emitted only where a poll has
+    outrun the interval, which before this ADR could not happen."
+
+    Driven by counting what is *armed*: each write re-arms one interval and cancels
+    the one it replaces, so a fan-out that has answered two polls holds exactly one —
+    and the two values the browser saw are the two deliveries, with no keep-alive
+    between them.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([_delivery(1), _delivery(2)], timers=timers)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+
+    await engine.answer_one_poll()
+    await engine.answer_one_poll()
+
+    assert [value["summary"] for value in read] == ["notification 1", "notification 2"]
+    assert len(timers.armed) == 1
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_stream_stalled_behind_a_value_is_abandoned_when_the_keep_alive_falls_due() -> None:
+    """§8: "ADR-0175 §4's per-stream rules bind the keep-alive unchanged… A keep-alive
+    is a value due on that stream, so a stream stalled behind a rendering meets that
+    clause exactly as it meets it behind any other value, and this ADR does not soften
+    it."
+
+    Nothing is queued behind the pending value — the stalled reader is holding one and
+    is offered nothing more — and no other stream's cadence is delayed by it, which is
+    §4's own reason for abandoning rather than waiting.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([_delivery(1)], timers=timers)
+    stalled, draining = fan_out.open(), fan_out.open()
+    assert stalled is not None
+    assert draining is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(draining, read))
+
+    await engine.answer_one_poll()
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert stalled.abandoned.is_set()
+    assert [value["kind"] for value in read] == ["notification", "alive"]
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_due_keep_alive_is_arbitrated_away_before_either_is_handed_over() -> None:
+    """§8: "A delivery and a keep-alive are arbitrated at one point, and that point is
+    before either is handed to any stream. The gateway decides there which value it
+    writes for the elapsing interval, and where a poll has returned the delivery is
+    that value: a keep-alive due or scheduled but **not yet handed to a stream** is
+    discarded, and for one interval the two never both reach one stream."
+
+    The coincidence is exact here rather than raced: the interval is armed and due —
+    ``Timers`` holds the callback and fires only when a test says so — and the poll
+    returns first. Adversarial review found on ADR-0206's ninth round that without
+    this the pair would fill one stream's single pending slot and §4 would end a
+    healthy stream in the instant after it was given the notification it was waiting
+    for.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([_delivery(1)], timers=timers)
+    one, two = fan_out.open(), fan_out.open()
+    assert one is not None
+    assert two is not None
+    here: list[Mapping[str, Any]] = []
+    there: list[Mapping[str, Any]] = []
+    reading = asyncio.gather(_drain(one, here), _drain(two, there))
+    await engine.polling.wait()
+    due = timers.armed[0]
+
+    await engine.answer_one_poll()
+
+    # The keep-alive that was due is discarded rather than written: it never fires,
+    # so "no keep-alive follows it" is a fact about the schedule and not about the
+    # order two writes happened to land in.
+    assert due.cancelled is True
+    assert [value["kind"] for value in here] == ["notification"]
+    assert [value["kind"] for value in there] == ["notification"]
+    assert not one.abandoned.is_set()
+    assert not two.abandoned.is_set()
+    # And the cadence continues: the delivery's own write re-armed the interval, so
+    # exactly one is standing and it is not the one that was arbitrated away.
+    assert [timer.delay for timer in timers.armed] == [_BUDGET.total_seconds()]
+    assert due not in timers.armed
+    fan_out.shutdown()
+    await reading
+
+
+async def test_a_keep_alive_a_stream_has_taken_is_not_retracted_by_the_delivery() -> None:
+    """§8: "A keep-alive already handed to a stream is not retracted, because a value a
+    stream has taken is a value a browser may already be reading. Where a delivery
+    arrives behind one a browser has not yet drained, ADR-0175 §4's pending-value
+    clause governs unchanged and its outcome is unchanged: the delivery is the next
+    value due on that stream, the stream is abandoned and ended, and the browser
+    reconnects."
+
+    Architecture review blocked the alternative on ADR-0206's tenth round: a stream's
+    slot is filled by a hand-off the gateway cannot undo, so a clause obliging a
+    retraction would have been unsatisfiable. And no other open stream is affected —
+    the one that drained its keep-alive takes the delivery normally.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([_delivery(1)], timers=timers)
+    stalled, draining = fan_out.open(), fan_out.open()
+    assert stalled is not None
+    assert draining is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(draining, read))
+    await engine.polling.wait()
+
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert stalled.offer({"kind": "alive"}) is False
+    await engine.answer_one_poll()
+
+    assert stalled.abandoned.is_set()
+    assert [value["kind"] for value in read] == ["alive", "notification"]
+    fan_out.shutdown()
+    await reading
+
+
+class _Gated(FakeAssistantEngine):
+    """The canonical fake, answering its poll only when a test lets it.
+
+    The fake deliberately does not sleep (its own docstring says why), so a fan-out
+    driven against it answers the instant it asks — which is the one thing a test of
+    ADR-0206 §8's *ordering* cannot have. Everything else is the fake's: the outbox,
+    the lease and ADR-0206's rendering are unchanged, which is what makes the lease
+    expiry below a real re-offer rather than a scripted one.
+    """
+
+    def __init__(self) -> None:
+        """Build one whose first poll parks."""
+        super().__init__()
+        self.polling = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def next_notification(
+        self,
+        *,
+        acknowledging: Identifier | None = None,
+        plays: tuple[SpokenAudioFormat, ...] = (),
+        budget: timedelta,
+    ) -> NotificationDelivery | None:
+        """Park until the test releases this poll, then answer it as the fake does."""
+        self.polling.set()
+        try:
+            await self.released.wait()
+        finally:
+            self.released.clear()
+            self.polling.clear()
+        return await super().next_notification(
+            acknowledging=acknowledging, plays=plays, budget=budget
+        )
+
+
+async def test_a_delivery_no_stream_took_is_re_offered_after_its_lease_expires() -> None:
+    """§8: "the entry is re-offered after its lease expires where no stream took the
+    delivery".
+
+    The one stream is stalled behind a keep-alive it has not drained, so the delivery
+    is written to nothing, §5 acknowledges nothing, and ADR-0131 §3's outbox holds the
+    unacknowledged entry until its lease expires and offers it again — at-least-once
+    behaving as built, which is what §8 means by the browser's reconnect costing the
+    owner nothing but a duplicate.
+    """
+    at = _AT
+    engine = _Gated()
+    store = FakeNotificationStore(now=lambda: at)
+    engine.notification_store = store
+    lease = timedelta(seconds=120)
+    engine.notification_outbox = FakeNotificationOutbox(records=store, now=lambda: at, lease=lease)
+    await engine.notification_outbox.offer(
+        NotificationCandidate(
+            candidate_key="key-1",
+            producer="calendar-upcoming",
+            notification_class="upcoming_event",
+            summary="Standup starts in ten minutes",
+            noticed_at=at,
+            confidence=0.9,
+            sensitivity=DataTier.PERSONAL,
+        )
+    )
+    timers = Timers()
+    slots = _Slots()
+    fan_out = DeliveryFanOut(
+        engine=engine, budget=_BUDGET, acquire=slots.acquire, release=slots.release, defer=timers
+    )
+    stalled = fan_out.open()
+    assert stalled is not None
+    await engine.polling.wait()
+
+    # The keep-alive lands in the stream's one pending slot and nobody drains it.
+    timers.fire_all()
+    await asyncio.sleep(0)
+    # Now the poll returns with the delivery, which is the next value due on a stream
+    # whose write has not completed — §4 abandons it rather than queueing behind.
+    engine.released.set()
+    for _ in range(4):
+        await asyncio.sleep(0)
+    fan_out.shutdown()
+
+    assert stalled.abandoned.is_set()
+    polls = [call[1] for call in engine.calls if call[0] == "next_notification"]
+    assert [poll["acknowledging"] for poll in polls] == [None] * len(polls)
+    assert await engine.notification_outbox.claim() is None
+    at += lease + timedelta(seconds=1)
+    reoffered = await engine.notification_outbox.claim()
+    assert reoffered is not None
+    assert reoffered.notification.summary == "Standup starts in ten minutes"
+
+
+# --- §8: the keep-alive's lifetime is the fan-out's, not the poll's -----------
+
+
+@pytest.mark.parametrize("ending", ["close", "shutdown"])
+async def test_the_keep_alive_is_dropped_with_the_last_stream_beside_the_poll(
+    ending: str,
+) -> None:
+    """§8: "It exists while and only while at least one delivery stream is open; it is
+    dropped in the same step that ends the last stream and in the same step that ends
+    them all on the way down; and nothing of it survives that step — no timer, no
+    task, no pending write, and no value written on any stream afterwards."
+
+    Both endings, because both reach the fan-out's end and ADR-0206 §8 names them
+    both. The poll is outstanding when the last stream goes — the case the clause is
+    written about, a synthesis still running — and it is cancelled, the interval is
+    cancelled with it, and firing whatever a scheduler might still hold writes
+    nothing: adversarial review found on the eighth round that an implementation
+    hanging the keep-alive off a second task and leaving ``_reap`` as it stood would
+    leave that task alive with no stream to write to, which is the shape ADR-0060 §1
+    names when it lists "a spawned task" among what a cancellation must not orphan.
+    """
+    timers = Timers()
+    fan_out, engine, slots = _fan_out([_delivery(1)], timers=timers)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+    await engine.polling.wait()
+    assert len(timers.armed) == 1
+
+    if ending == "close":
+        fan_out.close(stream)
+    else:
+        fan_out.shutdown()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert timers.armed == []
+    assert slots.held == 0
+    assert not engine.polling.is_set()
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert read == []
+    await reading
+
+
+async def test_nothing_is_written_on_a_stream_after_the_terminal_value() -> None:
+    """§8's lifetime clause at the other ending: a poll the gateway cannot complete
+    ends every stream with ADR-0175 §4's terminal value, and no keep-alive follows it.
+
+    An interval left armed across that ending would fire onto streams that are already
+    ended, where ``offer`` refuses and the fan-out would abandon a stream whose
+    terminal value the browser had not yet drained — costing it the ending §4
+    guarantees it.
+    """
+    timers = Timers()
+    fan_out, engine, _ = _fan_out([HubUnavailableError("hub is down")], timers=timers)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+
+    await engine.answer_one_poll()
+    await reading
+
+    assert [value["kind"] for value in read] == ["fault"]
+    assert timers.armed == []
+    assert not stream.abandoned.is_set()
+
+
+# --- ADR-0206 §9: the acknowledgement does not move ---------------------------
+
+
+async def test_the_acknowledgement_rides_the_next_poll_across_a_keep_alive() -> None:
+    """§9: "ADR-0175 §5 binds unchanged. The gateway acknowledges, on its next poll, a
+    delivery it wrote to at least one open delivery stream and acknowledges no other."
+
+    Whatever the page did with the rendering — and a keep-alive written between the
+    delivery and the next poll is the strongest form of "whatever", because it is the
+    gateway's own write arriving in between. Playback is not an acknowledgement, and
+    an interrupted, dropped, unplayed or undecodable rendering changes nothing about
+    what is acknowledged or when.
+    """
+    timers = Timers()
+    delivered = _delivery(1)
+    fan_out, engine, _ = _fan_out([delivered, None], timers=timers)
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+
+    await engine.answer_one_poll()
+    timers.fire_all()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await engine.answer_one_poll()
+
+    assert engine.acknowledged[:2] == [None, delivered.delivery_id]
+    assert [value["kind"] for value in read[:3]] == ["notification", "alive", "alive"]
+    fan_out.shutdown()
+    await reading
