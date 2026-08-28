@@ -217,7 +217,7 @@ can hold would close #1708 and leave the same laundering one distillation furthe
 along.
 
 **Two states rather than three, and a pre-field record is neither a third state nor
-a definitive negative.** §1's fourth and fifth clauses are the pair that keeps those
+a definitive negative.** §1's third and fourth clauses are the pair that keeps those
 apart: a post-field `False` is a measurement, a pre-field `False` is a decode
 default nobody may reason from, and *neither* gives a supply site a second test to
 apply — which is what stops the honest statement of the residue from turning into an
@@ -453,7 +453,7 @@ discovering it after the observer lands costs a supersession.
 > record decodes `False` because nothing recorded an answer, and where its producing
 > turn's supply in fact held withheld content, that `False` is wrong about it. This
 > is a limit on what may be *concluded* from the value and not a second value: §1's
-> fifth clause fixes the same thing at the field's own definition, and neither
+> fourth clause fixes the same thing at the field's own definition, and neither
 > clause gives a supply site anything to read beyond §3's test.
 
 > **Normative.** Nothing in this ADR is cited as authority that a question naming a
@@ -479,17 +479,48 @@ say — which is ADR-0199 §5's first clause honoured, "the ruling at supply and
 over composed prose", so the outcome does not depend on what a composition happened
 to write.
 
-**The pre-field residue is real, is stated rather than papered over, and has a
-ratified remedy.** Episodes already in a running deployment's store were captured
-before this field existed and decode `False`, so a supply site will place a
-pre-field episode exactly as it places one today. ADR-0203 §8 is right that a
-retention horizon "would drain the offending episodes eventually, which is not a
-fix". What is available and is a fix is ADR-0074 §8's deletion: unconditional,
+**The pre-field residue is real, is stated rather than papered over, and its
+ratified remedy reaches part of it.** Episodes already in a running deployment's
+store were captured before this field existed and decode `False`, so a supply site
+will place a pre-field episode exactly as it places one today. ADR-0203 §8 is right
+that a retention horizon "would drain the offending episodes eventually, which is
+not a fix". What is available is ADR-0074 §8's deletion: unconditional,
 conversation-scoped, and already a user-facing act. This ADR invents no migration —
 a backfill would have to mark every pre-field episode, which is the whole
 conversational history withheld from the spoken channel on the day of the upgrade —
 and states instead that the guarantee is prospective, so nobody reads a `False` on
 an old record as evidence about it.
+
+> **Normative.** ADR-0074 §8's deletion remediates a pre-field **episode** and not a
+> belief already distilled from one. Its unit is a conversation's episodes and its
+> index, and a `SemanticMemory` an observer distilled from a pre-field episode
+> survives it — ADR-0074 §7 rules that residue open in terms, "A belief may outlive
+> its evidence, and this ADR does not close that". This ADR states that residue
+> explicitly rather than claiming §8 covers it, and decides no remediation for it.
+
+**Why the descendant is accepted here rather than closed here**, in three parts.
+**It is governed, not unhandled**: such a belief is itself a pre-field record, so
+§1's fourth clause applies to its `False` unchanged — a decode default nobody may
+reason from — and §3's test stays the whole of what a supply site applies to it.
+**A remedy already reaches it**, one record at a time: ADR-0073 §5's "the store
+deletes what it is told to delete", which ADR-0074 §6 states destroys an episode
+"exactly as it destroys a belief". What that costs the user is identifying the
+belief, and nothing in the data identifies it for them — the field that would is the
+one this ADR introduces. **And closing it would be the migration the paragraph above
+declines**, in a worse form: a sweep typed over the derived band, resolving every
+belief's citations to decide whether any names a pre-field episode, over citations
+ADR-0074 §7's horizon may already have expired. §5's inheritance clause buys the
+prospective case — a belief distilled from a stamped episode carries the stamp — and
+the retrospective one is left where ADR-0074 §7 left it, with the user's own
+deletion right as its instrument.
+
+**What bounds the population is not a guarantee, and is not offered as one.** The
+observation stage distils only from a batch of episodes it selects
+(`orchestration/observation.py`), and that job "ships disabled, and that is
+deliberate" (ADR-0083 §7), so a deployment that never armed it has no descendants of
+pre-field episodes at all. That is a fact about how much residue exists, not a
+property this ADR may rest on: the clause above holds whether or not the job was
+ever armed.
 
 **And the question residue is the one ADR-0199 §2 makes undecidable.** A turn that
 asks aloud about a person the store holds nothing about is supplied nothing §3
@@ -572,7 +603,7 @@ layout. Each names an input and the outcome it fixes.
    orders.
 8. **A record constructed without the field decodes `False`.** A `Provenance`
    serialised without the member — the pre-field shape — round-trips to `False`
-   rather than failing, which is §1's third clause and §6's first clause pinned
+   rather than failing, which is §1's fourth clause and §6's first clause pinned
    together.
 9. **A parked turn's resolution inherits its stamp, and a later spoken turn is not
    supplied either episode.** A turn supplied a withheld record that parks for
@@ -693,7 +724,10 @@ possible because this ADR's change is scoped to both files, which is what ADR-02
   which a channel's audience is declared** (ADR-0199 §9). Each stands untouched.
 - **Retention, deletion and egress.** ADR-0074 §7's episode horizon and §8's
   deletion protocol are untouched; §6 points at §8 as the remedy available for the
-  pre-field residue and adds nothing to it.
+  pre-field residue and adds nothing to it. **Nor does it remediate that residue's
+  descendants:** a belief distilled from a pre-field episode before this field
+  landed is left where ADR-0074 §7 leaves it, reachable by ADR-0073 §5's per-record
+  deletion and by nothing this ADR adds.
 - **A mechanical check that a wire-carried `core` type's change bumped the
   version.** #891 carries it and ADR-0124 §9 declines to design it; §7 applies the
   rule as a review obligation, which is where that ADR puts it.
@@ -807,7 +841,12 @@ argues the distinction is provenance rather than payload", and §1 above is that
 argument; using an offer is not amending it. Its closing warning — that a lane "must
 not infer the trigger from the band: `OBSERVED` says the assistant witnessed
 something" — is obeyed: this ADR reads nothing off the band and records the fact in
-a field of its own.
+a field of its own. **§7 and §8 are read in §6 for their actual scope and neither is
+extended**: §7's open question — "A belief may outlive its evidence, and this ADR
+does not close that" — is cited as still open and stays open, and §8's deletion
+protocol is cited as reaching a conversation's episodes, which is what it says. This
+ADR puts no obligation on either, which is why the descendant residue is stated in
+§6 and §10 rather than remediated.
 
 **ADR-0040 §5a and ADR-0045 §4 — no record is owed on either, and §5's third and
 fourth clauses are written to make that true rather than to assume it.** §5a's
@@ -870,8 +909,10 @@ evaluation to compute it — and a producer review obligation is the rest of it.
 
 **Deployment is one redeploy of the hub with no version handshake to coordinate**
 (§7). Existing stores read back with the field `False`, which is right about every
-record except the episodes of turns that were already supplied withheld content —
-§6's residue, whose remedy is ADR-0074 §8's conversation deletion.
+record except the episodes of turns that were already supplied withheld content, and
+any belief an observer already distilled from one — §6's residue, which ADR-0074
+§8's conversation deletion reaches at the episode and ADR-0073 §5's per-record
+deletion reaches at the belief.
 
 **What would trigger revisiting this.** A producer that derives a record from
 something other than this store's records and cannot answer the inheritance question
