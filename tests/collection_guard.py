@@ -36,6 +36,20 @@ such reconstruction is a second description of the suite that can itself go
 stale. Here there is nothing to reconstruct: the object pytest is about to drop
 is in hand, with ``__abstractmethods__`` on it saying exactly what is missing.
 
+**One question, and the loss is the whole of it:** would this abstract class have
+contributed tests that will now not run? An abstract helper under a collected
+name that inherits no test function loses nothing, and is left alone — including
+one that has said ``__test__ = False``, pytest's explicit opt-out. But a class
+that inherits a conformance suite's obligations loses them all whether or not it
+carries that flag, since `__test__` is read a step later, in ``Class.collect``,
+and removes the very items this is about. So the flag is not asked about at all:
+it cannot change the answer where there is something to lose, and where there is
+not, there was nothing to refuse either way.
+
+(That leaves ``__test__ = False`` on a *concrete* binding losing exactly as much,
+in silence, and this guard does not see it — its subject is abstractness. Filed
+as issue #1774 rather than folded in here.)
+
 Registered by ``tests/conftest.py`` importing the hook. It lives in its own
 module rather than in that conftest so the end-to-end check can hand it to a
 nested pytest run with ``-p collection_guard``; a conftest cannot be loaded
@@ -52,31 +66,33 @@ import pytest
 if TYPE_CHECKING:
     from _pytest.python import PyCollector
 
+#: How many of the lost tests the refusal names. The count is what says how much
+#: is at stake; a few names say which suite it is. All of them -- 161 for the
+#: binding issue #1757 was found on -- would bury both under a wall of text.
+_NAMED = 3
 
-def _opts_out(obj: type) -> bool:
-    """Report whether the class says, in pytest's own terms, that it is not a test class.
 
-    ``__test__ = False`` is the explicit opt-out, and pytest honours it a step
-    later than ``istestclass`` -- in ``Class.collect``, which returns no items for
-    it. A class carrying it therefore contributes nothing whether it is abstract
-    or not, so there is nothing for this guard to be about: no test is lost, and
-    the loss is the whole subject. Refusing it anyway would break the one
-    supported way to write an abstract helper named ``Test…``.
+def _inherited_test_names(collector: PyCollector, obj: type) -> frozenset[str]:
+    """The test functions this class carries, and would stop contributing.
 
-    Read defensively, exactly as pytest reads it: a class whose metaclass defines
-    ``__getattr__`` can raise here, and a collection that died reading an
-    attribute would be a worse failure than the one being prevented.
+    Read off the whole MRO, because that is where a binding's obligations come
+    from: a conformance suite's tests are inherited, never written on the binding.
+    Selected by pytest's own ``funcnamefilter`` rather than by a literal ``test``
+    prefix, so the ``python_functions`` ini option decides here too.
 
     Args:
+        collector: The module or class pytest is collecting from.
         obj: The class pytest is deciding about.
 
     Returns:
-        Whether the class carries a falsy ``__test__``.
+        The names, empty when the class would take nothing down with it.
     """
-    try:
-        return not getattr(obj, "__test__", True)
-    except Exception:  # any attribute error means "cannot tell"; see above
-        return False
+    return frozenset(
+        name
+        for base in inspect.getmro(obj)
+        for name, value in vars(base).items()
+        if collector.funcnamefilter(name) and callable(value)
+    )
 
 
 def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
@@ -86,8 +102,7 @@ def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
     for the abstractness this guard exists to catch. So the other two halves of
     it are asked separately, through pytest's own predicates rather than through
     a second reading of ``python_classes`` — which would drift from the ini
-    option the moment a project set it. The third condition, ``__test__``, is one
-    ``istestclass`` does not ask at all; see :func:`_opts_out`.
+    option the moment a project set it.
 
     Args:
         collector: The module or class pytest is collecting from.
@@ -95,11 +110,8 @@ def _is_test_class(collector: PyCollector, name: str, obj: type) -> bool:
         obj: The class itself.
 
     Returns:
-        Whether the name or the ``__test__`` attribute marks it as a test class,
-        and it has not opted out.
+        Whether the name or the ``__test__`` attribute marks it as a test class.
     """
-    if _opts_out(obj):
-        return False
     return bool(collector.classnamefilter(name)) or collector.isnosetest(obj)
 
 
@@ -119,19 +131,27 @@ def abstract_test_class_refusal(collector: PyCollector, name: str, obj: object) 
         return None
     if not _is_test_class(collector, name, obj):
         return None
+    lost = _inherited_test_names(collector, obj)
+    if not lost:
+        return None
     abstract: frozenset[str] = getattr(obj, "__abstractmethods__", frozenset())
     missing = ", ".join(sorted(abstract))
+    named = sorted(lost)[:_NAMED]
+    rest = len(lost) - len(named)
+    sample = ", ".join(named) + (f", and {rest} more" if rest else "")
     return (
         f"{name} is a test class that is still abstract, so pytest would drop it "
-        f"from collection and report nothing: every test it inherits would stop "
-        f"running with the suite green (issue #1757).\n"
+        f"from collection and report nothing: the {len(lost)} test(s) it carries "
+        f"would stop running with the suite green (issue #1757).\n"
         f"  defined in: {getattr(obj, '__module__', '<unknown>')}\n"
         f"  never implemented: {missing}\n"
+        f"  would stop running: {sample}\n"
         f"Implement the names above on this binding -- they are the conformance "
         f"suite's abstract fixtures -- or, if the class is deliberately a base "
-        f"rather than a binding, say so: give it a name pytest does not collect "
-        f"(the suites themselves are named `...Contract`, not `Test...`), or set "
-        f"`__test__ = False` on it."
+        f"rather than a binding, give it a name pytest does not collect: the "
+        f"suites themselves are named `...Contract`, not `Test...`. "
+        f"`__test__ = False` does not answer this -- it removes the same tests, "
+        f"one step further on."
     )
 
 

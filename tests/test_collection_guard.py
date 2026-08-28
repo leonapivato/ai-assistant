@@ -56,11 +56,11 @@ class TestUnboundWidget(WidgetContract):
     """Implements nothing, so it stays abstract."""
 '''
 
-#: The supported way to write an abstract helper under a collected name: pytest
-#: honours ``__test__ = False`` in ``Class.collect``, so the class contributes no
-#: item whether or not it is abstract, and nothing is lost for a guard to report.
-_OPTED_OUT = '''\
-"""An abstract helper that has said it is not a test class."""
+#: An abstract class under a collected name that carries no test at all, in both
+#: spellings: with pytest's explicit ``__test__ = False`` opt-out and without it.
+#: Neither takes anything down with it, so neither is this guard's business.
+_LOSES_NOTHING = '''\
+"""Abstract helpers that carry no test."""
 
 from abc import ABC, abstractmethod
 
@@ -76,9 +76,27 @@ class TestSharedBase(ABC):
         """The subject."""
 
 
+class TestOtherBase(ABC):
+    @pytest.fixture
+    @abstractmethod
+    def gadget(self) -> int:
+        """Another subject."""
+
+
 def test_something_else() -> None:
     assert True
 '''
+
+#: The incomplete binding again, this time carrying the opt-out. It loses exactly
+#: the same inherited obligations, so the flag changes nothing about it.
+_OPTED_OUT_BINDING = _CORPUS.replace(
+    '''class TestUnboundWidget(WidgetContract):
+    """Implements nothing, so it stays abstract."""''',
+    '''class TestUnboundWidget(WidgetContract):
+    """Implements nothing, so it stays abstract."""
+
+    __test__ = False''',
+)
 
 
 def _run_nested(corpus: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -159,21 +177,45 @@ def test_the_guard_leaves_a_complete_binding_alone(tmp_path: Path) -> None:
     assert "1 passed" in result.stdout
 
 
-def test_an_abstract_helper_that_opted_out_is_not_refused(tmp_path: Path) -> None:
-    """``__test__ = False`` is the explicit opt-out, and it is honoured here too.
+def test_an_abstract_class_that_carries_no_test_is_not_refused(tmp_path: Path) -> None:
+    """The guard's subject is the loss, so a class with nothing to lose is left alone.
 
-    pytest reads it one step later than ``istestclass`` -- in ``Class.collect``,
-    which returns no items for such a class -- so an abstract helper carrying it
-    contributes nothing whether or not it is abstract, and no test is lost.
-    Refusing it would break the one supported way to write an abstract base under
-    a name pytest collects, which is a cost this guard has no reason to impose.
+    Both spellings are in this corpus: an abstract helper carrying pytest's
+    explicit ``__test__ = False`` opt-out, and one carrying nothing. Neither
+    inherits a test function, so neither stops contributing anything by being
+    abstract, and refusing either would break the ordinary way to write a base
+    under a name pytest collects.
     """
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    (corpus / "test_opted_out.py").write_text(_OPTED_OUT)
+    (corpus / "test_helpers.py").write_text(_LOSES_NOTHING)
 
     result = _run_nested(corpus, "-p", "collection_guard")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
     assert "TestSharedBase" not in result.stdout + result.stderr
+    assert "TestOtherBase" not in result.stdout + result.stderr
+
+
+def test_an_opted_out_binding_that_loses_obligations_is_still_refused(tmp_path: Path) -> None:
+    """``__test__ = False`` does not buy a binding out of this: it removes the same tests.
+
+    pytest reads the flag in ``Class.collect``, one step past the abstractness
+    check, and returns no items for the class either way. So an incomplete
+    binding carrying it loses exactly the inherited obligations an incomplete
+    binding without it loses -- and the suite stays green, because
+    `tests/core/test_protocol_triad.py` needs only *a* binding per Protocol, not
+    every one. The flag cannot change the answer where there is something to
+    lose, which is why the guard does not ask about it.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "test_widget_bindings.py").write_text(_OPTED_OUT_BINDING)
+
+    result = _run_nested(corpus, "-p", "collection_guard")
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, output
+    assert "TestUnboundWidget" in output
+    assert "would stop running: test_the_obligation" in output
