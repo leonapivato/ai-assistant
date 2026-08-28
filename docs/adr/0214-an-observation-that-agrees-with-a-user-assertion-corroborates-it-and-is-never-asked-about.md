@@ -184,16 +184,32 @@ premise false at the ratified threshold, 385 of 765 proposals folded), bought as
 a side effect of fixing a different one. Scoping to the deferral's own
 population means every rule ADR-0159 wrote still rules exactly what it ruled.
 
-**Inside that population the arm names the target ADR-0159 §4(a) would have
-named**, which is the check that the two paths have not come apart. No
-reconciler runs on this population — ADR-0159 §2 excludes an ingest whose
-conflict set holds an assertion — so no member carries a label, and
-`_effective_relations` computes `RESTATES` from `agrees` alone. §4(a) limb (i)'s
-purity condition is then vacuously satisfied, and its scan would select the
-best-ranked agreeing member. This arm selects the same record, from a class
-wider by exactly the member §4(a) cannot name because a fold onto it was
-refused. The presence of an agreeing assertion no longer changes which record an
-observation folds onto; it only stops the question being asked.
+**The target is the best-ranked member of the foldable agreeing set, and which
+record that is decides which fold arm runs.** The set is ADR-0159 §4(a)'s target
+class plus `USER_ASSERTED`, so two outcomes are reachable and both are intended:
+
+- Where an agreeing `OBSERVED` or `INFERRED` member outranks every agreeing
+  assertion, the arm names **that** member and the fold takes `_merge`'s ordinary
+  arm. The assertion is left exactly as it was — not refreshed, not touched — and
+  the record named is the one ADR-0159 §4(a) would itself have named. That parity
+  is worth checking rather than assuming: no reconciler runs on this population
+  (ADR-0159 §2 excludes an ingest whose conflict set holds an assertion), so no
+  member carries a label, `_effective_relations` computes `RESTATES` from
+  `agrees` alone, §4(a) limb (i)'s purity condition is vacuously satisfied, and
+  its scan selects the same record. The presence of an agreeing assertion no
+  longer changes which record an observation folds onto; it stops the question
+  being asked and does nothing else.
+- Where the best-ranked agreeing member **is** the assertion, the arm names it
+  and §4's corroboration arm runs. This is the member ADR-0159 §4(a) cannot name,
+  because a fold onto it was refused until §3 above.
+
+**Rank is the tie-break and not the ruling**, which is ADR-0121 §2's rule and
+ADR-0159 §4's ("`conflicts[0]` is never the target by position"): the scan runs
+over the members the agreement predicate and the target class already selected,
+in the order the set arrived. Whether the arm should instead *prefer* an agreeing
+assertion — refreshing the currency of the record that actually stands, rather
+than of an observation ranked above it — is a real question, and §9 files it with
+#871 rather than deciding it here.
 
 **The one condition is what preserves ADR-0038 §3's asymmetry, and it is not
 optional.** ADR-0121 §2's second condition is kept here word for word, and its
@@ -259,9 +275,11 @@ does.
 
 **The residue is stated rather than hidden.** An observation agreeing with an
 imported record, in a set holding no assertion, is ADR-0159 §4's population and
-is unchanged. In a set holding an assertion that also agrees, the arm folds onto
-the assertion and the import is simply never named — which is the same
-one-target limit ADR-0121 left and #871 files.
+is unchanged. In a set holding an assertion the observation also agrees with, the
+arm folds onto the best-ranked member of the foldable agreeing set — which may be
+the assertion or may be a better-ranked agreeing observation (§1) — and the
+`EXTERNAL` member is never named either way. That is the same one-target limit
+ADR-0121 left, and #871 files it.
 
 ### 3. Clause 1's second exception is widened in one condition; there is no third exception
 
@@ -727,7 +745,15 @@ and it is one subsystem's change.
   — a failure the writer-side conformance cases cannot catch, because the ruling
   never reaches them from a conforming policy. **The scope boundary**: with no
   asserted member in the set, the ruling is whatever ADR-0159 §4 gives and this
-  arm is not consulted.
+  arm is not consulted. And one more, pinning the **target selection** itself: an
+  `OBSERVED` proposal against the ordered conflict set `[OBSERVED, USER_ASSERTED]`
+  where both agree must rule `REINFORCE` naming the **`OBSERVED`** member, and the
+  same two records in the order `[USER_ASSERTED, OBSERVED]` must name the
+  **assertion**. Nothing else in this list distinguishes those two, and they do
+  not merely differ in `target_id`: they select different arms of `_merge` (§4),
+  so an implementation preferring the assertion by source rather than by rank
+  would corroborate where the ordinary arm is owed, and would pass every other
+  case here.
 - `tests/memory/test_currency_fold.py`, `test_taint_fold.py` and
   `test_withheld_fold.py`: the composed `last_confirmed_at` and the two
   disjunctions exercised on the widened pairing, in the direction that can fail
@@ -749,12 +775,14 @@ and it is one subsystem's change.
   reached here by a third path.
 - **Whether §1 should prefer an agreeing assertion over a better-ranked agreeing
   observation.** It does not: the arm takes the best-ranked member of the
-  foldable agreeing set, which is ADR-0121 §2's rule and ADR-0159 §4(a)'s.
-  Preferring the assertion would refresh the currency of the record that
-  actually stands rather than of an observation beside it, which is arguably
-  better, and it would make rank stop being the tie-break both sibling arms use.
-  It is a real question and it is not this ADR's; it is filed with #871, whose
-  subject is the same set read the same way.
+  foldable agreeing set, which is ADR-0121 §2's rule and ADR-0159 §4(a)'s. The
+  difference is observable and is more than a `target_id` — the two selections
+  run different arms of `_merge` (§4), so where an observation is named the
+  assertion's currency is not refreshed at all. Preferring the assertion would
+  refresh the record that actually stands rather than an observation ranked above
+  it, which is arguably better, and it would make rank stop being the tie-break
+  both sibling arms use. It is a real question and it is not this ADR's; it is
+  filed with #871, whose subject is the same set read the same way.
 - **A marker for a policy change in the trace stream** (§6, ADR-0121 §7). Not
   proposed, for the reason ADR-0121 gave.
 - **Whether the observation stage should decline to propose a belief it has
