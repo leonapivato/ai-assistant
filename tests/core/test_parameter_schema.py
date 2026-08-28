@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -308,37 +309,54 @@ def test_a_root_id_is_permitted() -> None:
 # --- §6: the check is computed once per document and given at every construction
 
 
-def test_a_second_construction_of_one_schema_is_answered_from_the_memo() -> None:
+def _counting_defect(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count calls to the memoised check, returning a one-element tally."""
+    tally = [0]
+    real = core_types._schema_defect
+
+    def counted(schema: Mapping[str, Any], /) -> str | None:
+        tally[0] += 1
+        return real(schema)
+
+    monkeypatch.setattr(core_types, "_schema_defect", counted)
+    core_types._schema_defects.clear()
+    return tally
+
+
+def test_a_second_construction_of_one_schema_is_meta_validated_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The check is memoised on the document, which is the whole of #1758's fix (§6).
 
-    Asserted as a cache *hit* rather than as a duration, because a wall-clock
-    assertion on a loaded machine is a flake and this is the property the timing
-    was evidence of. If a later change makes the key vary per construction — an
-    object identity, an instance counter — the answer stays correct and the hits
-    stop, and only this case notices.
+    Counted rather than timed, because a wall-clock assertion on a loaded machine
+    is a flake and the count is the property the timing was evidence of. If a
+    later change makes the key vary per construction — an object identity, an
+    instance counter — the answers stay correct and the recomputation comes back,
+    and only this case notices.
     """
+    tally = _counting_defect(monkeypatch)
     schema = {"type": "object", "properties": {"memoised": {"type": "integer"}}}
-    core_types._cached_schema_defect.cache_clear()
 
     assert _definition(parameters_schema=schema).parameters_schema
-    after_first = core_types._cached_schema_defect.cache_info()
-    assert (after_first.hits, after_first.misses) == (0, 1)
+    assert tally == [1]
 
     assert _definition(parameters_schema=dict(schema)).parameters_schema
-    after_second = core_types._cached_schema_defect.cache_info()
-    assert (after_second.hits, after_second.misses) == (1, 1)
+    assert tally == [1]
+
+    assert _definition(parameters_schema={"type": "object"}).parameters_schema
+    assert tally == [2]
 
 
-def test_a_memoised_refusal_is_raised_again_verbatim() -> None:
-    """A cached *defect* is still a refusal, with the message it had the first time (§6).
+def test_a_memoised_refusal_is_raised_again_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A remembered *defect* is still a refusal, with the message it had the first time.
 
     The memo remembers the reason, not merely that there was one, so the second
     construction of an unreadable schema fails exactly as the first did. A memo
-    that cached only the boolean would pass every "does it refuse" case and lose
-    the sentence a tool author reads.
+    that kept only the boolean would pass every "does it refuse" case and lose the
+    sentence a tool author reads.
     """
+    tally = _counting_defect(monkeypatch)
     schema = {"type": "not-a-json-type"}
-    core_types._cached_schema_defect.cache_clear()
 
     with pytest.raises(ValidationError) as first:
         _definition(parameters_schema=schema)
@@ -346,7 +364,7 @@ def test_a_memoised_refusal_is_raised_again_verbatim() -> None:
         _definition(parameters_schema=dict(schema))
 
     assert str(first.value) == str(second.value)
-    assert core_types._cached_schema_defect.cache_info().hits == 1
+    assert tally == [1]
 
 
 def test_a_bool_and_the_int_it_equals_are_two_schemas_and_not_one() -> None:
@@ -366,12 +384,12 @@ def test_a_bool_and_the_int_it_equals_are_two_schemas_and_not_one() -> None:
     unreadable: Mapping[str, Any] = {"type": "object", "properties": {"n": {"minLength": True}}}
     assert readable == unreadable  # the Python-value equality a hash key would use
 
-    core_types._cached_schema_defect.cache_clear()
+    core_types._schema_defects.clear()
     assert _definition(parameters_schema=readable).parameters_schema
     with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
         _definition(parameters_schema=unreadable)
 
-    core_types._cached_schema_defect.cache_clear()
+    core_types._schema_defects.clear()
     with pytest.raises(ValidationError, match="not a valid draft 2020-12 schema"):
         _definition(parameters_schema=unreadable)
     assert _definition(parameters_schema=readable).parameters_schema
@@ -382,10 +400,10 @@ def test_a_definition_mutated_past_its_guard_is_still_refused_on_revalidation() 
 
     A definition whose ``parameters_schema`` is swapped through
     ``object.__setattr__`` keeps its object identity and loses its canonical
-    encoding, so the mutated document misses the entry the original filled and is
-    meta-validated afresh. Assigning the definition to a model-typed field re-runs
-    the ``after`` model validator, which is the revalidation ADR-0029 §2's step 1
-    and ADR-0018 §4 already perform.
+    encoding, so the mutated document digests differently, misses the entry the
+    original filled and is meta-validated afresh. Assigning the definition to a
+    model-typed field re-runs the ``after`` model validator, which is the
+    revalidation ADR-0029 §2's step 1 and ADR-0018 §4 already perform.
     """
     tool = _definition(parameters_schema={"type": "object"})
     object.__setattr__(tool, "__dict__", {**tool.__dict__, "parameters_schema": {"type": "string"}})
@@ -394,33 +412,50 @@ def test_a_definition_mutated_past_its_guard_is_still_refused_on_revalidation() 
         ActionRequest(tool=tool, parameters={})
 
 
-def test_a_schema_with_no_canonical_encoding_is_answered_uncached() -> None:
+def test_a_schema_with_no_canonical_encoding_is_answered_unmemoised() -> None:
     """A document the key cannot be built from is answered as it was before the memo.
 
     Pydantic refuses a ``parameters_schema`` holding a value with no JSON encoding
     long before this validator sees one, so the only way here is the corrupted
     instance above. The answer must be the one the checks give, not an exception
-    from the encoder standing in for it, and nothing may be cached under a key
+    from the encoder standing in for it, and nothing may be remembered under a key
     that could not be computed.
     """
     corrupted: Mapping[str, Any] = {"unknown-keyword": object()}
-    core_types._cached_schema_defect.cache_clear()
+    core_types._schema_defects.clear()
 
     assert core_types._unreadable_schema_reason(corrupted) is None
-    assert core_types._cached_schema_defect.cache_info().currsize == 0
+    assert core_types._schema_defects == {}
 
 
 def test_the_memo_is_bounded_so_a_stream_of_schemas_cannot_grow_it() -> None:
     """The documents are provider-authored, so the memo holds a fixed number (§6, §7)."""
-    core_types._cached_schema_defect.cache_clear()
+    core_types._schema_defects.clear()
     for index in range(core_types._MAX_CACHED_SCHEMAS + 20):
         assert _definition(
             parameters_schema={"type": "object", "properties": {f"p{index}": {}}}
         ).parameters_schema
 
-    info = core_types._cached_schema_defect.cache_info()
-    assert info.maxsize == core_types._MAX_CACHED_SCHEMAS
-    assert info.currsize == core_types._MAX_CACHED_SCHEMAS
+    assert 0 < len(core_types._schema_defects) <= core_types._MAX_CACHED_SCHEMAS
+
+
+def test_the_memo_retains_no_part_of_the_document_it_answers_about() -> None:
+    """The entry bound is a memory bound only because an entry is a fixed size (§7).
+
+    A ``parameters_schema`` is bounded in depth and in neither breadth nor bytes,
+    so a memo holding documents would bound entries without bounding memory and
+    would keep a provider's schemas alive past the definitions that carried them.
+    The key is a ``sha256`` digest and the value is one short sentence or
+    ``None`` — asserted, because "we do not retain it" is exactly the kind of
+    claim a later refactor reintroducing a document-shaped key would silently
+    break.
+    """
+    core_types._schema_defects.clear()
+    bulky = {"type": "object", "$comment": "x" * 100_000}
+    assert _definition(parameters_schema=bulky).parameters_schema
+
+    assert [len(key) for key in core_types._schema_defects] == [sha256().digest_size]
+    assert list(core_types._schema_defects.values()) == [(None,)]
 
 
 # --- §6: the depth bound, measured rather than asserted ----------------------
