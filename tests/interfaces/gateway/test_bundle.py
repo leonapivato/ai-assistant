@@ -5803,3 +5803,106 @@ def test_a_rows_own_line_never_attributes_an_ending_to_the_owner() -> None:
     ):
         assert named not in words, named
         assert named in _functions(script)["answerConfirmation"], named
+
+
+def test_the_page_reports_the_playback_it_last_had_in_the_air() -> None:
+    """ADR-0205 §7: the page reports "the playback it last had in the air for the
+    conversation it is sending, **naming that answer's own ``episode_id``**".
+
+    Four claims, each one a separate way the report could be wrong. The subject is
+    the id the response disclosed — carried on the playback record rather than read
+    off the page's current selection when the sound stops, because by then the owner
+    may have chosen another conversation. The state is the distinction the front end
+    already draws, ``COMPLETE`` where the source ended of its own accord and
+    ``INTERRUPTED`` where a press ended it, and the page invents neither. The report
+    is *taken* rather than read, so a second press does not re-send one. And it rides
+    the request the next turn already makes: §1 declines a route for it, so there is
+    exactly one place it leaves this page.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    # The subject travels on the record, from the response that carried the rendering.
+    assert "void playSpoken(turn.spoken, slot, turn.episode_id" in functions["renderSpokenTurn"]
+    assert "episode," in functions["playSpoken"]
+    assert "conversation," in functions["playSpoken"]
+
+    # `COMPLETE` where the source ended of its own accord — written where the source's
+    # own `ended` listener is, which is the one place that knows it ended by itself.
+    assert 'reportDelivery(mine, "complete")' in functions["soundFrom"]
+    # `INTERRUPTED` where a press ended it, and `COMPLETE` where the press arrived
+    # after the sound had already elapsed (#1705's window).
+    interrupting = functions["interruptPlayback"]
+    assert 'reportDelivery(ended, "complete")' in interrupting
+    assert 'reportDelivery(ended, "interrupted")' in interrupting
+
+    # Nothing else in the page writes one, so a state cannot be invented anywhere else.
+    assert script.count("reportDelivery(") == 4, "three call sites and one declaration"
+
+    # Taken rather than read, and only for the conversation being sent.
+    taking = functions["takeDelivery"]
+    assert "pendingDelivery.conversation !== conversation" in taking
+    assert "pendingDelivery = null" in taking
+    sending = functions["sendRecording"]
+    assert "takeDelivery(conversationId)" in sending
+    assert "asked.delivery = played" in sending
+    assert script.count("asked.delivery") == 1, "one place the report leaves this page"
+
+
+def test_the_report_carries_two_durations_and_a_state_and_nothing_else() -> None:
+    """ADR-0205 §2: "a subject, two durations and a state, and nothing else. No audio,
+    no fragment of one, no transcript, no span of what was heard, no word count, no
+    character offset, no sample position and no format."
+
+    Read off the object the page actually builds, because that is what crosses.
+    """
+    script = _code("app.js")
+    building = _functions(script)["reportDelivery"]
+
+    sent = set(re.findall(r"^\s*(\w+):", building, re.MULTILINE))
+    assert sent == {"conversation", "report", "episode_id", "delivery", "state"} | {
+        "played_microseconds",
+        "rendered_microseconds",
+    }
+    # Derived from the decoded buffer the page already holds (§7), and from nothing it
+    # went and asked for.
+    assert "mine.buffer.duration * MICROSECONDS" in building
+    assert "mine.played * MICROSECONDS" in building
+
+
+def test_the_page_reports_nothing_where_it_holds_no_pair_to_report() -> None:
+    """ADR-0205 §7: it "reports nothing where it holds no such pair", and §3's clause
+    that in practice no report names a turn whose rendering never existed — "a page
+    that played nothing holds no measurement to report".
+
+    A response that disclosed ``null`` leaves nothing to name, and a playback whose
+    decode a press overtook has no buffer to measure.
+    """
+    building = _functions(_code("app.js"))["reportDelivery"]
+
+    assert "mine.episode === null" in building
+    assert "mine.conversation === null" in building
+    assert "mine.buffer === null" in building
+
+
+def test_the_page_obtains_the_report_from_no_new_browser_capability() -> None:
+    """ADR-0205 §7: "No lane adds a second audio API, a media element, a
+    ``speechSynthesis`` call or any other capability to obtain it; ADR-0200 §10's
+    front-end clauses bind unchanged."
+
+    The measurement comes off the decoded buffer and the audio context's own clock,
+    both of which the page already had for playing the answer at all.
+
+    Read from the **comment-stripped** view, because ADR-0200 §10's own clause is
+    named in the prose of the file — a check over the whole text would fail on the
+    sentence explaining the rule it enforces, which is :func:`_code`'s stated reason
+    for existing.
+    """
+    script = _code("app.js")
+
+    assert "speechSynthesis" not in script
+    assert "new Audio(" not in script
+    assert "createMediaElementSource" not in script
+    # One decoder and one context, as before.
+    assert script.count("decodeAudioData") == 1
+    assert script.count("new AudioContext(") == 1

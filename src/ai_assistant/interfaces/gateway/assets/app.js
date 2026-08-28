@@ -641,6 +641,15 @@ const FAULTS = {
   // whatever its message says, and §9 forbids a refused recording travelling inside
   // its own refusal.
   "recording-unusable": "That recording is not one the assistant can take.",
+  // ADR-0205 §7, on `recording-unusable`'s reasoning exactly: its own condition
+  // rather than `malformed-request`, because a well-shaped report whose two
+  // durations do not satisfy §2's partition is not the page and the gateway
+  // disagreeing about the shape. It is this page's own measurement, and the sentence
+  // says so — nothing the owner did is wrong, and the answer they just asked for did
+  // not run.
+  "delivery-unusable":
+    "The page's account of how much of the last answer was played out was not one " +
+    "the gateway would carry, so nothing was asked. Press and speak again.",
   // ADR-0200 §4. A transcription failure **fails** the call where a synthesis failure
   // degrades it — "the line is whether an answer exists yet" — so this is a fault and
   // "answer shown, not spoken" is not.

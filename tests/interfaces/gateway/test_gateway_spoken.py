@@ -33,7 +33,9 @@ from ai_assistant.core.types import (
     SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenDelivery,
     SpokenDeliveryReport,
+    SpokenDeliveryState,
     SpokenTurn,
     TimeOfDay,
     TurnOutcome,
@@ -707,3 +709,179 @@ async def test_a_declined_spoken_turn_is_still_the_hubs_own_condition() -> None:
 
         assert status == 422
         assert body["fault"] == "assistant-declined"
+
+
+# --- ADR-0205 §7: the fourth body member --------------------------------------
+
+
+def _report(**overrides: Any) -> dict[str, Any]:
+    """One well-formed report, with whatever a case wants changed."""
+    delivery: dict[str, Any] = {
+        "state": "interrupted",
+        "played_microseconds": "3200000",
+        "rendered_microseconds": "9800000",
+    }
+    delivery.update(overrides)
+    return {"episode_id": "conv:conv-1:1", "delivery": delivery}
+
+
+async def test_the_fourth_browser_owned_member_reaches_the_engine_whole() -> None:
+    """§7: the body carries "``utterance``, ``plays``, ``conversation_id`` and
+    ``delivery``", and the gateway "derives, defaults, composes and invents no part"
+    of the report — so what reaches the engine is the value the page sent, rebuilt
+    into the promoted surface's own type and not into a second shape.
+    """
+    engine = FakeAssistantEngine()
+    engine.start_conversation("conv-1")
+    async with _harness(engine) as one:
+        status, _ = await one.whole(
+            "POST", _SPOKEN, _body(conversation_id="conv-1", delivery=_report())
+        )
+
+        assert status == 200
+        relayed = engine.calls[0][1]["delivery"]
+        assert relayed == SpokenDeliveryReport(
+            episode_id="conv:conv-1:1",
+            delivery=SpokenDelivery(
+                state=SpokenDeliveryState.INTERRUPTED,
+                played=timedelta(seconds=3, milliseconds=200),
+                rendered=timedelta(seconds=9, milliseconds=800),
+            ),
+        )
+
+
+async def test_the_gateway_reads_no_fifth_member() -> None:
+    """§7 keeps ADR-0200 §10's clause with the count moved by one: "The gateway reads
+    those four members by name and reads no fifth." A member no clause names is read
+    by nothing and refuses nothing, exactly as before.
+    """
+    engine = FakeAssistantEngine()
+    engine.start_conversation("conv-1")
+    async with _harness(engine) as one:
+        status, _ = await one.whole(
+            "POST",
+            _SPOKEN,
+            _body(conversation_id="conv-1", delivery=_report(), heard_by="the kitchen"),
+        )
+
+        assert status == 200
+        assert set(engine.calls[0][1]) == {"plays", "conversation_id", "delivery"}
+
+
+async def test_the_turn_view_discloses_the_episode_the_next_report_will_name() -> None:
+    """§7: the page sends "the one the response carrying that rendering disclosed and
+    never one it derived, counted or guessed" — so the id has to cross for there to be
+    one to send.
+    """
+    engine = FakeAssistantEngine()
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", _SPOKEN, _body())
+
+        assert status == 200
+        assert body["turn"]["episode_id"] == "conv:c-1:1"
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [
+        pytest.param("not-an-object", id="not-an-object"),
+        pytest.param({"episode_id": "conv:conv-1:1"}, id="no-nested-delivery"),
+        pytest.param(
+            {"episode_id": "conv:conv-1:1", "delivery": "interrupted"}, id="nested-not-an-object"
+        ),
+        pytest.param({"delivery": {"state": "complete"}}, id="no-episode-id"),
+        pytest.param(_report(state="shouted"), id="state-of-no-vocabulary"),
+        pytest.param(_report(played_microseconds="3.2"), id="duration-not-an-integer"),
+    ],
+)
+async def test_a_report_the_page_and_the_gateway_disagree_about_is_malformed(
+    harness: Harness, sent: Any
+) -> None:
+    """§7: a member "that is not a JSON object", a missing or non-object nested
+    ``delivery``, and a member of no vocabulary at all are the page and the gateway
+    disagreeing about the **shape** — which is what :func:`_malformed` reports
+    (ADR-0168 §10), exactly as the same shapes are reported on ``plays``.
+    """
+    status, body = await harness.whole(
+        "POST", _SPOKEN, _body(conversation_id="conv-1", delivery=sent)
+    )
+
+    assert status == 400
+    assert body["fault"] == "malformed-request"
+    assert harness.engine.calls == [], "nothing was relayed"
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        pytest.param(
+            {"state": "complete", "played_microseconds": "1", "rendered_microseconds": "2"},
+            id="complete-below",
+        ),
+        pytest.param(
+            {"state": "interrupted", "played_microseconds": "2", "rendered_microseconds": "2"},
+            id="interrupted-equal",
+        ),
+        pytest.param({"state": "complete", "rendered_microseconds": "2"}, id="duration-missing"),
+        pytest.param(
+            {"state": "unknown", "rendered_microseconds": "2"}, id="unknown-with-a-duration"
+        ),
+    ],
+)
+async def test_a_report_outside_the_partition_is_refused_end_to_end(
+    harness: Harness, delivery: dict[str, Any]
+) -> None:
+    """§2's partition, "at validation and again end to end through the route" (§9).
+
+    §7's own condition rather than ``malformed-request``: the shape is one the page
+    and the gateway agree on, and what fails is the *measurement*. The refusal is
+    "a project-owned refusal carrying no input value and no chained cause", so the
+    episode id the page sent — a durable name of one of this owner's turns — is
+    nowhere in the body.
+    """
+    status, body = await harness.whole(
+        "POST",
+        _SPOKEN,
+        _body(
+            conversation_id="conv-1", delivery={"episode_id": "conv:secret:9", "delivery": delivery}
+        ),
+    )
+
+    assert status == 400
+    assert body["fault"] == "delivery-unusable"
+    assert "conv:secret:9" not in json.dumps(body), "no input value travels in the refusal"
+    assert harness.engine.calls == [], "nothing was relayed"
+
+
+async def test_an_unknown_report_is_refused_by_the_promoted_surface() -> None:
+    """§2: "``UNKNOWN`` is a value the hub writes and never one a caller supplies",
+    refused "locally, before any I/O" **at the promoted surface**.
+
+    So this gateway decides nothing about it — a second rule here could only differ
+    from the one every client already gets — and the answer the browser sees is the
+    hub's own refusal, ADR-0168 §9's ``rejected``.
+    """
+    engine = FakeAssistantEngine()
+    engine.start_conversation("conv-1")
+    async with _harness(engine) as one:
+        status, body = await one.whole(
+            "POST",
+            _SPOKEN,
+            _body(
+                conversation_id="conv-1",
+                delivery={"episode_id": "conv:conv-1:1", "delivery": {"state": "unknown"}},
+            ),
+        )
+
+        assert status == 400
+        assert body["fault"] == "rejected"
+
+
+async def test_a_report_beside_no_conversation_is_refused_by_the_promoted_surface() -> None:
+    """§1's other local refusal, likewise the surface's rather than this adapter's."""
+    engine = FakeAssistantEngine()
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", _SPOKEN, _body(delivery=_report()))
+
+        assert status == 400
+        assert body["fault"] == "rejected"
