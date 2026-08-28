@@ -369,6 +369,19 @@ You get three things back, and they are three different statements.
   you can talk over rather than wait out. The page says where the sound stopped,
   because the words on screen are the same either way.
 
+**And the assistant is told what you actually heard.** When you press again, the
+page tells the hub how much of the previous answer played — "3.2 of 9.8 seconds,
+interrupted" — and the hub records that against that turn. So the assistant does
+not build on words you cut off, and "carry on with what you were saying" is an
+ordinary thing to ask: it picks up from about where the sound stopped, in fresh
+words rather than by replaying anything. Where nothing is reported — you
+interrupted and then put the phone down — the record says *unknown*, which is
+never read as heard.
+
+What crosses is two numbers and one word: how long it played, how long the whole
+answer was, and whether it finished or was cut off. No audio, no transcript, and
+no position in the words.
+
 **On an iPhone, the ring/silent switch silences it.** If the answer is on screen
 and you hear nothing, check that switch before anything else — the phone mutes
 this page's audio while it is on silent, with the volume up and nothing on the

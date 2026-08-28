@@ -36,7 +36,12 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
-from ai_assistant.core.types import FIRST_TURN_ORDINAL, ParkedBinding
+from ai_assistant.core.types import (
+    FIRST_TURN_ORDINAL,
+    ParkedBinding,
+    SpokenDelivery,
+    SpokenDeliveryState,
+)
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
@@ -68,6 +73,21 @@ _EPISODE_PREFIX = "conv:"
 #: executions, so the two calls of a read op address independent subjects.
 _BINDING_LEFT = ParkedBinding(execution_id="exec-read-left", step_id="step-1")
 _BINDING_RIGHT = ParkedBinding(execution_id="exec-read-right", step_id="step-1")
+
+#: The three delivery values ADR-0205 §3's cases need: what capture writes, and the
+#: two a device can report. ``UNKNOWN`` is the only stampable state and the only one
+#: ``record_delivery`` refuses, which is the pair of clauses those cases turn on.
+_UNSTAMPED = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+_INTERRUPTED = SpokenDelivery(
+    state=SpokenDeliveryState.INTERRUPTED,
+    played=timedelta(seconds=3, milliseconds=200),
+    rendered=timedelta(seconds=9, milliseconds=800),
+)
+_COMPLETE = SpokenDelivery(
+    state=SpokenDeliveryState.COMPLETE,
+    played=timedelta(seconds=9, milliseconds=800),
+    rendered=timedelta(seconds=9, milliseconds=800),
+)
 
 #: What a failure of the exclusion cases means, in one place (ADR-0074 §8): two
 #: mutations of one conversation interleaved, so one of them acted on state the
@@ -824,6 +844,238 @@ class ConversationStoreContract:
             parked.ordinal,
             following.ordinal,
         ], "the refused append left no row behind"
+
+    # --- ADR-0205 §3: the delivery a device reports ---------------------------
+
+    async def test_a_turn_carries_no_delivery_unless_one_is_appended(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: an absent value means no delivery fact was recorded.
+
+        Every turn this suite appends elsewhere goes in without one, so the default
+        is what every other case here is silently asserting. On the surface as it
+        stands an absent value is a turn that did not run on ``converse_spoken``, and
+        §3 is explicit that it "is never read as delivered and never read as heard".
+        """
+        _, turns = await _seed(store, 3)
+
+        assert all(turn.delivery is None for turn in turns)
+        for turn in turns:
+            fetched = await store.turn_of_episode(turn.episode_id)
+            assert fetched is not None
+            assert fetched.delivery is None, "the absence survives a round trip"
+
+    async def test_an_appended_delivery_is_the_one_that_comes_back(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: ``append`` writes the value onto the row it allocates.
+
+        Capture writes ``UNKNOWN`` there and no other caller writes anything (§4), so
+        this is the only way a row acquires one — and the durations are checked on a
+        stamped row rather than here, because ``UNKNOWN`` has none.
+        """
+        conversation = await store.start()
+
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        assert turn.delivery == _UNSTAMPED
+        assert (await store.turn_of_episode(turn.episode_id)) == turn
+        assert [one.delivery for one in await store.turns(conversation.id)] == [_UNSTAMPED]
+
+    async def test_record_delivery_stamps_an_unknown_row_and_returns_it(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: all three conditions hold, so the row is stamped.
+
+        The returned turn is the row **as stamped** rather than as it was, which is
+        what lets a caller see what happened without a second read.
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        stamped = await store.record_delivery(
+            conversation.id, episode_id=turn.episode_id, delivery=_INTERRUPTED
+        )
+
+        assert stamped is not None
+        assert stamped.delivery == _INTERRUPTED
+        assert stamped.episode_id == turn.episode_id
+        assert (await store.turn_of_episode(turn.episode_id)) == stamped
+        assert [one.delivery for one in await store.turns(conversation.id)] == [_INTERRUPTED]
+
+    async def test_a_second_report_on_a_stamped_turn_performs_nothing(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §1: "a turn's delivery is stamped **once**".
+
+        "The row is left exactly as it stands and no error is raised", so a resend is
+        idempotent in the strong sense — and the *second* value being a different one
+        is what tells "left alone" from "written twice with the same bytes".
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+        await store.record_delivery(
+            conversation.id, episode_id=turn.episode_id, delivery=_INTERRUPTED
+        )
+
+        again = await store.record_delivery(
+            conversation.id, episode_id=turn.episode_id, delivery=_COMPLETE
+        )
+
+        assert again is None, "a stamped row performs nothing and returns None"
+        stamped = await store.turn_of_episode(turn.episode_id)
+        assert stamped is not None
+        assert stamped.delivery == _INTERRUPTED, "the first stamp stands"
+
+    async def test_a_report_naming_a_turn_with_no_delivery_stamps_nothing(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3's third condition, which keeps §4's reservation true.
+
+        "A row whose ``delivery`` is **absent** is a turn no delivery fact was
+        recorded for … and a report naming one is answered by doing nothing:
+        ``record_delivery`` is not a way to give such a turn a delivery, and no lane
+        reads it as one."
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW)
+
+        assert (
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_COMPLETE
+            )
+            is None
+        )
+        unchanged = await store.turn_of_episode(turn.episode_id)
+        assert unchanged is not None
+        assert unchanged.delivery is None, "the row is left absent, not given a delivery"
+
+    async def test_a_report_naming_no_turn_of_this_conversation_stamps_nothing(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §1: such a report is discarded — nothing recorded, nothing raised.
+
+        "A turn whose index entry was deleted or reclaimed, and an id belonging to
+        another conversation, are ordinary states rather than faults."
+        """
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        assert (
+            await store.record_delivery(
+                conversation.id, episode_id="conv:nobody:1", delivery=_COMPLETE
+            )
+            is None
+        )
+
+    async def test_a_report_is_never_applied_across_conversations(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3's first condition, and the store is where it is checked.
+
+        The store "derives every episode id from a conversation and an ordinal
+        (ADR-0074 §3), is where that is checked so no caller re-derives the
+        relation". The episode named here is real and unstamped — it simply belongs
+        to somebody else's thread.
+        """
+        mine = await store.start()
+        theirs = await store.start()
+        await store.append(mine.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+        elsewhere = await store.append(theirs.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        assert (
+            await store.record_delivery(
+                mine.id, episode_id=elsewhere.episode_id, delivery=_COMPLETE
+            )
+            is None
+        )
+        untouched = await store.turn_of_episode(elsewhere.episode_id)
+        assert untouched is not None
+        assert untouched.delivery == _UNSTAMPED, "the other conversation's row is untouched"
+
+    async def test_record_delivery_refuses_an_unknown_report(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: refused locally, before any I/O, as a malformed argument.
+
+        "``UNKNOWN`` is written by capture and only through ``append`` … the refusal
+        is part of the Protocol's contract and its shared conformance suite rather
+        than a caller's discipline. Without it a consumer holding the Protocol could
+        stamp ``UNKNOWN`` over ``UNKNOWN`` — a write the row's own state cannot
+        distinguish from no write, leaving the row eligible afterwards."
+
+        The row is checked afterwards, because a refusal that had already written is
+        the failure this clause exists to prevent.
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        with pytest.raises(ValueError, match="UNKNOWN"):
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_UNSTAMPED
+            )
+
+        still = await store.turn_of_episode(turn.episode_id)
+        assert still is not None
+        assert still.delivery == _UNSTAMPED
+        assert (
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_COMPLETE
+            )
+            is not None
+        ), "the refused call left the row eligible, so a real report still lands"
+
+    async def test_a_report_against_an_unknown_or_stamped_conversation_is_refused(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: "the same two refusals ``append`` carries"."""
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+
+        with pytest.raises(UnknownConversationError):
+            await store.record_delivery(
+                "no-such-conversation", episode_id=turn.episode_id, delivery=_COMPLETE
+            )
+
+        assert await store.stamp_deleted(conversation.id) is True
+        with pytest.raises(UnknownConversationError):
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_COMPLETE
+            )
+
+    async def test_two_reports_racing_on_one_row_leave_exactly_one_stamp(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §3: reading the conditions and writing the row are one step.
+
+        "Two reports observing ``UNKNOWN`` and both writing would each believe it had
+        stamped the turn once, and §1's rule would be true of neither. Which of two
+        concurrent reports wins is not decided here and does not need to be; that
+        exactly one does is."
+
+        So the assertion is on the **count** of calls that reported having stamped,
+        and on the row agreeing with whichever one did — never on which value won.
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+        reports = (_INTERRUPTED, _COMPLETE, _INTERRUPTED, _COMPLETE)
+
+        results = await asyncio.gather(
+            *(
+                store.record_delivery(conversation.id, episode_id=turn.episode_id, delivery=report)
+                for report in reports
+            )
+        )
+
+        stamped = [one for one in results if one is not None]
+        assert len(stamped) == 1, (
+            "exactly one report stamps the row: the read of the three conditions and "
+            "the write are one indivisible step (ADR-0205 §3)"
+        )
+        row = await store.turn_of_episode(turn.episode_id)
+        assert row is not None
+        assert row.delivery == stamped[0].delivery
+        assert row.delivery in set(reports)
 
     async def test_turns_that_parked_nothing_are_unconstrained(
         self, store: ConversationStore

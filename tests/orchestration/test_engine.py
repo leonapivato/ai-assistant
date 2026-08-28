@@ -442,6 +442,7 @@ class Harness:
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
         memory: FakeMemoryStore | None = None,
+        conversation_store: FakeConversationStore | None = None,
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
@@ -509,7 +510,15 @@ class Harness:
         # composition root wires it (ADR-0074 §9). Kept on the harness so a test can
         # read what capture actually recorded, and so a second façade over the same
         # durable state shares one stage.
-        self.conversation_store = FakeConversationStore(now=lambda: AT)
+        # A knob for the same reason ``memory`` is one: ADR-0074 §9's store faults and
+        # ADR-0205 §3's refusals are properties of what the *store* does, and a case
+        # about one needs a store it can arm or count. The default is the canonical
+        # fake, which is what every other case here wants.
+        self.conversation_store = (
+            FakeConversationStore(now=lambda: AT)
+            if conversation_store is None
+            else conversation_store
+        )
         self.conversations = ConversationLifecycle(
             conversations=self.conversation_store,
             memory=self.memory,

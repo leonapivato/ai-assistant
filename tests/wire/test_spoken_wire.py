@@ -16,12 +16,22 @@ from __future__ import annotations
 
 import json
 from base64 import b64encode
+from datetime import timedelta
 from typing import Final
 
 import pytest
 
 from ai_assistant.core.errors import TranscriptionFailedError
-from ai_assistant.core.types import SpeechFailure, SpokenAudio, SpokenAudioFormat
+from ai_assistant.core.types import (
+    SpeechFailure,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenDelivery,
+    SpokenDeliveryReport,
+    SpokenDeliveryState,
+    SpokenTurn,
+    TurnOutcome,
+)
 from ai_assistant.wire.codec import canonical_payload, project
 from ai_assistant.wire.errors import (
     UndecodableFrameError,
@@ -129,6 +139,108 @@ def test_a_recording_projects_as_ordinary_text() -> None:
     projected = project(SpokenAudio(content=_CLIP, media_type=SpokenAudioFormat.MP4))
 
     assert projected == {"content": _CLIP, "media_type": "audio/mp4"}
+
+
+# --- ADR-0205 §9: the report crosses on the shape the codec already carries ----
+
+
+def test_the_report_projects_through_the_branches_the_codec_already_had() -> None:
+    """ADR-0205 §9: "``wire/codec.py``'s ``project`` gains no branch, ADR-0087 §2c's
+    scalar table gains no row".
+
+    The claim is checked rather than taken: a nested frozen model of a ``StrEnum``
+    and two durations render through the ``BaseModel`` branch and ADR-0087
+    §2e's duration form, both of which existed before this decision.
+    """
+    projected = project(
+        SpokenDeliveryReport(
+            episode_id="conv:c-1:1",
+            delivery=SpokenDelivery(
+                state=SpokenDeliveryState.INTERRUPTED,
+                played=timedelta(seconds=3, milliseconds=200),
+                rendered=timedelta(seconds=9, milliseconds=800),
+            ),
+        )
+    )
+
+    assert projected == {
+        "episode_id": "conv:c-1:1",
+        "delivery": {
+            "state": "interrupted",
+            "played": "PT3.2S",
+            "rendered": "PT9.8S",
+        },
+    }
+
+
+def test_the_report_decodes_from_the_annotation_alone() -> None:
+    """ADR-0205 §9: "``wire/surface.py`` derives this argument's adapter from the
+    annotation as it derives every other."
+
+    So the far side reconstructs the promoted surface's own type with no wire-side
+    declaration of it, and the partition ADR-0205 §2 fixes is enforced there by the
+    model's own validator rather than by anything under ``wire/``.
+    """
+    decoded = _decode_arguments(
+        "converse_spoken",
+        {
+            "utterance": {"content": _CLIP, "media_type": "audio/mp4"},
+            "plays": ["audio/mp4"],
+            "timeout": "PT30S",
+            "conversation_id": "c-1",
+            "delivery": {
+                "episode_id": "conv:c-1:1",
+                "delivery": {"state": "complete", "played": "PT9.8S", "rendered": "PT9.8S"},
+            },
+        },
+    )
+
+    assert decoded["delivery"] == SpokenDeliveryReport(
+        episode_id="conv:c-1:1",
+        delivery=SpokenDelivery(
+            state=SpokenDeliveryState.COMPLETE,
+            played=timedelta(seconds=9, milliseconds=800),
+            rendered=timedelta(seconds=9, milliseconds=800),
+        ),
+    )
+
+
+def test_a_report_outside_the_partition_is_refused_at_the_far_side() -> None:
+    """The same derivation, on the value ADR-0205 §2 refuses.
+
+    "A value that has already contradicted itself is not a report, it is a defect" —
+    and the refusal is the model's, so a peer cannot reach the engine with one by
+    sending it over the wire instead of constructing it.
+    """
+    with pytest.raises(UndecodableFrameError):
+        _decode_arguments(
+            "converse_spoken",
+            {
+                "utterance": {"content": _CLIP, "media_type": "audio/mp4"},
+                "plays": ["audio/mp4"],
+                "timeout": "PT30S",
+                "delivery": {
+                    "episode_id": "conv:c-1:1",
+                    "delivery": {
+                        "state": "complete",
+                        "played": "PT1S",
+                        "rendered": "PT9.8S",
+                    },
+                },
+            },
+        )
+
+
+def test_the_disclosed_episode_id_crosses_as_ordinary_text() -> None:
+    """ADR-0205 §1: the id "reaches the caller so that it can be handed back".
+
+    ``SpokenTurn`` is rendered by ``model_dump()``, so the member is **present
+    whatever it holds** — which is what makes this a version bump biting in the
+    result direction as well as the argument one.
+    """
+    assert project(SpokenTurn())["episode_id"] is None
+    recorded = SpokenTurn(heard="hi", outcome=TurnOutcome(turn=None), episode_id="conv:c-1:1")
+    assert project(recorded)["episode_id"] == "conv:c-1:1"
 
 
 # --- §4: the reduced delivery -------------------------------------------------
