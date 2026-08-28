@@ -757,9 +757,13 @@ _mode_start() {
             # stop polling; here it does not, and a message that sent a lane to
             # `--wait` promising it could tell a slow start from a dead one would
             # be walking that lane into the relaunch this whole mode exists to
-            # prevent. The log is the evidence that does work, because the child
-            # writes to it as it goes and has already written the aggregate by
-            # the time it starts rendering the diff.
+            # prevent. Nor is the log conclusive, and it is not offered as
+            # though it were: a child writes to it as it goes, so growth is
+            # positive evidence that the round is alive, but a static log
+            # distinguishes nothing — a child can hang mid-render having written
+            # a line, or die before writing any. What ENDS this window is the
+            # claim itself, after which `--wait` is conclusive exactly as it is
+            # everywhere else, so asking it again is the terminating move.
             echo "the detached '${persona}' round has not claimed this loop within" >&2
             echo "  ${start_grace}s. Nothing here has killed it, and nothing here can" >&2
             echo "  see whether it is dead: a round claims the loop only after it has" >&2
@@ -772,8 +776,11 @@ _mode_start() {
             echo "  lock, and an unclaimed child has published neither, so it can" >&2
             echo "  answer exit 4 ('no round in flight') about a child that is alive." >&2
             echo "  In THIS window an exit 4 is NOT the 'stop polling' it is" >&2
-            echo "  everywhere else. The log below is the evidence that works: while" >&2
-            echo "  it is still growing the round is running." >&2
+            echo "  everywhere else — ask again. Nothing here is conclusive: a log" >&2
+            echo "  that is still GROWING says the round is alive, but a static one" >&2
+            echo "  says nothing either way (a child can hang mid-render, or die" >&2
+            echo "  before writing a line). What ends the window is the claim, and" >&2
+            echo "  once it lands --wait is conclusive as usual (issue #1730)." >&2
             echo "    scripts/codex-review.sh --wait ${persona}" >&2
             echo "  Its output so far:" >&2
             _echo_log "$log_file"

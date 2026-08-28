@@ -115,7 +115,10 @@ before it claims. Never relaunch (issues #1670, #1674). Ask `--wait` — but not
 that it is not conclusive in that same window: it reads the round marker and the
 persona lock, both of which an unclaimed child has yet to publish, so it can
 answer exit 4 about a round that is alive. There and only there, an exit 4 is not
-the "stop polling" it is everywhere else; the round's log is what settles it. And when `--wait` answers exit 4 about a round that failed,
+the "stop polling" it is everywhere else — ask again. Nothing in that window is
+conclusive: a log that is still growing says the round is alive, a static one says
+nothing either way, and what ends the window is the claim itself, after which
+`--wait` is conclusive as usual. Issue #1730 is the gap. And when `--wait` answers exit 4 about a round that failed,
 read the log it prints: `codex exec --json` puts its failures on **stdout**, so
 until issue #1674 that log ended at "Running Codex …" with nothing after it and
 the reason was discarded unread.*
