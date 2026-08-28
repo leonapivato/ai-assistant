@@ -1,6 +1,6 @@
 # 205. A spoken answer's delivery is a fact the device reports, and an unreported answer is never assumed heard
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-28
 
 ## Context
