@@ -2,6 +2,31 @@
 
 - Status: Partially superseded by ADR-0086 (§1's and §5a's rule that a `REINFORCE` retains both records' `evidence`)
 - Date: 2026-07-22
+- Amended: 2026-08-29 by ADR-0214 — **§5b's conformance predicate: the first
+  disjunct's exception widens by one condition; the second disjunct is
+  untouched.** §5b states the predicate "so it cannot be paraphrased into
+  something broader": "A `REINFORCE` or `SUPERSEDE` must raise `MemoryStoreError`
+  and write nothing when `target.provenance.source is USER_ASSERTED`, **or** when
+  `incoming.provenance.source is USER_ASSERTED` **and**
+  `target.provenance.source is EXTERNAL`."
+  [ADR-0214](0214-an-observation-that-agrees-with-a-user-assertion-corroborates-it-and-is-never-asked-about.md)
+  §3 widens ADR-0121 §5's exception to the first disjunct from an incoming
+  `USER_ASSERTED` record to any incoming `USER_ASSERTED`, `OBSERVED` or
+  `INFERRED` one, the agreement and `REINFORCE` conditions unchanged, so a suite
+  pinning the disjunct as ADR-0121 left it would now refuse a fold this ADR's own
+  contract permits — the contract-widening mistake §5b names, arriving from the
+  other direction.
+
+  **What stands.** The second disjunct, whole. §5b's argument that the refusals
+  are contract rather than tuning, its reasoning that a second `MemoryWriter` is
+  exactly the "conforming implementation that rules differently" the obligation
+  exists for, and its two closing limits — the refusal does not move out of
+  `MemoryIngestor`, and `EXTERNAL` is not settled here — are all untouched.
+  ADR-0214 §5 keeps the recomputation at the writer that §5b's whole argument
+  turns on, and its §8 names the conformance cases owed. ADR-0214 §7 applies
+  ADR-0070 §1's test and records this ruling; the `Status` line is unchanged
+  because ADR-0082 §2 puts the record in this note alone on a line led by
+  `Partially superseded by`. Refs #869.
 - Amended: 2026-08-16 by ADR-0159 — **§4's description of rule 5's ruling no
   longer describes `DefaultMemoryPolicy`; §7's filed question is answered.** §4
   records that "**rule 5** — a non-asserted proposal that conflicts with a
@@ -474,6 +499,15 @@ suite, which is the divergence §Consequences already requires it to close.
 > The second disjunct — a `USER_ASSERTED` proposal onto an `EXTERNAL` target, as
 > narrowed to `REINFORCE` by ADR-0045 §5b — is untouched, as is everything this
 > section says about why the refusals are contract rather than tuning.
+
+> **Amended by ADR-0214 (2026-08-29).** That exception to the **first** disjunct
+> now admits an incoming `OBSERVED` or `INFERRED` record as well as a
+> `USER_ASSERTED` one (ADR-0214 §3), the `REINFORCE` and agreement conditions
+> unchanged, because ADR-0214 §4 makes every `REINFORCE` onto a `USER_ASSERTED`
+> target corroborate. A suite pinning the first disjunct as ADR-0121 left it
+> would now refuse a fold this contract permits. The second disjunct and
+> everything this section says about why the refusals are contract rather than
+> tuning are untouched, and the predicate is still recomputed at the writer.
 
 `_refuse_unsafe_fold`'s two refusals — no fold of any kind onto a
 `USER_ASSERTED` target, no `USER_ASSERTED` proposal onto an `EXTERNAL` one — join
