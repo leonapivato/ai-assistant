@@ -125,7 +125,14 @@ stage.
   ADR-0199 §5's third clause uses for the withholding fact, and adds nothing else.
 - **ADR-0203 §1 and §2** subtract the withheld supply before the turn plans, over
   one assembly, one retrieval and one filter. A resumed answer is an ordinary turn
-  on this operation, so both bind it (§6).
+  on this operation, so both bind it (§6). ADR-0203 §4's first clause — "**This
+  ADR** adds no field to `EpisodicMemory`, adds no field to `Provenance`" — is a
+  statement about that ADR's own reach, which ADR-0204 §11 says in as many words.
+- **ADR-0204 §1, §3 and §5** put `supplied_withheld_content` on `Provenance` and
+  make a supply site for a channel of unbounded audience withhold a stamped record.
+  It ratified after this ADR's declared base and is composed with rather than
+  touched: §3 below puts this decision's fact on a different type entirely, and §5
+  states how the two meet at the supply site.
 - **ADR-0074 §3, §5 and §9** decide capture, the replay tail and the store surface.
   §3 below adds one member and one operation to that surface; capture's content
   rendering is untouched.
@@ -357,8 +364,17 @@ why one is refused rather than deferred.
 > **Normative.** This ADR adds **no field to `EpisodicMemory`**, no field to
 > `Provenance`, mints no memory record, installs nothing in the `MemoryStore`, and
 > changes nothing capture writes there. ADR-0200 §8's clause and ADR-0203 §4's
-> clause each stay true word for word, and nothing here is read as authority to add
-> such a field for any other purpose.
+> first clause each stay true word for word, and nothing here is read as authority
+> to add such a field for any other purpose.
+
+> **Normative.** **This fact and ADR-0204's stamp are on different types and never
+> stand in for one another.** `Provenance.supplied_withheld_content` records what
+> stood in a record's warrant (ADR-0204 §1); `ConversationTurn.delivery` records
+> what a device played of a turn's rendering. Neither is derivable from the other,
+> no implementation reads one to answer the other's question, and a lane
+> implementing either does not touch the other's type. That this ADR adds no
+> `Provenance` field is what keeps the two apart by construction rather than by
+> discipline.
 
 > **Normative.** `ConversationStore` gains exactly one operation, `record_delivery`,
 > which stamps the turn a given `episode_id` names with a `SpokenDelivery` and
@@ -515,6 +531,21 @@ the room to hear ought to be.
 > and no second retrieval**, and its context and memories still reach it from the
 > turn and from nowhere else — ADR-0199 §5's second clause, ADR-0170 §2 and ADR-0203
 > §2, each binding unchanged.
+
+> **Normative.** A delivery fact **travels with the episode it qualifies and never
+> without it**. Where a supply site withholds a record — under ADR-0199 §3, or under
+> ADR-0204 §3's test on `Provenance.supplied_withheld_content` — no delivery fact
+> for that turn reaches the composing stage either. A fact stating how long an
+> answer ran, standing beside no answer, is a value that narrows what was withheld,
+> and ADR-0199 §5's fourth clause forbids one.
+
+> **Normative.** This section adds **no supply site**. It adds one fact to the
+> inputs the existing composing stage is already given, and that fact is not a
+> record, so ADR-0204 §3's test has no subject in it — it is neither applied to a
+> delivery fact nor weakened by one. ADR-0204 §3's second clause obliges an ADR
+> admitting a new component that assembles what an unbounded channel is composed
+> from to state that the test applies there rather than settle it by silence; this
+> ADR admits no such component, and says so here rather than by omission.
 
 > **Normative.** The fact is a **supplied input and not part of the episode's
 > `content`**. Capture's canonical rendering is byte-unchanged by this ADR
@@ -694,7 +725,9 @@ stamps the turn it names and leaves the later one `UNKNOWN`** — the case
 adversarial review's round-1 `blocker` describes, written as an integration test
 with an intervening captured turn rather than as two writes in a row; a second
 report naming an already-stamped turn performs nothing; a report beside
-a report naming a turn that carries no `delivery` at all stamps nothing and leaves
+a turn whose episode a supply site withheld under ADR-0199 §3 or ADR-0204 §3
+contributes no delivery fact to that turn's composing input either; a report naming
+a turn that carries no `delivery` at all stamps nothing and leaves
 that row absent; two reports racing on one `UNKNOWN` row leave exactly one stamp,
 pinned in the `ConversationStore` conformance suite beside the store's other
 concurrent-mutation rows; a report beside `conversation_id` `None` is refused before
@@ -784,7 +817,15 @@ rather than assumed.** Architecture review, round 1, `blocker`, reads its marked
 clause — "This is achieved with **no new type and no new member**. No
 `core/types.py` model gains a field, `TurnOutcome` gains no narrowed variant,
 `SpokenTurn` keeps the four members ADR-0200 §4 gives it" — as a live prohibition
-this ADR breaches. Three things in ADR-0203's own text say otherwise. The clause's
+this ADR breaches. **ADR-0204 §11 ruled the same question about the neighbouring
+clause of the same section, and ruled it this way**: ADR-0203 §4's first clause,
+"**This ADR** adds no field to `EpisodicMemory`, adds no field to `Provenance`",
+"is a statement about ADR-0203's own reach and stays true of it word for word; a
+later ADR adding a field does not make it false, and no record is owed on it" — and
+ADR-0204 then added exactly such a field. That is a ratified precedent for reading a
+"this ADR adds no…" clause as scoped to its own ADR, and §3's clause is the same
+shape one section earlier. Three things in ADR-0203's own text say the same. The
+clause's
 subject is "**This is achieved**", so the three items are what ADR-0203 does not do
 rather than what nobody may. §5 states the same scope outright: "This ADR decides
 conduct inside `orchestration` and **adds no contract surface**. It adds no
@@ -797,8 +838,8 @@ where the rule lives and nowhere else. The contrary reading is real and is
 **parked as #1716** rather than dismissed: were it taken, what is owed is one
 `Status` pair and one dated note on ADR-0203 naming that sentence, and nothing this
 ADR decides moves either way. `docs/adr/0203-*.md` is outside this lane's fence and
-is already carried by another open lane, which is the second reason the question is
-parked rather than answered by editing it here.
+was carried by ADR-0204's lane, which has since merged — the second reason the
+question is parked rather than answered by editing it here.
 
 **No *amendment* record is owed anywhere.** ADR-0082 §1 owes one "when the later ADR
 amends a named clause — and not otherwise". The two clauses of ADR-0200 and the one
