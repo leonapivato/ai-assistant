@@ -575,8 +575,9 @@ as qualified, as ADR-0027 left it.
 > - A PR that **adds** the file carrying the cited member, and one that
 >   **deletes** it, each judged on the endpoint it has and neither charged as a
 >   failed read.
-> - An unreadable PR file, an unreadable endpoint, and an unretrievable PR
->   description (owed).
+> - An unreadable PR file, an unreadable endpoint, an unparseable base-move
+>   listing, an unretrievable PR description, and any other error reaching the
+>   extraction (owed — §6's fail-closed inputs, each tested on its own).
 > - Every existing ADR-0027 §§2–4 case, still refusing exactly as it does today.
 
 **§10 is marked because in a marked ADR nothing else binds.** ADR-0089 §3 is
