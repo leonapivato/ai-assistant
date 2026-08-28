@@ -394,25 +394,29 @@ effects happened and whose cursor did not advance. This clause is about where a 
 
 ### 5. The advance: once per pass, and never past a gap on its first reading
 
-> **Normative.** A pass advances the watermark **exactly once**, after every
-> proposal it produced has been ruled by the write path. It advances even where the
-> page resolved to no episode, even where the observer was not called, and even
-> where nothing was proposed.
+> **Normative.** A pass makes **exactly one** attempt to advance the watermark, after
+> every proposal it produced has been ruled by the write path — one `record_observed`
+> call and no other write to the watermark. It makes that attempt even where the page
+> resolved to no episode, even where the observer was not called, and even where
+> nothing was proposed.
 
-> **Normative.** It advances to **the highest ordinal in the page that is below the
-> lowest ordinal in the page whose episode did not resolve** — or, where every turn
-> in the page resolved, to the page's highest ordinal.
+> **Normative.** The position it names is **the highest ordinal in the page that is
+> below the lowest ordinal in the page whose episode did not resolve** — or, where
+> every turn in the page resolved, the page's highest ordinal.
 
-> **Normative.** Where that rule would advance the watermark by nothing — because
-> the page's **lowest** turn is itself one whose episode did not resolve — the pass
-> advances instead to the highest ordinal in the page below the **second**-lowest
-> unresolved ordinal in it, or to the page's highest ordinal where the page holds no
-> second unresolved turn.
+> **Normative.** Where that rule would name no position above the watermark the pass
+> read — because the page's **lowest** turn is itself one whose episode did not
+> resolve — the pass names instead the highest ordinal in the page below the
+> **second**-lowest unresolved ordinal in it, or the page's highest ordinal where the
+> page holds no second unresolved turn.
 
-> **Normative.** The watermark therefore **strictly increases whenever a pass reads a
-> non-empty page**, and **no unresolved turn is passed over on the pass that first
-> reads it** unless it was that page's lowest turn — which requires the watermark to
-> have already stood immediately below it.
+> **Normative.** A pass that read a non-empty page therefore always names a position
+> **strictly above the watermark that pass read**. Its attempt either advances the
+> watermark, or performs nothing because an overlapping pass has already advanced it
+> to at or above the same position. So **the watermark never stands still across a
+> pass over a non-empty page** and never moves backwards, and **no unresolved turn is
+> passed over on the pass that first reads it** unless it was that page's lowest turn
+> — which requires the watermark to have already stood immediately below it.
 
 > **Normative.** Two passes over one conversation may overlap, and neither the store
 > nor this decision serialises them. Each pass computes its advance from **its own**
@@ -422,7 +426,10 @@ effects happened and whose cursor did not advance. This clause is about where a 
 > rests on `record_observed`'s monotonicity (§8) and on nothing else: each call stamps
 > if and only if its ordinal is strictly above the recorded one, so whichever order
 > the calls arrive in, the **higher** of the two positions is what stands and the
-> lower performs nothing.
+> lower performs nothing. Where the two happen to name the same position, the first
+> to arrive stamps it and the second performs nothing, which is the same rule and not
+> an exception to it: an attempt that loses is an attempt whose position already
+> stands.
 
 > **Normative.** No pass advances the watermark past what that pass itself read, so a
 > position that stands was computed by a pass that read every turn at or below it.
@@ -772,7 +779,8 @@ saying so.
 > breaking Protocol change and the lane flags it** (golden rule 5).
 
 > **Normative.** The `orchestration` half owes the selector of §3 in
-> `ObservationStage`, §4's uncursored start, §5's single advance — computed from the
+> `ObservationStage`, §4's uncursored start, §5's single advance **attempt** — one
+> `record_observed` call per pass, whose position is computed from the
 > lowest unresolved ordinal in the page, with the fallback that stops in front of the
 > second, and **never** from the page's length — and §6's no-partial-advance. It owes the
 > module docstring of `orchestration/observation.py` corrected, which today states
