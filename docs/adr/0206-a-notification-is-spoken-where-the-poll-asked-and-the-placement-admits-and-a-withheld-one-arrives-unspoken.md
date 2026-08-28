@@ -435,10 +435,26 @@ clause of ADR-0199 §5 pushes and the direction a mistake here should fail in.
 > an unbounded one. The rendering is produced for the unbounded channel and is the
 > only value on this path produced for a channel at all.
 
-> **Normative.** **A rendering carried to a page that does not play it is emitted
-> on no channel.** Reaching a device is not an emission: the unbounded channel is
-> the loudspeaker, and it carries the rendering exactly when the page plays it
-> (§8). No implementation reads the fan-out itself as an emission.
+> **Normative.** **The fan-out this ADR admits is not undifferentiated, and the
+> differentiation happens at the hub rather than in the fan-out.** Whether a
+> rendering exists at all is decided by §3's placement before any value leaves the
+> hub, so a candidate this ADR withholds is fanned out with no audio in it. The
+> obligation ADR-0199 §5's reasoning places on "whoever adds the speech" is
+> discharged there, which is the earliest point on this path at which it can be.
+
+> **Normative.** **Every destination of a rendering has the same audience.** A
+> rendering is produced for a channel of unbounded audience and reaches only
+> loudspeakers, each of which is such a channel, so ADR-0199 §5's last clause is
+> satisfied on its second limb — the component "emits only on channels whose
+> audience the value was composed for". There is no channel of bounded audience
+> among a rendering's destinations for a fan-out to have to tell apart.
+
+> **Normative.** **The stream value carries two emissions and they are not merged.**
+> The delivery's own text reaches the page, a channel of bounded audience; the
+> rendering reaches the loudspeaker, a channel of unbounded audience. Each is
+> emitted on the audience it was produced for, neither is emitted on the other's,
+> and no implementation reads the one carriage as putting either on the other's
+> channel.
 
 > **Normative.** ADR-0175 §4's "filters nothing… withholds nothing" therefore binds
 > unchanged, and **this ADR requires no per-stream routing**: no browser-specific
@@ -446,15 +462,29 @@ clause of ADR-0199 §5 pushes and the direction a mistake here should fail in.
 > no stream selected over another. One delivery, one rendering, every open stream,
 > unchanged.
 
-**An earlier draft of these three clauses was one clause and it was
-unsatisfiable.** It said the fan-out emitted "the rendering only where it will be
-played" — which the gateway cannot do, because ADR-0175 §4 obliges it to write one
-value to every open stream and forbids it filtering, and §2 and §8 between them
-forbid it holding the per-browser state it would need to filter on. Architecture
-review found it on the fifth round, and the repair is to say what is actually true
-rather than to weaken ADR-0175 §4: the emission happens at the loudspeaker, not at
-the socket, so the clause the fan-out has to satisfy is about what was *composed*
-for a bounded channel, and on this path nothing is.
+**Two drafts of these clauses were wrong in two different ways, and both are worth
+recording because the second correction is the one that reads the ratified prose
+properly.** The first said the fan-out emitted "the rendering only where it will be
+played", which the gateway cannot do: ADR-0175 §4 obliges it to write one value to
+every open stream and forbids it filtering, and §2 and §8 forbid it the per-browser
+state it would need. Architecture review found that on the fifth round. The second
+answered by calling the gateway-to-page transfer a non-emission — which review
+found again on the sixth, correctly: reclassifying a transfer does not change the
+topology, and ADR-0199 §5's prose is explicit that "a channel of unbounded audience
+may not be fed by an undifferentiated fan-out at all".
+
+**What answers that sentence is where the differentiation sits, not what the
+transfer is called.** Read with the marked clause it explains — a component "either
+emits only on channels whose audience the value was composed for, or emits
+nothing" — the prose's subject is a fan-out that cannot tell its destinations
+apart *because they differ*, and its worked hazard, one paragraph up, is the
+gateway relaying a value the hub composed for a screen. Neither is this path. The
+rendering is composed for a loudspeaker and every destination is one, so the
+clause's second limb holds exactly; and the decision that makes it hold — whether
+a rendering exists — is taken at the hub, before the fan-out, which is precisely
+where §5's prose says the obligation lands. A gateway that had to decide would be
+the authoring golden rule 3 forbids, which is the outcome ADR-0175 §4 was written
+to prevent and this ADR does not reach for.
 
 > **Normative.** No signal about who is present enters this path. No occupancy,
 > presence, diarization, speaker identification or paired-device evidence is read,
@@ -533,23 +563,30 @@ nothing new is invented, and adversarial review found the gap on the first round
 > the synthesizer's obligation, discharged in its conformance suite; no component
 > decodes, re-transcribes or otherwise inspects a rendering to check it.
 
-> **Normative.** `spoken_rendering` is `DEGRADED` in exactly five cases and no
+> **Normative.** `spoken_rendering` is `DEGRADED` in exactly four cases and no
 > others: synthesis raised a `SpeechError`; the intersection of `plays` with the
-> synthesizer's `formats` was empty; nothing remained of `budget` when the entry
-> was selected, so no synthesizer was called (§7); the rendering breached
-> ADR-0200 §6's `hub_max_spoken_audio_bytes`; or the whole projected
-> `NotificationDelivery` carrying that rendering would breach ADR-0085 §8c's
-> payload limit. In every one the delivery travels without the rendering.
+> synthesizer's `formats` was empty; the rendering breached ADR-0200 §6's
+> `hub_max_spoken_audio_bytes`; or the whole projected `NotificationDelivery`
+> carrying that rendering would breach ADR-0085 §8c's payload limit. In every one
+> the delivery travels without the rendering.
 
-**Two of the five are discovered before a synthesizer is called rather than
-reported by one**, which is ADR-0200 §4's treatment of the empty intersection —
-"discovered before the call rather than reported by one, which is why nothing is
-spent on it" — reaching a second cause. An exhausted budget is the other, and it
-is a `DEGRADED` case rather than a sixth outcome because the caller's position is
-identical either way: the notification is here and the audio is not. Architecture
-review found on the first round that §7 required this state and §6's exhaustive
-list did not admit it, which is a state with no conforming outcome; naming it is
-the fix rather than relaxing either clause.
+> **Normative.** **An elapsed budget is not among them.** §7 makes the rendering
+> the request's own work in ADR-0135 §3's sense, so it is performed whatever the
+> state of the budget and no implementation degrades on that ground. A synthesis
+> that outlives the decorator's own deadline raises `SpeechTimeoutError`, which is
+> a `SpeechError` and is the first case above.
+
+**The empty intersection is discovered before a synthesizer is called rather than
+reported by one**, which is ADR-0200 §4's own treatment of it — "discovered before
+the call rather than reported by one, which is why nothing is spent on it" — taken
+whole. It is the only one of the four that spends nothing.
+
+**The list was five for two rounds and the fifth was a mistake of this ADR's own
+making.** Architecture review found on the first round that an earlier §7 required
+`DEGRADED` where the budget had run out and §6 did not admit it; the case was added,
+and adversarial review then found on the sixth that the §7 clause creating the state
+contradicted ADR-0135 §3. Removing the cause removed the case. Recording both steps
+is worth more than presenting the four as though they had always been four.
 
 > **Normative.** **A withholding is never reported as a degradation and a
 > degradation is never reported as a withholding.** No implementation collapses
@@ -630,43 +667,71 @@ subject here**: a delivery with `spoken` `None` is the value ADR-0131 §4's rese
 already guarantees fits, as the arithmetic above shows, so a rendering-free
 delivery cannot be over §8c and there is nothing further to drop.
 
-### 7. The budget bounds the whole call, and the rendering takes what the wait left
+### 7. The budget bounds the waiting, and the rendering is the request's own work
 
-> **Normative.** `budget` bounds the whole call — the wait for an entry and the
-> rendering together — and the hub answers within it. ADR-0131 §4's `budget`
-> clauses bind unchanged: the closed range from zero to
-> `hub_max_notification_budget`, the refusal rather than a clamp outside it, and
-> the immediate poll at zero.
+> **Normative.** `budget` bounds how long the hub may wait for an entry and bounds
+> nothing else about the request. **ADR-0135 §3 binds this poll unchanged**, in the
+> terms it is written in: the request's own work "run[s] to completion whatever the
+> state of the budget, and a request whose own work outruns its budget has broken
+> no rule", and "an elapsed budget is no ground for withholding a delivery that
+> selection produced".
 
-> **Normative.** The rendering is bounded by what remains of `budget` when the
-> entry was selected, and by the deadline decorator the composition root wires
-> over the synthesizer (ADR-0200 §1) — whichever is the lesser, which is ADR-0200
-> §3's threading rule at a second call site. Where nothing remains, no synthesizer
-> is called and `spoken_rendering` is `DEGRADED`.
+> **Normative.** **The rendering is the request's own work in that clause's sense.**
+> It is performed after the selection step, it runs to completion whatever the state
+> of the budget, and no implementation declines it, shortens it or degrades it on
+> the ground that the budget has elapsed. A poll may therefore answer later than
+> `budget`, and does so by construction whenever it renders.
+
+> **Normative.** The rendering's bound is the deadline decorator the composition
+> root wires over the synthesizer (ADR-0200 §1) and nothing else. Expiry there is a
+> `SpeechTimeoutError`, a `SpeechError`, so §6's first degradation case governs it.
+
+> **Normative.** ADR-0131 §4's `budget` clauses bind unchanged: the closed range
+> from zero to `hub_max_notification_budget`, the refusal rather than a clamp
+> outside it, and the immediate poll at zero — which, under ADR-0135 §3, selects at
+> once and then does the request's own work, so a zero budget renders exactly as any
+> other budget does where a rendering was asked for.
 
 > **Normative.** ADR-0131 §4's ordering rule binds unchanged and comes first: a
-> request whose arguments are refused has no effect on the outbox, and arguments
-> are validated "before the acknowledgement is applied, before any entry is
-> selected, and before any other outbox state changes". A malformed `plays` is
-> such an argument.
+> request whose arguments are refused has no effect on the outbox, and arguments are
+> validated "before the acknowledgement is applied, before any entry is selected,
+> and before any other outbox state changes". A malformed `plays` is such an
+> argument, and no rendering is attempted on a request whose arguments were refused.
 
-> **Normative.** ADR-0175 §4's cadence binds unchanged. Because the answer arrives
-> within `budget`, the gateway still "writes on every open delivery stream at
-> least once per `gateway_notification_budget`", and no lane reads this ADR as
-> relaxing it.
+**An earlier draft made `budget` bound the whole call, and it contradicted a
+ratified clause nobody had read.** It threaded the caller's remaining budget into
+the synthesis stage on ADR-0200 §3's rule, so an entry arriving near the window's
+edge degraded for want of time. Adversarial review found on the sixth round that
+ADR-0135 §3 had already decided this exact question the other way — a poll's budget
+"bounds **how long the hub may wait for an entry to become available**, and bounds
+nothing else about the request" — and that the draft would have partially superseded
+it without saying so. ADR-0135's semantics are adopted rather than superseded, and
+the ADR is strictly better for it: the fifth degradation case disappears, the
+reserve deferral disappears, and a notification that arrives at the end of a poll
+window is spoken like any other.
 
-**Threading rather than reserving, and the cost is named rather than hidden.** At
-the shipped defaults the gateway polls with `gateway_notification_budget` of 20
-seconds and the speech decorator's default bound is 30, so what actually bounds a
-rendering is almost always the remainder of the poll window. An entry arriving
-near the window's edge therefore leaves too little to render in and degrades — it
-arrives on the page, silently, and the owner reads it. The alternative is to
-reserve a slice of `budget` for the rendering and shorten the wait by it, which
-buys reliability at the cost of a new `Settings` duration and a wait halved at the
-defaults. §10 defers that with the measurement that would fire it. What is *not*
-available is letting the answer run past `budget`: that would move ADR-0131 §4's
-immediate poll and ADR-0175 §4's cadence, two clauses in two ADRs, for a
-convenience.
+**Why ADR-0200 §3's threading rule does not transfer, stated because the two look
+alike.** There, `timeout` is "the budget for the whole call — transcription, the
+turn and synthesis together", because a caller pressed a button and is waiting for
+an answer; the deadline is ADR-0029 §4's caller-owned one and every stage is inside
+it. Here the caller asked "have you anything for me", the hub has already answered
+that question by selecting an entry, and what follows is work on a delivery the
+outbox has already leased. ADR-0135 §3 is the clause that names the difference, and
+it names it for the acknowledgement and the selection before this ADR adds a third
+item to the same list.
+
+**What that costs ADR-0175 §4's cadence, bounded rather than waved away.** That
+clause has the gateway writing on every open stream "at least once per
+`gateway_notification_budget`", and a poll that renders answers later than its
+budget — so the interval between writes grows by up to the synthesis bound. It is
+*bounded*, which is the property the clause's own prose asks for: "One write per
+poll cycle makes the liveness of the gateway, of its hub connection and of the
+browser's own socket observable at a bounded cadence." And the slack is not new in
+kind — ADR-0135 §3 records that "a poll's occupancy was never exactly its budget"
+because argument validation, the acknowledgement and the result frame's write all
+sit outside the waiting. What this ADR adds is a larger term to a sum that was
+never zero, with a ceiling the deployment sets. §11 records that ADR-0175 §4 is
+therefore untouched.
 
 ### 8. An idle device is a fact about the device, and the page queues no rendering
 
@@ -822,10 +887,12 @@ say which, or how many did not.
 
 ### 10. Deferred, by name, each with the condition that fires it
 
-- **A reserved slice of `budget` for the rendering** (§7). One `Settings`
-  duration, and a wait shortened by it. **Fires** on a measurement that the
-  edge-of-window degradation is frequent enough to matter in use — which is a
-  figure the implementing lane can produce and this ADR cannot.
+- **A bound on how far a rendering may push a poll past its budget** (§7).
+  ADR-0135 §3 permits the request's own work to outrun the budget and this ADR
+  adds a term to it; the ceiling today is the synthesis decorator's own deadline,
+  which a deployment sets. **Fires** on a measurement that the keep-alive interval
+  ADR-0175 §4 paces has grown far enough to matter to a browser — a figure the
+  implementing lane can produce and this ADR cannot.
 - **Streamed speech on the delivery path.** The rendering comes back whole, as
   ADR-0200 §11 already defers it for a turn. **Fires** with that deferral, which
   it presupposes: a streamed delivery needs a streamed rendering first.
@@ -921,13 +988,37 @@ Six near misses, named so a reviewer can check them rather than take them:
   as ratified and this ADR reads none of them more widely, which is ADR-0200 §12's
   finding about the same ADR reached again on the delivery path. **No record is
   owed on it.**
-- **ADR-0175 §4, §5 and §6 are untouched, and §9 says why for the one that
-  matters.** §4's fan-out clause is satisfied by the gateway relaying one value
-  unchanged; its retention clause and its cadence clause bind unchanged (§7, §8);
-  §5's acknowledgement rule is left exactly where it stands (§9); §6's second
-  clause — that this poll is the gateway's own — is what §2 depends on rather than
-  what it changes, and its closed enumeration of five browser-reached operations
-  gains nothing, because this ADR adds no browser-reached operation at all.
+- **ADR-0175 §4, §5 and §6 are untouched, and the one a reader will doubt is §4's
+  cadence.** Its fan-out clause is satisfied by the gateway relaying one value
+  unchanged and is argued in §5 rather than asserted; its retention clause binds
+  unchanged (§8); §5's acknowledgement rule is left exactly where it stands (§9);
+  §6's second clause — that this poll is the gateway's own — is what §2 depends on
+  rather than what it changes, and its closed enumeration of five browser-reached
+  operations gains nothing, because this ADR adds no browser-reached operation.
+  **The cadence clause is the one to check**, because a poll that renders answers
+  later than `gateway_notification_budget`. It is untouched on ADR-0135 §3's own
+  account of what a budget bounds: "a poll's occupancy was never exactly its
+  budget", since argument validation, the acknowledgement and the result frame's
+  write all sit outside the waiting, so a reader holding only ADR-0175 was never
+  building a gateway whose interval was exactly that figure. §4's own prose asks
+  for "a bounded cadence" and the cadence stays bounded — by the budget plus the
+  synthesis decorator's deadline. What grows is a term, not the kind of the
+  guarantee, and §10 defers the measurement that would make the term worth
+  bounding further.
+- **ADR-0135 §3 is adopted rather than superseded, and §7 was rewritten to adopt
+  it.** Its clause that a poll's budget bounds "how long the hub may wait for an
+  entry to become available, and bounds nothing else about the request" is read as
+  written and applied to the rendering, which is the request's own work in exactly
+  the sense §3 gives the acknowledgement and the selection. Its zero-budget
+  reading, its elapsed-budget selection rule and its refusal to let a budget
+  withhold "a delivery that selection produced" all bind unchanged, and a reader
+  holding only ADR-0135 builds the same poll. **No record is owed on it**, and the
+  draft that would have owed one is recorded in §7 rather than quietly removed.
+- **ADR-0200 §3's threading rule is applied to nothing here**, which §7 states with
+  its reason. That rule is about a caller waiting on an answer it asked for; this
+  ADR's stages sit after a selection the outbox has already leased, and ADR-0135 §3
+  is the clause that separates the two. Reading §3's rule across would have been a
+  supersession of ADR-0135 by resemblance.
 - **ADR-0177 §1 is untouched, and §2 argues it rather than asserting it.** §1's
   thirty-one-operation enumeration gains nothing: `next_notification` is expressly
   "not one of the thirty" and this ADR adds no operation. §1's deadline carve-out
@@ -1021,8 +1112,10 @@ dispatcher. What is decided here is what each must contain if it exists.
 | §6 (no collapse) | A withholding is never a degradation | A test that a `WITHHELD` delivery is not retried into speech on the next poll |
 | §6 (translation) | `SpeechError` degrades; every other exception propagates | Two tests, one each direction, over a synthesizer made to fail |
 | §6 (ceiling) | The whole projected delivery measured; the rendering dropped | A near-ceiling test: a candidate lawful for `offer` plus a rendering degrades rather than raising |
-| §7 | The budget threaded; the answer inside `budget` | A test that a poll answers within `budget` where synthesis would outlast it, with `DEGRADED`; a test that a zero budget answers at once |
-| §7 (ordering) | A malformed `plays` refused before any outbox effect | A test that such a poll retires nothing, leases nothing and mints nothing |
+| §7 | The rendering performed whatever the state of the budget | A test whose entry is selected with the budget already elapsed, asserting the rendering is produced and `RENDERED` returned; a test that a zero budget selects at once and still renders |
+| §7 (no budget degradation) | No implementation degrades on an elapsed budget | A test asserting `DEGRADED` is never returned for a placed candidate whose synthesizer succeeded, at any budget |
+| §7 (ordering) | A malformed `plays` refused before any outbox effect | A test that such a poll retires nothing, leases nothing and mints nothing, and that no rendering is attempted |
+| §6 (cancellation) | A cancellation propagates from a blocked synthesis and never degrades | A test cancelling the poll while `synthesize` is blocked, asserting `CancelledError` propagates after cancellation-safe cleanup, that no delivery is returned, that none is acknowledged, and that the leased entry returns to the outbox on lease expiry |
 | §8 (projection) | `streams.notification` gains `spoken` and nothing else | A test enumerating the value's keys for a rendered and for a withheld delivery; a test that `delivery_id`, `spoken_rendering`, confidence, sensitivity and references appear in neither |
 | §8 (shape) | `spoken` is `null` or an object of exactly `content` and `media_type` | A test per shape, asserting the member is present in both |
 | §8 | The page plays only with a running context and nothing in the air | A test that a delivery arriving during a playback is rendered and not queued; a test that a page with no context renders and does not play |
@@ -1044,8 +1137,10 @@ producer to land inherits a stated default rather than a habit.
 **Harder, and stated plainly.** Every notification producer that lands from now on
 is silent by default and stays silent until an ADR places it, which is a tax
 ADR-0199 §3 already imposed and this ADR makes concrete rather than theoretical.
-A rendering that arrives near the edge of a poll window is not spoken (§7), which
-is a real and measurable shortfall with a named remedy rather than a mystery. And
+A poll that renders answers later than its budget (§7), so the keep-alive interval
+ADR-0175 §4 paces grows by up to the synthesis bound — bounded, set by the
+deployment, and larger than the slack ADR-0135 §3 already ratified rather than new
+in kind. And
 a page that has had no user gesture will not speak at all (§8) — the honest shape
 of "proactive speech" on a browser is that the owner has to have spoken to it
 first, and no clause here can change a browser's autoplay rule.
