@@ -406,12 +406,26 @@ supersession, which retires the record" is a statement about ADR-0204 §5, which
 and about the mirror of the residue ADR-0204 §6's third clause already declines. Nothing
 here reaches it.
 
-### 8. Scope: conduct in `orchestration`, and no contract surface
+### 8. Scope: no `core` edit and no Protocol, and the one meaning this does narrow
 
-> **Normative.** This ADR decides conduct inside `orchestration` and adds no Protocol,
-> no member to one, no `core` type and no member to one. `Provenance` is unchanged,
-> `MemoryRecord` is unchanged, `CurrentContext` is unchanged, and no existing member
-> changes its type, its default or its meaning.
+> **Normative.** This ADR's implementation edits no file under `src/ai_assistant/core/`.
+> It adds no Protocol and no member to one, adds no `core` type and no member to one, and
+> moves no member's type, default or wire shape: `Provenance`, `MemoryRecord` and
+> `CurrentContext` all keep the shape they have, and the change §10 describes is confined
+> to `orchestration`.
+
+> **Normative.** It does, on **one class of record**, narrow what
+> `Provenance.supplied_withheld_content` *means*. ADR-0204 §1 defines the field as
+> recording "whether content ADR-0199 §3 withholds from a channel of unbounded audience
+> stood anywhere in this record's warrant", and §1 above narrows what stands in the
+> warrant of an episode captured from an operation whose output channel's audience is
+> unbounded. That is the partial supersession of ADR-0204 §2's second clause this ADR's
+> header states; it is why this decision is a **contract-surface change** owing both the
+> adversarial and the architecture lens (ADR-0015 §1) although it edits no `core` file;
+> and it is why the implementation is a lane of its own, merged after this ADR (ADR-0015
+> §5, golden rule 5). A reader of the field on any **other** record — an episode of a
+> bounded-channel turn, a belief, a record written before this decision — reads exactly
+> what ADR-0204 §1 says.
 
 > **Normative.** `PROTOCOL_VERSION` does not move for this change. Nothing on the wire
 > changes shape, and no client, spoke or gateway learns anything new.
@@ -439,10 +453,14 @@ subsystem, over the `SupplyFilter` alias `orchestration/loop.py` owns.
 > relevance-retrieved group holds a record ADR-0199 §3 withholds, the composing stage is
 > told a withholding occurred and the captured episode is stamped, exactly as today.
 
-> **Normative.** The lane pins **the inherited term over the retrieved groups**: a
-> stamped record in the relevance-retrieved group, or in ADR-0158's episodic supplement,
-> fires the evaluation. Without this arm §1's narrowing cannot be distinguished from
-> dropping ADR-0204 §2's second term.
+> **Normative.** The lane pins **the inherited term over the retrieved groups**, on a
+> fixture ADR-0199 §3 would otherwise place as **speakable** — `about_person` unset and
+> a placed `Provenance.source` — carrying `supplied_withheld_content = True`. Such a
+> record in the relevance-retrieved group, or in ADR-0158's episodic supplement, fires
+> the evaluation, and the same fixture is asserted to be withheld by the stamp alone. A
+> fixture ADR-0199 §3 withholds on its own account fires the **first** term and proves
+> nothing about the second, so a test written over one cannot distinguish §1's narrowing
+> from an implementation that dropped ADR-0204 §2's second term.
 
 > **Normative.** The lane pins **the bounded channel unchanged**: the same conversation
 > tail, the same stamped episode, on `converse`, evaluates `True` and stamps its
