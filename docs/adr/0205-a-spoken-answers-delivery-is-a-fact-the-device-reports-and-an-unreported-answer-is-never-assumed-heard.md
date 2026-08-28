@@ -203,8 +203,9 @@ async def converse_spoken(
 > **Normative.** A turn's delivery is stamped **once**, and §3 makes that a single
 > indivisible transition out of `UNKNOWN` rather than a promise an implementation
 > keeps by care. A second report naming a turn whose recorded delivery is no longer
-> `UNKNOWN` — or was never `UNKNOWN`, a turn no rendering was produced for —
-> performs nothing: the row is left exactly as it stands and no error is raised. Because a report names its turn, a
+> `UNKNOWN` — or a turn carrying no recorded delivery at all, which on the surface
+> as it stands is a turn that did not run on `converse_spoken` (§3) — performs
+> nothing: the row is left exactly as it stands and no error is raised. Because a report names its turn, a
 > resend of one is idempotent in the strong sense — it reaches the same row and
 > either finds it unstamped and stamps it, or finds it stamped and does nothing —
 > and it can never be applied to a turn captured since.
@@ -377,11 +378,21 @@ why one is refused rather than deferred.
 
 > **Normative.** The third condition is what keeps §4's reservation true against a
 > report rather than only against capture. A row whose `delivery` is **absent** is a
-> turn no spoken rendering was produced for (§3), and a report naming one is
-> answered by doing nothing: `record_delivery` is not a way to give a text turn a
-> delivery, and no lane reads it as one. A row already carrying `COMPLETE` or
-> `INTERRUPTED` is likewise left exactly as it stands, which is §1's stamped-once
-> rule.
+> turn no delivery fact was recorded for — a turn that did not run on
+> `converse_spoken` (§3) — and a report naming one is answered by doing nothing:
+> `record_delivery` is not a way to give such a turn a delivery, and no lane reads
+> it as one. A row already carrying `COMPLETE` or `INTERRUPTED` is likewise left
+> exactly as it stands, which is §1's stamped-once rule.
+
+> **Normative.** **`UNKNOWN` is the whole of what is stampable, and a turn whose
+> rendering never existed is stampable like any other.** §4 writes `UNKNOWN` on
+> every turn of this operation, the park and the degraded synthesis included, so
+> such a row is eligible and a report naming it is applied. In practice none names
+> it — a page that played nothing holds no measurement to report — but the rule is
+> stated rather than left to that practice, because "eligible" must be decidable
+> from the row and nothing on the row says whether a rendering existed. Where such a
+> report does arrive it is the device's claim like any other (§2), and it is not
+> checked against a rendering the hub did not keep (ADR-0200 §8).
 
 > **Normative.** Reading the three conditions and writing the row are **one
 > indivisible step**, decided by the store under the same per-conversation exclusion
