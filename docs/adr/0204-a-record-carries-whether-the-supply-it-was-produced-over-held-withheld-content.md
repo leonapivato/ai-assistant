@@ -106,7 +106,8 @@ about, which §2 forbids outright as a decision procedure. A rule that tried to
 answer it would fail silently on the first rationale that alluded to a belief
 without quoting it, which is the failure mode §2 exists to refuse.
 
-The decidable form is one stage upstream: **what was the producing turn supplied?**
+The decidable form is one stage upstream: **what was the producing turn supplied,
+and what was this record derived from?**
 Every record and every facet in a turn's supply carries a recorded origin, so the
 question is three field reads per record and an exact type match per facet —
 `disclosure._speakable` and `disclosure._is_unplaced_facet` as they already stand,
@@ -155,10 +156,11 @@ authorises nothing about egress, retention or deletion.
 
 ## Decision
 
-We will record on every memory record **whether the supply the turn that produced
-it ran over held content ADR-0199 §3 withholds from a channel of unbounded
-audience**, and we will withhold a record carrying that stamp from any supply site
-for such a channel.
+We will record on every memory record **whether content ADR-0199 §3 withholds from
+a channel of unbounded audience stood in that record's warrant** — because the
+supply the turn producing it ran over held such content, or because it was derived
+from a record whose own stamp is set — and we will withhold a record carrying that
+stamp from any supply site for such a channel.
 
 ### 1. One additive field on `Provenance`, recording what stood in a record's warrant
 
@@ -208,10 +210,10 @@ along.
 
 **Two states rather than three, and the absence is not a fourth state.** ADR-0109's
 `last_confirmed_at` takes `None` for "the store does not hold this", and the shape
-was considered here and rejected: the question "did this record's producing turn's
-supply hold withheld content?" has a true answer for every record ever written, and
-for the overwhelming majority — every record no turn produced — that answer is
-`False`. A `None` meaning "unrecorded" that a supply site had to withhold on would
+was considered here and rejected: §1's question — did such content stand in this
+record's warrant, by either route? — has a true answer for every record ever
+written, and for the overwhelming majority, every record no turn produced and
+nothing was derived from, that answer is `False`. A `None` meaning "unrecorded" that a supply site had to withhold on would
 withhold every belief in the store from the spoken channel until every producer in
 the system was taught to write `False`, which is ADR-0199 §3's speakable set
 emptied by a type default and milestone 19's exit test failing on the day the field
@@ -734,7 +736,8 @@ lens set §7 names.
 ## Consequences
 
 **#1708's chain is closed at the root and #1703's on the path it records.** A record
-whose producing turn was supplied withheld content does not reach a channel of
+in whose warrant such content stood — because its producing turn was supplied it,
+or because it was derived from a record that was — does not reach a channel of
 unbounded audience, whatever its text says and whichever channel its turn ran on. The
 outcome no longer depends on what a model happened to write into a rationale, which
 is ADR-0199 §5's first clause finally holding across the whole path rather than on
