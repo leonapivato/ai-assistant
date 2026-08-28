@@ -889,7 +889,12 @@ coverage.**
 > park — no confirmation content, no policy `reason`, no tool id, no routed subject,
 > no part of the transcript — reaches the synthesizer on any of them; and (g) a live
 > park carrying `spoken` `None` beside `spoken_degraded` `False` is refused at
-> construction, which is §6's third arm and the shape #1699 measured.
+> construction, which is §6's third arm and the shape #1699 measured. Row (g) is
+> pinned over **both** of §1's shapes, the step park and the routed one, as (a) and
+> (b) are: §6's third arm ranges over §1's definition and not over one member of
+> it, and an arm that refused the silent step park while admitting the silent
+> routed one would pass a singular test while letting #1699's silence cross the
+> wire on exactly the routed operations §1 was widened to reach.
 
 > **Normative.** Both park shapes are exercised in the **shared `AssistantEngine`
 > conformance suite** (`tests/orchestration/assistant_engine_contract.py`), so the
