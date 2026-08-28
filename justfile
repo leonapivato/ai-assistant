@@ -179,14 +179,15 @@ test-fast *args:
         echo "just test-fast: TEST_FAST_SLOTS must be at most 64, got '$slots'" >&2; exit 2
     fi
     # The slots live in a directory only this user can write: the runtime
-    # directory where there is one, else one this recipe makes 0700 under TMPDIR
-    # and checks is a real directory it owns with that mode -- never a public
-    # predictable path, where anyone could plant a symlink or a FIFO ahead of us.
+    # directory where there is one, else `/tmp/ai-assistant-<uid>` -- one fixed
+    # name per user, so no environment variable can give two clones two
+    # directories and two quotas -- which this recipe makes 0700 and checks is a
+    # real directory it owns with that mode, so a planted one is refused, not used.
     # Per user, not per machine, which is what a wave of clones is (ADR-0099 §1).
     if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         slot_dir="$XDG_RUNTIME_DIR"
     else
-        slot_dir="${TMPDIR:-/tmp}/ai-assistant-$(id -u)"
+        slot_dir="/tmp/ai-assistant-$(id -u)"
         mkdir -p -m 0700 "$slot_dir"
     fi
     if [ -L "$slot_dir" ] || [ ! -d "$slot_dir" ] || [ ! -O "$slot_dir" ] || \
@@ -197,9 +198,10 @@ test-fast *args:
     while :; do
         for ((i = 0; i < slots; i++)); do
             slot="$slot_dir/ai-assistant-test-fast.slot$i"
-            # A regular file or nothing: not a symlink, not a FIFO that would block
-            # the open, not anything else that could be waiting at that name.
-            if [ -e "$slot" ] && { [ -L "$slot" ] || [ ! -f "$slot" ]; }; then
+            # A regular file or nothing: not a symlink (dangling included -- `-L`
+            # is asked first, since `-e` is false for one), not a FIFO that would
+            # block the open, not anything else that could be waiting at that name.
+            if [ -L "$slot" ] || { [ -e "$slot" ] && [ ! -f "$slot" ]; }; then
                 echo "just test-fast: $slot is not a regular file; refusing to use it as a lock" >&2; exit 2
             fi
             exec {fd}>>"$slot"
