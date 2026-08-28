@@ -107,6 +107,22 @@ until it exits 0 with the artifact path and verdict. Exit 3 is `still running`
 the same round as the foreground form — same locks, same artifact, same
 acceptance — started detached rather than reimplemented (issue #1594).*
 
+*Two further operator notes, both bought by lanes that lost time to them. A
+`--start` that returns non-zero without confirming is **not** a statement that
+the round is dead — it cannot see that; it is saying only that no claim arrived
+in the grace, and a round renders the whole diff and computes the patch identity
+before it claims. Ask `--wait`, which can tell the two apart, and never relaunch
+(issues #1670, #1674). And when `--wait` answers exit 4 about a round that failed,
+read the log it prints: `codex exec --json` puts its failures on **stdout**, so
+until issue #1674 that log ended at "Running Codex …" with nothing after it and
+the reason was discarded unread.*
+
+*One more, for an ADR lane. Where `HEAD` is the one-line ratification flip, a
+round reviews and records `HEAD`'s **parent** — the content `ship` judges
+coverage over under ADR-0165 §3 — and says so on stderr as it starts. A round
+recorded against the flip's own tree could not satisfy `ship` at all, which is
+issue #1672.*
+
 ## When a change owes both lenses
 
 Two shapes require both reviewers rather than adversarial alone: a change to the
