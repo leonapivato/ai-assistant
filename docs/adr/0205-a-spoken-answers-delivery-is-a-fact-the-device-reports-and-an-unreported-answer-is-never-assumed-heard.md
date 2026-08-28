@@ -214,8 +214,8 @@ async def converse_spoken(
 
 **Why an argument on this call rather than a member of its own.** #1700 names both
 shapes and the choice turns on when the fact is worth having. The report is about
-the previous turn *of this conversation* and it is useful to exactly one consumer —
-the stage composing the next answer — so it arrives with the next press, in the
+a turn *of this conversation* and it is useful to exactly one consumer — the stage
+composing the answers that follow it — so it arrives with the next press, in the
 round trip that already exists, and reaches that stage without a second frame, a
 second admission, a second refusal path or a second gateway route. A
 `report_delivery` member would be a second frame per press for a fact whose only
@@ -429,15 +429,29 @@ the room to hear ought to be.
 
 ### 5. How the composing stage is told, and why nothing is retrieved a second time
 
-> **Normative.** Where the conversation's previous turn carries a `delivery`, the
-> composing stage of the turn being run is **told it as a supplied fact** — the
-> state, and where a report was received, the two durations. That is ADR-0199 §5's
-> third clause in the form it already uses for the withholding fact: the stage is
-> told a fact and composes over it.
+> **Normative.** Where a turn in the replay tail carries a `delivery`, the composing
+> stage of the turn being run is **told it as a supplied fact**, paired with the
+> episode it qualifies — the state, and where a report was received, the two
+> durations. That is ADR-0199 §5's third clause in the form it already uses for the
+> withholding fact: the stage is told a fact and composes over it.
 
-> **Normative.** The fact rides the tail that stage's inputs are already assembled
+> **Normative.** It is **every such turn of the tail and not only the previous
+> one**, because a report may name a turn that is no longer the previous one (§1)
+> and because the tail is what the stage is supplied. A turn whose episode is in
+> front of the stage carrying words the device did not play must arrive with the
+> fact that it did not, or the assumption this ADR exists to remove survives one
+> turn further back than it is looked for.
+
+> **Normative.** How each state is rendered into a prompt is the implementing lane's,
+> bounded by one rule: a turn whose state is not `COMPLETE` is **never** rendered as
+> heard in full, and a turn carrying no `delivery` is never rendered as heard at all.
+> A `COMPLETE` turn may be rendered as nothing, because a device saying it played the
+> answer out is exactly the state the stage would otherwise assume.
+
+> **Normative.** The facts ride the tail that stage's inputs are already assembled
 > from. `ConversationLifecycle.history` walks `ConversationStore.turns` and holds
-> those rows already, so the composing supply reads it off what was fetched. The
+> **every** one of those rows already, so the composing supply reads them off what
+> was fetched and the count of them costs nothing. The
 > stage gains **no `ContextProvider`, no `MemoryStore`, no second context assembly
 > and no second retrieval**, and its context and memories still reach it from the
 > turn and from nowhere else — ADR-0199 §5's second clause, ADR-0170 §2 and ADR-0203
@@ -448,9 +462,9 @@ the room to hear ought to be.
 > (`Engine._capture`), and no delivery sentence enters what a later turn replays.
 
 > **Normative.** No stage, adapter, surface or later ADR asserts that an unreported
-> answer was heard. Where the previous turn's state is `UNKNOWN` the stage is told
-> that it is unknown, and composes accordingly; it is never told, and never
-> defaults to, delivered.
+> answer was heard. Where a tail turn's state is `UNKNOWN` the stage is told that it
+> is unknown, and composes accordingly; it is never told, and never defaults to,
+> delivered.
 
 > **Normative.** How the stage renders the fact into a prompt — the wording, and
 > whether the durations are rounded — is the implementing lane's, bounded by §2's
@@ -467,14 +481,22 @@ three turns later when it means nothing, and it would make an episode's canonica
 rendering depend on how the answer happened to be carried — which is the property
 ADR-0074 §3 gives it precisely so that it does not.
 
-**The composing stage is `converse_spoken`'s, and this input does not leak to
-others.** A turn on `converse` whose conversation's previous turn carries a
-`delivery` is a real case — the owner speaks, is interrupted, and then types. That
-turn's stage is told the same fact, for the same reason: the previous answer was not
-heard, and a text turn that builds on it is wrong in exactly the way a spoken one
-would be. The fact is about the previous turn's delivery, not about this turn's
-channel, so it is supplied wherever it is known, and §3's absence clause keeps it
-from being invented where it is not.
+**The composing stage is not only `converse_spoken`'s, and that is deliberate.** A
+turn on `converse` whose tail carries a `delivery` is a real case — the owner speaks,
+is interrupted, and then types. That stage is told the same facts, for the same
+reason: an answer that was not heard is one no turn should build on, whatever channel
+the next turn arrives by. The facts are about the tail's deliveries, not about this
+turn's channel, so they are supplied wherever they are known, and §3's absence clause
+keeps them from being invented where they are not.
+
+**Why the tail rather than the last row, stated because the first draft said the
+last row.** Adversarial review, round 2, `blocker`, walked the case the subject of §1
+makes reachable: turn 1 is interrupted, turn 2 is captured before turn 1's report
+arrives, turn 3 carries it. §1 stamps turn 1, correctly — and a supply that read only
+the previous row would hand turn 3 the tail with turn 1's full reply in it and turn
+2's delivery beside it, saying nothing about the one turn in that prompt the owner
+did not hear. The fact and the episode it qualifies were both already fetched; not
+pairing them was the whole of the defect.
 
 ### 6. "Continue what you were saying" is an ordinary utterance
 
@@ -519,8 +541,9 @@ every ratified clause true.
 > **Normative.** The gateway **derives, defaults, composes and invents no part** of
 > the report. Where the body carries no `delivery`, no `delivery` reaches
 > `converse_spoken`. Where it carries one the gateway cannot parse into a
-> `SpokenDelivery`, the request is refused with a project-owned refusal carrying no
-> input value and no chained cause, on ADR-0200 §9's stated ground for a refused
+> `SpokenDeliveryReport` — its `episode_id` and its nested `SpokenDelivery`
+> together — the request is refused with a project-owned refusal carrying no input
+> value and no chained cause, on ADR-0200 §9's stated ground for a refused
 > recording. This is ADR-0177 §1's fourth clause satisfied, not widened: the report
 > is the browser's own, and the one class the gateway supplies of its own remains
 > the caller-owned deadline.
@@ -591,7 +614,8 @@ deciding.
 > holds. It adds no browser capability and no route.
 
 > **Normative.** No file under `wire/` changes to carry the report beyond
-> `PROTOCOL_VERSION` itself. `SpokenDelivery` is the shape the codec already carries
+> `PROTOCOL_VERSION` itself. `SpokenDeliveryReport` and the `SpokenDelivery` it
+> nests are the shape the codec already carries
 > — a frozen model of scalars, with `timedelta` on ADR-0087 §2e's duration form and
 > a `StrEnum` as `SpokenAudioFormat` already is — so `wire/codec.py`'s `project`
 > gains no branch, ADR-0087 §2c's scalar table gains no row, and `wire/surface.py`
@@ -611,8 +635,10 @@ report naming an already-stamped turn performs nothing; a report beside
 `conversation_id` `None` is refused before any seam is called; an `UNKNOWN` report
 is refused; a degraded synthesis leaves `UNKNOWN`; `SpokenTurn.episode_id` is `None`
 exactly on the two shapes §1 names and is otherwise the id `record_delivery` accepts
-back; the composing stage is told an `UNKNOWN` previous turn is unknown; the supply
-path makes no second store call; and the captured episode's content is
+back; the composing stage is told an `UNKNOWN` turn of the tail is unknown; **a
+report about turn 1 that arrives on turn 3 reaches turn 3's composing input paired
+with turn 1's episode**, and not merely the store; the supply path makes no second
+store call; and the captured episode's content is
 byte-identical to what the same transcript produces with no report.
 
 ### 10. This ADR classified under ADR-0070 §1 and ADR-0082 §1
