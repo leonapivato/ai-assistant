@@ -13,6 +13,16 @@ while both looking correct, and several are guarantees some other section states
 duplicates for the whole time §8 says it does, a unit of budget being spent once.
 None of those is expressible as a type, so this is where they live.
 
+**ADR-0215 §7 adds to that list and takes two clauses out of it.** The duplicate
+rule now reads the *suppressing* population rather than the actionable one, so
+the obligation "a candidate re-offered after its predecessor was dismissed is not
+a duplicate" is gone in its dismissed half — its *expired* half survives
+untouched — and the purge obligation is re-asserted for every record that speaks
+for nothing rather than for every record that ceased. What §7 asks of a store and
+what it asks of the record itself are deliberately different: a backend could
+satisfy every case here and still break §4, so the type's own predicates are
+pinned beside this suite in ``test_notification_types.py``.
+
 **They sit under ``tests/core/`` because these Protocols have no owning subsystem
 package**, exactly as ``reader_contract.py`` and ``secret_contract.py`` do
 (ADR-0093 §2, ADR-0125 §8). ``tests/conftest.py`` pins this directory onto
@@ -841,14 +851,88 @@ class NotificationStoreContract(ABC):
         assert second.notification_id is None
         assert [record.id for record in await store.held()] == [first.notification_id]
 
-    async def test_a_key_re_offered_after_a_dismissal_is_not_a_duplicate(
+    async def test_a_key_re_offered_after_a_dismissal_is_a_duplicate_until_its_fact_perishes(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §§1-2: the duplicate rule reads the **suppressing** population.
+
+        **This is #1372.** A delivery acknowledgement dismisses the record
+        (ADR-0131 §3b), a cursorless producer re-notices the same fact on the next
+        tick (ADR-0132 §5, §10), and under ADR-0130 §8's actionable-set test the
+        key was free the instant the notification succeeded — one event, three
+        interruptions, and a day's budget spent. A dismissal is a statement about
+        the *record*; the fact's own lifetime is the candidate's declared expiry,
+        and the record goes on speaking for its key until then.
+
+        The ``DROP`` writing **no** record is half of it, exactly as for an
+        actionable predecessor: a store that wrote one would fill its own cap with
+        the repetition it exists to absorb.
+        """
+        clock = MutableClock()
+        store = factory(now=clock)
+        expiry = NOW + timedelta(hours=1)
+        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        assert first.notification_id is not None
+        assert await store.dismiss(first.notification_id) is True
+
+        clock.advance(timedelta(minutes=30))
+        second = await store.admit(
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+        )
+
+        assert second.kind is NotificationDispositionKind.DROP
+        assert second.reason is NotificationCondition.DUPLICATE
+        assert second.notification_id is None
+        assert [record.id for record in await store.held()] == [first.notification_id]
+
+    async def test_at_its_expiry_a_dismissed_record_stops_speaking_for_its_key(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §1: the horizon is the declared expiry, observed both ways.
+
+        The *same* candidate re-offered there is dropped as **expired** and not as
+        a duplicate — ADR-0130 §5 evaluates expiry first, and its order is
+        normative — while a candidate carrying the same key with a live expiry is
+        admitted afresh. Asserting only the first would leave a store that
+        suppresses forever looking correct, both answers being a ``DROP``.
+        """
+        clock = MutableClock()
+        store = factory(now=clock)
+        expiry = NOW + timedelta(hours=1)
+        perishing = candidate(key="k1", expires_at=expiry)
+        first = await store.admit(perishing, policy=policy)
+        assert first.notification_id is not None
+        assert await store.dismiss(first.notification_id) is True
+
+        clock.at = expiry
+        stale = await store.admit(perishing, policy=policy)
+
+        assert stale.kind is NotificationDispositionKind.DROP
+        assert stale.reason is NotificationCondition.EXPIRED
+
+        afresh = await store.admit(
+            candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            policy=policy,
+        )
+
+        assert afresh.kind is not NotificationDispositionKind.DROP
+        assert afresh.notification_id != first.notification_id
+
+    async def test_a_key_re_offered_after_a_no_expiry_record_was_dismissed_is_not_a_duplicate(
         self, store: NotificationStore, policy: NotificationPolicy
     ) -> None:
-        """§7: the duplicate rule reads the **actionable** population.
+        """ADR-0215 §1's third clause: a candidate declaring no expiry is left where it was.
 
-        The user disposed of the old notification, so the fact recurring is news
-        again. A store deduplicating against every retained record would silence
-        a producer for the whole retention horizon after one dismissal.
+        Such a record's speech ends exactly where its actionability ends, because
+        the horizon is the producer's own declared expiry and **no implementation
+        may supply a default one** — a global window would be ADR-0130 §11's
+        refused priority score in another costume, right for a calendar occurrence
+        and uncalibratable for whatever ships next.
+
+        The decision therefore buys nothing here, and says so rather than implying
+        coverage it does not give: such a candidate can never interrupt at all,
+        ADR-0130 §5 making a declared expiry the first condition of ``INTERRUPT``,
+        so it cannot produce #1372's failure either.
         """
         first = await store.admit(candidate(key="k1"), policy=policy)
         assert first.notification_id is not None
@@ -858,6 +942,124 @@ class NotificationStoreContract(ABC):
 
         assert second.kind is not NotificationDispositionKind.DROP
         assert second.notification_id != first.notification_id
+
+    async def test_a_record_dropped_by_a_reconsideration_speaks_for_nothing(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §1: a ``DROP`` ends speech, and the case that makes it matter.
+
+        A ``DROP`` on a reconsideration comes from an expiry or from a class
+        lowered to ``off`` (ADR-0130 §5). While the class is ``off`` the reach
+        condition is evaluated **before** the duplicate one, so suppression there
+        would buy nothing — every offer of the key is dropped naming the reach and
+        writes nothing either way. What it would cost is this: the owner changes
+        their mind faster than the fact perishes, turns the class back up inside
+        the candidate's lifetime, and must be reachable about it.
+        """
+        clock = MutableClock()
+        store = factory(now=clock)
+        expiry = NOW + timedelta(days=1)
+        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        assert first.notification_id is not None
+        await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
+        dropped = await store.reconsider(first.notification_id, policy=policy)
+        assert dropped is not None
+        assert dropped.kind is NotificationDispositionKind.DROP
+        assert dropped.reason is NotificationCondition.REACH_OFF
+
+        clock.advance(timedelta(minutes=5))
+        await store.set_preferences(reaching(CLASS, NotificationReach.INTERRUPT))
+        again = await store.admit(
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+        )
+
+        assert again.kind is not NotificationDispositionKind.DROP
+        assert again.notification_id != first.notification_id
+
+    async def test_a_record_that_has_stopped_speaking_never_speaks_again(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §1's monotonicity, at the one boundary a store can move across.
+
+        A dismissal offered to a record whose candidate has already expired changes
+        nothing — the store reports ``False``, the cessation instant a retention
+        horizon runs from not being movable by a second call — and it cannot revive
+        the key either. A store that stamped the dismissal anyway and then read the
+        second disjunct off it would suppress a key its own expiry had already
+        freed, which is speech running backwards.
+        """
+        clock = MutableClock()
+        store = factory(now=clock, retention=None)
+        expiry = NOW + timedelta(hours=1)
+        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        assert first.notification_id is not None
+
+        clock.at = expiry
+        assert await store.dismiss(first.notification_id) is False
+
+        afresh = await store.admit(
+            candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            policy=policy,
+        )
+        assert afresh.kind is not NotificationDispositionKind.DROP
+        assert afresh.notification_id is not None
+        assert await store.delete(afresh.notification_id) is True
+
+        clock.advance(timedelta(days=3650))
+        later = await store.admit(
+            candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            policy=policy,
+        )
+
+        assert later.kind is not NotificationDispositionKind.DROP
+
+    async def test_a_key_alternates_between_free_and_suppressed_with_nothing_purged(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §§1-2 over a retained tail, under ADR-0130 §7's ``retention = None``.
+
+        Nothing is ever purged here, so every predecessor is still in the store on
+        every offer — which is what makes this the case a store gets wrong by
+        reading its retained rows as one set rather than by asking each of them
+        whether it speaks. The key is admitted, freed by its first record's expiry,
+        admitted again, suppressed while that second record stands dismissed inside
+        its own expiry, and admitted once more past it.
+
+        It is also where the lookup's *shape* shows: ADR-0215 §2 reads **every**
+        record retained under the key rather than the most recently admitted one,
+        because a store that ran under ADR-0130 §8 can hold two speaking for one
+        key at once and carries no marker telling the two vintages apart.
+        """
+        clock = MutableClock()
+        store = factory(now=clock, retention=None)
+        first_expiry = NOW + timedelta(hours=1)
+        first = await store.admit(candidate(key="k1", expires_at=first_expiry), policy=policy)
+        assert first.notification_id is not None
+
+        clock.at = first_expiry
+        second_expiry = clock.at + timedelta(hours=1)
+        second = await store.admit(
+            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at), policy=policy
+        )
+        assert second.kind is not NotificationDispositionKind.DROP
+        assert second.notification_id is not None
+        assert await store.dismiss(second.notification_id) is True
+
+        clock.advance(timedelta(minutes=30))
+        suppressed = await store.admit(
+            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at), policy=policy
+        )
+        assert suppressed.kind is NotificationDispositionKind.DROP
+        assert suppressed.reason is NotificationCondition.DUPLICATE
+
+        clock.at = second_expiry
+        third = await store.admit(
+            candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            policy=policy,
+        )
+
+        assert third.kind is not NotificationDispositionKind.DROP
+        assert len(await store.held()) == 3
 
     async def test_a_key_re_offered_after_its_record_expired_is_not_a_duplicate(
         self, factory: StoreFactory, policy: NotificationPolicy
@@ -906,23 +1108,36 @@ class NotificationStoreContract(ABC):
         assert refused.reason is NotificationCondition.AT_CAP
         assert [record.id for record in await store.held()] == [admitted.notification_id]
 
-    async def test_a_dismissal_frees_capacity_under_the_cap_at_once(
+    async def test_a_dismissal_frees_capacity_under_the_cap_while_its_key_still_speaks(
         self, factory: StoreFactory, policy: NotificationPolicy
     ) -> None:
-        """§7: the cap counts actionable records, so dismissing frees a slot.
+        """§7 and ADR-0215 §3: the cap counts **actionable** records, and no others.
 
         Counting every retained record instead would make a hundred dismissed
         notifications under a retention of ``None`` close the store permanently —
         the failure the actionable-set choice exists to prevent.
+
+        **The two populations are asserted together here, because it is one store
+        answering two questions and the answers differ.** Capacity is about the
+        list a person reads and suppression is about repeat contact over one fact;
+        ADR-0215 §3 keeps the cap exactly where ADR-0130 §7 put it and forbids
+        reading its widening into any clause. So the dismissed record's slot is
+        free for another key at the same instant its own key is still shut.
         """
         store = factory(now=MutableClock(), cap=1)
-        first = await store.admit(candidate(key="k1"), policy=policy)
+        expiry = NOW + timedelta(hours=1)
+        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
         assert first.notification_id is not None
         assert await store.dismiss(first.notification_id) is True
 
-        admitted = await store.admit(candidate(key="k2"), policy=policy)
+        admitted = await store.admit(candidate(key="k2", expires_at=expiry), policy=policy)
 
         assert admitted.kind is not NotificationDispositionKind.DROP
+
+        still_shut = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+
+        assert still_shut.kind is NotificationDispositionKind.DROP
+        assert still_shut.reason is NotificationCondition.DUPLICATE
 
     # --- §5: reconsideration ---------------------------------------------
 
@@ -1264,7 +1479,7 @@ class NotificationStoreContract(ABC):
             )
         )
         spent = await store.admit(
-            candidate(key="k1", expires_at=NOW + timedelta(days=1)), policy=policy
+            candidate(key="k1", expires_at=NOW + timedelta(minutes=1)), policy=policy
         )
         assert spent.kind is NotificationDispositionKind.INTERRUPT
         assert spent.notification_id is not None
@@ -1275,7 +1490,10 @@ class NotificationStoreContract(ABC):
             assert await store.clear() == 1
         else:
             assert await store.dismiss(spent.notification_id) is True
-            clock.advance(timedelta(minutes=2))  # past the record's own retention
+            # Past the record's own retention **and** past its candidate's
+            # expiry, since a record still speaking for its key is not purged
+            # whatever its retention says (ADR-0215 §4).
+            clock.advance(timedelta(minutes=2))
             assert await store.purge() == 1
         assert await store.held() == []
 
@@ -1329,6 +1547,107 @@ class NotificationStoreContract(ABC):
         assert await store.purge() == 0, "a record is retained at its horizon, not past it"
 
         clock.at = ceased_at + retention + timedelta(microseconds=1)
+        assert await store.purge() == 1
+        assert await store.held() == []
+
+    async def test_a_dismissed_records_purge_waits_for_the_later_of_its_two_horizons(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §4: no record is purged while it still speaks for its key.
+
+        This is ADR-0130 §7's own argument applied to the clause that moved.
+        Without it, a deployment with a short retention reproduces #1372 on a
+        slower schedule: the record is purged, its key suppresses nothing, and the
+        cursorless producer's next re-notice interrupts a second time about a fact
+        that has not yet perished.
+
+        **Neither boundary direction moves.** Retention is still tested strictly —
+        at the horizon the record is held, past it it is not — and §1's expiry
+        horizon is still half-open, so a record whose expiry falls **later** than
+        its retention horizon is purged *at* that expiry, speech ending there while
+        retention elapsed strictly earlier.
+        """
+        retention = timedelta(hours=1)
+        clock = MutableClock()
+        store = factory(now=clock, retention=retention)
+        expiry = NOW + timedelta(hours=3)
+        ruling = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        assert ruling.notification_id is not None
+        assert await store.dismiss(ruling.notification_id) is True
+
+        clock.at = NOW + retention + timedelta(microseconds=1)
+        assert await store.purge() == 0, "retention elapsed, but the key still speaks"
+        clock.at = expiry - timedelta(microseconds=1)
+        assert await store.purge() == 0
+
+        clock.at = expiry
+
+        assert await store.purge() == 1
+        assert await store.held() == []
+
+    async def test_a_dismissed_record_whose_fact_perishes_first_is_purged_where_it_always_was(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §4's other half: it lengthens nothing that was already there.
+
+        Where the candidate's expiry falls at or before the retention horizon the
+        clause adds nothing at all, and the record is purged exactly where ADR-0130
+        §7 put it — strictly after ``ceased + retention``, never at it. A record
+        dismissed at ``D`` whose candidate expired at ``D + 1 hour`` under a
+        retention of seven days was purgeable strictly after ``D + 7 days`` before
+        this decision and still is.
+        """
+        retention = timedelta(days=7)
+        clock = MutableClock()
+        store = factory(now=clock, retention=retention)
+        ruling = await store.admit(
+            candidate(key="k1", expires_at=NOW + timedelta(hours=1)), policy=policy
+        )
+        assert ruling.notification_id is not None
+        assert await store.dismiss(ruling.notification_id) is True
+        horizon = NOW + retention
+
+        clock.at = horizon
+        assert await store.purge() == 0, "a record is retained at its horizon, not past it"
+
+        clock.at = horizon + timedelta(microseconds=1)
+
+        assert await store.purge() == 1
+        assert await store.held() == []
+
+    async def test_a_dropped_record_is_purged_at_its_retention_horizon_whatever_its_expiry(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §1's precedence, seen through §4's guard: a ``DROP`` ends speech.
+
+        A record a reconsideration dropped speaks for nothing from the instant it
+        ceased, however far in the future its candidate's expiry lies, so §4's
+        clause reaches it not at all and it is purged strictly after its retention
+        horizon — exactly where ADR-0130 §7 has it.
+
+        The store-reachable half of §7's obligation. A record carrying a dismissal
+        **beside** the drop cannot be built through this Protocol — ``dismiss``
+        refuses a record that is not actionable and a reconsideration never reaches
+        a dismissed one — so the pair itself is pinned directly on the type, in
+        ``tests/core/test_notification_types.py``.
+        """
+        retention = timedelta(hours=1)
+        clock = MutableClock()
+        store = factory(now=clock, retention=retention)
+        ruling = await store.admit(
+            candidate(key="k1", expires_at=NOW + timedelta(days=3650)), policy=policy
+        )
+        assert ruling.notification_id is not None
+        await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
+        dropped = await store.reconsider(ruling.notification_id, policy=policy)
+        assert dropped is not None
+        assert dropped.kind is NotificationDispositionKind.DROP
+
+        clock.at = NOW + retention
+        assert await store.purge() == 0
+
+        clock.at = NOW + retention + timedelta(microseconds=1)
+
         assert await store.purge() == 1
         assert await store.held() == []
 

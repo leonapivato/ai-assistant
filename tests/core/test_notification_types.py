@@ -3,8 +3,16 @@
 The three conformance suites in ``notification_contract.py`` hold
 *implementations* to §3 and §5 through §9. These are the rules that hold however
 a record is built — the ones a store never gets a chance to break, because the
-model refuses first — plus the two predicates §7's whole retention argument rests
-on. A validator with no case against it is a validator a refactor deletes.
+model refuses first — plus the predicates §7's whole retention argument rests on
+and the one ADR-0215 §1 adds beside them. A validator with no case against it is a
+validator a refactor deletes.
+
+**ADR-0215 §7 requires some of these directly rather than through the suite.** A
+backend that left the old actionability guard on ``is_purgeable_at`` and composed
+``speaks_for_its_key_at`` into its own purge path would pass every store-level
+case and still break §4; and a record carrying a dismissal beside a
+reconsideration ``DROP`` cannot be built through ``NotificationStore`` at all, so
+§1's precedence between the two stamps is assertable only here.
 """
 
 from __future__ import annotations
@@ -299,7 +307,7 @@ def test_cessation_is_the_earliest_of_the_three_ways_it_ends() -> None:
 
 
 def test_a_record_with_no_ending_is_actionable_and_never_purgeable() -> None:
-    """§7: no record is purged while it is still actionable, whatever its retention.
+    """§7: no record is purged while it still speaks for its key, whatever its retention.
 
     Measured from admission instead, such a record is purged while its key is
     still the thing suppressing a cursorless producer's repetition — and the same
@@ -309,7 +317,136 @@ def test_a_record_with_no_ending_is_actionable_and_never_purgeable() -> None:
 
     assert forever.ceased_at() is None
     assert forever.is_actionable_at(_AT + timedelta(days=3650)) is True
+    assert forever.speaks_for_its_key_at(_AT + timedelta(days=3650)) is True
     assert forever.is_purgeable_at(_AT + timedelta(days=3650)) is False
+
+
+def test_a_dismissed_record_speaks_for_its_key_until_its_candidate_expires() -> None:
+    """ADR-0215 §1, at both of its boundaries.
+
+    A dismissal ends actionability at the instant it is stamped and leaves speech
+    running to the candidate's declared expiry — half-open there, as every other
+    boundary in ADR-0130 is: at the expiry the fact has perished and the key is
+    free. That gap between the two predicates is the whole decision, and #1372 is
+    what closing it to zero cost: one event, three interruptions, and a day's
+    budget spent on a fact nobody had stopped caring about.
+    """
+    expiry = _AT + timedelta(hours=1)
+    dismissed = _record(candidate=_candidate(expires_at=expiry), dismissed_at=_AT)
+
+    assert dismissed.is_actionable_at(_AT) is False
+    assert dismissed.speaks_for_its_key_at(_AT) is True
+    assert dismissed.speaks_for_its_key_at(expiry - timedelta(microseconds=1)) is True
+    assert dismissed.speaks_for_its_key_at(expiry) is False
+    assert dismissed.speaks_for_its_key_at(expiry + timedelta(days=3650)) is False
+
+
+def test_a_record_whose_candidate_declares_no_expiry_stops_speaking_where_it_ceases() -> None:
+    """ADR-0215 §1's third clause: no implementation supplies a default horizon.
+
+    The horizon is the producer's own declared expiry and nothing else, so a
+    candidate that declares none leaves its record exactly where ADR-0130 put it.
+    A default here would be the configurable window §8 refuses — ADR-0130 §11's
+    priority score in another costume, uncalibratable on the first day.
+    """
+    dismissed = _record(dismissed_at=_AT)
+
+    assert dismissed.is_actionable_at(_AT - timedelta(seconds=1)) is True
+    assert dismissed.speaks_for_its_key_at(_AT - timedelta(seconds=1)) is True
+    assert dismissed.is_actionable_at(_AT) is False
+    assert dismissed.speaks_for_its_key_at(_AT) is False
+
+
+def test_an_expired_record_speaks_for_nothing_and_that_half_of_section_seven_survives() -> None:
+    """ADR-0215 §2: only the *dismissed* half of ADR-0130 §7's sentence is replaced.
+
+    "A fact that recurs after its notification **expired** is a new candidate and
+    not a duplicate" stays true — an expired record carries no dismissal, so
+    neither disjunct of §1 holds. That asymmetry is the decision in one line:
+    expiry is the fact perishing, and a dismissal is not.
+    """
+    expiry = _AT + timedelta(hours=1)
+    expired = _record(candidate=_candidate(expires_at=expiry))
+
+    assert expired.speaks_for_its_key_at(expiry - timedelta(microseconds=1)) is True
+    assert expired.speaks_for_its_key_at(expiry) is False
+
+
+def test_a_drop_beside_a_dismissal_ends_speech_at_the_records_cessation() -> None:
+    """ADR-0215 §1: where a record carries both stamps, the ``DROP`` decides.
+
+    **The pair is unreachable through a conforming store** — ``dismiss`` refuses a
+    record that is not actionable, and a reconsideration never reaches a dismissed
+    one — but this record's coherence validator does not forbid it: it ties
+    ``dropped_at`` to a ``DROP`` ruling and says nothing about a dismissal beside
+    it. So the precedence is stated on the type rather than resting on the pair
+    being unbuildable, and this is where it can be asserted at all.
+
+    It is deliberate as well as defensive. Suppression while a class sits at
+    ``off`` buys nothing, ADR-0130 §5 evaluating the reach condition before the
+    duplicate one; what it would cost is the owner who turns the class back up
+    inside the candidate's lifetime and must be reachable.
+    """
+    expiry = _AT + timedelta(days=3650)
+    both = _record(
+        candidate=_candidate(expires_at=expiry),
+        kind=NotificationDispositionKind.DROP,
+        reason=NotificationCondition.REACH_OFF,
+        failed=(),
+        dismissed_at=_AT,
+        dropped_at=_AT,
+    )
+
+    assert both.ceased_at() == _AT
+    assert both.speaks_for_its_key_at(_AT - timedelta(seconds=1)) is True
+    assert both.speaks_for_its_key_at(_AT) is False
+    assert both.speaks_for_its_key_at(expiry - timedelta(days=1)) is False
+
+
+def test_a_record_carrying_both_stamps_is_purged_on_its_retention_alone() -> None:
+    """ADR-0215 §4 over the record §1 gives the ``DROP``: the guard reaches it not at all.
+
+    Its speech ended when it ceased, so the second condition is decided by
+    retention alone however far in the future its candidate's expiry lies — which
+    is exactly where ADR-0130 §7 already put it, strictly after the horizon.
+    """
+    retention = timedelta(days=7)
+    both = _record(
+        candidate=_candidate(expires_at=_AT + timedelta(days=3650)),
+        kind=NotificationDispositionKind.DROP,
+        reason=NotificationCondition.REACH_OFF,
+        failed=(),
+        dismissed_at=_AT,
+        dropped_at=_AT,
+        retention=retention,
+    )
+    horizon = _AT + retention
+
+    assert both.is_purgeable_at(horizon) is False
+    assert both.is_purgeable_at(horizon + timedelta(microseconds=1)) is True
+
+
+def test_the_purge_guard_reads_speech_and_not_actionability() -> None:
+    """ADR-0215 §4 answered **whole** by the record, which is why §4 puts it here.
+
+    A backend that left the old actionability guard on ``is_purgeable_at`` and
+    composed the speaking test into both stores' purge paths would satisfy every
+    store-level conformance case and still break §4: the record would not answer
+    its own rule, and the next backend written against this type would purge one
+    that still speaks. So the two boundaries are asserted directly — ``False``
+    past the retention horizon while the expiry is still future, and ``True`` at
+    the expiry, where speech ends and retention elapsed strictly earlier.
+    """
+    retention = timedelta(hours=1)
+    expiry = _AT + timedelta(hours=3)
+    dismissed = _record(
+        candidate=_candidate(expires_at=expiry), dismissed_at=_AT, retention=retention
+    )
+
+    assert dismissed.is_actionable_at(_AT + retention + timedelta(microseconds=1)) is False
+    assert dismissed.is_purgeable_at(_AT + retention + timedelta(microseconds=1)) is False
+    assert dismissed.is_purgeable_at(expiry - timedelta(microseconds=1)) is False
+    assert dismissed.is_purgeable_at(expiry) is True
 
 
 def test_the_retention_horizon_is_exclusive_and_none_is_never_purged() -> None:

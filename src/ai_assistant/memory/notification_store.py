@@ -155,10 +155,19 @@ _COLUMNS = (
     "admitted_at, retention, dismissed_at, dropped_at"
 )
 
+#: The rows no reconsideration has dropped — the narrowing the *suppressing*
+#: population admits (ADR-0215 §§1-2). A dropped record speaks for its key at no
+#: instant after it ceased, the ``DROP`` taking precedence over any dismissal
+#: beside it, so excluding these in SQL excludes nothing the lookup would have
+#: kept. Nothing narrower is available: the dismissal half of ADR-0130 §8's
+#: narrowing is exactly what ADR-0215 removes, and the expiry that bounds a
+#: dismissed record's speech lives inside the candidate's JSON.
+_UNDROPPED = "dropped_at IS NULL"
+
 #: The rows a state narrowing calls "not yet ceased by an act". Expiry is
 #: deliberately absent: it lives inside the candidate and is judged by
 #: :meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at`.
-_UNCEASED = "dismissed_at IS NULL AND dropped_at IS NULL"
+_UNCEASED = f"dismissed_at IS NULL AND {_UNDROPPED}"
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -605,7 +614,9 @@ class _StoreFacts:
 
     Attributes:
         preferences: The standing settings, defaulted where nothing is held.
-        duplicate: Whether an actionable record carries this candidate's key.
+        duplicate: Whether a record still **speaking for** this candidate's key
+            carries it (ADR-0215 §2) — a different population from ``at_cap``'s,
+            read separately for that reason (ADR-0215 §3).
         at_cap: Whether the store holds its cap of actionable records.
         budget_spent: ``INTERRUPT`` rulings recorded inside the budget window.
         budget_frees_at: When that window next frees a unit, or ``None``.
@@ -713,9 +724,10 @@ class SqliteNotificationStore:
                 "retention INTEGER, dismissed_at INTEGER, dropped_at INTEGER)"
             )
             # The key is *indexed* rather than unique: several records may share
-            # one over time, and only an **actionable** one suppresses a new
-            # arrival (ADR-0130 §7, §8) — a predicate the record answers rather
-            # than a constraint a column can carry.
+            # one over time, and only one still **speaking for** it suppresses a
+            # new arrival (ADR-0130 §8 as ADR-0215 §§1-2 replace it) — a predicate
+            # the record answers rather than a constraint a column can carry, and
+            # a store that crossed ADR-0215 may hold two speaking at once.
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS notifications_key ON notifications(candidate_key)"
             )
@@ -933,7 +945,13 @@ class SqliteNotificationStore:
         return [_notification_from(row) for row in rows]
 
     def _actionable(self, conn: sqlite3.Connection, now: datetime) -> list[HeldNotification]:
-        """The population the cap counts and §8's duplicate rule reads (§7).
+        """The population the cap counts, and no other (§7, ADR-0215 §3).
+
+        **§8's duplicate rule reads a different one** and is a second read of the
+        table, :meth:`_is_duplicate`. Answering both from this list is the
+        coupling ADR-0215 §3 forbids in terms, in the direction opposite to
+        #1372's: capacity is about the list a person reads, and suppression is
+        about repeat contact over one fact.
 
         SQL narrows to the rows no *act* has ceased; expiry is then judged by the
         record's own predicate, because §7 fixes that boundary half-open and
@@ -961,15 +979,34 @@ class SqliteNotificationStore:
         return [record for record in map(_notification_from, rows) if record.is_actionable_at(now)]
 
     def _is_duplicate(self, conn: sqlite3.Connection, key: str, now: datetime) -> bool:
-        """Whether an **actionable** record already carries this key (§8)."""
+        """Whether a record still **speaking for** this key exists (§8, ADR-0215 §2).
+
+        **Every record retained under the key is read**, and the offer is a
+        duplicate where any one of them speaks at the ruling instant. Narrowing to
+        one row — the most recently admitted, say — is refused in terms by
+        ADR-0215 §2: at most one record per key speaks among those *this* decision
+        admitted, but a store that ran under ADR-0130 §8 admitted a second the
+        moment the first was dismissed, and where that first declared the later
+        expiry both speak until the earlier horizon passes. No marker distinguishes
+        the two vintages, and none is added.
+
+        **The dismissal half of the SQL narrowing is what ADR-0215 removes**, so
+        the dismissed-and-undropped rows under the key are decoded too, and the
+        cost is named rather than argued away. The rows *examined* are unchanged
+        and were never bounded: the two stamp columns are not carried by the
+        ``candidate_key`` index, so every row under the key is fetched today and
+        was before — #1801 records that against the ratified store, where it
+        already stands, and ADR-0215 §7 neither requires nor forbids the
+        denormalised expiry column that would narrow the decode.
+        """
         rows = self._fetch(
             conn,
             "look up a candidate key",
             f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module constants, no input
-            f"WHERE candidate_key = ? AND {_UNCEASED}",
+            f"WHERE candidate_key = ? AND {_UNDROPPED}",
             (key,),
         )
-        return any(record.is_actionable_at(now) for record in map(_notification_from, rows))
+        return any(record.speaks_for_its_key_at(now) for record in map(_notification_from, rows))
 
     def _fresh_id(self, conn: sqlite3.Connection) -> str:
         """Draw a record id, refusing one this store already holds.
@@ -1467,6 +1504,10 @@ class SqliteNotificationStore:
     async def dismiss(self, notification_id: str) -> bool:
         """End one record's actionability, leaving it readable (§7, §9).
 
+        It frees a slot under the cap at once and does **not** free the record's
+        key: the record goes on suppressing that key until its candidate's
+        declared expiry (ADR-0215 §§1-2).
+
         Returns:
             ``True`` if an actionable record was dismissed, ``False`` if the id
             named nothing or named a record that was already not actionable —
@@ -1621,10 +1662,13 @@ class SqliteNotificationStore:
     async def purge(self) -> int:
         """Sweep the records retention has released (§7).
 
-        **No record is purged while it is still actionable, whatever its
-        retention**, so a record's key suppresses duplicates for the whole time §8
-        says it does; and ``retention is None`` is a complete answer rather than
-        an undefined expression. **It refunds no unit of budget** (§5), which
+        **No record is purged while it still speaks for its key, whatever its
+        retention** (ADR-0215 §4, replacing §7's actionability guard), so a
+        record's key suppresses duplicates for the whole time §8 says it does; and
+        ``retention is None`` is a complete answer rather than an undefined
+        expression. Both conditions are answered by
+        :meth:`~ai_assistant.core.types.HeldNotification.is_purgeable_at` and
+        neither is composed here (§4). **It refunds no unit of budget** (§5), which
         matters here more than at :meth:`delete`: this is a *scheduler's* act, so
         a store deriving its spend count from the retained records would widen the
         budget on a timer wherever a deployment configured a retention shorter
@@ -1640,9 +1684,10 @@ class SqliteNotificationStore:
         with self._transaction("purge the notification store") as conn:
             now = self._now()
             # `retention IS NULL` is excluded in SQL because the exclusion is
-            # about the *column* and nothing else; the horizon and the
-            # actionability are then judged by the record, which is where their
-            # one definition lives (`is_purgeable_at`).
+            # about the *column* and nothing else; the horizon and whether the
+            # record still speaks for its key are then judged by the record,
+            # which is where their one definition lives (`is_purgeable_at`) and
+            # where ADR-0215 §4 requires them to stay.
             rows = self._fetch(
                 conn,
                 "purge the notification store",

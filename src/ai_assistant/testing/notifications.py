@@ -171,7 +171,8 @@ class FakeNotificationPolicy:
             notification_id: The record this ruling would produce or update.
             preferences: The standing settings in force.
             now: The ruling instant, tz-aware.
-            duplicate: Whether an actionable record carries this key (§8).
+            duplicate: Whether a record still **speaking for** this key
+                carries it (§8 as ADR-0215 §2 replaces it).
             at_cap: Whether the store is at its cap of actionable records (§7).
             budget_spent: ``INTERRUPT`` rulings inside the budget window (§6).
             budget_frees_at: When that window next frees a unit, or ``None``.
@@ -643,6 +644,10 @@ class FakeNotificationStore:
     async def dismiss(self, notification_id: str) -> bool:
         """End one record's actionability, leaving it readable (§7).
 
+        It frees a slot under the cap at once and does **not** free the record's
+        key, which goes on suppressing until the candidate's declared expiry
+        (ADR-0215 §§1-2).
+
         Args:
             notification_id: The record to dismiss.
 
@@ -733,7 +738,12 @@ class FakeNotificationStore:
         return self._ordered()
 
     async def purge(self) -> int:
-        """Sweep the records retention has released (§7).
+        """Sweep the records retention has released (§7, ADR-0215 §4).
+
+        The record answers both conditions — that it no longer speaks for its key
+        and that its retention has elapsed — and nothing is composed around
+        :meth:`~ai_assistant.core.types.HeldNotification.is_purgeable_at` here,
+        which §4 forbids in terms.
 
         Returns:
             How many records were removed.
@@ -755,7 +765,13 @@ class FakeNotificationStore:
         return sorted(self._records.values(), key=lambda record: (record.admitted_at, record.id))
 
     def _actionable(self, now: datetime) -> list[HeldNotification]:
-        """The population the cap counts and §8's duplicate rule reads (§7).
+        """The population the cap counts, and no other (§7, ADR-0215 §3).
+
+        §8's duplicate rule reads the *suppressing* set instead, in
+        :meth:`_is_duplicate`, which is a second pass over the records rather than
+        a filter of this list: answering both from one population is the coupling
+        ADR-0215 §3 forbids, and a dismissed record holds no capacity while its key
+        still speaks.
 
         Args:
             now: The instant to judge at.
@@ -766,17 +782,23 @@ class FakeNotificationStore:
         return [record for record in self._records.values() if record.is_actionable_at(now)]
 
     def _is_duplicate(self, candidate_key: str, now: datetime) -> bool:
-        """Whether an actionable record already carries this key (§8).
+        """Whether a record still **speaking for** this key exists (§8, ADR-0215 §2).
+
+        Every retained record carrying the key is read, and the offer is a
+        duplicate where any one of them speaks at ``now`` — never the most
+        recently admitted alone, which ADR-0215 §2 refuses because a store that
+        ran under ADR-0130 §8 can hold two records speaking for one key.
 
         Args:
             candidate_key: The offered candidate's key.
-            now: The instant to judge actionability at.
+            now: The instant to judge speech at.
 
         Returns:
             Whether the key is already spoken for.
         """
         return any(
-            record.candidate.candidate_key == candidate_key for record in self._actionable(now)
+            record.candidate.candidate_key == candidate_key and record.speaks_for_its_key_at(now)
+            for record in self._records.values()
         )
 
     def _fresh_id(self) -> str:
