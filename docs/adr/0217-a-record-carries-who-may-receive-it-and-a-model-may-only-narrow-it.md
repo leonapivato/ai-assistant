@@ -39,15 +39,17 @@
   the set the evaluation ranges over on a channel of unbounded audience is exactly the
   set §1 named, and this ADR neither widens nor narrows it. What moves is the name of
   the recorded value the second term of that evaluation reads.
-- **This is a contract change.** It adds one field to `MemoryBase` in
-  `core/types.py`, removes one from `Provenance` in the same file, and adds three
-  `core` types (`Placement`, `PlacementReach`, `PlacementSetter`) — `core` surface, so
-  this ADR is its own PR, ratified and merged before anything implements against it
-  (golden rule 5, ADR-0015 §5), and it owes **both** lenses: adversarial and
-  architecture, on ADR-0015 §1 and `CONTRIBUTING.md` → "Stop when the required reviews
-  are green". It adds no Protocol and no member to one, and no `Settings` field. It
-  adds two members to the promoted `AssistantEngine` surface and two to
-  `RoutableOperation` (§7), and — §9 — it **does** move `PROTOCOL_VERSION`.
+- **This is a contract change, and a Protocol change.** It adds two members to the
+  `AssistantEngine` **Protocol** in `core/protocols.py` (§7) — which golden rule 5
+  makes a **breaking change**, flagged here in terms — adds one field to `MemoryBase`
+  in `core/types.py`, removes one from `Provenance` in the same file, adds three
+  `core` types (`Placement`, `PlacementReach`, `PlacementSetter`) and two members to
+  `RoutableOperation`. So this ADR is its own PR, ratified and merged before anything
+  implements against it (golden rule 5, ADR-0015 §5), and it owes **both** lenses:
+  adversarial and architecture, on ADR-0015 §1 and `CONTRIBUTING.md` → "Stop when the
+  required reviews are green". It adds **no new** Protocol and no member to any
+  Protocol other than `AssistantEngine`, and no `Settings` field. It adds two wire
+  operations and — §9 — it **does** move `PROTOCOL_VERSION`.
 - **Durability clause.** Every quotation below — from an ADR, from `core/types.py`,
   from `orchestration/`, or from an issue — is of its text as it stood at this ADR's
   base, `a35ad5e5`, and not of its text on any later day. Where a later ADR changes
@@ -544,16 +546,48 @@ would fail that test on the first turn.
 > `OWNER_ACT`. It takes no value, it is a narrowing only, and its absence is not an act
 > of any kind.
 
-> **Normative.** The owner's explicit act **after the fact** is two operations on the
-> promoted `AssistantEngine` surface, each taking exactly one argument, a record id:
-> one narrowing a record to reach `OWNER`, one widening it to reach `ANYONE`. Both
-> write setter `OWNER_ACT` and the instant of the act. The widening one is refused on a
-> record whose setter is `DERIVED` (§3), and the refusal is an `AssistantError` naming
-> the reason.
+> **Normative.** The owner's explicit act **after the fact** is two members added to
+> the `AssistantEngine` Protocol (`core/protocols.py`), whose signatures are exactly:
+>
+> ```python
+> async def guard(self, record_id: Identifier) -> Placement | None: ...
+> async def unguard(self, record_id: Identifier) -> Placement | None: ...
+> ```
+>
+> `guard` writes reach `OWNER`, `unguard` writes reach `ANYONE`; both write setter
+> `OWNER_ACT` and the instant of the act, and both are subject to §3's precedence.
 
-> **Normative.** Both are added to `RoutableOperation` (ADR-0197 §3) and are
-> **confirm-owed**, so a routed one is rendered and confirmed before it is performed
-> (ADR-0197 §7). ADR-0197 §3's widening rule is satisfied and each condition is stated
+> **Normative.** Each **returns the record's placement as it stands after the act**,
+> and `None` where `record_id` named nothing live — which is not an error, on
+> `AssistantEngine.forget`'s own reading of the same case ("the user's intent … is
+> already satisfied"). Each raises `ValueError` where `record_id` is blank and
+> `MemoryStoreError` where reading or writing memory failed, and raises for no other
+> reason. In particular a **refusal raises nothing**: `unguard` on a placement whose
+> setter is `DERIVED` returns that placement unchanged, and a surface reads the
+> returned reach and setter to say why nothing moved. A raise was rejected because it
+> would make an act the system declines on ratified grounds indistinguishable, on
+> ADR-0197's routed path, from an operation that failed (`RouteOutcome.FAILED`), and
+> because it would make an idempotent act — `guard` on an already-guarded record — a
+> failure too. Both operations are idempotent, and calling either twice returns the
+> same value.
+
+> **Normative.** The two members are **`AssistantEngine`'s and no other Protocol's**.
+> No `MemoryStore`, `MemoryWriter`, `ContextProvider`, `Planner`, `NotificationPolicy`
+> or any other Protocol in `core/protocols.py` gains a member, changes a signature or
+> changes a return type. Whether `MemoryStore` needs an operation to perform the write
+> is an implementation question inside `memory/` that this ADR does not settle and that
+> no lane settles by adding a Protocol member without its own ADR (golden rule 5).
+
+> **Normative.** The added members carry the obligations any member of a Protocol
+> carries: the shared `AssistantEngine` conformance suite gains an arm for each clause
+> of §3 and §10 that binds an implementation, and the canonical fake in
+> `ai_assistant.testing` implements both. §11 states which change carries them.
+
+> **Normative.** `RoutableOperation` gains exactly two members, `GUARD` and `UNGUARD`,
+> named for the operation each routes to, in ADR-0197 §3's own naming rule.
+
+> **Normative.** Both are **confirm-owed**, so a routed one is rendered and confirmed
+> before it is performed (ADR-0197 §7). ADR-0197 §3's widening rule is satisfied and each condition is stated
 > here rather than cited: (i) both are members of the promoted surface; (ii) neither
 > reaches any egress boundary — no `ToolRegistry`, no `ToolInvoker`, no
 > `EgressDestination`, no credential; (iii) each takes exactly one argument, resolved
@@ -643,9 +677,17 @@ ADR-0201 closed.
 
 > **Normative.** The `core` change is exactly: `MemoryBase` gains `placement`;
 > `Provenance` loses `supplied_withheld_content`; `Placement`, `PlacementReach` and
-> `PlacementSetter` are added. No Protocol and no member of one, no `Settings` field,
-> no `ContextFacet`, no `NotificationCandidate` member. The promoted surface gains the
-> two operations of §7 and `RoutableOperation` gains their two members.
+> `PlacementSetter` are added; `RoutableOperation` gains `GUARD` and `UNGUARD`; and the
+> `AssistantEngine` **Protocol** gains `guard` and `unguard` with §7's signatures. No
+> other Protocol and no member of one, no `Settings` field, no `ContextFacet`, no
+> `NotificationCandidate` member.
+
+> **Normative.** The Protocol change is the reason this ADR is ratified and merged
+> before anything implements against it, and it is stated rather than left to be
+> inferred from "the promoted surface": `AssistantEngine` is a `Protocol` in
+> `core/protocols.py` — "the assistant's whole request surface, as a client sees it"
+> (ADR-0085 §1), provided by `orchestration` and consumed by `interfaces` — so adding
+> to it is golden rule 5's breaking change and carries golden rule 5's obligations.
 
 > **Normative.** **`PROTOCOL_VERSION` moves for this change**, and ADR-0124 §9's test
 > is applied rather than asserted past. A member is **removed** from `Provenance`, a
@@ -726,6 +768,12 @@ ADR-0201 closed.
 > `DERIVED`, and is withheld from an unbounded channel on the first read after the
 > upgrade.
 
+> **Normative.** The lane pins **the two operations, through the shared
+> `AssistantEngine` conformance suite**: each returns the record's placement after the
+> act; each returns `None` for an id naming nothing live; each raises `ValueError` on a
+> blank id; each is idempotent; and `unguard` on a `DERIVED` placement returns it
+> unchanged rather than raising.
+
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
 > turn exactly as it does today, with nothing withheld and no deflection composed.
@@ -738,10 +786,18 @@ ADR-0201 closed.
 > record. It rides with the `PROTOCOL_VERSION` bump and its `wire/envelope.py` log
 > entry.
 
-> **Normative.** The `orchestration` change — the derivation writing the new field, the
-> supply sites reading it — is a **second change**, and the `learning/` and surface
-> change carrying §4's proposal, §5's statement and §7's acts is a **third**. Each is
-> one subsystem plus its tests (`CLAUDE.md`, "One subsystem per change").
+> **Normative.** The `AssistantEngine` members of §7 land with their conformance-suite
+> arms and their canonical fake in the **same change** as the `orchestration`
+> implementation of them, on `CLAUDE.md`'s contract-seam exception — a Protocol member
+> and the primary implementation whose demands shape it are one unit of work
+> (ADR-0137 §2). That is the **second change**: the derivation writing the new field,
+> the supply sites reading it, `guard`/`unguard` on the engine, the suite arms and the
+> fake.
+
+> **Normative.** The `learning/` and interface change carrying §4's proposal, §5's
+> statement, §7's `learn` flag and the two `RoutableOperation` members is a **third**.
+> Each change is one subsystem plus its tests (`CLAUDE.md`, "One subsystem per
+> change").
 
 > **Normative.** The records this decision owes on ADR-0204, ADR-0199 and ADR-0210 are
 > made in **this ADR's own PR** (ADR-0082 §1, ADR-0070 §1), and are header-only.
@@ -792,6 +848,17 @@ ADR-0070 §1 that reconciles the ADR with a fact that postdates it while leaving
 acting identically once they hold both, which is an amendment; under ADR-0082 §2 the
 record goes on the `Status` line — ADR-0210's carries no leading token — and in the dated
 note.
+
+**Against ADR-0085 no record is owed, and the addition is stated rather than assumed.**
+ADR-0085 §1 makes `AssistantEngine` "the assistant's whole request surface, as a client
+sees it"; §7 adds two members to it. Would a reader holding only ADR-0085 now act
+differently, or read one of its clauses more widely than it now holds? No — a surface
+described as *whole* is not a surface described as *closed*, and the corpus has added to
+it before on exactly this footing: `standing_grants` is a member ADR-0139 §2 added, and
+ADR-0197 §3's widening rule presupposes that the promoted surface grows. This is a
+stacked addition under ADR-0082 §1, recorded in this ADR and nowhere else. What it is
+*not* is a change anyone may make without an ADR: golden rule 5 binds, which is why the
+header flags the Protocol break and why this ADR is merged before its implementation.
 
 **Against ADR-0203, ADR-0100, ADR-0197, ADR-0201, ADR-0130 and ADR-0021 no record is
 owed.** ADR-0203 §1's subtraction and §2's bounds are used as given and every sentence of
