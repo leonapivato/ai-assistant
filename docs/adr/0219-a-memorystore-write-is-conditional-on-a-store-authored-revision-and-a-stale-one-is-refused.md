@@ -739,7 +739,10 @@ different questions and read at different sites.
 
 > **Normative.** The SQLite migration is **mechanical and additive**: a `revision`
 > column on `records`, in the shape ADR-0045 §9 gave the `validity` columns, plus
-> the store's issuer. No row is rewritten and no record's payload changes.
+> the store's issuer. **No record's payload is rewritten**: the backfill below
+> writes the new column and nothing else, so every row's `data` blob, its id, its
+> kind and its derived columns are byte for byte what they were. The rows
+> themselves are updated, which is what writing a backfilled column is.
 
 > **Normative.** The backfill **issues** a stamp for every existing row from the
 > store's own issuer, in one ordered pass, and persists the issuer at the last value
