@@ -542,6 +542,17 @@ class Pr:
         files this module does not resolve — so the patch is parsed in one place
         and never twice with two ideas of what a header is.
 
+        **A patch this reader cannot place a line in is an unevaluable input.**
+        Every added or removed line of a well-formed patch sits inside a hunk of a
+        section, and every pre-hunk line either opens the section, names one of its
+        endpoints, or is metadata carrying no ``+``/``-``. So a changed line met
+        outside a hunk, or a hunk met outside a section, means the patch is not the
+        shape this reads — and ADR-0209 §6 binds rather than attributing the line
+        to nothing and clearing (adversarial review, round 9). Nothing produces
+        that from `ship`, which renders the patch itself under pinned options; what
+        §6 is about is the case nobody foresaw, so it is answered by structure
+        rather than by trusting the caller.
+
         **A ``---``/``+++`` line is a file header only before the first ``@@``.**
         They carry pathnames, not content, and §5's tests about "a symbol an added
         or removed line carries" would otherwise be satisfied by the *filename* of
@@ -557,22 +568,31 @@ class Pr:
             patch order. A section feeds it where **either** endpoint's pathname is
             neither Python nor documentation markup, so a rename into or out of a
             fallback language is admitted — the priced direction.
+
+        Raises:
+            UnevaluableError: the patch is not the shape this reads, so §5's diff
+                input cannot be attributed and ADR-0209 §6 binds.
         """
         sections: list[tuple[bool, list[str]]] = []
         changed: list[str] = []
         source = False
         in_hunk = False
+        opened = False
         for line in self.diff_text.splitlines():
             if line.startswith("diff --git "):
                 sections.append((source, changed))
-                changed, source, in_hunk = [], False, False
+                changed, source, in_hunk, opened = [], False, False, True
             elif line.startswith("@@ "):
+                if not opened:
+                    raise UnevaluableError("the PR's patch opens a hunk outside any file section")
                 in_hunk = True
             elif not in_hunk and (header := _DIFF_PATH_RE.match(line)) is not None:
                 source = source or _feeds_fallback(header["path"])
             elif not in_hunk and _FILE_HEADER_RE.match(line) is not None:
                 continue
             elif line[:1] in {"+", "-"}:
+                if not in_hunk:
+                    raise UnevaluableError("the PR's patch carries a changed line outside any hunk")
                 changed.append(line)
         sections.append((source, changed))
         return sections
