@@ -250,6 +250,10 @@ test-fast *args:
     # re-parses the controller's argv and ini, not its options), and a flag here
     # would override it and scatter the layer across ~570-600 MB browsers.
     #
+    # Passing one here would now be refused rather than silently obeyed: see
+    # `tests/conftest.py`'s `pytest_configure`, which is where the clause is enforced
+    # rather than merely arranged for.
+    #
     # It still changes only which worker runs a test, so ADR-0166 §1 is untouched.
     if uv run pytest -n auto "$@" --basetemp="$tmp"; then
         rm -rf "$tmp" "$tmp.lease"
