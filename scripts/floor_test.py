@@ -171,9 +171,11 @@ _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 # changed", never on every identifier a hunk happens to contain. Nothing in §3's
 # symbol path reads it: a Python file `ast` refuses binds under §6 rather than
 # falling back to a pattern.
-# `--- a/path`, `+++ b/path`, `--- /dev/null`. The prefixes are pinned by the
-# caller's `_diff_opts` (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), so
-# these are the only three shapes the rendered patch can carry.
+# `--- /dev/null`, and the two pathname spellings `_DIFF_PATH_RE` reads more
+# closely just below. The prefixes are pinned by the caller's `_diff_opts`
+# (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), and `/dev/null` is the one
+# shape that carries no pathname, so this is what is left once the section walk has
+# taken the path out of the other two.
 _FILE_HEADER_RE = re.compile(r"^(?:\+\+\+|---) (?:a/|b/|/dev/null)")
 
 _DEFINITION_RE = re.compile(
@@ -506,22 +508,54 @@ class Pr:
     descriptions: list[str] = field(default_factory=list)
 
     @cached_property
-    def changed_lines(self) -> str:
-        """The added and removed lines of the PR's diff, and nothing else.
+    def _sections(self) -> list[tuple[bool, list[str]]]:
+        """The patch walked once, per file section: is it source, and what changed.
 
-        The ``+++``/``---`` file headers are dropped: they carry pathnames, not
-        content, and §5's tests about "a symbol an added or removed line
-        carries" would otherwise be satisfied by the *filename* of every file
-        the PR touches. They are recognised by their whole shape rather than by
-        their first three characters, because a *removed* line whose own content
-        begins with ``--`` renders as ``---…`` and is content, not a header.
+        A unified patch is a sequence of sections, each opened by ``diff --git``,
+        carrying its two file headers and then its hunks. Both readings §5 needs
+        come off that one walk — every changed line, and the changed lines of the
+        files this module does not resolve — so the patch is parsed in one place
+        and never twice with two ideas of what a header is.
+
+        **A ``---``/``+++`` line is a file header only before the first ``@@``.**
+        They carry pathnames, not content, and §5's tests about "a symbol an added
+        or removed line carries" would otherwise be satisfied by the *filename* of
+        every file the PR touches. But inside a hunk that shape is ambiguous: a
+        removed line whose own content begins with ``--`` renders as ``---…``, and
+        one beginning ``-- a/`` renders as a perfectly well-formed header. Reading
+        the position instead of guessing at the text settles both — a header cannot
+        appear after a hunk has opened, and content cannot appear before one
+        (adversarial review of PR #1803, rounds 6 and 7).
+
+        Returns:
+            One ``(is non-Python source, changed lines)`` pair per section, in
+            patch order. A section is source where **either** endpoint's pathname
+            carries one of :data:`_OTHER_SOURCE_SUFFIXES`, so a rename into or out
+            of one of those languages is admitted — the priced direction.
         """
-        kept = [
-            line
-            for line in self.diff_text.splitlines()
-            if line[:1] in {"+", "-"} and _FILE_HEADER_RE.match(line) is None
-        ]
-        return "\n".join(kept)
+        sections: list[tuple[bool, list[str]]] = []
+        changed: list[str] = []
+        source = False
+        in_hunk = False
+        for line in self.diff_text.splitlines():
+            if line.startswith("diff --git "):
+                sections.append((source, changed))
+                changed, source, in_hunk = [], False, False
+            elif line.startswith("@@ "):
+                in_hunk = True
+            elif not in_hunk and (header := _DIFF_PATH_RE.match(line)) is not None:
+                source = source or header["path"].endswith(_OTHER_SOURCE_SUFFIXES)
+            elif not in_hunk and _FILE_HEADER_RE.match(line) is not None:
+                continue
+            elif line[:1] in {"+", "-"}:
+                changed.append(line)
+        sections.append((source, changed))
+        return sections
+
+    @cached_property
+    def changed_lines(self) -> str:
+        """The added and removed lines of the PR's diff, and nothing else."""
+        return "\n".join(line for _source, lines in self._sections for line in lines)
 
     @cached_property
     def text(self) -> str:
@@ -605,24 +639,8 @@ class Pr:
         what #1799 was matching: `docs/adr/template.md` puts `- Status: Proposed`
         at the head of every ADR, so admitting `.md` here would restore the
         unconditional match between any two ADR lanes that the resolver closed.
-
-        The attribution is read off the patch's own `--- a/…` / `+++ b/…` headers
-        — in both the bare and the C-quoted spelling — rather than by asking git a
-        second time: `ship` renders the patch once, under pinned options, and this
-        module is handed that text.
         """
-        kept: list[str] = []
-        admitted = False
-        for line in self.diff_text.splitlines():
-            if line.startswith("diff --git "):
-                admitted = False
-            elif (header := _DIFF_PATH_RE.match(line)) is not None:
-                admitted = admitted or header["path"].endswith(_OTHER_SOURCE_SUFFIXES)
-            elif _FILE_HEADER_RE.match(line) is not None:
-                continue
-            elif admitted and line[:1] in {"+", "-"}:
-                kept.append(line)
-        return "\n".join(kept)
+        return "\n".join(line for source, lines in self._sections if source for line in lines)
 
     def is_symbol(self, member: str) -> bool:
         """Whether ``member`` is a name ADR-0209 §3 can be about at all.

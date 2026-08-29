@@ -799,6 +799,37 @@ def test_a_removed_line_beginning_with_two_dashes_is_content_not_a_header(
     assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
 
 
+#: A changed line whose own content is a well-formed file header, in both
+#: directions: removed `-- a/Pane.js` renders as `--- a/Pane.js`, added
+#: `++ b/Pane.js` as `+++ b/Pane.js`.
+_HEADER_SHAPED_CONTENT = (
+    ("-- a/Pane.js\nconst other = 1;\n", "const other = 1;\n"),
+    ("const other = 1;\n", "++ b/Pane.js\nconst other = 1;\n"),
+)
+
+
+@pytest.mark.parametrize(("before", "after"), _HEADER_SHAPED_CONTENT)
+def test_a_changed_line_shaped_like_a_file_header_is_content_inside_a_hunk(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    """The sharper form of the two-dashes case (adversarial round 7).
+
+    `test_a_removed_line_beginning_with_two_dashes_is_content_not_a_header` covers
+    a line a shape test can still tell apart. This one cannot be told apart at all:
+    `--- a/Pane.js` is exactly what git writes for a real header. Dropping it loses
+    the symbol the line carries and clears a floor that was owed, which is the
+    direction ADR-0209 §5 forbids — so the reader uses the line's *position*
+    instead, and a `---`/`+++` after the first `@@` of a section is content.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing."), "assets/app.js": before}, {"assets/app.js": after})
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is `Pane`.")))
+
+    assert judged.owed, judged.stderr
+    assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
 def test_a_module_qualified_citation_is_satisfied_by_the_path(tmp_path: Path) -> None:
     """`pkg.mod.Symbol` where the module path, not the contents, carries the words.
 
