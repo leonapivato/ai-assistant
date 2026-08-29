@@ -385,3 +385,53 @@ async def test_an_id_factory_that_raises_propagates_from_the_fake() -> None:
 
     with pytest.raises(RuntimeError, match="broken"):
         await observer.observe(batch_of(2))
+
+
+# --- ADR-0213 §6: the fake proposes topics, and refuses a template it could
+# only honour by breaking the contract ---------------------------------------
+
+
+async def test_a_scripted_topic_reaches_the_proposed_record() -> None:
+    """An observer *is* a producer that proposes topics (§6), so the fake honours them.
+
+    Unlike ``about_person``, which §5 of ADR-0100 has the fake **discard and count**
+    because an observer's proposal states no subject. The two templates are treated
+    differently on purpose, and a consumer scripting a labelled belief is scripting
+    something a real producer can emit.
+    """
+    observer = FakeObserver([ObservedBelief(content="a belief", topics=("health", "sleep"))])
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert [proposal.proposed.topics for proposal in outcome.proposals] == [("health", "sleep")]
+
+
+def test_a_template_carrying_no_topics_proposes_the_empty_tuple() -> None:
+    """The default, which is what every producer but two writes (§6)."""
+    assert ObservedBelief(content="a belief").topics == ()
+
+
+@pytest.mark.parametrize(
+    "topics",
+    [
+        pytest.param(("a", "b", "c", "d", "e"), id="past-the-proposal-bound"),
+        pytest.param(("Health",), id="not-casefolded"),
+        pytest.param(("health  care",), id="two-consecutive-spaces"),
+        pytest.param(("sleep", "health"), id="unsorted"),
+        pytest.param(("health", "health"), id="a-repeated-label"),
+    ],
+)
+def test_a_template_the_producer_could_only_ignore_is_refused_at_construction(
+    topics: tuple[str, ...],
+) -> None:
+    """Refused rather than silently emptied, and the shape of the refusal is the point.
+
+    §4 rules that a topics entry a producer cannot use is **ignored** with no counter
+    moving — so "the entry was ignored" is not an observable outcome, and a fake that
+    quietly emptied a bad template would hide the mistake in the one place nothing
+    can see it. ``EPISODIC``'s refusal has the same shape for the same reason;
+    ``about_person``'s does not, because *there* the outcome is observable as a
+    discard.
+    """
+    with pytest.raises(ValueError, match=r"topic|Value error"):
+        ObservedBelief(content="a belief", topics=topics)

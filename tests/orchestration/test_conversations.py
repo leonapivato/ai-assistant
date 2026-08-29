@@ -185,6 +185,41 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
     # question about it, and every episode in the store would otherwise claim a
     # currency it has no use for.
     assert stored.provenance.last_confirmed_at is None
+    # ADR-0213 §6, the same clause one field along: "**Capture judges nothing
+    # else.**" A topic is a judgement of the same kind as `importance`, capture is
+    # on the turn's own path with no provider and no budget for one, and nothing
+    # labels a record it did not itself produce — so the observer reading this
+    # episode may not stamp one on it either. §15 names the residue honestly: a
+    # topic-scoped act does not reach the transcript of the conversation a belief
+    # came from, which is why ADR-0201 §1's exclusion of `EPISODIC` from a routed
+    # `forget`'s lookup is aligned with this decision rather than in tension with it.
+    assert stored.topics == ()
+
+
+async def test_a_capture_on_a_resumed_conversation_still_writes_no_topics() -> None:
+    """ADR-0213 §12.17's second path, which is where a later lane would reach for one.
+
+    A resumption is the case with a history in front of it, so it is the one where
+    "the assistant already knows what this conversation is about" is a tempting
+    sentence — and §6 rules it out for the same reason the ordinary path is ruled
+    out: capture holds no provider, and no producer labels a record it did not
+    itself produce. The assertion is on **every** episode the resumed conversation
+    holds, not only the newest, because the tempting implementation labels the
+    thread rather than the turn.
+    """
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    await wiring.stage.capture(conversation.id, content="The user asked: hello")
+
+    resumed = await wiring.stage.begin(conversation.id)
+    report = await wiring.stage.capture(resumed.id, content="The user asked: and again")
+
+    assert report.episode_id is not None
+    stored = [
+        record for record in await wiring.memory.export() if isinstance(record, EpisodicMemory)
+    ]
+    assert len(stored) == 2
+    assert all(episode.topics == () for episode in stored)
 
 
 async def test_an_unset_retention_stamps_a_finite_expiry() -> None:
