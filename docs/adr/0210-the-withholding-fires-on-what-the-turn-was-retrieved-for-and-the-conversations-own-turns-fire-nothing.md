@@ -4,19 +4,23 @@
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
-  — §2's second clause **and §5's second clause**, both **scoped to an operation whose
-  output channel's audience is unbounded**, in the one respect that the disjunction
-  each states is evaluated over the supply "as assembled and retrieved" *whole*: §2's
-  as the turn's own rule, §5's as the general producer rule ADR-0204 §2's third clause
-  applies to the turn. On such an operation both are evaluated over the part of that
-  supply retrieval placed there for the turn's own goal statement, and not over the
-  conversation's own recent turns. §5's second clause is narrowed **for that one
-  producer and for no other**: an observer, a fold, a consolidation and a
-  bounded-channel turn still disjoin over every record they were supplied. Both terms
-  of §2's disjunction, both grounds on which a producer sets the field, §1's field,
-  §3's withholding, §4's bounded-channel rule and §5's **first, third, fourth and
-  fifth** clauses — the no-clearing ratchet whole — are untouched, and the evaluation
-  on a channel of bounded audience is untouched entirely.
+  — **three clauses, all scoped to an operation whose output channel's audience is
+  unbounded**. §2's second clause **and** §5's second clause, in the one respect that
+  the disjunction each states is evaluated over the supply "as assembled and retrieved"
+  *whole* — §2's as the turn's own rule, §5's as the general producer rule ADR-0204 §2's
+  third clause applies to the turn — so that on such an operation both are evaluated
+  over the part of that supply retrieval placed there for the turn's own goal statement
+  and not over the conversation's own recent turns. And §3's **fourth** clause, in the
+  one respect that where §3's test removes a record the fact of the withholding reaches
+  the composing stage; after this decision it reaches the stage where the record removed
+  was one so placed. §5's second clause is narrowed **for that one producer and for no
+  other**: an observer, a fold, a consolidation and a bounded-channel turn still disjoin
+  over every record they were supplied. §3's first three clauses are untouched — the
+  record is still removed, wherever in the supply it stood — as are the other three
+  limbs of §3's fourth clause. Both terms of §2's disjunction, both grounds on which a
+  producer sets the field, §1's field, §4's bounded-channel rule and §5's **first,
+  third, fourth and fifth** clauses — the no-clearing ratchet whole — are untouched, and
+  the evaluation on a channel of bounded audience is untouched entirely.
 - **Partially supersedes:**
   [ADR-0199](0199-the-audience-of-the-output-channel-decides-what-may-be-said-and-a-withheld-class-is-deflected-rather-than-redacted.md)
   — §5's third clause, **scoped to the same operations**, in the one respect that
@@ -321,6 +325,27 @@ decision is every application of it except a spoken turn's own capture.
 > for a channel of unbounded audience is applied to every record alike, whichever
 > group of the supply it stands in. No record becomes speakable on such a channel by
 > anything in this ADR.
+
+> **Normative.** ADR-0204 §3's **fourth** clause is narrowed with §1, and the header
+> records it. That clause rules that where §3's test removes a record, "the fact that a
+> withholding occurred reaches the composing stage as ADR-0199 §5's third clause
+> requires", and §3's prose reads the entailment out loud — "A turn whose supply this
+> test narrows is a turn on which a withholding occurred". On an operation whose output
+> channel's audience is unbounded that entailment no longer runs in one direction: a
+> stamped record standing only in the conversation's recent turns is still **removed**,
+> by §3's first clause unnarrowed, and the composing stage is **not** told. The other
+> three limbs of §3's fourth clause bind unchanged — nothing is refetched, widened,
+> re-run or backfilled to replace the record, and the order of what survives is the
+> order it had.
+
+**Recording this on §3 as well as on ADR-0199 §5's third clause is belt and braces, and
+deliberately so.** Read one way, §3's fourth clause defers wholly to §5's third clause —
+"as ADR-0199 §5's third clause requires" — and would follow it narrowed with no record of
+its own owed. Read the other, §3 states the trigger itself, "Where this test removes a
+record", and asserts the notification in its own voice as one of three consequences it
+lists. The second reading is available on the text, and under it a reader holding only
+ADR-0204 §3 acts differently, which is ADR-0070 §1's line. This ADR does not rest on the
+reading that would save it a record.
 
 > **Normative.** ADR-0199 §5's first, second and fourth through ninth clauses are
 > untouched. A deflection is still composed rather than filtered, still carries no
@@ -633,8 +658,8 @@ change's first obligation.
 ### 10. What the implementing lane owes
 
 The implementation is briefed after this ADR merges (ADR-0015 §5, golden rule 5), and it
-is **two changes rather than one** — items 1–4 and 6 in `orchestration`, and item 5 in
-`core/types.py` on its own — for the reason the clause below the list gives. It owes:
+is **two changes rather than one** — items 1–4, 6 and 7 in `orchestration`, and item 5
+in `core/types.py` on its own — for the reason the clause below the list gives. It owes:
 
 1. **What the relevance reads returned**, carried from `LearningLoop.respond` to the
    supply filter inside `orchestration`: the belief composition's records and the ids
@@ -658,15 +683,23 @@ is **two changes rather than one** — items 1–4 and 6 in `orchestration`, and
    dispatcher can afford that.
 6. **Closing #1775** on the half this decision reaches, with #1785 left open for the
    half it does not.
+7. **A check of ADR-0204 §8's pinned tests against §1.** ADR-0204 §8 states its
+   spoken-channel fixtures over a store and over what retrieval returns — test 3's
+   record is one "whose retrieval returns it", and tests 4 and 9 put theirs in the turn's
+   supply by retrieval — so no test there places its withheld record in the conversation
+   tail and none is expected to change. The lane **verifies that rather than assuming
+   it**, and where a fixture's withheld record would after this decision stand in the
+   tail alone, it is placed in a retrieved group so ADR-0204 §8's pinned outcome holds
+   unweakened. No assertion of ADR-0204 §8 is relaxed, and none is deleted.
 
-> **Normative.** Items 1–4 and 6 are one change, in `orchestration`. **Item 5 is a second
-> change**, touching `core/types.py` and nothing else, merged **immediately after** the
-> first with no other change between them. `CLAUDE.md` scopes a change to "a single
-> package plus its tests" and rules of the one exception it names — the Protocol triad,
-> widened by ADR-0137 §2 to carry its primary production implementation — that "**that
-> widening is the whole of it: every other cross-subsystem pairing is still more than one
-> change**". This pairing adds no Protocol and no triad, so it is not that exception and
-> the two may not be combined.
+> **Normative.** Items 1–4, 6 and 7 are one change, in `orchestration`. **Item 5 is a
+> second change**, touching `core/types.py` and nothing else, merged **immediately**
+> after the first with no other change between them. `CLAUDE.md` scopes a change to "a
+> single package plus its tests" and rules of the one exception it names — the Protocol
+> triad, widened by ADR-0137 §2 to carry its primary production implementation — that
+> "**that widening is the whole of it: every other cross-subsystem pairing is still more
+> than one change**". This pairing adds no Protocol and no triad, so it is not that
+> exception and the two may not be combined.
 
 **The window that opens between the two merges is stated rather than hidden, and it is
 the smaller cost.** While it is open, `core/types.py` describes the unnarrowed rule and
@@ -686,7 +719,7 @@ which is the same defect pointing the other way.
 > on ADR-0199's line without dropping either of the two it carries, and converting
 > ADR-0204's plain `Accepted` into a leading-token line under ADR-0082 §2 — and an
 > appended dated note records the supersession (ADR-0070 §1, ADR-0082 §2). The scope
-> names the clause as this ADR's header names it, and nothing else of either ADR is
+> names the clauses as this ADR's header names them, and nothing else of either ADR is
 > touched. Applying one edit without the other is not a partial record.
 
 **Scheduling both records rather than making them here is permitted and is stated
@@ -745,6 +778,20 @@ clause of one section, scoped to one class of operation **and** to one producer.
 other producer §5 reaches is untouched, which is why §5's own reason — the observer's
 second distillation — and #1708's closure survive intact (§2, §4).
 
+**ADR-0204 §3's fourth clause — a record is owed on the more demanding of its two
+readings.** Its condition is "Where this test removes a record", and one of the three
+consequences it then lists is that "the fact that a withholding occurred reaches the
+composing stage". §1's fourth clause keeps §3's removal running over the whole supply, so
+on a spoken turn whose only stamped record stands in the conversation tail the test still
+removes and the stage is still not told. If the clause's closing words — "as ADR-0199 §5's
+third clause requires" — make the requirement wholly §5's, then no record is owed here and
+the narrowing recorded on §5's third clause carries it. If they name the manner of a
+requirement §3 states in its own voice, a reader holding only ADR-0204 §3 acts
+differently and a record is owed. The text supports both readings, so this ADR records the
+supersession rather than resting on the one that would save it a record. Partial in
+ADR-0070 §3's sense: one limb of one clause of one section, scoped to one class of
+operation, with §3's removal itself untouched.
+
 **ADR-0199 §5's third clause — a record is owed on the same test.** Its condition is
 "Where content was withheld"; a reader holding only ADR-0199 tells the composing stage
 whenever anything was withheld from the supply, and after this decision, on one channel,
@@ -762,6 +809,20 @@ decided. A reader holding either acts identically.
 **And no record is owed on ADR-0074 §5.** Its three-group sentence is used exactly as
 written, as the fact that makes this decision expressible; the distinction between the
 tail and "records retrieved as relevant" is §5's own.
+
+> **Normative.** The clauses this ADR supersedes are **exactly the four its header
+> names** — ADR-0204 §2's second, §3's fourth and §5's second, and ADR-0199 §5's third —
+> and no other clause of either ADR is superseded, amended or narrowed by it. Where a
+> clause of ADR-0204 or ADR-0199 states its condition **by reference** to one of those
+> four, it follows the narrowed clause and owes no record of its own, because a reader
+> cannot act on it without reading the clause it points at. Those are: ADR-0204 §1's
+> first clause, whose two routes are given as "(§2)" and "(§5)"; ADR-0204 §3's prose
+> entailment that a turn this test narrows "is a turn on which a withholding occurred";
+> ADR-0204 §6's continuity claim, which §1's prose restores rather than contradicts; and
+> ADR-0199 §3's sixth clause read for this field, which this ADR's facet clause obeys
+> rather than moves. A clause on neither list is untouched by this decision, and a reader
+> who finds one that is neither referential nor named has found a defect in this section
+> rather than a licence to narrow further.
 
 ## Consequences
 
