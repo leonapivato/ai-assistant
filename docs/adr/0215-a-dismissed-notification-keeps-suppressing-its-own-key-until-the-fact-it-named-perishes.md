@@ -497,6 +497,21 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > Leaving those standing would put two contradictory statements of one contract in
 > the tree, which is the failure the shared conformance suite cannot catch.
 
+> **Normative.** The same obligation reaches `core/types.py`, where two
+> statements of the replaced rules stand. `HeldNotification`'s **class
+> docstring** says that "the cap counts the actionable set and §8's duplicate
+> rule reads the same population, so a fact that recurs after its notification
+> expired or was dismissed is a new candidate and not a duplicate"; the second
+> half of that is what §2 replaces, and the cap half is what §3 keeps.
+> `is_purgeable_at`'s docstring states the purge guard the clause above moves.
+> The lane revises both beside the predicates, in the same change.
+
+> **Normative.** Those named sites are **not a closed list**. Wherever
+> `core/types.py` or `core/protocols.py` states one of the rules §§1-4 replace,
+> the lane restates it in that same change. Two statements of one contract inside
+> `core` is the failure no conformance suite catches, and an enumeration written
+> a lane ahead of the edit is not the thing that has to be true.
+
 > **Normative.** The implementing lane changes the duplicate lookup and the purge
 > of **every** `NotificationStore` implementation together with the shared
 > conformance suite, in one change: the SQLite store, the canonical fake in
