@@ -1349,6 +1349,40 @@ def test_ship_binds_when_the_floor_test_is_not_beside_it(tmp_path: Path) -> None
     assert "floor_test.py is missing" in result.stderr
 
 
+#: Patches that are not the shape `Pr._sections` reads. The first is round 9's
+#: worked case — a changed line with no section and no hunk around it; the second
+#: is a hunk opened before any `diff --git`.
+_MALFORMED_PATCHES = (
+    b"+renderPane\n",
+    b"@@ -1 +1 @@\n+renderPane\n",
+)
+
+
+@pytest.mark.parametrize("patch", _MALFORMED_PATCHES)
+def test_a_patch_this_reader_cannot_place_a_line_in_binds(tmp_path: Path, patch: bytes) -> None:
+    """§6 again: attribution that cannot be established is not a negative answer.
+
+    The fallback reads a changed line's *file* off the patch's own structure, so a
+    patch whose structure is missing leaves every line unattributable. Treating that
+    as "no source file carried it" clears the floor on an unevaluable input, which
+    is what §6 exists to forbid. Every added or removed line of a well-formed patch
+    sits inside a hunk of a section, so the reader can tell the difference.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("The pane is drawn by `renderPane`.")}, {_PLAN: "a note\n"})
+
+    out = _run_floor_test(
+        repo,
+        entries=[("M", _ADR, "")],
+        old=_git(repo, "rev-parse", "main"),
+        new=_git(repo, "rev-parse", "HEAD"),
+        pr_diff=patch,
+    )
+
+    assert out[0][1] == "bind"
+    assert "§6" in out[0][2]
+
+
 # --- §6's disclosure: the record names the test, per floor path ---------------
 
 
