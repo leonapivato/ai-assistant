@@ -49,7 +49,7 @@ import pytest
 
 _ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(_ROOT / "scripts"))
-from floor_test import _python_definitions, defined_names  # noqa: E402
+from floor_test import UnevaluableError, _python_definitions, defined_names  # noqa: E402
 
 # --- Python: one case per binding form ----------------------------------------
 
@@ -102,23 +102,27 @@ _DOES_NOT_BIND = {
 @pytest.mark.parametrize("form", _BINDS)
 def test_every_python_binding_form_reaches_the_index(form: str) -> None:
     """Each is a definition Python makes, so each must be a symbol §3 can bind on."""
-    assert "render" in _python_definitions(_BINDS[form].encode()), form
+    assert "render" in _python_definitions(_BINDS[form].encode(), "m.py"), form
 
 
 @pytest.mark.parametrize("form", _DOES_NOT_BIND)
 def test_a_name_python_only_uses_is_not_a_definition(form: str) -> None:
     """Binding a name locally is not defining the thing the citation names."""
-    assert "render" not in _python_definitions(_DOES_NOT_BIND[form].encode()), form
+    assert "render" not in _python_definitions(_DOES_NOT_BIND[form].encode(), "m.py"), form
 
 
-def test_a_python_file_that_will_not_parse_falls_back_rather_than_failing() -> None:
-    """One unparseable file is not an unevaluable test (ADR-0209 §6).
+def test_a_python_file_that_will_not_parse_binds_under_section_6() -> None:
+    """A parse failure is §6's own first named instance, not a cue to guess.
 
-    §6 binds a *test* that cannot be evaluated. A single file of several hundred
-    that will not parse is not that: the reader falls back to the line-oriented
-    one, which is the generous direction, and the rest of the tree still answers.
+    This module carried a line-oriented fallback for exactly this case, and
+    adversarial review of PR #1803 found it short of `type Widget = object`: the
+    file's real definition drops out of the index, so a moved ADR citing it clears
+    a floor that was owed. That is the fifth appearance of one defect — a grammar
+    read by a pattern the pattern does not have — and the answer is to stop
+    reading the grammar. Raising binds, which is loud and is the priced direction.
     """
-    assert "render" in _python_definitions(b"render = 1\ndef (:\n")
+    with pytest.raises(UnevaluableError, match="will not parse"):
+        _python_definitions(b"type Widget = object\ndef (:\n", "src/pkg/broken.py")
 
 
 # --- The corpus, both directions ----------------------------------------------

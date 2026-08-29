@@ -65,9 +65,10 @@ answering it twice would restore the match this closes.
 **That is an evaluation, not a failure to evaluate.** §6 binds a test that
 *cannot* be evaluated; a token searched for and demonstrably found nowhere has
 been evaluated, and the answer is that it is not a symbol. What binds under §6 is
-the resolver failing — an endpoint git will not read — and it does, through the
-same ``except`` every other test here falls into. The search is deliberately
-generous in the other direction, per ADR-0209 §5's asymmetry.
+the resolver failing — an endpoint git will not read, or a Python file that will
+not parse — and it does, through the same ``except`` every other test here falls
+into. The search is deliberately generous in every other direction, per ADR-0209
+§5's asymmetry.
 
 **Python is resolved; the other two languages are answered from the diff side
 instead.** All but four of this repository's source files are Python, and those
@@ -92,6 +93,13 @@ never for a function inside one. What is left over-binds only where a moved ADR
 names a word some JavaScript or shell line of the diff happens to carry — the
 priced direction, and rare on four tracked files. Prose is still not source,
 which is the whole of what #1799 was matching.
+
+**No pattern is left anywhere in this path, and that is the point.** The line
+reader for a Python file :mod:`ast` refuses was the last one, and adversarial
+review found it short of `type Widget = object` — the same defect a fifth time,
+now in the fallback rather than in the reader. So a file that will not parse binds
+under §6, which names a parse failure as its own first instance, instead of being
+read by a grammar nobody can finish enumerating.
 
 **One implementation, called from one place.** ADR-0209 §6 requires that
 ``scripts/ship.sh``'s acceptance loop and its ``--drill`` share it, and issue
@@ -160,9 +168,9 @@ _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 # A definition in one of the two contract files: a class, a `def`, or a bound
 # name — which is what an enum member and an annotated attribute look like.
 # ADR-0209 §4's second limb turns on "a name whose *definition* the move
-# changed", never on every identifier a hunk happens to contain. `_line_definitions`
-# reuses it for the one Python file `ast` refuses, so that the fallback is this
-# module's existing pattern rather than a second one.
+# changed", never on every identifier a hunk happens to contain. Nothing in §3's
+# symbol path reads it: a Python file `ast` refuses binds under §6 rather than
+# falling back to a pattern.
 # `--- a/path`, `+++ b/path`, `--- /dev/null`. The prefixes are pinned by the
 # caller's `_diff_opts` (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), so
 # these are the only three shapes the rendered patch can carry.
@@ -372,7 +380,7 @@ def _python_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]
     return blobs
 
 
-def _python_definitions(source: bytes) -> set[str]:
+def _python_definitions(source: bytes, path: str) -> set[str]:
     """Every name a Python module binds, decided by Python.
 
     ``Store`` context is the language's own statement of "a name is being bound
@@ -389,18 +397,29 @@ def _python_definitions(source: bytes) -> set[str]:
     same tree and supplies it. A parameter is excluded for the same reason: it binds
     a name without defining anything ADR-0088 §1's citation form could name.
 
+    **A file that will not parse binds, and is not read by a pattern instead.**
+    ADR-0209 §6 names "a parse failure at either endpoint" as its own first
+    instance, and the alternative was tried in this module and failed on its own
+    terms: a line-oriented fallback is another enumeration of Python's grammar, and
+    a form it lacks — `type Widget = object` was the one adversarial review found —
+    drops a real definition out of the index silently, which clears a floor that
+    was owed. Binding is loud, is the priced direction, and needs no grammar.
+
     Args:
         source: One file's bytes.
+        path: The name it was read under, for the reason §6 publishes.
 
     Returns:
-        The names, or the line-oriented reader's answer where the file will not
-        parse — the generous direction, and never an exception: one unparseable
-        file is not an unevaluable test.
+        Every name the module binds.
+
+    Raises:
+        UnevaluableError: the file will not parse, so the test over it is
+            undecidable and ADR-0209 §6 binds.
     """
     try:
         tree = ast.parse(source)
-    except SyntaxError, ValueError:
-        return _line_definitions(source)
+    except (SyntaxError, ValueError) as exc:
+        raise UnevaluableError(f"`{path}` will not parse: {exc}") from exc
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, _NAMED_DEFINITIONS):
@@ -421,29 +440,14 @@ def _python_definitions(source: bytes) -> set[str]:
     return names
 
 
-def _line_definitions(source: bytes) -> set[str]:
-    """Every name :data:`_DEFINITION_RE` finds — the reader for a file `ast` refused.
-
-    This is not a second grammar: it is §4's own Python definition pattern, reused
-    for the one case :func:`_python_definitions` cannot hand to the language. A
-    Python file that will not parse is rare and is not an unevaluable *test*, so
-    the module reads what it can rather than binding the whole move on it.
-    """
-    names: set[str] = set()
-    for line in source.decode("utf-8", errors="replace").splitlines():
-        match = _DEFINITION_RE.match(line)
-        if match is not None:
-            names.add(match.group("def") or match.group("cls") or match.group("bound"))
-    return names
-
-
 def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
     """Every name this repository's **Python** defines across ``commits``.
 
-    The set is over-inclusive by construction — a local counts, an unparseable
-    Python file falls back to the line reader — because it decides whether a
-    backticked token is a *symbol* at all, and ADR-0209 §5 prices over-binding as
-    acceptable and forbids the converse.
+    The set is over-inclusive by construction — a local counts, a name under a
+    `TYPE_CHECKING` guard counts — because it decides whether a backticked token is
+    a *symbol* at all, and ADR-0209 §5 prices over-binding as acceptable and
+    forbids the converse. A file that will not parse is the one case it cannot be
+    generous about, so that one raises and §6 binds.
 
     JavaScript and shell are deliberately absent: nothing resolves them, and a
     name of theirs reaches §3 through :attr:`Pr.non_python_changed_lines` instead.
@@ -456,12 +460,12 @@ def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
         The names, bare and unqualified.
 
     Raises:
-        UnevaluableError: git would not read a tree, which is ADR-0209 §6's case
-            and not this one's.
+        UnevaluableError: git would not read a tree, or a file it read will not
+            parse. Both are ADR-0209 §6's case.
     """
     names: set[str] = set()
-    for _path, blob in _python_blobs(repo, commits):
-        names |= _python_definitions(blob)
+    for path, blob in _python_blobs(repo, commits):
+        names |= _python_definitions(blob, path)
     return names
 
 
