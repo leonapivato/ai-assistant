@@ -1,6 +1,6 @@
 # 213. A record carries the topics it is about, proposed once at write and never inferred at read
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **One record is owed on an earlier ADR (ADR-0082 §1), and this change writes it.**
   §16 names the clause — ADR-0111 §4's second normative clause, which §1 amends by
