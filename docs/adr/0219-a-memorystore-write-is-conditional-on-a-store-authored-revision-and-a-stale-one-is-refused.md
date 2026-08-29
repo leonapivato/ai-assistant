@@ -667,6 +667,14 @@ extra="forbid"` — neither of which is true of this one.
 > never-reissued clause breached by the one path that writes a stamp without going
 > through a write.
 
+> **Normative.** **The migration rewrites no payload, asserted over the bytes.** The
+> migration test snapshots every legacy row's `data` blob before the migration runs
+> and compares it byte for byte afterwards. §10's clause is about the bytes and not
+> about the decoded value, so a migration that decoded each record and re-serialised
+> it — reformatting an instant, dropping a member this version ignores, or writing
+> `revision` into the payload §1 keeps out of it — would satisfy every other arm here
+> while breaching the one thing a migration over stored data must not do.
+
 > **Normative.** **`MemoryWrite`'s two invalid states are refused at construction**,
 > asserted in `core`'s own type tests rather than in the store suite, because they
 > never reach a store: an `IF_UNCHANGED` element with `expected_revision=None`, a
@@ -688,6 +696,15 @@ extra="forbid"` — neither of which is true of this one.
 > between the writer's read and its write; `MemoryWriterContract` binds
 > implementations against a store the suite does not drive that way, and an arm that
 > could not fail there would certify nothing. ADR-0028 §8's list is untouched.
+
+> **Normative.** **The enumeration above is a floor and not a ceiling.** Every clause
+> of §§1–4 and §10 that an implementation can fail is owed an arm. The list above
+> names the ones whose absence would otherwise be non-obvious, each with the failure
+> it exists to catch, and it is written that way deliberately: a conformance list read
+> as exhaustive is ADR-0108 §4's "false-shelter shape" at one more remove, this time
+> in the suite rather than in the contract. So a lane implementing this ADR adds the
+> arm a normative clause needs whether or not that clause is listed here, and no
+> implementation is conformant on the ground that a rule it breaches has no arm above.
 
 ### 8. What this ADR does not decide
 
