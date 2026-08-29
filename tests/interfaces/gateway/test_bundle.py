@@ -793,9 +793,9 @@ def test_the_page_says_what_a_resumed_thread_already_holds() -> None:
 
     assert '<p class="hint" id="resumed" hidden></p>' in document
     assert "sayResumed(describeHeld(digest.conversation));" in functions["resumeConversation"]
-    assert (
-        'relay(half, "/conversation", { conversation_id: id }' in (functions["resumeConversation"])
-    )
+    resuming = functions["resumeConversation"]
+    assert '"/conversation",' in resuming
+    assert "{ conversation_id: id }," in resuming
 
 
 def test_the_resumed_line_is_built_from_the_digest_and_from_nothing_else() -> None:
@@ -838,6 +838,33 @@ def test_a_resumed_count_is_cleared_by_every_route_that_could_make_it_stale() ->
     # through and puts back a count the answer had just made short.
     assert "described += 1;" in functions["sayResumed"]
     assert "chose" not in functions["resumeConversation"]
+
+
+def test_a_digest_read_is_stopped_when_the_line_it_would_write_is_cleared() -> None:
+    """Adversarial review round 2: a guard on the rendering leaves the refusal open.
+
+    ``relay`` classifies a refusal and writes it into the panel's fault slot itself,
+    before any caller sees a value — so an abandoned digest for a thread destroyed
+    elsewhere reported "There is no conversation of that name" over a panel that was
+    about something else, and no comparison after the ``await`` could take that back
+    without also erasing a fault the current act had legitimately written.
+
+    Clearing the line and stopping the read behind it are therefore one act, in one
+    place, reached by every route that invalidates the line.
+    """
+    functions = _functions(_code("app.js"))
+    saying = functions["sayResumed"]
+    resuming = functions["resumeConversation"]
+
+    assert "stopping.abort();" in saying
+    # Cleared before the abort, so a `sayResumed` reached *from* the abort's own
+    # rejection cannot abort a controller a later press has since registered.
+    assert saying.index("describing = null;") < saying.index("stopping.abort();")
+    assert "const stopping = new AbortController();" in resuming
+    assert "describing = stopping;" in resuming
+    # An abort is not a transport failure, and reporting it would put back the very
+    # condition the abort exists to suppress.
+    assert "if (described === mine) {" in resuming
 
 
 def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() -> None:

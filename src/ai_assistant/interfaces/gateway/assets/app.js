@@ -391,9 +391,38 @@ function setConversation(id) {
 // this function, wherever it was reached from.
 let described = 0;
 
+// The digest read this view is waiting on, or `null`.
+//
+// **Held so that a read nobody is waiting for is stopped rather than ignored**
+// (adversarial review round 2, `major`). A guard on the *rendering* path is not
+// enough, because a refusal is not rendered by the caller: `relay` classifies it and
+// writes it into the panel's fault slot itself, at nineteen call sites, before any
+// caller sees a value. So a stale digest for a thread the owner has left — one
+// destroyed from a terminal while its read was in flight — reported "There is no
+// conversation of that name" over a panel whose selection and resumed line were
+// about something else entirely, and no comparison after the `await` could take it
+// back without also erasing a fault the *current* act had legitimately written.
+//
+// Aborting is what makes the whole question go away: a request that never settles
+// classifies nothing, writes nothing and needs no guard. It also costs nothing,
+// because this read is a courtesy — the thread was continued the moment the owner
+// pressed, and ADR-0175 §6's `conversation` is a pure read with nothing to undo.
+let describing = null;
+
 // What the thread being continued already holds, or nothing (#1371's second clause).
+//
+// **Clearing the line is also the moment the read behind it stops being wanted**, so
+// the two happen together and in one place. Every route that invalidates the line
+// comes through here — another conversation chosen, the thread left, a turn's own
+// answer, the session ending — and each of them is equally a reason to stop waiting
+// on a digest about what is no longer on screen.
 function sayResumed(text) {
   described += 1;
+  if (describing !== null) {
+    const stopping = describing;
+    describing = null;
+    stopping.abort();
+  }
   const held = el("resumed");
   held.textContent = text === null ? "" : text;
   held.hidden = text === null;
@@ -5539,6 +5568,13 @@ function renderConversation(list, summary) {
 // land before the digest, and it would otherwise re-render a count short by the turn
 // that had just been recorded — adversarial review round 1, and the reason the guard
 // is `described` rather than `chose`.
+//
+// **And the read is armed with a way to be stopped**, because `described` alone
+// guards only what this function renders and a refusal is written by `relay` before
+// this function sees anything (adversarial review round 2). `changeConversation`
+// above has already aborted whatever read the previous press left in flight — it
+// goes through `sayResumed`, which is where clearing the line and stopping the read
+// behind it are one act — so what is registered here is only ever this press's.
 async function resumeConversation(id) {
   fault(null, "conversations");
   changeConversation(id);
@@ -5549,14 +5585,32 @@ async function resumeConversation(id) {
     showBootstrap();
     return;
   }
+  const stopping = new AbortController();
+  describing = stopping;
   try {
-    const digest = await relay(half, "/conversation", { conversation_id: id }, "conversations");
+    const digest = await relay(
+      half,
+      "/conversation",
+      { conversation_id: id },
+      "conversations",
+      stopping
+    );
     if (digest === null || described !== mine) {
       return;
     }
+    // Cleared before the write, because `sayResumed` aborts whatever is registered
+    // and this read is the thing it would abort.
+    describing = null;
     sayResumed(describeHeld(digest.conversation));
   } catch (_) {
-    fault(GATEWAY_GONE, "conversations");
+    // **An abort is not a transport failure**, and the comparison is what tells them
+    // apart: this rejection is either the socket giving up on a read the owner is
+    // still waiting for, or `sayResumed` having stopped one they are not. Only the
+    // first is news, and reporting the second would put the condition it exists to
+    // suppress back on screen under a different name.
+    if (described === mine) {
+      fault(GATEWAY_GONE, "conversations");
+    }
   }
 }
 
