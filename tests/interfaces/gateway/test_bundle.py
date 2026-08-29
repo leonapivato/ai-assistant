@@ -840,6 +840,38 @@ def test_a_resumed_count_is_cleared_by_every_route_that_could_make_it_stale() ->
     assert "chose" not in functions["resumeConversation"]
 
 
+def test_a_request_its_caller_stopped_classifies_nothing_even_after_a_head() -> None:
+    """Adversarial review round 4: aborting shuts one window and not the other.
+
+    ``fetch`` settles when the *head* lands, so a refusal's head can arrive before the
+    abort and its body read reject afterwards. ``readBody`` swallows that rejection —
+    right for the refusal path it was written for, because a proxy really can replace
+    a condition, and wrong here: ``{}`` comes back and the panel is told "The gateway
+    refused that request (HTTP 404)" about a thread the owner has left.
+
+    It throws rather than returning ``null``, because ``null`` says "refused, and the
+    condition is already on screen" at nineteen call sites and neither half holds. The
+    true statement is that no response was read, which is where ADR-0177 §7's fourth
+    clause already puts the other caller that passes a controller.
+
+    **Asserted here rather than driven**, and ADR-0216 §2 is the ground: this is a
+    property of the shipped bytes, and the ordering it turns on — a head delivered and
+    its body then withheld — is not constructible against a real gateway from a route
+    handler. A browser case for it would have to fabricate the gateway's response,
+    which is the author's belief checked against itself (ADR-0216 §1) rather than
+    evidence. What *is* drivable — an abort before the head — is driven, twice, in
+    ``test_browser_conversations.py``.
+    """
+    relaying = _functions(_code("app.js"))["relay"]
+
+    assert "if (stopping !== undefined && stopping.signal.aborted) {" in relaying
+    assert "throw stopping.signal.reason;" in relaying
+    # After the body read and before anything is classified from it: an abort that
+    # lands *during* the read is the case, so a check before it would miss it.
+    assert relaying.index("await readBody(response)") < relaying.index("signal.aborted")
+    assert relaying.index("signal.aborted") < relaying.index("refused(panelId")
+
+
 def test_a_digest_read_is_stopped_when_the_line_it_would_write_is_cleared() -> None:
     """Adversarial review round 2: a guard on the rendering leaves the refusal open.
 

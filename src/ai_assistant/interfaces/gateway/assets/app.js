@@ -5441,6 +5441,28 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
     return asObject(await response.json());
   }
   const body = await readBody(response);
+  // **A request the caller stopped classifies nothing, even once a head has arrived**
+  // (adversarial review round 4, `major`). `readBody` swallows a rejection, which is
+  // right for the refusal path it was written for — a proxy really can replace a
+  // condition — and wrong for an abort: the head lands, `sayResumed` aborts, the body
+  // read rejects, `{}` comes back, and the panel is told "The gateway refused that
+  // request (HTTP 404)" about a thread the owner left. That is the stale fault round 2
+  // closed, arriving through the one window aborting the request does not shut.
+  //
+  // **It is thrown rather than returned as `null`**, because a `null` says "refused,
+  // and the condition is already on screen" at nineteen call sites and neither half of
+  // that is true here. What is true is that no response was read — which is exactly the
+  // ending the other caller passing a controller is written against: ADR-0177 §7's
+  // fourth clause makes "the request was sent and no response was read" an outcome that
+  // is **not known**, and a park's answer reaches that branch through its `catch`. So
+  // this puts both callers where their own reasoning already puts them.
+  //
+  // `signal.reason` rather than a constructed error: it is what the abort carried, and
+  // on an engine too old to supply one this throws `undefined`, which both callers
+  // catch identically.
+  if (stopping !== undefined && stopping.signal.aborted) {
+    throw stopping.signal.reason;
+  }
   // Every other request that names a conversation goes through here — the digest, the
   // forget, and `observe`, which sends this view's selection exactly as `ask` does.
   conversationLost(body, payload.conversation_id);
