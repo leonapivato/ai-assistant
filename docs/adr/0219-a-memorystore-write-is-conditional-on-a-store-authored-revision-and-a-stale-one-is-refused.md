@@ -480,6 +480,18 @@ and §10 orders the changes.
 > obligation falls on the change that adds the error — §10's first — in that change,
 > with its own entry in `wire/envelope.py`'s log naming this ground.
 
+> **Normative.** **The bump and the error class are the same change, which is what
+> lets §10's second owe no second bump.** `MemoryStoreStaleError` is added to
+> `core/errors.py` in §10's first change and the bump is made in that same change, so
+> **no tree exists in which a peer carries the new version and not the class**: a peer
+> that may be handed the code has it defined and resolves it, and a peer that does not
+> is at the old version, where the guard refuses it outright. By the time §10's second
+> change makes an emission reachable through `AssistantEngine.learn`, every admitted
+> peer already decodes the code — so the ground is spent rather than left unspent, and
+> no lane reads "one ground, spent once" (§10) as leaving a window. Bumping at the
+> change that **adds** a wire-renderable error rather than at the one that first
+> **emits** it is the conservative direction of §9's test and never a laxer one.
+
 > **Normative.** **`MemoryBase.revision` is not a ground and is not cited as one.**
 > The field is additive and defaulted on a type that does not set `extra="forbid"`,
 > and ADR-0213 §11's ruling on the same envelope governs it: it would move nothing
@@ -571,6 +583,18 @@ extra="forbid"` — neither of which is true of this one.
 > **Normative.** **An absent id is refused.** An `IF_UNCHANGED` element whose id
 > names no stored row raises `MemoryStoreStaleError` and writes nothing, including
 > where the row was deleted after the caller read it.
+
+> **Normative.** **§4's inheritances are asserted at the new door and not assumed
+> from the old ones.** The suite's existing cross-kind cases are taken at `add`, at
+> `UPSERT` and at `INSERT_IF_ABSENT`, so none of them reaches this mode. An
+> `IF_UNCHANGED` element naming a stored record of a **different** `kind` and carrying
+> that row's **current** revision is refused with `MemoryStoreError` and commits
+> nothing; the current revision is what makes the arm bite, since an implementation
+> checking staleness alone would let it through on the one input that is not stale.
+> Beside it, presence is physical: an `IF_UNCHANGED` write against an **expired or
+> window-closed** row, at that row's current revision, **lands** — the conditional
+> window-close ADR-0045 §4's applier makes. And a batch naming one id twice is refused
+> before the transaction opens whatever modes its two elements carry.
 
 > **Normative.** **The revision is store-authored.** A record submitted with a
 > non-default `revision` is stored at the revision the assignment rule gives it, and
