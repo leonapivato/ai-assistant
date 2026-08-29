@@ -187,6 +187,39 @@ mechanics of withholding at supply.
 > would have stamped `False` is written with the default. No other member of any `core`
 > type changes its type, its default or its meaning.
 
+> **Normative.** **`Placement`'s legal states are enumerated and are refused at
+> construction**, by a validator on the type, so no producer, decode or later lane can
+> represent a combination this ADR does not mean. The table is total:
+>
+> | `set_by` | permitted `reach` | `set_at` |
+> | --- | --- | --- |
+> | `None` | `ANYONE` only | `None` only |
+> | `DERIVED` | `OWNER` only | set, or `None` for §9's decode of a pre-field record |
+> | `PROPOSED` | `OWNER` only | set, or `None` for §9's decode of a pre-field record |
+> | `OWNER_ACT` | `ANYONE` or `OWNER` | set |
+>
+> and the three refusals it states are: a `set_by` of `None` with any reach but
+> `ANYONE`, or with a `set_at`; a `set_by` of `DERIVED` or `PROPOSED` with reach
+> `ANYONE`; and a `set_at` with no `set_by`.
+
+> **Normative.** The two refusals that matter are the two that are otherwise
+> **silent**. `Placement(reach=ANYONE, set_by=DERIVED)` would be a record the
+> derivation narrowed rendered speakable on a channel of unbounded audience — the
+> laundering ADR-0204 §5 exists to stop, reachable by construction rather than by a
+> mistake in any rule. `Placement(reach=OWNER, set_by=None)` would be a narrowing no
+> setter is accountable for: §3's precedence could not decide whether an act may lift
+> it, and §1's reading of an absent setter would be false of it. Neither is a state any
+> clause of this ADR produces, so refusing them costs nothing and closes the two
+> routes by which a bug elsewhere becomes a disclosure.
+
+> **Normative.** A `set_at` of `None` beside a setter is **unknown, never
+> unrecorded-therefore-recent**, and it arises on exactly one path: §9's decode of a
+> record written before this field existed, which carries no instant for an act nobody
+> timed. No lane, implementation or later ADR reads such a `None` as evidence about
+> when the narrowing was made, and no surface renders it as one. This is ADR-0109's
+> reading of `last_confirmed_at` and ADR-0204 §1's fourth clause, applied to the one
+> place this type inherits the same gap.
+
 > **Normative.** A `Placement` whose setter is `None` states that **nothing has
 > narrowed this record**, and on a record written after this field lands that is a
 > measurement and not merely a default, exactly as ADR-0204 §1's third clause says of
@@ -852,8 +885,9 @@ ADR-0201 closed.
 > **Normative.** **A record already in a store is decoded, never defaulted.** The
 > implementing lane maps a `provenance.supplied_withheld_content` of `true` to a
 > placement of reach `OWNER` and setter `DERIVED` at **decode**, and `false` or absent
-> to the default. The mapping is total, one-directional and applied wherever a record
-> carrying the legacy member is decoded, and no lane relies on a separate migration pass
+> to the default. The decoded placement carries **no `set_at`**, on §1's unknown
+> reading — nothing timed an act that predates the field. The mapping is total,
+> one-directional and applied wherever a record carrying the legacy member is decoded, and no lane relies on a separate migration pass
 > or on a store being rewritten before it is read. **The load-bearing site is the
 > persistent store**, which holds records written under ADR-0204 and is read on the
 > first turn after the upgrade; the wire is covered by the same mapping and by the
@@ -900,6 +934,12 @@ ADR-0201 closed.
 > **Normative.** The lane pins **the floors**: a widening act on a record whose
 > `about_person` is stated leaves it withheld from an unbounded channel, and no
 > placement admits a Tier 0 value anywhere.
+
+> **Normative.** The lane pins **every refusal of §1's state table**, one arm each, at
+> construction **and** on deserialisation, because a validator that runs only on the
+> first leaves the second as the route in: `reach=ANYONE` with `set_by=DERIVED` is
+> refused, and so is it with `PROPOSED`; `reach=OWNER` with `set_by=None` is refused;
+> a `set_at` with no `set_by` is refused; and every row of the table is constructible.
 
 > **Normative.** The lane pins **the decode**: a stored record carrying
 > `supplied_withheld_content: true` and no placement decodes to reach `OWNER`, setter
