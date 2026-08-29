@@ -44,8 +44,12 @@
   makes a **breaking change**, flagged here in terms — adds one field to `MemoryBase`
   in `core/types.py`, removes one from `Provenance` in the same file, adds three
   `core` types (`Placement`, `PlacementReach`, `PlacementSetter`) and two members to
-  `RoutableOperation`. So this ADR is its own PR, ratified and merged before anything
-  implements against it (golden rule 5, ADR-0015 §5), and it owes **both** lenses:
+  `RoutableOperation`, adds one member to `FeedbackEvent`, and **changes the
+  behavioural contract of the `FeedbackProcessor` Protocol** without moving its
+  signature (§7) — which golden rule 5 reaches, because a Protocol change is a change
+  to what an implementation must do and not only to how it is called. So this ADR is
+  its own PR, ratified and merged before anything implements against it (golden rule 5,
+  ADR-0015 §5), and it owes **both** lenses:
   adversarial and architecture, on ADR-0015 §1 and `CONTRIBUTING.md` → "Stop when the
   required reviews are green". It adds **no new** Protocol and no member to any
   Protocol other than `AssistantEngine`, and no `Settings` field. It adds two wire
@@ -611,6 +615,29 @@ would fail that test on the first turn.
 > placement would be deciding disclosure in the thinnest layer in the system. The
 > adapter sets a field; `learning/` reads it.
 
+> **Normative.** Honouring `guarded` is a change to the **`FeedbackProcessor`
+> Protocol's behavioural contract**, and it is stated as one rather than left to read
+> as a change in one implementation. Implementations of that Protocol are
+> interchangeable behind `core/protocols.py`, so one that built its normal proposal and
+> ignored the member would be structurally conformant and would silently discard an
+> explicit owner act. Golden rule 5 reaches a change to what an implementation must do
+> and not only to how it is called, which is why this ADR decides it.
+
+> **Normative.** It therefore carries that Protocol's own obligations, in the **same
+> change** as the member: `FeedbackProcessorContract` gains a guarded-event arm,
+> every implementation bound to that suite is made to pass it, and the canonical fake
+> in `ai_assistant.testing` honours the member. A fake that ignores it would put a
+> default placement on records in every orchestration and world test that uses one,
+> which is the silent loss this clause exists to prevent.
+
+> **Normative.** The member and its honouring land **atomically**, and no tree ever
+> accepts `guarded=True` without acting on it. A `core` member a client may set and a
+> hub may ignore is a fail-open window on the promoted surface — a caller's explicit
+> guard accepted, recorded nowhere, and the record speakable — and the version bump
+> that admits such a caller is what makes it reachable rather than theoretical. §11
+> puts the member, the processor, the suite arm and the fake in one change for this
+> reason and no other.
+
 > **Normative.** The owner's explicit act **after the fact** is two members added to
 > the `AssistantEngine` Protocol (`core/protocols.py`), whose signatures are exactly:
 >
@@ -765,10 +792,11 @@ ADR-0201 closed.
 > `Provenance` loses `supplied_withheld_content`; `Placement`, `PlacementReach` and
 > `PlacementSetter` are added; `FeedbackEvent` gains `guarded: bool = False`;
 > `RoutableOperation` gains `GUARD` and `UNGUARD`; and the `AssistantEngine`
-> **Protocol** gains `guard` and `unguard` with §7's signatures. No other Protocol and
-> no member of one — `FeedbackProcessor`'s signature does not move, because the member
-> rides the event it already takes — no `Settings` field, no `ContextFacet`, no
-> `NotificationCandidate` member.
+> **Protocol** gains `guard` and `unguard` with §7's signatures. `FeedbackProcessor`'s
+> **signature** does not move — the member rides the event it already takes — but its
+> **behavioural contract** does, per §7. No other Protocol changes in either sense, and
+> there is no `Settings` field, no `ContextFacet` and no `NotificationCandidate`
+> member.
 
 > **Normative.** The Protocol change is the reason this ADR is ratified and merged
 > before anything implements against it, and it is stated rather than left to be
@@ -777,8 +805,13 @@ ADR-0201 closed.
 > (ADR-0085 §1), provided by `orchestration` and consumed by `interfaces` — so adding
 > to it is golden rule 5's breaking change and carries golden rule 5's obligations.
 
-> **Normative.** **`PROTOCOL_VERSION` moves for this change**, on **two independent
-> grounds**, and ADR-0124 §9's test is applied rather than asserted past.
+> **Normative.** **`PROTOCOL_VERSION` moves for this decision**, on **two independent
+> grounds**, and ADR-0124 §9's test is applied rather than asserted past. It moves
+> **once per change that changes a frame**: §11's first change moves it on the two
+> grounds below, and §11's second moves it again for `FeedbackEvent.guarded`, a member
+> a client sets. Two entries in `wire/envelope.py`'s log, each naming its own reason,
+> is what that file's own practice requires; collapsing them into one bump would leave
+> a released version whose log entry does not describe it.
 
 > **Normative.** The **first ground is the promoted surface's method set.** §7 adds
 > `guard` and `unguard` to `AssistantEngine`, and ADR-0210 §8 names that limb of
@@ -902,11 +935,12 @@ ADR-0201 closed.
 > clause exists for — a classification call added at a read — which every other arm
 > here would let through.
 
-> **Normative.** The lane pins **the write-time act**: a `FeedbackEvent` carrying
-> `guarded=True` produces records placed reach `OWNER` with setter `OWNER_ACT`; one
-> carrying the default produces records placed by §6's default; and the flag reaches the
-> processor unread by any adapter, so the arm is taken at the `learning/` seam and not
-> through the CLI.
+> **Normative.** The lane pins **the write-time act on the shared
+> `FeedbackProcessorContract`**, so that every implementation and the canonical fake
+> are bound by it and not one of them: a `FeedbackEvent` carrying `guarded=True`
+> produces records placed reach `OWNER` with setter `OWNER_ACT`, and one carrying the
+> default produces records placed by §6's default. The arm is taken at that seam and
+> not through the CLI, because the flag reaches the processor unread by any adapter.
 
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
@@ -951,17 +985,24 @@ ADR-0201 closed.
 > when it opens, because a change spanning `core`, `orchestration`, `wire` and
 > `testing` is otherwise more than one change.
 
-> **Normative.** §4's model proposal **and** the `FeedbackProcessor`'s honouring of
-> `FeedbackEvent.guarded` are a **second change**, in `learning/` and its tests alone.
-> It lands after the first and depends on it, and it changes no `core` definition and
-> no Protocol. Between the first change and this one the member exists and nothing
-> honours it, which is behaviour-neutral because its default is `False`.
+> **Normative.** The **second change** is §7's write-time act, entire and atomic:
+> `FeedbackEvent.guarded` in `core/types.py`, the `FeedbackProcessor` implementations
+> in `learning/` that honour it, the guarded-event arm on `FeedbackProcessorContract`,
+> `FakeFeedbackProcessor` in `ai_assistant.testing`, and its own `PROTOCOL_VERSION`
+> bump with its `wire/envelope.py` entry. It spans `core`, `learning` and `testing` on
+> `CLAUDE.md`'s contract-seam exception (ADR-0137 §2) — a contract member, the
+> conformance suite that binds it, the canonical fake and the primary implementation
+> are one unit of work — and §7's last clause is why no split of it is admissible.
+
+> **Normative.** §4's model proposal is a **third change**, in `learning/observer.py`
+> and its tests alone. It lands after the first, is independent of the second, and
+> changes no `core` definition and no Protocol.
 
 > **Normative.** `assistant learn --guarded` and any rendering of a placement are a
-> **third change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
+> **fourth change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
 > adapters are thin"): the adapter sets `FeedbackEvent.guarded` and decides nothing.
-> It lands after the second, because a flag that reaches a processor which ignores it
-> is a control that silently does nothing.
+> It lands after the second, because a flag reaching a processor that ignored it would
+> be a control silently doing nothing.
 
 > **Normative.** No lane reads the ordering above as licence to widen any of the three.
 > Anything not named in one of them is a change of its own.
@@ -1065,16 +1106,18 @@ runs only where a provider was already being consulted — and the read stays a 
 But the corpus has not had a model write into a disclosure decision before, and a reader
 should see that stated rather than discovered.
 
-**`PROTOCOL_VERSION` moves, so every spoke redeploys.** That is the cost of moving a
-member of a wire-carried `core` type rather than changing a value a hub computes, and §9
-takes it deliberately in preference to a silent disagreement between a hub and a spoke
-about a disclosure-bearing field.
+**`PROTOCOL_VERSION` moves twice, so every spoke redeploys twice.** That is the cost of
+moving a member of a wire-carried `core` type and of adding the promoted surface's two
+operations, and then of a second member a client sets. §9 takes it deliberately in
+preference to a silent disagreement between a hub and a spoke about a disclosure-bearing
+field, and §11's ordering means neither redeployment is on a tree that accepts an
+instruction it does not act on.
 
 **A store carries `DERIVED` narrowings the owner cannot lift.** §12 names it as a residue
 with two ratified escapes. It is the price of keeping ADR-0204 §5's closing prohibition,
 and #1708 is why that price is worth paying.
 
-**Three changes follow, not one**, and §11 orders them and bounds each. The first is
+**Four changes follow, not one**, and §11 orders them and bounds each. The first is
 large and cannot be made smaller: the field move, its decode mapping and every
 production reader of the removed field are one commit, because any split of them is a
 tree that does not type-check or a deployment that widens every narrowed record. It
