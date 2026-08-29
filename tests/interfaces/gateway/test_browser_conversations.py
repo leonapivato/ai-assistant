@@ -177,16 +177,21 @@ async def test_the_row_the_owner_taps_names_the_conversation_it_will_continue(
     responses, and a listing keyed by activity and an indicator keyed by a tap are
     exactly the pair that can disagree.
 
-    It is also laid out so an id cannot push the row off a phone: the name has the
-    whole width of the row, and the page scrolls no further sideways than it did.
+    It is also laid out so an id cannot push the row off a phone, and the ids seeded
+    here are what makes that assertion mean anything: an id is a hub value with no
+    bounded length and **no spaces to break at**, so a row of ``c-1`` and ``c-2``
+    would scroll no further sideways whether the wrapping rule were there or not
+    (adversarial review round 5). These are unbroken and far wider than 390px, which
+    is #1385's "Remo ve" one row over.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        _seed(drive, "c-1", turns=3)
-        _seed(drive, "c-2", turns=1)
+        long = "conversation-" + "x" * 120
+        _seed(drive, long, turns=3)
+        _seed(drive, long.upper(), turns=1)
         await drive.page.set_viewport_size({"width": 390, "height": 844})
         await _open_listing(drive)
         named = await _first_row(drive).locator(".conversation-name").inner_text()
-        assert named in {"Conversation c-1", "Conversation c-2"}
+        assert named in {f"Conversation {long}", f"Conversation {long.upper()}"}
         await _first_row(drive).get_by_role("button", name="Continue").click()
         await drive.page.wait_for_selector("#resumed:not([hidden])")
         said = await drive.page.inner_text("#conversation")
