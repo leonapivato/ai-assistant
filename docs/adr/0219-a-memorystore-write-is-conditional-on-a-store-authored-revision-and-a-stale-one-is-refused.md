@@ -151,8 +151,8 @@ rather than merely narrowing.
 ### 1. The token is a store-authored `revision` on `MemoryBase`
 
 > **Normative.** `MemoryBase` gains one field, `revision: int`, defaulting to `0`
-> and constrained `ge=0`. It is the record's concurrency token: the store's own
-> count of how many times a row has been stored at that id.
+> and constrained `ge=0`. It is the record's concurrency token: the stamp the store
+> issued for the write that stored this row.
 
 > **Normative.** The field is **store-authored**. A store assigns it, and a
 > submitted record's value is never persisted: `add` and every `write_atomic`
@@ -160,11 +160,17 @@ rather than merely narrowing.
 > producer, applier, policy, writer or client sets it, and no implementation reads a
 > submitted `revision` for any purpose other than nothing.
 
-> **Normative.** The assignment rule is exactly two clauses. Where an id names **no
-> stored row**, the row is stored with `revision` `0`. Where an id **names a stored
-> row**, the row that replaces it is stored with that row's `revision` **plus one**.
-> The rule binds every write path on every implementation — `add` and each of
-> `write_atomic`'s modes alike.
+> **Normative.** The assignment rule is one clause and it is **never-reissued
+> within the store**: every write that stores a row — `add` and each of
+> `write_atomic`'s modes alike, on every implementation — stamps it with a value the
+> store has never issued before and will never issue again for the life of that
+> store, whatever id it is stored at and whatever was stored there previously. A
+> store issues from any source that satisfies that; it is not obliged to issue in any
+> particular order, and it is not a per-id count.
+
+> **Normative.** `0` is issued by no store and is the field's default, so a record
+> no store has stored is distinguishable from every record a store has stored, and no
+> caller-constructed default can equal a stored value.
 
 > **Normative.** Every read that returns a record returns the `revision` the store
 > holds for that row: `get`, `get_many`, `search`, `list_beliefs`, `export` and
@@ -173,20 +179,26 @@ rather than merely narrowing.
 > the default.
 
 > **Normative.** The operative property, which is what a conditional write is
-> decided against, is **inequality and never ordering**: after any write that stores
-> a row at an id, a read of that id returns a `revision` different from the one any
-> earlier read of the same standing row returned. No caller compares two revisions
-> with `<`, infers an interval from their difference, or reads a revision as a count
-> of anything it may act on. That the shipped stores reach inequality by
-> incrementing is the mechanism, not the promise.
+> decided against, is **inequality and never ordering**: two records carry equal
+> revisions only where they are the same stored row, unrewritten, between the two
+> reads that observed them. No caller compares two revisions with `<`, infers an
+> interval or an age from their difference, reads one as a count of anything, or
+> derives from two revisions which of the two writes happened first. That an
+> implementation reaches never-reissued by issuing from a monotonic sequence is the
+> mechanism, not the promise, and nothing may be built on it.
 
-> **Normative.** `delete` destroys a row and the revision with it, and an id stored
-> again after a delete starts at `0`. A conditional write therefore cannot
-> distinguish "unchanged at revision 0" from "deleted and stored again at revision
-> 0", and §3's presence rule is what bounds that: `IF_UNCHANGED` is not an insert
-> path and refuses an absent id, so the case needs a delete *and* a re-mint of the
-> same probabilistic id, which is the collision `INSERT_IF_ABSENT` already exists to
-> refuse (ADR-0046 §2). It is named here rather than left to be discovered.
+> **Normative.** **A deleted-and-recreated id is a changed record, and the stamp
+> makes it one.** `delete` destroys a row; a row stored again at that id takes a
+> fresh stamp the store has never issued, so an `IF_UNCHANGED` expecting the
+> destroyed row's stamp is **refused**. This is why the stamp is never-reissued
+> rather than a per-id counter, and the case is exactly why: `MemoryStore.delete` is
+> unconditional and `add` takes a **producer-owned** id — an external system's
+> identifier is that system's idempotency key (ADR-0038 §2a) — so a delete followed
+> by an ordinary `add` or `UPSERT` at the same id needs no re-mint and no
+> `INSERT_IF_ABSENT`, and a per-id counter that restarted would let a stale write
+> land on the replacement. Nothing about this rule obliges a store to retain
+> anything of a deleted record: what survives a delete is the store's issuer, which
+> holds no record, no id and no content.
 
 **On the envelope, and this is ADR-0045 §2's own placement rule applied rather than
 worked around.** §2 put `validity` on `MemoryBase` because "The window is a
@@ -246,10 +258,15 @@ from a record it read would carry the right value by construction; a caller
 assembling one from a record it built — which is what a fold does, and what
 ADR-0045 §4's applier does for the correction `P` — would carry the field's default
 of `0` and silently expect "the row has never been rewritten". That is a fail-open
-expectation on the exact path this mode exists to guard, and it is unreachable when
-the expectation is a separate field a validator requires. It is also the ratified
-shape: `ExecutionState` carries `version` and `StepTransition` carries
-`expected_version`, and the reason they are two fields is this one.
+expectation on the exact path this mode exists to guard, and the separate field a
+validator requires makes it unreachable. §1's value space closes the same case a
+second time from the other side — `0` is issued by no store, so an expectation of
+`0` matches no stored row and would refuse rather than land — and the two are stated
+as two because neither should be the only one: the validator catches the caller's
+mistake at construction, where it is diagnosable, rather than at a write that
+mysteriously always refuses. It is also the ratified shape: `ExecutionState` carries
+`version` and `StepTransition` carries `expected_version`, and the reason they are
+two fields is this one.
 
 **`MemoryWrite` is frozen and stays frozen**, for the reason its docstring gives —
 "a value that governs whether records are *skipped* must not be reconstructible by
@@ -502,6 +519,24 @@ extra="forbid"` — neither of which is true of this one.
 > `IF_UNCHANGED`, reads back with a different revision after each — the inequality
 > §1 promises, asserted on each of the three doors rather than on one.
 
+> **Normative.** **Every record-returning read carries the same revision**, asserted
+> over each read by name rather than over an unspecified one: a record stored and
+> then rewritten is read back through `get`, `get_many`, `search`, `list_beliefs`,
+> `export` and `walk_records`, and all six return the same non-default revision, and
+> a conditional write carrying the revision each of them returned lands. The arm is
+> parameterised over the six because the failure it exists to catch is per-path: a
+> store holding the revision outside the payload it decodes can overlay it correctly
+> on one read and return the model default on the five that decode the payload
+> directly, and a caller that read through `search` would then meet
+> `MemoryStoreStaleError` on a write that is not stale.
+
+> **Normative.** **A deleted-and-recreated id refuses.** Read a record, `delete` it,
+> store a different same-kind record at that id through plain `add`, then submit an
+> `IF_UNCHANGED` element carrying the first read's revision: `MemoryStoreStaleError`,
+> and the replacement stands unmodified. The recreation is made through `add` and not
+> through `INSERT_IF_ABSENT` deliberately — the hole §1's never-reissued clause
+> closes is exactly the one a mode-dependent bound would leave open.
+
 > **Normative.** **Both refusals stay distinguishable.** An `INSERT_IF_ABSENT`
 > collision raises `MemoryStoreConflictError` and a stale `IF_UNCHANGED` raises
 > `MemoryStoreStaleError`, and neither is catchable as the other.
@@ -511,6 +546,15 @@ extra="forbid"` — neither of which is true of this one.
 > against `FakeMemoryStore`, `InMemoryMemoryStore` and `SqliteMemoryStore` through
 > the existing `TestFakeMemoryStoreContract`, `TestInMemoryMemoryStoreContract` and
 > `TestSqliteMemoryStoreContract` bindings.
+
+> **Normative.** **`MemoryWrite`'s two invalid states are refused at construction**,
+> asserted in `core`'s own type tests rather than in the store suite, because they
+> never reach a store: an `IF_UNCHANGED` element with `expected_revision=None`, a
+> non-`IF_UNCHANGED` element with an `expected_revision` set, and a negative
+> `expected_revision`, each a construction-time `ValidationError`. Without these an
+> implementation passes every arm above while accepting an `IF_UNCHANGED` element
+> carrying no expectation, which reaches write time with nothing to compare and
+> fails — or worse, does not — in a way this ADR does not describe.
 
 > **Normative.** **The cross-process arm is `SqliteMemoryStore`'s own test and not a
 > contract arm.** Two connections on one file, one committing between the other's
@@ -629,11 +673,16 @@ different questions and read at different sites.
 > atomic in the sense ADR-0217 §7 uses the word.
 
 > **Normative.** The SQLite migration is **mechanical and additive**: a `revision`
-> column on `records`, backfilled `0` for every existing row, in the shape ADR-0045
-> §9 gave the `validity` columns. No row is rewritten, no record's payload changes,
-> and a record written before this ADR reads back at revision `0` — which is a true
-> statement about a row nothing has rewritten since the column existed, not a
-> fabricated measurement.
+> column on `records`, in the shape ADR-0045 §9 gave the `validity` columns, plus
+> the store's issuer. No row is rewritten and no record's payload changes.
+
+> **Normative.** The backfill gives every existing row a **distinct non-zero** value
+> and seeds the issuer strictly above all of them. It may **not** backfill `0`: §1
+> reserves `0` for a record no store has stored, and a backfilled `0` would make a
+> caller-constructed default expectation match a real row — the fail-open case §2
+> closes twice, reintroduced by the migration. `records.rowid` is a source that
+> satisfies the requirement without a scan, being `AUTOINCREMENT` and so
+> never-reissued for the reason ADR-0114 §1 gives, and every row has one.
 
 > **Normative.** The ingestor change (§5) is a **second change**, after the first,
 > and it is what closes #248. It carries the two call sites, the bounded re-run, and
@@ -666,7 +715,8 @@ different questions and read at different sites.
   outside this repository written against ADR-0046 would be non-conformant until it
   does. That is why it is an ADR, why it merges alone ahead of any implementation,
   and why it carries the architecture review as well as the adversarial one.
-- **Every record grows one small integer**, in memory and in one SQLite column. The
+- **Every record grows one small integer** and every store gains a never-reissuing
+  issuer, in memory and in one SQLite column. The
   read path gains nothing to compute; the write path gains one lookup the shipped
   store already makes, since `_persist_record`'s `SELECT` is where the row is found
   for the insert-versus-update decision and for ADR-0108 §4's kind check.
@@ -690,8 +740,22 @@ different questions and read at different sites.
   obliged to be. And the digest's definition becomes contract: `score` is populated
   by retrieval and `None` when stored, so a record read through `search` would digest
   differently from the same row read through `get` unless the exclusion is written
-  into `core` and every implementation reproduces it exactly. A store-authored
-  counter has neither problem and is the corpus's existing answer.
+  into `core` and every implementation reproduces it exactly. A store-authored,
+  never-reissued stamp has neither problem.
+- **A per-id counter, restarting at `0` when an id is stored after a delete.** The
+  narrower mechanism, and the shape `ExecutionState.version` has. Rejected on the
+  ABA hole it leaves, which is not hypothetical here: `MemoryStore.delete` is
+  unconditional and `MemoryBase.id` is producer-owned — an external system's
+  identifier is that system's idempotency key (ADR-0038 §2a) — so a re-sync that
+  deletes a record and stores a new one at the same id through an ordinary `add` or
+  `UPSERT` restarts the counter, and a conditional write held over that gap lands on
+  the replacement it was never decided against. Bounding it by requiring
+  `INSERT_IF_ABSENT` for the recreation does not work: nothing obliges `add` or
+  `UPSERT` to be that mode, and a rule that holds only where every other writer opts
+  in is not a store guarantee. `ExecutionState`'s id is minted by the tracker and is
+  nobody's foreign key, which is why the same shape is sound there and is not here.
+  A never-reissued stamp closes the case at the cost of the counter's one readable
+  property, which §1 forbids reading anyway.
 - **Comparing the whole record: `MemoryWrite` carries the `expected` record and the
   store compares it against the stored one.** No new envelope field, and the
   expectation says exactly what the caller means. Rejected: it carries a whole
