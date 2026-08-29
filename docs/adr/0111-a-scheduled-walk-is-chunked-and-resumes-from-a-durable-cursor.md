@@ -194,6 +194,20 @@
   the re-arming rule, and §§1–3 and §§5–9 entire. Nothing about a provider call, a store
   read or any awaited operation changes, and no other job's admissibility moves.
 
+  **What this note does not claim is that one chunk's duration is constant.** §4 already
+  makes a chunk's duration a per-record cost multiplied by the chunk's records, already
+  calls the chunk "both the unit of loss and the unit of overrun", and already says
+  "fifty is chosen small on purpose" because "a deployment whose per-record cost is high
+  wants it lower, which is precisely why it is a field rather than a constant". The
+  accumulation is one further per-record term in that same arithmetic, so a deployment
+  that raises `scheduler_chunk_size` lengthens a chunk exactly as it already did, for
+  exactly the reason §4 gives. The duty-cycle bound — a chunked job occupies the loop
+  "for at most one budget plus one chunk per interval" — therefore holds after this
+  amendment in precisely the form §4 states it, which is a bound *relative to* a chunk's
+  duration and never a promise about it. What the amendment admits is an operation with
+  no **timer**; what it does not do is take a chunk's cost out of §4's arithmetic, or
+  promise a wall-clock duration §4 never promised for any chunk.
+
   **The hazard §4 was written against is unchanged, and is why the exception is this
   narrow.** The ratification note above records round 1's finding "that §4's budget
   bounds nothing if a chunk can block indefinitely", and this clause as the repair —
