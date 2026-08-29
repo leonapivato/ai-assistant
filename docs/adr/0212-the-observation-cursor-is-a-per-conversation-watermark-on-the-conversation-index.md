@@ -638,9 +638,14 @@ ADR adds no failure count and no per-conversation retry state.
 
 ### 7. Upgrade discipline: ignored by an older build, discarded when unreadable
 
-> **Normative.** The watermark is **additive and read by one consumer only** — the
-> observation selector. No other read of the conversation index changes its result
-> or its meaning because a watermark is present, absent, high or low.
+> **Normative.** The watermark is **additive and acted on by one consumer only** —
+> the observation selector. `Conversation` carries the member, so every read that
+> returns a `Conversation` — `get`, `recent`, `turns`' conversation, `export` — carries
+> it too, and the export's version moves for exactly that reason (§8). What no other
+> read changes is its **behaviour**: because a watermark is present, absent, high or
+> low, no read selects a different set of rows, orders them differently, refuses where
+> it would have answered, or returns a different value in any other member. No consumer
+> but the observation selector may branch on it.
 
 > **Normative.** A build that does not read the watermark **ignores it and must not
 > refuse to start over it.** A watermark is not state ADR-0083 §6 makes a state
@@ -701,9 +706,15 @@ second clause — "A store whose recorded cursor and recorded progress disagree 
 treated as damaged in the same way" — is met concretely here by
 `ConversationExport`: the export carries `conversations` and `turns` side by side,
 and the user-facing export "drops those turns" whose episodes no longer resolve
-(`ConversationExport`). A restore from a filtered or truncated export can therefore
-present a conversation whose watermark names an ordinal its turns do not reach. That
-is discarded by the clause above, and the conversation re-enters at its tail.
+(`ConversationExport`), which is one way a watermark and the turns beside it come
+apart on paper. **The reachable case is a store state, not a restore**, and the
+distinction matters because `ConversationStore` offers `export` and no import (§8), so
+nothing here reads such a document back. What the clause above governs is a *store*
+whose watermark names an ordinal its own turns do not reach — from an operator's hand
+edit, a partial recovery, a `forget` that took a turn row, a migration, or a downgrade
+that dropped rows. That is discarded, and the conversation re-enters at its tail. Any
+future import path inherits the same clause and needs no new rule; deciding whether
+one should exist is not this ADR's (§9).
 
 **An older build's passes do not write it, and that is safe.** A downgrade followed
 by an upgrade leaves the watermark lower than what was actually observed in between,
@@ -918,8 +929,11 @@ watermark is then recovered end to end** — it appears in
 `conversations_with_unobserved_turns`, its next pass reads its tail and stamps a fresh
 watermark — so that an implementation coercing the value on one read and filtering it
 wrongly on another cannot leave the conversation permanently unreachable; a store whose watermark column is
-missing entirely opens, serves and starts; and an export round-trips a watermark
-while a *filtered* export restored into a fresh store leaves it discarded.
+missing entirely opens, serves and starts; `export` carries a stamped conversation's
+watermark in the document it produces; and — since there is no import path — a **store**
+whose watermark names an ordinal its own turns do not reach reads as unstamped and is
+re-observed at its tail, exercised by writing the row rather than by restoring a
+document.
 
 ### 9. What this ADR does not decide
 
