@@ -539,16 +539,34 @@ on the first sentence that phrases a diagnosis in ordinary language, and its fai
 silent"; a proposal that can only narrow fails, when it fails, by guarding something
 that did not need guarding, which the owner can see and lift.
 
-### 5. Where a proposal narrows what the owner's own act produced, the turn says so
+### 5. The write-time disagreement is unreachable under §4's proposer, and the correction is the act
 
-> **Normative.** Where a model's proposal narrows a record produced by an act the owner
-> took in that turn, the reply for that turn **states that it did** and names the act
-> that lifts it. The statement carries no span of any withheld content and no value
-> derived from one; the content it is about is the owner's own utterance.
+> **Normative.** Under §4's single proposer, **no proposal is made over a record an act
+> of the owner's produced in that turn**, and the same-turn disagreement is therefore a
+> case this mechanism cannot reach. The two paths never meet. The owner's write-time
+> act rides `FeedbackEvent` through the `FeedbackProcessor` (§7), which proposes
+> nothing. `Observer` is handed a `Sequence[EpisodicMemory]` on a pass whose own
+> contract says "It is deliberately explicit: nothing triggers it but a caller"
+> (`AssistantEngine.observe`), and every record it proposes is a fresh belief it is
+> about to write — never a record another producer wrote in a turn.
 
-> **Normative.** This is a statement about the write and is not a deflection. ADR-0199
-> §5's clauses govern a withholding at supply and are neither invoked nor changed by
-> it, and no turn is parked, no confirmation is owed, and nothing is refused.
+> **Normative.** **This ADR states no reply obligation, and no turn it reaches owes
+> one.** A clause requiring "the reply for that turn" to state a proposal would name a
+> surface no path of this decision produces: the pass that makes the proposal composes
+> no reply and returns an `ObservationReport`. §12 defers the obligation with the
+> condition that fires it rather than legislating a clause an implementation could not
+> satisfy, which is the same disposition §1 takes for a state no path produces.
+
+> **Normative.** What the owner has instead is the record: the placement, its setter
+> and its instant are on the belief the proposal narrowed, `guard` and `unguard` are
+> the per-record acts (§7), and how a surface renders a placement is the implementing
+> lane's within ADR-0199 §5's bounds. **No member is added to `ObservationReport` or
+> `ObservedProposal`** — §9's `core` surface is exhaustive and neither type is in it —
+> so no lane reads this section as licence to widen the report.
+
+> **Normative.** This section invokes and changes nothing at supply. ADR-0199 §5's
+> clauses govern a withholding at supply; no turn is parked, no confirmation is owed,
+> and nothing is refused.
 
 > **Normative.** The owner's correction is the explicit widening act of §7 on that
 > record — deterministic, and final over the proposal by §3. It is not a re-run of the
@@ -586,14 +604,17 @@ that did not need guarding, which the owner can see and lift.
 **#1719's fourth point is honoured on the reading the vocabulary actually supports.**
 That point asks what happens when "Owner's placement vs the model's narrowing at the
 moment of write" disagree, and rules that "the narrower stands (fail-closed) and the
-reply says so". In the shipped vocabulary an explicit act at write is a *narrowing*
-(`--guarded`, "keep it to me"), which the proposal can never contradict because it is
-already the narrowest; there is no explicit widening act at write, because on a record
-no proposal has yet narrowed it would be a no-op. So the reachable disagreement is
-exactly the one above: the owner said "remember this", meant nothing about disclosure,
-and the model guarded it. The narrower stands, the reply says so, and the correction is
-one act. Recording that the disagreement moved is better than legislating a case the
-acts cannot produce.
+reply says so". Two independent things empty that case in the shipped mechanism, and
+both are stated rather than glossed. In the shipped vocabulary an explicit act at write
+is a *narrowing* (`--guarded`, "keep it to me"), which the proposal can never contradict
+because it is already the narrowest; there is no explicit widening act at write, because
+on a record no proposal has yet narrowed it would be a no-op. And the producers do not
+meet: the act's record is built by a `FeedbackProcessor` that proposes nothing, while
+the proposal is made on an explicit observation pass over episodes, which composes no
+reply. **The narrower stands — fail-closed, which is the half of #1719's point that
+binds — and the correction is one act.** "The reply says so" is the half this mechanism
+cannot deliver, and §12 records it with the condition that fires it. Recording that the
+case is out of reach is better than legislating a statement no path could make.
 
 **Learning it through the ordinary observer, rather than through a recogniser for
 "correction" utterances, is the choice #1719 left open and it is the cheaper of the
@@ -741,6 +762,27 @@ would fail that test on the first turn.
 > changes a return type. Whether `MemoryStore` needs an operation to perform the write
 > is an implementation question inside `memory/` that this ADR does not settle and that
 > no lane settles by adding a Protocol member without its own ADR (golden rule 5).
+
+> **Normative.** **The acts are a read-modify-write over the store, and the window that
+> leaves is ADR-0046 §5's — named here rather than left for the lane to discover.**
+> Each act reads the record its id names, decides under §3's precedence, and writes.
+> `MemoryStore` carries no compare-and-swap, and ADR-0046 §5 ruled in terms that
+> `write_atomic` does not close the lost update — "Atomic-write-set is orthogonal to
+> read-modify-write isolation" — re-scoping #248 to "a compare-and-swap extension of
+> `write_atomic` … gated on a consumer that runs two writers on one store". What is at
+> risk here is not a lost content merge but a lost **narrowing**: a derivation landing
+> between an act's read and its write, overwritten by a stale `unguard`, is exactly the
+> laundering §3's precedence refuses whenever it can see it.
+
+> **Normative.** The lane therefore closes it by **the invariant and not by a new
+> Protocol member**, which is the second of the two answers ADR-0046 §5 itself names —
+> "either a store CAS (the extension below) or a tested single-writer invariant".
+> **Every write of a placement in a running composition goes through one writer over
+> one store**, the two acts included, so no two writers race a placement. §10 pins it.
+> A composition that cannot hold that invariant has fired #248's own trigger and owes
+> the compare-and-swap in an ADR of its own under golden rule 5; this ADR neither
+> pre-empts that decision nor performs it, and no lane adds the mode or the concurrency
+> token without it.
 
 > **Normative.** The added members carry the obligations any member of a Protocol
 > carries: the shared `AssistantEngine` conformance suite gains an arm for each clause
@@ -1009,6 +1051,14 @@ ADR-0201 closed.
 > default produces records placed by §6's default. The arm is taken at that seam and
 > not through the CLI, because the flag reaches the processor unread by any adapter.
 
+> **Normative.** The lane pins **§7's single-writer invariant**: every site that writes
+> a placement — the derivation, the proposal, the write-time flag and the two acts —
+> writes through one writer over one store in the composition `app/` wires, so no act
+> can overwrite a narrowing that landed after it read. Where a lane closes the window
+> with a conditional write instead, it says so in its PR and pins the interleaving
+> directly; either way the residue named in §7 is tested rather than assumed
+> (ADR-0046 §5, #248).
+
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
 > conformance suite beside the other members that carry it.
@@ -1106,6 +1156,14 @@ ADR-0201 closed.
 > golden rule 5 puts behind its own ADR. Until then a proposal is made without one, and
 > the corrective loop closes through the owner's per-record act.
 
+> **Normative.** **Stating a proposal to the owner in the turn that produced it**
+> (§5). Fires with a decision that puts the proposal in front of a producer that
+> composes a reply — the widening of §4's proposer set above is one such decision — or
+> that gives the observation pass a surface for it, which needs a member on
+> `ObservedProposal` or `ObservationReport` and is a `core` change §9 forbids this ADR.
+> Until then the placement on the record and §7's per-record act are what the owner
+> has, and no lane reads §5 as owing a statement on any turn.
+
 > **Normative.** **Rendering a placement on a bounded surface.** §2 rules that nothing
 > is withheld there and §7 rules that nothing is obliged to render one. Whether a
 > beliefs list *shows* a placement is a surface decision no clause here settles.
@@ -1155,6 +1213,20 @@ unchanged. ADR-0130 §11 forbids a model ruling on a **notification candidate** 
 ADR adds no such ruling; §4 answers its three grounds because they are the right grounds,
 not because §11 reaches this case. ADR-0021 §5's monotonicity is cited as a precedent for
 the shape of §3's precedence and is not touched.
+
+**The three records land in this PR, and the ratification flip is the commit that makes
+them true.** They are written beside the decision that owes them because ADR-0082 §1
+puts the judgement "in the later ADR's text, which is where it is reviewed" — a reviewer
+checks the showing against the quoted clause, which is only possible where the record
+and the argument for it are one diff. That this ADR reads `Proposed` while the records
+stand is an artefact of *when* a review is taken and not a state any merged tree carries:
+ADR-0165's one-line `Proposed` → `Accepted` flip is the last commit of this PR, and
+ADR-0165 §5 refuses to take it out of draft while an ADR it touches still reads
+`Proposed`. ADR-0204's own PR did exactly this — the commit that proposed it wrote the
+record on ADR-0203, and the ratification came later in the same PR. Under ADR-0082 §1 a
+reviewer may require a record "added or removed by showing the test comes out the other
+way", and may not demand either "on book-keeping grounds alone"; the status of the ADR
+making the record is not that showing.
 
 ## Consequences
 
