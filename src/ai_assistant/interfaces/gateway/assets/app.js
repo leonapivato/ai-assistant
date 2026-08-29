@@ -376,8 +376,24 @@ function setConversation(id) {
   sayResumed(null);
 }
 
+// How many times the resumed line has been invalidated, and the whole of what a
+// digest read has to still be true about before it may write one.
+//
+// **It is not `chose`, and adversarial review round 1 is why.** `chose` counts the
+// changes of selection that are *not* a turn's answer, which is exactly right for
+// what it guards — an answer must not put back a thread the owner has left — and
+// exactly wrong here. Continue `A`, ask a question in `A` while the digest read is
+// still out, and let the answer land first: `renderOutcome` reaches
+// `setConversation` without touching `chose`, the line is cleared, and the digest
+// then arrives with `chose` unchanged and re-renders a count that is short by the
+// turn that just landed. The two guards are counting different things, and the one
+// this line needs is the one bumped by **every** route that clears it — which is
+// this function, wherever it was reached from.
+let described = 0;
+
 // What the thread being continued already holds, or nothing (#1371's second clause).
 function sayResumed(text) {
+  described += 1;
   const held = el("resumed");
   held.textContent = text === null ? "" : text;
   held.hidden = text === null;
@@ -5406,22 +5422,42 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   return null;
 }
 
+// How many reads of the conversations listing have been *begun*, which is what a
+// forget's outcome has to still be the newest of before it may be written.
+//
+// **Begun and not finished**, which is the whole point of it and adversarial review
+// round 1's second finding. Accept a forget, let its refresh hang, press
+// "Conversations", and let the owner's newer read return first: the older refresh
+// then resumes and writes its outcome over a listing that was read afterwards and
+// had already cleared the slot. Counting reads as they start is what lets the
+// resuming one see that it is no longer the last word.
+let listed = 0;
+
+// Read the listing, and hand back the generation the read ran under.
+//
+// The return value is for `forgetConversation` alone and is returned from **every**
+// path, the refusals included: a forget whose refresh failed still destroyed
+// something and still owes the owner the sentence saying so, so a read that ended in
+// a fault must not silently swallow the outcome as well.
 async function listConversations() {
+  listed += 1;
+  const mine = listed;
   fault(null, "conversations");
   // The outcome of a forget belongs to the forget, not to the panel: reading the
   // listing afresh is a new question, and an outcome left standing above it would be
   // a claim about a listing it was never made against. `forgetConversation` writes
-  // its own outcome *after* the refresh it triggers, so this clears nothing of it.
+  // its own outcome *after* the refresh it triggers, and only while that refresh is
+  // still the newest one, so this clears nothing that is owed.
   sayForgotten(null);
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
-    return;
+    return mine;
   }
   try {
     const body = await relay(half, "/conversations", {}, "conversations");
     if (body === null) {
-      return;
+      return mine;
     }
     const list = el("conversation-list");
     clearNode(list);
@@ -5433,6 +5469,7 @@ async function listConversations() {
   } catch (_) {
     fault(GATEWAY_GONE, "conversations");
   }
+  return mine;
 }
 
 function renderConversation(list, summary) {
@@ -5493,16 +5530,20 @@ function renderConversation(list, summary) {
 // what was said, which is the rest of #1371's second clause and needs an operation
 // the promoted surface does not carry — filed as #1818 rather than invented here.
 //
-// **`chose` is what keeps a slow read off a thread the owner has since left**, and it
-// is the device this file already uses at three other places where two acts race over
-// one value. Press "Continue" on `A`, then "Start a new conversation" before the
-// digest lands, and without the comparison the page would announce `A`'s turn count
-// under a selection that is now empty.
+// **`described` is what keeps a slow read off a line something has since cleared**,
+// and it is the device this file already uses at four other places where two acts
+// race over one value. Two orderings reach it and one guard has to answer both.
+// Press "Continue" on `A`, then "Start a new conversation" before the digest lands,
+// and the page would otherwise announce `A`'s turn count under a selection that is
+// now empty. Press "Continue" on `A`, ask a question in `A`, and let the *answer*
+// land before the digest, and it would otherwise re-render a count short by the turn
+// that had just been recorded — adversarial review round 1, and the reason the guard
+// is `described` rather than `chose`.
 async function resumeConversation(id) {
   fault(null, "conversations");
   changeConversation(id);
   el("utterance").focus();
-  const mine = chose;
+  const mine = described;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -5510,7 +5551,7 @@ async function resumeConversation(id) {
   }
   try {
     const digest = await relay(half, "/conversation", { conversation_id: id }, "conversations");
-    if (digest === null || chose !== mine) {
+    if (digest === null || described !== mine) {
       return;
     }
     sayResumed(describeHeld(digest.conversation));
@@ -5569,11 +5610,17 @@ async function forgetConversation(id) {
     if (conversationId === id) {
       changeConversation(null);
     }
-    await listConversations();
-    // **After the refresh, so it is the last thing written** — `listConversations`
-    // clears this slot on every read, which is what keeps a stale outcome off a fresh
-    // listing, and what makes the order here load-bearing rather than cosmetic.
-    sayForgotten(statedForget(id, held, done.destroyed));
+    const read = await listConversations();
+    // **After its own refresh, and only while that refresh is still the newest**
+    // (adversarial review round 1). `listConversations` clears this slot on every
+    // read, so writing before the refresh would be writing into a slot the refresh
+    // then empties — which is what makes the order load-bearing rather than cosmetic.
+    // And a refresh that lost its race to a listing the owner asked for afterwards is
+    // no longer the last word on what is on screen, so it does not get to write over
+    // one: the outcome is dropped rather than restored above a newer listing.
+    if (read === listed) {
+      sayForgotten(statedForget(id, held, done.destroyed));
+    }
   } catch (_) {
     fault(GATEWAY_GONE, "conversations");
   }

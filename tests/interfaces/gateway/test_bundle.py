@@ -831,6 +831,13 @@ def test_a_resumed_count_is_cleared_by_every_route_that_could_make_it_stale() ->
     # makes the invariant checkable at all.
     assert script.count("sayResumed(") == 3
     assert "sayResumed(describeHeld" in functions["resumeConversation"]
+    # And the guard counts *that clearing* rather than the selection changing, which
+    # is the difference between the two orderings and what adversarial review round 1
+    # found: an answer reaches `setConversation` through `renderOutcome` without
+    # touching `chose`, so a guard written against `chose` lets the digest behind it
+    # through and puts back a count the answer had just made short.
+    assert "described += 1;" in functions["sayResumed"]
+    assert "chose" not in functions["resumeConversation"]
 
 
 def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() -> None:
@@ -841,16 +848,18 @@ def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() 
     is the same kind of act. So a digest read that is slow, refused or unreachable
     costs the sentence about what is in the thread and never the thread itself.
 
-    ``chose`` is the guard on the other side of that: the read is in flight while the
-    owner can still press "Start a new conversation", and this file's own device for
-    two acts racing over one value is what keeps a late digest from being announced
-    under a selection that has since changed.
+    ``described`` is the guard on the other side of that, and it counts the *line
+    being cleared* rather than the selection changing — because two orderings reach
+    it and one guard has to answer both. The owner can press "Start a new
+    conversation" while the read is out, and a turn's answer can land while it is
+    out; only the second of those reaches ``setConversation`` without touching
+    ``chose``, which is what adversarial review round 1 found.
     """
     resuming = _functions(_code("app.js"))["resumeConversation"]
 
     assert resuming.index("changeConversation(id);") < resuming.index("await relay(")
-    assert "const mine = chose;" in resuming
-    assert "chose !== mine" in resuming
+    assert "const mine = described;" in resuming
+    assert "described !== mine" in resuming
 
 
 def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> None:
@@ -888,6 +897,30 @@ def test_the_forget_outcome_is_written_after_the_refresh_it_triggered() -> None:
 
     assert "sayForgotten(null);" in functions["listConversations"]
     assert forgetting.index("await listConversations();") < forgetting.index("sayForgotten(stated")
+
+
+def test_a_refresh_that_is_no_longer_the_newest_listing_writes_no_outcome() -> None:
+    """Adversarial review round 1: writing after its own refresh is not enough.
+
+    A forget's refresh can lose its race to a listing the owner asked for afterwards,
+    and the resuming older call would then write its outcome into a slot the newer
+    read had already cleared — above a listing it did not produce. Counting reads as
+    they *begin* is what lets the older one see that it is no longer the last word.
+
+    Begun and not finished is the load-bearing half: a counter bumped when a read
+    *returns* would be equal again by the time the loser resumed, and would answer
+    the wrong question.
+    """
+    functions = _functions(_code("app.js"))
+    listing = functions["listConversations"]
+
+    assert listing.index("listed += 1;") < listing.index("await relay(")
+    assert "const mine = listed;" in listing
+    # Returned from all three paths, the refusals included: a forget whose refresh
+    # failed still destroyed something and still owes the owner the sentence saying
+    # so, so a read that ended in a fault must not swallow the outcome as well.
+    assert listing.count("return mine;") == 3
+    assert "if (read === listed) {" in functions["forgetConversation"]
 
 
 def test_the_forget_ceremony_is_unchanged_and_no_second_one_is_added() -> None:
