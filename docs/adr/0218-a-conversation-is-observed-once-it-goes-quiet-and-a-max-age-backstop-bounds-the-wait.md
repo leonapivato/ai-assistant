@@ -431,6 +431,13 @@ means nothing.
 > every trace a run emits carries the run's correlation and attributes to the
 > run's seam (§6).
 
+> **Normative.** `observe_due` returns a **counts-only** run report — an
+> `orchestration` dataclass in `ConsolidationReport`'s shape and not a `core` type —
+> carrying at most: passes performed, conversations observed, episodes read, model
+> calls made, proposals ruled by outcome, and whether the run exhausted its due set
+> or spent its budget. It returns **no** `ObservationReport`, no proposal, no route
+> and no conversation id, and nothing it returns grows with the number of passes.
+
 > **Normative.** `scheduler_chunk_size` does not reach this job. ADR-0212 §3 rules
 > that already — "an implementation that hands it to `turns_after` or to
 > `conversations_with_unobserved_turns` is not implementing this ADR" — and this
@@ -448,9 +455,20 @@ write for different *causes*, and ADR-0120 §3 attributes a write by the seam of
 operation that caused it, so one seam serving both would make an armed job's writes
 indistinguishable from a user's deliberate ones. A third is the return shape:
 `ObservationReport` is "What one observation pass did", carrying one
-`conversation_id` and one `route`, and a run performs many passes. `observe_due`
-returns the passes it performed, in order; `ObservationReport` gains nothing, which
-is what ADR-0212 §9 left standing.
+`conversation_id`, one `route` and every proposal with its ruling, and a run
+performs many passes.
+
+**And the run therefore returns counts, not reports.** A run is bounded by *time*
+and not by a pass count, and its cheapest passes are its fastest — a page whose
+episodes have all expired calls no model at all (ADR-0212 §3) — so "one report per
+pass" is a list whose length is bounded by nothing in this ADR, holding Tier 1
+proposal content, retained until the run returns, for a caller that discards it:
+`service/scheduler.py` says the job body's "return type is `object` because the
+scheduler never looks at it". `ConsolidationReport` is the precedent and the shape:
+an `orchestration` dataclass of counts — "chunks", "examined", "proposed",
+"committed", "deferred", "rejected", "exhausted" — carrying no content of what it
+ruled on. `ObservationReport` itself gains nothing and stays exactly what a pass
+returns to the CLI, which is what ADR-0212 §9 left standing.
 
 **Why the run *names* the conversation, and what that buys.** ADR-0212 §3's third
 clause reads "One pass observes **one** conversation: the conversation named by the
@@ -750,11 +768,14 @@ figure an operator should think about belongs when refusing it would be wrong.
 
 ### 8. ADR-0111 §4's admissibility condition, checked rather than assumed
 
-> **Normative.** Every operation inside one pass is bounded by a deadline, and the
-> deadlines are the two the corpus already supplies: the pass's single model call
-> by `model_timeout_seconds`, and every write that reaches an embedder by
-> `embedding_timeout_seconds` (ADR-0118). This ADR supplies no new deadline and
-> introduces no operation that lacks one.
+> **Normative.** Every operation inside one pass whose duration is not under this
+> process's control is bounded by a deadline the corpus already supplies: the
+> pass's single model call by `model_timeout_seconds`, and every write that reaches
+> an embedder by `embedding_timeout_seconds` (ADR-0118). Every other operation a
+> pass performs is a **local store call on the hub's own data directory**, bounded
+> in size by ADR-0212 §8's own limits. This ADR supplies no new deadline, adds no
+> seam that lacks one, and reaches no operation of a kind the jobs already on this
+> loop do not.
 
 **§4 states this as a condition on being chunked at all**, and ADR-0212 §3 assigned
 the check to this lane by name: "Discharging it is the trigger lane's, not this
@@ -790,6 +811,40 @@ resting on the same two figures and inventing nothing: "A chunk's model call is
 bounded by `model_timeout_seconds`; its writes reach the `Embedder` through
 `MemoryStore.write_atomic`, and that seam carries `embedding_timeout_seconds` since
 ADR-0118".
+
+**The clause's words are "every operation", and this section reads them as the
+corpus applies them rather than more widely — which is a reading, and it is stated
+so it can be argued with.** No store seam in this corpus carries a deadline:
+`MemoryStore.walk_records`, `MemoryStore.get`, `ConversationStore.turns` and the
+three operations ADR-0212 §8 adds all carry a *size* bound and no duration one. Read
+at its widest, §4's condition would therefore make `consolidate` — the first and
+only chunked job on this loop — inadmissible too, and it was admitted on exactly the
+discharge quoted above, with #820 closed against it. §4's own arithmetic points the
+same way: the bound it computes for a chunk is "``max_attempts * timeout + total
+backoff``, multiplied by the chunk's records", which is a product over *model
+attempts* and never counts a store read into it. So the operations the clause
+reaches are the ones whose duration this process does not control, and a local
+SQLite call on the hub's own data directory is not one.
+
+**What that reading leaves genuinely unbounded is named rather than left implicit.**
+A store call blocked on a stalled filesystem holds ADR-0083 §7's serial loop for as
+long as it blocks, and no figure in `Settings` says so. That is true of the retention
+purge and the conversation sweep as well, neither of which is chunked, so it is a
+property of the loop rather than something this decision introduces — and the one
+place the corpus has treated it, ADR-0093 §7's worker-plus-deadline for a sensor
+read, is expressly scoped to "a source the system does not own", which the hub's own
+database is not. **Closing it is not available to this ADR** even if it wanted to:
+§4 puts the remedy on the seam — "**This ADR adds no cancellation mechanism** and
+does not reach inside a chunk […] supplying a missing deadline belongs to whichever
+seam lacks it" — and a deadline on `ConversationStore` or `MemoryStore` is
+`core/protocols.py` surface under golden rule 5, which takes a contract ADR of its
+own. Filed as **#1817**, which states both readings and names what a deciding lane
+owes; that this job now ships armed is part of why it is filed rather than left. In
+the meantime the operator's remedy is the one ADR-0083 §7 already gives every job on
+this table, which is to set its interval to the disable sentinel. As a fact about the
+shipped backend rather than about the contract: the SQLite stores connect without an
+explicit `timeout=`, so the driver's default busy timeout bounds a *lock* wait and
+nothing else.
 
 **Two chunked jobs may be armed at once, and the arithmetic adds.** With
 `consolidation_interval` also set, the loop's worst case is two run budgets plus two
@@ -861,8 +916,9 @@ would have nothing to call.
   "How often the hub distils beliefs from the most recently active conversation.
   Disabled by default until the observation cursor lands", both halves of which
   ADR-0212 and this ADR have made false; it is replaced, not patched.
-- **`orchestration`** — `Engine.observe_due`, and the stage's due selection behind
-  it. `Engine.observe` is untouched: same signature, same seam, same behaviour, and
+- **`orchestration`** — `Engine.observe_due`, its counts-only run report (§3, in
+  `ConsolidationReport`'s shape and beside it, not in `core/types.py`), and the
+  stage's due selection behind them. `Engine.observe` is untouched: same signature, same seam, same behaviour, and
   ADR-0212 §3's "given none" default still selects the first candidate without a due
   test, because an operator who typed the command has already decided it is time.
 - **`service/scheduler.py`** — the observation row's body becomes
@@ -894,14 +950,21 @@ first **due** candidate and not merely the first candidate; that
 the page read to decide is the page the pass reads, so no turn is read twice; that
 the budget is checked at a pass boundary and not inside one; that a deleted
 conversation drops rather than halting; that a run's writes carry the run's seam and
-not `observe`'s; and that the shipped default arms the job, pinned as a value rather
-than asserted in prose.
+not `observe`'s; that the run's return carries counts and no proposal content
+however many passes it performs; and that the shipped default arms the job, pinned
+as a value rather than asserted in prose.
 
-**Filed rather than absorbed: #1815.** ADR-0120 §6's exclusion of the `observe`
-reinforcement share rests on an overlap ADR-0212 removed, and §6's population and
-§5's move again once this job is armed and carries its own seam. Both are
-measurement questions for a measurement lane, and §6 above says why neither is taken
-here.
+**Filed rather than absorbed, two of them.**
+
+- **#1815** — ADR-0120 §6's exclusion of the `observe` reinforcement share rests on
+  an overlap ADR-0212 removed, and §6's population and §5's move again once this job
+  is armed and carries its own seam. Both are measurement questions for a
+  measurement lane, and §6 above says why neither is taken here.
+- **#1817** — ADR-0111 §4's admissibility clause says *every* operation in a chunk
+  owes a deadline, and no store seam in this corpus carries one. §8 states the
+  reading this ADR takes and the landed precedent for it; deciding the clause's
+  reach, and supplying a seam deadline if it reaches that far, is `core` contract
+  surface and so a contract ADR rather than a paragraph in a trigger's.
 
 **What this ADR does not decide:**
 
