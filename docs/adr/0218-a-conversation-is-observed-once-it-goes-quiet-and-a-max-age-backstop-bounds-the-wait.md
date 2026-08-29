@@ -189,17 +189,21 @@ what keeps this trigger from re-ordering, re-sorting or re-paging a listing ADR-
 relation to the order, and every quiet arm would then be a scan whose cost grew
 with the listing.
 
-**A non-monotonic clock costs the prefix property and nothing else.**
-`Conversation` records that "`started_at`, `last_active_at` and `last_turn_at` all
-come from an injected clock, which this project never promises is monotonic". Under
-a stepped clock the listing may be ordered on values that do not reflect real
-activity order, so the prefix property degrades to "the head is *usually* quiet
-first". The due test itself does not degrade: it is evaluated per candidate against
-that candidate's own instant, so a mis-ordered listing costs at most a scan past a
-non-quiet head, which §2's rule already performs. This is the same limit ADR-0212
-§3 named for its own order ("The bound is a property of the clock, and this ADR does
-not promise more than the clock gives it") and it is inherited rather than
-re-argued.
+**A non-monotonic clock does not cost the prefix property; it costs what the
+property is *about*.** Both halves read the same stored column: the listing is
+ordered on `last_active_at` and the quiet test compares `last_active_at` against one
+run instant, so for a fixed instant the quiet candidates are a prefix of that
+ordering exactly, whatever the stored values are and whether or not they reflect the
+order things really happened in. What a stepped or stopped clock costs is the
+*meaning*: `Conversation` records that "`started_at`, `last_active_at` and
+`last_turn_at` all come from an injected clock, which this project never promises is
+monotonic", so a conversation the user left an hour ago can carry an instant that
+says otherwise and be called busy, or the reverse. That is a wrong answer to "is
+this conversation over", not a broken selector, and it is the same limit ADR-0212 §3
+named for its own order — "The bound is a property of the clock, and this ADR does
+not promise more than the clock gives it" — inherited rather than re-argued. §2's
+other two arms are what stop such a conversation being unreachable rather than
+merely late.
 
 ### 2. Due is quiet, aged, or a full page — and only the last of the three rests on no clock
 
@@ -418,9 +422,14 @@ means nothing.
 
 > **Normative.** One run performs zero or more **passes**. Before each pass it
 > reads the candidate listing afresh, applies §2's due test in ADR-0212 §3's
-> order, and — where a due candidate exists — performs exactly one ADR-0212 pass
-> **naming that conversation's id**. It returns when no candidate is due or when
-> `scheduler_run_budget` is spent.
+> order, and — where a due candidate exists **in that listing** — performs exactly
+> one ADR-0212 pass **naming that conversation's id**. It returns when the listing
+> it last read held no due candidate, or when `scheduler_run_budget` is spent.
+
+> **Normative.** A run establishes nothing about candidates **beyond** the
+> listing's bound, and no clause of this ADR may be read as claiming it does. "No
+> due candidate" is always a statement about the listing a run read and never about
+> the store; §2 names the state in which the two differ.
 
 > **Normative.** The run budget is checked **only at a pass boundary**, so a run
 > overruns it by at most one pass. That is ADR-0111 §4's clause applied with the
@@ -441,8 +450,9 @@ means nothing.
 > **Normative.** `observe_due` returns a **counts-only** run report — an
 > `orchestration` dataclass in `ConsolidationReport`'s shape and not a `core` type —
 > carrying at most: passes performed, conversations observed, episodes read, model
-> calls made, proposals ruled by outcome, and whether the run exhausted its due set
-> or spent its budget. It returns **no** `ObservationReport`, no proposal, no route
+> calls made, proposals ruled by outcome, and whether the run stopped because the
+> listing it last read held no due candidate or because it spent its budget — never
+> a claim that the store holds none. It returns **no** `ObservationReport`, no proposal, no route
 > and no conversation id, and nothing it returns grows with the number of passes.
 
 > **Normative.** `scheduler_chunk_size` does not reach this job. ADR-0212 §3 rules
@@ -612,13 +622,35 @@ qualifiers have turned. It is no longer the *first version* — ADR-0121, ADR-01
 ADR-0162, ADR-0212 and ADR-0214 have all landed on this producer since. It no longer
 *costs nothing*: #1737 is the record of what it costs, which is that the deployed
 hub's user model does not accumulate at all unless somebody remembers to run a
-command. And "the user knowing" is not what the explicit trigger was the only source
-of: the armed job is stated in the hub's configuration record at every start —
+command. And the reason names **two** things the user is to know — *that* accumulated history
+is read, and *by which route* — which are disclosed differently and are worth
+separating rather than asserting together.
+
+**That it runs is disclosed, at three places and without the user asking.** The
+armed state and its cadence are in the hub's `CONFIGURATION` record at every start —
 `service/configuration.py` carries `observation_interval_armed` and
-`observation_interval_seconds` on its allowlist — it appears in `hub_ready`'s job
-list, and every run still reports the route that read the episodes, which is the
-half of reason 3 that was doing the work. What is genuinely given up is the *per-run*
-choice, and that is stated as given up rather than argued away.
+`observation_interval_seconds` on its allowlist — the job is in `hub_ready`'s job
+list, and each run appears in the operational log, which carries "the job's name and
+how long it took" (`service/scheduler.py`), and in the run's own `OPERATION` trace
+under the seam §6 gives it.
+
+**Which route read it is *not* disclosed per run, and this ADR says so rather than
+implying otherwise.** The scheduler "never logs a job's result" and §3's run report
+carries no route, so nothing per-run names it. It does not need to: ADR-0077 §3
+gives the observer **one named route with no fallback** — "a routable failure that
+would advance a turn to the next candidate simply ends the observation" — so the
+route is a constant of the deployment set by the operator, not a fact about a run,
+and a per-run line would be the same string on a timer. What ADR-0004 §2's property
+guarantees is the part that could otherwise vary, and it is unchanged: no run can
+reach a provider the user did not configure. The residue is that the hub's
+configuration record cannot carry the route at all — it carries numbers and
+booleans, and a model route is a label — so an operator reads it from their own
+configuration rather than from the record. That is noted on **#1815**, whose subject
+is what the record and the measures should carry, and it is not this ADR's to fix.
+
+**So what is genuinely given up is the per-run choice and the per-run route line**,
+and both are stated as given up rather than argued away. What replaces the first is
+ground 3; what replaces the second is that the route stopped being able to vary.
 
 **What the deployed hub sets: nothing.** After this decision and its
 implementation, a hub needs no `ASSISTANT_OBSERVATION_INTERVAL` to observe, and the
