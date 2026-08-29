@@ -18,6 +18,7 @@ the *shape* of the wiring and cannot say that pressing it moves the indicator.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -408,33 +409,125 @@ async def test_an_answer_landing_first_is_not_undone_by_the_digest_behind_it(
     ``chose``, so a guard written against ``chose`` would let the digest through and
     put back a count that is short by the turn just recorded.
 
+    An answer is one of the invalidators, and the *other* case is a different thread
+    being chosen — driven separately below, because only this one reaches
+    ``setConversation`` without passing through ``changeConversation``.
+
     The digest request is held rather than raced for: ADR-0216 §7 forbids a fixed
-    sleep, and a real ordering the driver *decides* is the only kind that cannot be
-    lost on a loaded runner. Nothing about the response is fabricated — the request is
-    released and answered by the same gateway.
+    sleep, and an ordering the driver *decides* is the only kind that cannot be lost
+    on a loaded runner. Nothing about the response is fabricated — what the page ends
+    up not being told is decided by the page, not by this test.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         _seed(drive, "c-1", turns=3)
-        await drive.page.evaluate(_SETTLED)
+        reached = asyncio.Event()
         released = asyncio.Event()
+        settled = asyncio.Event()
+        held: dict[str, object] = {}
 
         async def hold(route: Route) -> None:
+            held["request"] = route.request
+            reached.set()
             await released.wait()
-            await route.continue_()
+            with contextlib.suppress(Exception):
+                await route.continue_()
 
+        def note(request: object) -> None:
+            if request is held.get("request"):
+                settled.set()
+
+        drive.page.on("requestfailed", note)
+        drive.page.on("requestfinished", note)
         await drive.page.route(lambda url: urlparse(url).path == "/conversation", hold)
         await _open_listing(drive)
         await _first_row(drive).get_by_role("button", name="Continue").click()
+        await reached.wait()
         await drive.page.fill("#utterance", "what did we decide?")
         await drive.page.click("#ask-button")
         # `releaseAsk` is the page's own "this turn is over", and it runs after the
         # outcome has been rendered -- so past this the answer has already reached
-        # `setConversation` and cleared the line.
+        # `setConversation`.
         await drive.page.wait_for_selector("#ask-button:not([disabled])")
         assert await drive.page.is_hidden("#resumed")
         released.set()
-        await drive.page.wait_for_function("() => (window.__settled['/conversation'] || 0) === 1")
+        await settled.wait()
+        await drive.page.evaluate("() => null")
+        assert not [one for one in drive.engine.calls if one[0] == "conversation"]
         assert await drive.page.is_hidden("#resumed")
+
+
+async def test_a_digest_for_a_thread_the_owner_has_left_reports_nothing_at_all(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A read nobody is waiting for is stopped, not merely ignored.
+
+    Adversarial review round 2, ``major``. A guard on what this page *renders* leaves
+    the refusal path uncovered, because ``relay`` classifies a refusal and writes it
+    into the panel's fault slot itself, before any caller sees a value. Continue
+    ``c-1`` with its digest held, continue ``c-2`` and get its answer, let ``c-1`` be
+    destroyed from somewhere else, and the abandoned read would report "There is no
+    conversation of that name" over a panel whose selection and resumed line are
+    about ``c-2``.
+
+    So the read is aborted when the line it would write is cleared, and the assertion
+    is the strong one that follows: the gateway is never asked at all.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        _seed(drive, "c-1", turns=3)
+        _seed(drive, "c-2", turns=9)
+        reached = asyncio.Event()
+        released = asyncio.Event()
+        settled = asyncio.Event()
+        abandoned: dict[str, object] = {}
+        reads = {"n": 0}
+
+        async def hold_the_first_digest(route: Route) -> None:
+            reads["n"] += 1
+            if reads["n"] == 1:
+                abandoned["request"] = route.request
+                reached.set()
+                await released.wait()
+            # The abandoned request is cancelled while this handler is held, so
+            # continuing it raises rather than returning -- which is the fix working.
+            with contextlib.suppress(Exception):
+                await route.continue_()
+
+        def note(request: object) -> None:
+            if request is abandoned.get("request"):
+                settled.set()
+
+        drive.page.on("requestfailed", note)
+        drive.page.on("requestfinished", note)
+        await drive.page.route(
+            lambda url: urlparse(url).path == "/conversation", hold_the_first_digest
+        )
+        await _open_listing(drive)
+        rows = drive.page.locator("#conversation-list .conversation-row")
+        first = await rows.nth(0).locator(".conversation-name").inner_text()
+        await rows.nth(0).get_by_role("button", name="Continue").click()
+        await reached.wait()
+        # The thread the abandoned read is about is destroyed from somewhere that is
+        # not this page, which is the state that makes its refusal a refusal.
+        left = first.removeprefix("Conversation ")
+        drive.engine.conversations_held.pop(left)
+        drive.engine.activity.pop(left)
+        await rows.nth(1).get_by_role("button", name="Continue").click()
+        await drive.page.wait_for_selector("#resumed:not([hidden])")
+        stated = await drive.page.inner_text("#resumed")
+        released.set()
+        await settled.wait()
+        # One round trip, which is a later task: every microtask the abandoned read
+        # could still have been holding has drained by the time this answers.
+        await drive.page.evaluate("() => null")
+        # The read for the thread the owner left never reached the gateway at all; the
+        # one for the thread they are in did.
+        asked = [
+            one[1]["conversation_id"] for one in drive.engine.calls if one[0] == "conversation"
+        ]
+        assert left not in asked
+        assert asked
+        assert await drive.page.inner_text("#resumed") == stated
+        assert "no conversation" not in (await drive.page.inner_text("#conversations")).lower()
 
 
 async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listing(
