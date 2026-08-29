@@ -304,12 +304,17 @@ stubbed the assets would forfeit exactly that.
 > substitute.
 
 > **Normative.** The build installed and driven is the full `chromium`. The
-> lighter `chromium-headless-shell` may be substituted for it only where the
-> substituting change has established, by running this layer's own cases against
-> both builds, that they agree on every behaviour those cases assert — the Web
-> Audio and `MediaRecorder` paths included — and records that comparison in its
-> PR. Absent that evidence the full build is what is installed, locally and in
-> CI.
+> lighter `chromium-headless-shell` may be substituted for it only against a
+> recorded comparison establishing that the two builds agree on every behaviour
+> this layer's cases assert — the Web Audio and `MediaRecorder` paths included —
+> run over the layer as it then stands and the `playwright` version then pinned.
+> Absent that evidence the full build is what is installed, locally and in CI.
+
+> **Normative.** That substitution is licensed by a comparison that still covers
+> the layer, and by nothing else. A change that adds or alters a behaviour this
+> layer asserts, or that moves the pinned `playwright` version or the browser
+> revision it resolves, either repeats the comparison and records it or restores
+> the full `chromium` build in the same change.
 
 > **Normative.** The layer drives Chromium and no other engine. Adding WebKit or
 > Firefox to it — with the install, the wall clock and the second set of
@@ -341,6 +346,17 @@ is a claim to be *tested*, by running the cases on both builds, and not one to b
 assumed by whoever is trying to shave a CI step. The clause is written so that the
 cheap option is available and the evidence for it is not optional, and so that
 "the shell was already installed" is not by itself a reason.
+
+**The second clause is there because the first one alone decays**, and the decay
+is silent. A comparison is evidence about a *set of cases* on a *pair of builds*.
+Substitute the shell today against the cases that exist today, and the next change
+that adds a Web Audio case runs it on the shell alone — the evidence was never
+about that case, but the licence it granted does not expire on its own, so the
+gate goes green on a build nobody checked that behaviour against. The same holds
+one layer down when `playwright` moves and resolves a different browser revision.
+Attaching the licence to a comparison that *still covers* the layer is what makes
+the cheap option safe to take, and it puts the cost where it belongs: on whoever
+wants to keep the substitution, in the change that would otherwise outrun it.
 
 **The engine clause is a refusal, and it is marked because it refuses something a
 later lane could otherwise do** (ADR-0089 §1: "an ADR's declined alternatives are
