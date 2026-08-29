@@ -366,6 +366,21 @@ function setConversation(id) {
       ? "No conversation yet. Your next question starts one."
       : `Conversation ${id}. Your next question continues it.`;
   el("new-conversation").hidden = id === null;
+  // **What was already in the thread is cleared here and written in exactly one
+  // place** (#1371's second clause). Every route into this function invalidates the
+  // digest that line carries: a different conversation makes it about the wrong one,
+  // and a turn's own answer — which reaches here through `renderOutcome` and not
+  // through `changeConversation` — makes its count short by the turn that just
+  // landed. A stale count is worse than no count, because a reader cannot tell it is
+  // stale. Only `resumeConversation` writes it, and only having just read it.
+  sayResumed(null);
+}
+
+// What the thread being continued already holds, or nothing (#1371's second clause).
+function sayResumed(text) {
+  const held = el("resumed");
+  held.textContent = text === null ? "" : text;
+  held.hidden = text === null;
 }
 
 // Leave the thread this view is reading, and do nothing else.
@@ -5393,6 +5408,11 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
 
 async function listConversations() {
   fault(null, "conversations");
+  // The outcome of a forget belongs to the forget, not to the panel: reading the
+  // listing afresh is a new question, and an outcome left standing above it would be
+  // a claim about a listing it was never made against. `forgetConversation` writes
+  // its own outcome *after* the refresh it triggers, so this clears nothing of it.
+  sayForgotten(null);
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -5434,8 +5454,7 @@ function renderConversation(list, summary) {
   resume.type = "button";
   resume.textContent = "Continue";
   resume.addEventListener("click", () => {
-    changeConversation(summary.id);
-    el("utterance").focus();
+    void resumeConversation(summary.id);
   });
   const forget = document.createElement("button");
   forget.type = "button";
@@ -5444,6 +5463,65 @@ function renderConversation(list, summary) {
   item.appendChild(resume);
   item.appendChild(forget);
   list.appendChild(item);
+}
+
+// Continue a thread, and say what is already in it (#1371's second clause).
+//
+// **The selection changes first and unconditionally.** Continuing is the owner's act
+// and it is local — it sends nothing and needs nothing to succeed — so a digest read
+// that is slow, refused or unreachable must not cost the owner the thread they
+// pressed for. What a failed read costs is the sentence about what is in it, which
+// the panel's own fault slot then explains.
+//
+// **It is the count and the span, and it is not the transcript.** `conversation` is
+// one of ADR-0175 §6's five browser-reached operations and it answers with a
+// `ConversationDigest`: four scalars, fixed by ADR-0074 §8 as "the count and span
+// rather than every turn" on the ground that a transcript is "something nobody can
+// read". So the rendering is bounded by the operation rather than by a limit this
+// page chose, and it cannot grow with the conversation. What it does *not* do is show
+// what was said, which is the rest of #1371's second clause and needs an operation
+// the promoted surface does not carry — filed as #1818 rather than invented here.
+//
+// **`chose` is what keeps a slow read off a thread the owner has since left**, and it
+// is the device this file already uses at three other places where two acts race over
+// one value. Press "Continue" on `A`, then "Start a new conversation" before the
+// digest lands, and without the comparison the page would announce `A`'s turn count
+// under a selection that is now empty.
+async function resumeConversation(id) {
+  fault(null, "conversations");
+  changeConversation(id);
+  el("utterance").focus();
+  const mine = chose;
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const digest = await relay(half, "/conversation", { conversation_id: id }, "conversations");
+    if (digest === null || chose !== mine) {
+      return;
+    }
+    sayResumed(describeHeld(digest.conversation));
+  } catch (_) {
+    fault(GATEWAY_GONE, "conversations");
+  }
+}
+
+// How much is already in a conversation, in words, from its digest alone.
+//
+// **A conversation with no turn says so rather than borrowing the other reading**,
+// which is `renderConversation`'s own rule one line up: `last_turn_at` is `None` where
+// no turn was ever recorded, and a span printed with a missing end is a span nobody
+// can read.
+function describeHeld(held) {
+  if (held.last_turn_at === null) {
+    return `Nothing has been recorded in it yet. It was started ${held.started_at}.`;
+  }
+  return (
+    `It already holds ${held.recorded_turns} recorded turn(s), ` +
+    `from ${held.started_at} to ${held.last_turn_at}.`
+  );
 }
 
 // Read the conversation, then forget it — the CLI's own order, which ADR-0175 §6
@@ -5481,9 +5559,40 @@ async function forgetConversation(id) {
       changeConversation(null);
     }
     await listConversations();
+    // **After the refresh, so it is the last thing written** — `listConversations`
+    // clears this slot on every read, which is what keeps a stale outcome off a fresh
+    // listing, and what makes the order here load-bearing rather than cosmetic.
+    sayForgotten(statedForget(id, held, done.destroyed));
   } catch (_) {
     fault(GATEWAY_GONE, "conversations");
   }
+}
+
+// Whether the forget took effect, said (#1371's third clause).
+function sayForgotten(text) {
+  const slot = el("forget-outcome");
+  slot.textContent = text === null ? "" : text;
+  slot.hidden = text === null;
+}
+
+// What the hub answered, in words.
+//
+// **`destroyed` is read rather than assumed.** `forget_conversation` "returns whether
+// a conversation was destroyed — `False` where the id named nothing live", and this
+// page had been discarding that answer: a race with a terminal or another tab
+// destroyed nothing here and reported it as a destruction. The two are different facts
+// and the honest rendering says which one happened.
+//
+// **The count is the digest's, read before the destruction**, which is the only moment
+// it was readable — after the forget there is nothing left to count.
+function statedForget(id, held, destroyed) {
+  if (!destroyed) {
+    return `There was no conversation ${id} left to forget, so nothing was destroyed.`;
+  }
+  return (
+    `Conversation ${id} is gone. It held ${held.recorded_turns} recorded turn(s), ` +
+    "and the episodes they index went with it."
+  );
 }
 
 // --- the grant surface (ADR-0177 §6, §7; ADR-0139) ---------------------------
