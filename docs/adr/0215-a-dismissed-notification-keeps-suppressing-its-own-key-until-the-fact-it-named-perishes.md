@@ -27,8 +27,9 @@
   merely kept but are the **ground** of this decision — §5 below says so clause by
   clause.
 - **Contract change — flagged under golden rule 5.** §7 adds
-  `HeldNotification.speaks_for_its_key_at` to `src/ai_assistant/core/types.py` and
-  changes the behavioural contract of `NotificationStore`'s admission and purge.
+  `HeldNotification.speaks_for_its_key_at` to `src/ai_assistant/core/types.py`,
+  moves `HeldNotification.is_purgeable_at`'s guard onto it, and changes the
+  behavioural contract of `NotificationStore`'s admission and purge.
   No Protocol gains or loses a member and no signature moves, and
   `PROTOCOL_VERSION` does not move; what makes it breaking is that a conforming
   store written against ADR-0130 §§7-8 no longer conforms. So this ADR is reviewed
@@ -336,12 +337,22 @@ coupling this ADR removes, in the other direction.
 > setting afterwards, and it runs from the instant the record **ceased to be
 > actionable**. `None` still means never purged.
 
+> **Normative.** The rule above stays whole on the type.
+> `HeldNotification.is_purgeable_at` answers it, its guard reading §1's speaking
+> predicate where it read actionability, and no implementation may compose the
+> second condition around it in a backend or a helper. A store asks the record
+> whether it is purgeable and purges what says yes.
+
 **So a dismissed record's purge waits for the later of its two conditions, and
-neither boundary direction moves.** `HeldNotification.is_purgeable_at` tests
-retention **strictly** — "at the horizon it is still held, and past it it is not,
-which is the boundary §9's conformance clause states" — and §1's horizon is
-half-open, a record speaking for its key strictly before the declared expiry. This
-ADR changes neither; it adds a second condition that must hold as well. So for a
+neither boundary direction moves.** The one symbol that moves is the guard's:
+`is_purgeable_at` refuses on `is_actionable_at` today and refuses on
+`speaks_for_its_key_at` after this, which subsumes it — every actionable record
+speaks — so the second condition joins by *replacing* the first rather than
+standing beside it. It tests retention **strictly** — "at the horizon it is still
+held, and past it it is not, which is the boundary §9's conformance clause
+states" — and §1's horizon is half-open, a record speaking for its key strictly
+before the declared expiry. This ADR changes neither boundary direction; it
+narrows which records reach the retention test at all. So for a
 record dismissed at `D`, **not** reached by a reconsideration `DROP`, with
 retention `R` and a candidate expiring at `E`: where `E` is later than `D + R`, the
 record is not purgeable before `E` and is purgeable at it, because it stops
@@ -452,9 +463,20 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > predicate over the other store's records, and two names for it is how the two
 > drift.
 
-> **Normative.** The predicate lives on the type and not in a backend, for the
+> **Normative.** One predicate already on the type changes with it, and no other.
+> `HeldNotification.is_purgeable_at` refuses on `speaks_for_its_key_at` where it
+> refused on `is_actionable_at`, so §4's rule is answered whole by the record. Its
+> signature does not move and its other two conditions are untouched — a `None`
+> retention is still never purged, and the horizon is still compared strictly —
+> and the lane restates the guard in its docstring to name the population that
+> now holds it.
+
+> **Normative.** Both predicates live on the type and not in a backend, for the
 > reason `is_actionable_at` does: two conforming stores must not be able to
-> disagree about the instant a key stops speaking.
+> disagree about the instant a key stops speaking, nor about the instant a record
+> becomes purgeable. A store that composed §4's second condition around
+> `is_purgeable_at` would be exactly the drift this places on the type to prevent,
+> and §4 forbids it in terms.
 
 > **Normative.** No field is added to any wire-carried type, so no value either
 > peer emits becomes invalid for the other and `PROTOCOL_VERSION` does not move.
@@ -544,7 +566,8 @@ constant `_UNCEASED` and whose remaining filter is `is_actionable_at`; the
 narrowing by dismissal is what has to go, and the record's own predicate is what
 replaces it. The purge is `SqliteNotificationStore._purge_sync` by way of the
 module helper `_is_purgeable`, which wraps `HeldNotification.is_purgeable_at` and
-is where the second condition joins. The canonical fake's counterparts are in
+gains no condition of its own: the guard moves inside that predicate, and the
+helper inherits it unchanged. The canonical fake's counterparts are in
 `ai_assistant.testing`'s notification module, and the shared suite is
 `tests/core/notification_contract.py`. `SqliteNotificationOutbox` needs no change
 at all: every site it reads actionability at still means actionability.
