@@ -1,6 +1,6 @@
 # 219. A `MemoryStore` write is made conditional on a store-authored revision, and a stale one is refused
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **This is a contract change on `MemoryStore`.** It adds one field to
   `MemoryBase` and one to `MemoryWrite` in `core/types.py`, one member to
