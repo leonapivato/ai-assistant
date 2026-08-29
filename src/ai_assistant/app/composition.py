@@ -331,10 +331,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     * the *same* :class:`SqliteMemoryStore` instance is injected into the loop
       (for retrieval) and into the :class:`MemoryIngestor` writer (for
       persistence), so the closed learning loop is not silently open (ADR-0028 §4);
-    * one :class:`InMemoryToolRegistry` object is injected as both the selecting
-      ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8), and is handed
-      the ``InvocationLedger`` face of the one :class:`SqliteAuditTrail` — never
-      the trail itself (ADR-0192 §9);
+    * one :class:`InMemoryToolRegistry` object is injected as the selecting
+      ``ToolRegistry``, the acting ``ToolInvoker`` (ADR-0029 §8) **and the registry
+      the loop reads the planner's capability vocabulary from** (ADR-0211 §3), and
+      is handed the ``InvocationLedger`` face of the one :class:`SqliteAuditTrail`
+      — never the trail itself (ADR-0192 §9);
     * the deferred-question queue (ADR-0078) is opened here, under the same data
       directory and owner-only file mode as the other Tier 1 stores, and joined to
       the façade's ordered shutdown — with its claim-token source left at its
@@ -407,9 +408,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     any other capability — a memory lookup included — finds no capable tool and is
     skipped (``NO_CAPABLE_TOOL``), which ADR-0208 §3 rules is the correct outcome
     rather than a gap to close by re-registering a tool.
-    Whether the planner names a tool's exact capability string is not guaranteed
-    (ADR-0014 §2 keeps planning blind to the tool set), which is the model↔tool
-    alignment follow-up ADR-0048 records rather than solves.
+    Since ADR-0211 the planner is **told** that vocabulary — the loop reads it off
+    the very registry built here and passes it — so a goal needing a capability
+    nobody advertises is one the prompt asks to be declined rather than planned.
+    That is an instruction and not a guarantee (ADR-0211 §6): a model may still emit
+    a name outside the vocabulary, and where it does the step is planned, reaches
+    selection and skips exactly as before. ADR-0053's alias layer is the bridge for
+    a near miss, which is the model↔tool alignment follow-up ADR-0048 records
+    rather than solves.
 
     Args:
         settings: Loaded application settings — the model specs the router routes
@@ -1078,6 +1084,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # and silently loses the queue, which is the drop ADR-0078 ends.
             writes=writes,
             planner=ModelBackedPlanner(model),
+            # **The same object as the selecting registry and the acting invoker**
+            # (ADR-0211 §3), not a second registry and not a snapshot taken from
+            # one. The turn reads `capabilities()` off this to tell the planner what
+            # can be done, and `StepRunner` below resolves the resulting steps
+            # against the very same object — so a step cannot be planned against a
+            # capability the selecting registry never advertised, which is #1772's
+            # narration reintroduced by wiring rather than by prompting. This root
+            # already holds exactly one `InMemoryToolRegistry` for ADR-0029 §8's
+            # reason; this line extends that single-object discipline to the
+            # planning stage rather than inventing a second one for it.
+            registry=tools,
             feedback=RuleBasedFeedbackProcessor(),
             # Passed rather than defaulted, for the reason the ingestor's
             # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality

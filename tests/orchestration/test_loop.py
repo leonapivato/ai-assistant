@@ -29,18 +29,24 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    CostBasis,
     CurrentContext,
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
+    Idempotency,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    Reversibility,
+    RiskLevel,
     SemanticMemory,
     TimeOfDay,
+    ToolCost,
+    ToolDefinition,
 )
 from ai_assistant.orchestration import (
     LearningLoop,
@@ -62,6 +68,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakePlanner,
+    FakeToolRegistry,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +81,7 @@ if TYPE_CHECKING:
         MemoryStore,
         MemoryWriter,
         Planner,
+        ToolRegistry,
     )
     from ai_assistant.core.types import (
         ActionPlan,
@@ -128,6 +136,7 @@ class _FailingPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Fail the way a planner with nothing to offer fails."""
         msg = "no plan for that"
@@ -151,6 +160,7 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
     memory: MemoryStore | None = None,
     policy: MemoryPolicy | None = None,
     planner: Planner | None = None,
+    registry: ToolRegistry | None = None,
     feedback: FeedbackProcessor | None = None,
     writer: MemoryWriter | None = None,
     resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
@@ -175,6 +185,7 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
             writer or FakeMemoryWriter(store=store, policy=policy or FakeMemoryPolicy(), now=_clock)
         ),
         planner=planner or FakePlanner(now=_clock),
+        registry=registry or FakeToolRegistry(),
         feedback=feedback or FakeFeedbackProcessor(),
         resolution_limit=resolution_limit,
         now=_clock,
@@ -363,6 +374,7 @@ async def test_a_derived_flood_cannot_displace_an_assertion_from_the_prompt() ->
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=5,
         now=_clock,
+        registry=FakeToolRegistry(),
     )
 
     result = await loop.respond("dana")
@@ -396,6 +408,7 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=2,
         now=_clock,
+        registry=FakeToolRegistry(),
     )
 
     result = await loop.respond("dana")
@@ -438,6 +451,7 @@ async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_thirty() 
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         now=_clock,
+        registry=FakeToolRegistry(),
     )
 
     result = await loop.respond("dana")
@@ -1289,6 +1303,7 @@ def _supplementing_loop(
         episodic_limit=episodic_limit,
         now=_clock,
         id_factory=lambda: "goal-1",
+        registry=FakeToolRegistry(),
     )
 
 
@@ -1727,6 +1742,7 @@ def _loop_with(
         resolution_limit=resolution_limit,
         episodic_limit=episodic_limit,
         now=_clock,
+        registry=FakeToolRegistry(),
     )
 
 
@@ -1746,7 +1762,120 @@ async def test_a_naive_clock_is_the_reading_stages_error() -> None:
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         now=lambda: naive_now,
+        registry=FakeToolRegistry(),
     )
 
     with pytest.raises(PlanningError, match="LearningLoop"):
         await loop.respond("book the flight")
+
+
+# --- the planner is told which capabilities exist (ADR-0211) ------------------
+
+
+def _advertising(*capabilities: str) -> FakeToolRegistry:
+    """A registry advertising exactly ``capabilities``, one tool apiece.
+
+    The declarations are the least a ``ToolDefinition`` will validate with: this
+    loop reads ``capabilities()`` and nothing else off the registry — it never
+    finds a tool, sees a definition or invokes anything (ADR-0211 §1) — so risk,
+    cost and reach are noise here and are kept at their most inert.
+    """
+    return FakeToolRegistry(
+        ToolDefinition(
+            id=f"{name}-tool",
+            capability=name,
+            description=f"Performs {name}.",
+            risk_level=RiskLevel.LOW,
+            reversibility=Reversibility.REVERSIBLE,
+            side_effecting=False,
+            reads=(),
+            writes=(),
+            discloses=(),
+            cost=ToolCost(basis=CostBasis.FREE),
+            idempotency=Idempotency.NATURAL,
+        )
+        for name in capabilities
+    )
+
+
+async def test_the_planner_is_told_what_the_registry_advertises() -> None:
+    """ADR-0211 §§1, 3: the turn reads the vocabulary and passes it, unchanged.
+
+    ``planning`` performs no read of its own — the vocabulary is pushed in exactly
+    as ``context`` and ``memories`` are, and for the reason ADR-0014 §6 gives for
+    those. Asserted against what the registry itself answers rather than against a
+    literal, so the test moves with the registry rather than pinning a tuple this
+    loop is not the authority on (ADR-0016 §5).
+    """
+    planner = FakePlanner(now=_clock)
+    registry = _advertising("send_email", "report_current_time")
+
+    await _loop(planner=planner, registry=registry).respond("send Ana a note")
+
+    assert planner.calls[0][3] == await registry.capabilities()
+
+
+async def test_the_vocabulary_is_passed_as_the_registry_answered_it() -> None:
+    """ADR-0211 §1: the loop re-sorts nothing and drops nothing on the way through.
+
+    ``capabilities()`` is already sorted and de-duplicated (ADR-0016 §5), so what is
+    checkable here is that this stage adds no second normalisation — including no
+    filtering, which would make the loop a second authority on what the planner may
+    name while the selection stage still resolved against the whole set.
+    """
+    planner = FakePlanner(now=_clock)
+    registry = _advertising("send_email", "report_current_time", "book_flight")
+
+    await _loop(planner=planner, registry=registry).respond("do the thing")
+
+    assert planner.calls[0][3] == ("book_flight", "report_current_time", "send_email")
+
+
+async def test_a_registry_advertising_nothing_reaches_the_planner_as_an_empty_vocabulary() -> None:
+    """ADR-0211 §6: the empty vocabulary is a legal input and raises at no stage.
+
+    A deployment with no builtin and no integration reaches it. What the turn does
+    with it is the planner's business — the decline is the only shape its prompt
+    then offers — and what is pinned here is that this stage neither raises, nor
+    substitutes a default, nor skips the planner call.
+    """
+    planner = FakePlanner(now=_clock)
+
+    turn = await _loop(planner=planner, registry=FakeToolRegistry()).respond("book a flight")
+
+    assert planner.calls[0][3] == ()
+    assert turn.plan.goal_id == turn.goal.id
+
+
+async def test_the_vocabulary_is_read_within_the_turn_not_at_construction() -> None:
+    """ADR-0211 §3: the read happens in the turn, before the planner call.
+
+    So the plan is judged against the vocabulary as it stood at that read. A loop
+    that snapshotted at construction would plan against a registry state the
+    selection stage no longer resolves against — the same divergence the
+    same-object clause closes, arriving through time rather than through wiring.
+    """
+    planner = FakePlanner(now=_clock)
+    registry = _advertising("report_current_time")
+    loop = _loop(planner=planner, registry=registry)
+
+    await loop.respond("what time is it")
+    registry.register(
+        ToolDefinition(
+            id="send_email-tool",
+            capability="send_email",
+            description="Sends an email.",
+            risk_level=RiskLevel.LOW,
+            reversibility=Reversibility.REVERSIBLE,
+            side_effecting=False,
+            reads=(),
+            writes=(),
+            discloses=(),
+            cost=ToolCost(basis=CostBasis.FREE),
+            idempotency=Idempotency.NATURAL,
+        )
+    )
+    await loop.respond("send Ana a note")
+
+    assert planner.calls[0][3] == ("report_current_time",)
+    assert planner.calls[1][3] == ("report_current_time", "send_email")

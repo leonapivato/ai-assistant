@@ -490,6 +490,28 @@ async def test_build_engine_wires_one_registry_object_as_both_registry_and_invok
         await engine.aclose()
 
 
+async def test_build_engine_plans_against_the_registry_selection_resolves_against(
+    tmp_path: Path,
+) -> None:
+    """ADR-0211 §3: the planner is told the vocabulary of the *same* registry object.
+
+    The same-object clause is what makes ADR-0211 worth anything. Told one
+    vocabulary while selection resolved against another, a step could be planned
+    against a capability the selecting registry never advertised — the
+    ``NO_CAPABLE_TOOL`` narration #1772 records, reintroduced by wiring rather than
+    by prompting, and invisible to every test that stubs one side. It is a third
+    prose-only wiring obligation of exactly the shape the two above are: no Protocol
+    can close it, so the root discharges it and a test asserts it.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        tools = engine._runner._registry
+        assert isinstance(tools, InMemoryToolRegistry)
+        assert engine._loop._registry is tools
+    finally:
+        await engine.aclose()
+
+
 async def test_build_engine_hands_the_invoker_the_ledger_face_of_the_one_trail(
     tmp_path: Path,
 ) -> None:

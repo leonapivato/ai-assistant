@@ -87,8 +87,11 @@ class _TwoStepPlanner(OneStepPlanner):
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
-        first = await super().plan(goal, context=context, memories=memories)
+        first = await super().plan(
+            goal, context=context, memories=memories, capabilities=capabilities
+        )
         later = PlanStep(
             id="step-2", intent="file the reply", capability="file_note", parameters=PARAMETERS
         )
@@ -140,8 +143,11 @@ class _NoStep(OneStepPlanner):
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
-        built = await super().plan(goal, context=context, memories=memories)
+        built = await super().plan(
+            goal, context=context, memories=memories, capabilities=capabilities
+        )
         return built.model_copy(update={"steps": ()})
 
 

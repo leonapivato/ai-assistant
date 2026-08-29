@@ -115,7 +115,10 @@ async def test_fake_planner_records_what_it_was_asked() -> None:
         within_working_hours=True,
     )
 
-    await planner.plan(goal, context=context)
+    await planner.plan(goal, context=context, capabilities=("send_email",))
 
     assert len(planner.calls) == 1
     assert planner.calls[0][0].id == "g1"
+    # ADR-0211 §9 item 3: the vocabulary is recorded as handed, so a test over the
+    # loop can assert what the planner was told without standing a model up.
+    assert planner.calls[0][3] == ("send_email",)

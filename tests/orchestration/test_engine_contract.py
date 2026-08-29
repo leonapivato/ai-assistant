@@ -134,6 +134,7 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -258,6 +259,7 @@ class _OneStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Return a one-step plan for the goal."""
         step = PlanStep(
@@ -280,6 +282,7 @@ class _NoStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Return an empty plan for the goal."""
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
@@ -483,6 +486,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=_counter("g"),
+        registry=FakeToolRegistry(),
     )
     runner = StepRunner(
         plans=store,

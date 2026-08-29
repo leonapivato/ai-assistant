@@ -2532,14 +2532,50 @@ class Planner(Protocol):
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Produce a plan for ``goal``.
 
-        ``context`` and ``memories`` are passed in rather than fetched: the
-        pipeline assembles context and retrieves memory before planning, and a
-        planner that reached for them itself would import two subsystems it has
-        no business importing. Retrieved memory is also what makes a plan
-        personal rather than generic.
+        ``context``, ``memories`` and ``capabilities`` are passed in rather than
+        fetched: the pipeline assembles context, retrieves memory and reads the
+        advertised vocabulary before planning, and a planner that reached for them
+        itself would import subsystems it has no business importing. Retrieved
+        memory is also what makes a plan personal rather than generic.
+
+        **``capabilities`` is the vocabulary the registry advertised for this
+        turn** (ADR-0211 §1) — what ``ToolRegistry.capabilities()`` answered on the
+        very object the turn's tool-selection stage will resolve the resulting
+        steps against (ADR-0211 §3). It is an open vocabulary of strings, of which
+        the registry is the sole authority (ADR-0016 §5), and it is nothing else:
+        not tool ids, not ``ToolDefinition`` objects, not risk, cost, reversibility
+        or reach. A planner treats it as the complete statement of what is
+        advertised for this turn — it neither re-derives one, nor fetches one, nor
+        imports any name from ``ai_assistant.tools``, nor holds a ``ToolRegistry``.
+        It does not re-sort, de-duplicate or otherwise canonicalise the value and
+        asserts nothing about its order: ``capabilities()`` already answers a
+        sorted, de-duplicated tuple, and a second normalisation here would be a
+        second authority on the vocabulary.
+
+        **It is required and carries no default**, which is a departure from
+        ``memories`` and a deliberate one (ADR-0211 §1). A call that forgets
+        ``memories`` plans impersonally — the same *kind* of plan, less personal. A
+        call that forgets the vocabulary would be handed the empty one, under which
+        every goal requiring an act declines: a system that silently refuses to act
+        at all, indistinguishable from a deployment that genuinely advertises
+        nothing. Required, that omission is a ``mypy`` error rather than a live
+        regression nobody can see.
+
+        **An empty vocabulary is legal and never an error** (ADR-0211 §6). A
+        conforming planner raises nothing, refuses nothing and enters no repair
+        round on account of it; what it means is that no step can be carried, so a
+        decline is the only shape available for that turn. That binds what a
+        planner is *asked* for and not what a model returns: a step naming a
+        capability outside the vocabulary is still planned, still reaches
+        selection, and is still reported ``NO_CAPABLE_TOOL`` (ADR-0037 §1). No
+        implementation rejects a plan, or a step of one, on the ground that its
+        capability is unadvertised — an emitted name is resolved as it always was,
+        through ADR-0053's selection-time alias layer and failing that through
+        ADR-0037 §1.
 
         **``memories`` is what the pipeline assembled for this turn, not one
         relevance cut** (ADR-0074 §5, widened by ADR-0158 §5). It carries **three
@@ -2569,9 +2605,10 @@ class Planner(Protocol):
         let an episode take a belief's position invisibly, which is exactly what the
         separate budgets exist to prevent one layer down.
 
-        The signature is unchanged and ``Planner`` grows no ``history`` parameter —
-        all three groups are ``MemoryRecord``s the planner already renders, and a
-        second channel would split one prompt input in two. ADR-0074 §5 refused that
+        The three groups arrive on one parameter and ``Planner`` grows no
+        ``history`` parameter — all three are ``MemoryRecord``s the planner already
+        renders, and a second channel would split one prompt input in two. ADR-0074
+        §5 refused that
         channel because the planner did "not act on" the distinction; ADR-0158 §4
         records that the premise has since moved and that carrying an explicit
         boundary is now a ``Planner`` contract change taking its own ADR. Both
@@ -2585,6 +2622,11 @@ class Planner(Protocol):
                 as relevant, then the episodic supplement (ADR-0158 §4). The
                 retrieved group is composed under the assembling consumer's
                 precedence rather than as one relevance rank; see above.
+            capabilities: The capability vocabulary the registry advertised for
+                this turn (ADR-0211 §1) — read by the caller from the same
+                ``ToolRegistry`` object selection will resolve against, never
+                fetched here. Required; an empty vocabulary is legal and means the
+                behaviour above.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`.

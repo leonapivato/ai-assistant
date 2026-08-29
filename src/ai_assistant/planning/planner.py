@@ -10,7 +10,10 @@ Two boundaries from ADR-0014 shape the whole module:
 
 - A step names an **abstract capability**, not a tool. This module imports
   nothing from ``tools`` and validates a capability only as a non-blank
-  identifier (ADR-0014 §2).
+  identifier (ADR-0014 §2). Since ADR-0211 §1 it is *told* which capabilities are
+  advertised — a tuple of strings the caller read from the registry and pushed in,
+  exactly as ``context`` and ``memories`` are pushed in — which changes what the
+  prompt can state and changes nothing about what this module imports or holds.
 - Model output **never sets execution status** (VISION §7). The planner produces
   an ``ActionPlan`` and nothing else; ids, timestamps and every ``StepStatus``
   stay the property of deterministic code.
@@ -21,8 +24,12 @@ kept out of the id space entirely (ADR-0047 §2).
 
 The envelope has **two** legal shapes (ADR-0176 §1). A plan carries a non-empty
 ``steps`` list; a **decline** carries an empty one *together with*
-``"no_capability_needed": true`` and a non-blank ``rationale``, and says that the
-goal is answered from what this turn already carries. The second shape is asserted
+``"no_capability_needed": true`` and a non-blank ``rationale``. A decline has two
+grounds and one shape (ADR-0211 §5): the goal is answered from what this turn
+already carries, or it requires an act that no advertised capability can perform.
+Which one applies is said by the ``rationale`` and nowhere else — the marker keeps
+its structural meaning, that this envelope names no capability, and is never read
+as a claim that the goal needed none. The second shape is asserted
 rather than merely empty, which is what tells it apart from a failure to
 decompose — the objection ADR-0047 §4 raised against a bare empty list, and one
 that has no purchase on a positive assertion. ``no_capability_needed`` is a key of
@@ -165,34 +172,131 @@ way either: recording this exchange happens after you, and separately, so the \
 rationale must not say that what you were told has been saved, stored, or put into \
 long-term memory."""
 
-#: The two legal envelope shapes and the test between them (ADR-0176 §4).
+#: The unadvertised-act direction of ADR-0211 §4's test, worked through.
 #:
-#: The test is stated as what the goal *requires*, never as a list of request
-#: categories, because the material a goal might be answered from is rendered into
-#: this same prompt one message below (:func:`_render_request`) — so "can this be
-#: answered from what is in front of me?" is a question about the text the model is
-#: already holding, and a category list is not (ADR-0176 §4). The stated-fact block
-#: sits under the decline shape as one *direction* of that test worked through, in
-#: the same requires-terms — the way §4's own prose names the two directions
-#: concretely — and the general rule still closes the section.
-_SYSTEM_PROMPT = (
-    """\
+#: §4's third normative clause: where the decline's ground is that nothing
+#: advertised can perform the act, the rationale must say what the goal would have
+#: needed and that the assistant cannot do it, and "may not name a capability, a
+#: tool, a product or a vendor that the stated vocabulary does not contain".
+#:
+#: **That prohibition is the whole point of the block, and #1772 is why.** Eight
+#: rows of a live QA run came back apologising for a *fabricated referent* — "no
+#: calendar tool connected", "no tool available to search contacts" — describing
+#: something that was never registered, never selected and never called. The
+#: honesty obligation ADR-0170 §5 puts on the composing stage was discharged
+#: faithfully over a plan that had invented the thing being disclaimed. Moving the
+#: sentence from "I have no calendar tool" to "I cannot look at your calendar" is
+#: one sentence, once, about something true.
+#:
+#: A separate constant for the reason :data:`_STATED_FACT_GUIDANCE` is one: the
+#: prompt test can assert it **reaches the model** without string-matching its
+#: wording, which ADR-0176 §4's fourth clause declines to demand of any lane.
+_UNAVAILABLE_GUIDANCE = """\
+Where the goal does require an act and nothing on the list above can carry it, the \
+reply is a DECLINE as well, and there the rationale is the whole of your answer to \
+the user. Say in your own words what the goal would have needed and that you \
+cannot do it — one sentence about the act itself. Do not name a capability, tool, \
+product, service or vendor that is not on the list above, and do not say that one \
+is missing, disconnected or unavailable: naming a thing that was never there tells \
+the user a connection has gone wrong when nothing of the kind ever existed, which \
+is the mistake to avoid here."""
+
+#: How the advertised vocabulary is headed when the registry answered names
+#: (ADR-0211 §4's first clause).
+_VOCABULARY_HEADING: Final = (
+    "These are the capabilities this assistant has, and the only names a plan step may carry:"
+)
+
+#: What stands in for the list when the registry advertised nothing (ADR-0211 §6).
+#:
+#: The empty vocabulary is a legal input and never an error, and §6 fixes what the
+#: prompt then states: the list admits no step, so the decline is the only shape
+#: available for this turn. It is phrased as an *empty list* rather than as the
+#: absence of one so that every sentence below referring to "the list above" still
+#: has a referent — including the plan shape's condition, which is then trivially
+#: unsatisfiable, which is exactly §6's reading.
+_EMPTY_VOCABULARY: Final = (
+    "This assistant has no capabilities at all right now — the list of what it can "
+    "do is empty. No plan step has a name it could carry, so the DECLINE below is "
+    "the only shape available for this turn."
+)
+
+
+def _render_vocabulary(capabilities: Sequence[str]) -> str:
+    """Render the advertised vocabulary into the block the system prompt states.
+
+    The names are rendered **in the order they were handed**, unchanged: ADR-0016
+    §5 already obliges ``ToolRegistry.capabilities()`` to answer a sorted,
+    de-duplicated tuple, and ADR-0211 §1 forbids a second normalisation here on the
+    ground that it would be a second authority on the vocabulary. Nothing is
+    sorted, de-duplicated, folded or filtered — the value is stated as it arrived.
+
+    Each name goes through :func:`_quoted_span` for the reason a facet's ``source``
+    does: this renderer authored the surrounding block and the name did not, and a
+    capability is only a :data:`~ai_assistant.core.types.VisibleIdentifier` — issue
+    #62 leaves internal whitespace and control characters open — so an unquoted one
+    could break the block's own line structure. Quoting is a property of the
+    *rendering* and not of the value: nothing downstream sees a changed name, which
+    is what keeps this clear of §1's no-canonicalisation clause.
+
+    Args:
+        capabilities: The vocabulary the registry advertised for this turn.
+
+    Returns:
+        The vocabulary block, headed, or :data:`_EMPTY_VOCABULARY` where the
+        vocabulary is empty (ADR-0211 §6).
+    """
+    names = list(capabilities)
+    if not names:
+        return _EMPTY_VOCABULARY
+    listed = "\n".join(f"  {_quoted_span(name)}" for name in names)
+    return (
+        f"{_VOCABULARY_HEADING}\n\n{listed}\n\n"
+        "Take that list as the complete statement of what can be done this turn. A "
+        "capability that is not on it cannot be performed, however reasonable it "
+        "would be to have one."
+    )
+
+
+#: The prompt above the vocabulary block: the role, the reply rule, and what a step
+#: names.
+#:
+#: **The examples are gone, and their absence is the fix** (ADR-0211, #1772). This
+#: paragraph used to close with "Use short snake_case names such as `send_email`,
+#: `search_calendar`, or `book_flight`" — and the calendar row of #1772 is a model
+#: doing exactly as instructed on a hub whose whole vocabulary was
+#: ``report_current_time``. Offering an example vocabulary beside a stated one
+#: would reintroduce the defect in the same breath as the correction.
+_PROMPT_OPENING: Final = """\
 You are the planning stage of an AI assistant. Decide what the user's goal \
 requires, then reply with exactly one of the two JSON objects below — a single \
 JSON object and nothing else, no prose, no code fence.
 
 A step names an abstract CAPABILITY — what must be done — not a specific tool, \
-product, or vendor. Use short snake_case names such as `send_email`, \
-`search_calendar`, or `book_flight`. Do not name a concrete tool or service.
+product, or vendor. Do not name a concrete tool or service.
+"""
 
+#: The two legal envelope shapes and the test between them (ADR-0176 §1, ADR-0211
+#: §4).
+#:
+#: The test is stated as what the goal *requires*, judged against the vocabulary
+#: above, and never as a list of request categories: the material a goal might be
+#: answered from is rendered into this same prompt one message below
+#: (:func:`_render_request`), so "can this be answered from what is in front of
+#: me?" is a question about text the model is already holding, and a category list
+#: is not (ADR-0176 §4). ADR-0211 §4 adds the second half of each side — a plan
+#: needs a listed capability able to carry every step, and a goal requiring an act
+#: that nothing listed can perform is the decline's second ground.
+_PROMPT_SHAPES: Final = """\
 Where accomplishing the goal requires the assistant to act in the world, or to \
-reach for something this turn has not already given you, decompose it into an \
-ordered sequence of steps and reply with a PLAN:
+reach for something this turn has not already given you, and a capability on the \
+list above can carry each of those steps, decompose it into an ordered sequence of \
+steps and reply with a PLAN:
 
 {"rationale": "<one sentence on why these steps>",
  "steps": [
    {"intent": "<human-readable purpose of this step>",
-    "capability": "<abstract_capability>",
+    "capability": "<a capability from the list above>",
     "parameters": {"<name>": "<json value>"}}
  ]}
 
@@ -200,25 +304,71 @@ Where the goal is answered from what this turn already carries — the retrieved
 memories, the assembled context and the conversation set out in the next message \
 — no capability is wanted at all, and the reply is a DECLINE:
 
-{"rationale": "<one sentence on why no capability is needed>",
+{"rationale": "<one sentence on why you are not planning steps>",
  "steps": [],
  "no_capability_needed": true}
-
 """
-    + _STATED_FACT_GUIDANCE
-    + """
 
+#: The prompt below both worked-through directions: ADR-0176 §4's first clause and
+#: the envelope's grammar.
+#:
+#: ``no_capability_needed`` keeps its spelling and its **structural** meaning
+#: (ADR-0176 §1, ADR-0211 §5): it asserts that this envelope names no capability,
+#: and it is neither read nor cited as an assertion that the goal needed none.
+#: Which of the two grounds applies is said by the ``rationale`` and nowhere else,
+#: which is why the key is set on both.
+_PROMPT_CLOSING: Final = """\
 A decline is an ordinary, expected outcome — not a fallback, not an error, not a \
-last resort. Naming a capability for a goal that needs none is the worse answer of \
-the two. Judge which shape is wanted by what the goal requires, not by what kind \
-of request it looks like.
+last resort. Naming a capability for a goal that needs none, or one that is not on \
+the list above, is the worse answer of the two. Judge which shape is wanted by \
+what the goal requires and by what the list above holds, not by what kind of \
+request it looks like.
 
 In a plan, `steps` must be a non-empty list, and `parameters` is optional per step \
 and, when present, must be a JSON object. In a decline, `steps` must be the empty \
 list, `no_capability_needed` must be the JSON literal true (not 1, not "true"), \
-and `rationale` must be a non-empty string. Do not include step ids; they are \
-assigned downstream."""
-)
+and `rationale` must be a non-empty string. Set `no_capability_needed` on either \
+kind of decline; it says that this reply names no capability, and the rationale is \
+what says why. Do not include step ids; they are assigned downstream."""
+
+
+def _system_prompt(capabilities: Sequence[str]) -> str:
+    """Build the planning system prompt over the vocabulary advertised this turn.
+
+    A function rather than a constant because ADR-0211 §4 makes the vocabulary part
+    of what the prompt *states*: the list of names a step may carry, the test
+    between the two envelope shapes judged against it, and the rationale a decline
+    on its second ground owes. A prompt cannot state a vocabulary it was not given,
+    which is why #1772's remedy — "state the decline test harder" — could not have
+    worked on its own.
+
+    The blocks are assembled in a fixed order, and one ordering is load-bearing
+    rather than aesthetic: both worked-through directions
+    (:data:`_STATED_FACT_GUIDANCE`, :data:`_UNAVAILABLE_GUIDANCE`) sit **below** the
+    rendered envelopes, because a reader meeting a direction before the shape it
+    belongs to has been told what to reply before being told what a reply looks
+    like.
+
+    Args:
+        capabilities: The vocabulary the registry advertised for this turn, taken
+            as handed (ADR-0211 §1). Empty is legal (ADR-0211 §6).
+
+    Returns:
+        The system turn for this call.
+    """
+    return "\n".join(
+        (
+            _PROMPT_OPENING,
+            _render_vocabulary(capabilities),
+            "",
+            _PROMPT_SHAPES,
+            _STATED_FACT_GUIDANCE,
+            "",
+            _UNAVAILABLE_GUIDANCE,
+            "",
+            _PROMPT_CLOSING,
+        )
+    )
 
 
 def _uuid() -> str:
@@ -325,13 +475,29 @@ class ModelBackedPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Produce a frozen plan for ``goal`` (ADR-0047).
 
         Prompts the model for a JSON envelope, extracts and validates it into a
-        plan, and retries once on malformed output before giving up. ``context``
-        and ``memories`` are rendered into the prompt — the memories are what make
-        the plan personal (ADR-0014 §6) — and are never fetched here.
+        plan, and retries once on malformed output before giving up. ``context``,
+        ``memories`` and ``capabilities`` are rendered into the prompt — the
+        memories are what make the plan personal (ADR-0014 §6), the vocabulary is
+        what the plan is judged against (ADR-0211 §4) — and none of the three is
+        ever fetched here.
+
+        **The vocabulary is stated, not enforced** (ADR-0211 §6). It is rendered
+        into the system turn and nothing downstream of the model checks a returned
+        step against it: no post-parse vocabulary test lives here, and no reply is
+        converted into a decline on the ground that its capability is unadvertised.
+        Three reasons, and the first is decisive on its own — ADR-0053's alias layer
+        resolves an emitted name onto an advertised one at *selection* time, so a
+        check here would refuse ``send_mail`` on a hub advertising ``send_email``, a
+        plan the layer would have resolved and the tool would have performed. This
+        module cannot consult that layer either: it lives in `orchestration`, and
+        `planning` importing it is an architecture violation ``lint-imports``
+        fails. What an out-of-vocabulary name still gets is what it always got —
+        the alias layer, then ``NO_CAPABLE_TOOL`` (ADR-0037 §1).
 
         ``goal`` is observed **once**, on this coroutine's first executed line and
         before the first ``await`` (ADR-0065). ``Goal`` is mutable, the model call
@@ -339,9 +505,9 @@ class ModelBackedPlanner:
         its own instance mid-flight would otherwise get an ``ActionPlan`` whose
         frozen, auditable ``goal_id`` names a goal the model was never shown. The
         prompt, the plan's ``goal_id`` and the failure message all derive from
-        that one snapshot. ``context`` and ``memories`` need no snapshot: they are
-        read once, into the prompt, before the same first ``await`` and never
-        again — the other discharge the clause allows.
+        that one snapshot. ``context``, ``memories`` and ``capabilities`` need no
+        snapshot: each is read once, into the prompt, before the same first
+        ``await`` and never again — the other discharge the clause allows.
 
         ``memories`` carries what the pipeline assembled for this turn, which
         ADR-0074 §5 widened from "relevant, best first" to the conversation's
@@ -356,6 +522,13 @@ class ModelBackedPlanner:
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then records retrieved as
                 relevant, best first within that group (ADR-0074 §5).
+            capabilities: The capability vocabulary the registry advertised for
+                this turn (ADR-0211 §1), rendered into the system prompt as the
+                names a step may carry. Taken as handed — neither re-sorted,
+                de-duplicated nor canonicalised — and read once, into the prompt,
+                before the first ``await``. An empty vocabulary is legal and is
+                stated as such (ADR-0211 §6); it raises nothing and drives no
+                repair round.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan` for ``goal``.
@@ -372,7 +545,7 @@ class ModelBackedPlanner:
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
         conversation: list[Message] = [
-            Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
+            Message(role=Role.SYSTEM, content=_system_prompt(capabilities)),
             Message(role=Role.USER, content=_render_request(snapshot, context, memories)),
         ]
 

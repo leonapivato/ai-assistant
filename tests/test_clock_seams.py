@@ -78,6 +78,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -225,6 +226,7 @@ async def _learning_loop(now: Clock) -> None:
         planner=FakePlanner(now=lambda: _AWARE),
         feedback=FakeFeedbackProcessor(),
         now=now,
+        registry=FakeToolRegistry(),
     ).respond("book the flight")
 
 
@@ -233,7 +235,7 @@ async def _clock_source(now: Clock) -> None:
 
 
 async def _fake_planner(now: Clock) -> None:
-    await FakePlanner(now=now).plan(_goal(), context=_context())
+    await FakePlanner(now=now).plan(_goal(), context=_context(), capabilities=())
 
 
 async def _fake_plan_store(now: Clock) -> None:
@@ -275,6 +277,7 @@ async def _engine(now: Clock) -> None:
             planner=FakePlanner(now=lambda: _AWARE),
             feedback=FakeFeedbackProcessor(),
             now=lambda: _AWARE,
+            registry=FakeToolRegistry(),
         ),
         runner=StepRunner(
             plans=plans,

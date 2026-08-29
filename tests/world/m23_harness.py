@@ -136,6 +136,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     source_grant,
@@ -616,6 +617,7 @@ def build_world(
         feedback=FakeFeedbackProcessor(),
         now=lambda: NOW,
         id_factory=lambda: f"g-{next(goals)}",
+        registry=FakeToolRegistry(),
     )
 
     conversations = FakeConversationStore(now=lambda: NOW)

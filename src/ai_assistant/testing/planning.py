@@ -109,7 +109,14 @@ class FakePlanner:
         """
         self._plan = plan
         self._clock = checked_clock(now, owner="FakePlanner")
-        self.calls: list[tuple[Goal, CurrentContext, tuple[MemoryRecord, ...]]] = []
+        #: One entry per call: the goal, the context, the memories and the
+        #: capability vocabulary the caller stated (ADR-0211 §9 item 3). The
+        #: vocabulary is recorded so a test over the loop can assert *what the
+        #: planner was told* without standing a model up — which is the only way
+        #: ADR-0211 §3's same-object clause is checkable from outside `app`.
+        self.calls: list[
+            tuple[Goal, CurrentContext, tuple[MemoryRecord, ...], tuple[str, ...]]
+        ] = []
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error the real planner raises.
@@ -135,9 +142,27 @@ class FakePlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
-        """Return the scripted plan, recording the arguments it was given."""
-        self.calls.append((goal, context, tuple(memories)))
+        """Return the scripted plan, recording the arguments it was given.
+
+        ``capabilities`` is recorded and **not acted on**: the plan is scripted, so
+        making it depend on the vocabulary would put a judgement in a fake that the
+        contract leaves to an implementation (ADR-0211 §9 item 2 forbids the
+        conformance suite asserting which envelope any planner returns). It is
+        taken as handed — not sorted, de-duplicated or otherwise canonicalised
+        (ADR-0211 §1) — and only frozen into a tuple, so a caller mutating the
+        sequence it passed cannot rewrite what this records.
+
+        Args:
+            goal: The objective to plan for.
+            context: The situational context assembled for this request.
+            memories: What the pipeline assembled for this turn.
+            capabilities: The vocabulary the registry advertised for this turn.
+                Required, exactly as the contract requires it; the empty
+                vocabulary is legal and changes nothing here (ADR-0211 §6).
+        """
+        self.calls.append((goal, context, tuple(memories), tuple(capabilities)))
         if self._plan is not None:
             return self._plan
         return ActionPlan(
