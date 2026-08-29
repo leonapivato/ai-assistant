@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 import pytest_asyncio
+import structlog
 from playwright.async_api import Error as BrowserError
 from playwright.async_api import async_playwright
 
@@ -64,7 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 from collection_guard import pytest_pycollect_makeitem  # noqa: F401  # a hook, by name
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from playwright.async_api import Browser
     from test_protocol_triad import CheckOutcome, TriadEvidence
@@ -165,6 +166,70 @@ def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
         if variable.upper().startswith(_SETTINGS_ENV_PREFIX):
             monkeypatch.delenv(variable, raising=False)
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
+def structlog_configuration_is_this_test_s_own() -> Iterator[None]:
+    """Give each test back the ``structlog`` configuration it started with.
+
+    **The exposure.** ``structlog``'s configuration is process-global, and
+    ``structlog.testing.capture_logs`` — which 27 modules of this suite assert
+    through — replaces and restores only its *processors*. It leaves
+    ``wrapper_class``, ``logger_factory`` and ``cache_logger_on_first_use``
+    untouched, and each of those can silence a capture on its own: the level lives
+    in ``wrapper_class`` (``core.logging._configure`` installs
+    ``structlog.make_filtering_bound_logger(level)``, which drops an ``info`` call
+    **before** any processor sees it), and caching binds a logger's chain on first
+    use so that a later ``configure`` never reaches it. A test that leaves any of
+    them moved therefore leaves every later ``capture_logs`` on that worker
+    capturing nothing — and each of those tests fails saying the code under test
+    logged nothing, which is a true statement about a global somebody else moved.
+
+    **It is not one stray test.** A census over one distributed run — this fixture
+    with a recorder in place of the restore — found about twenty tests in six
+    modules handing the configuration on changed: ``tests/core/test_logging.py``
+    (whose subject *is* the configuration, including a case that leaves
+    ``cache_logger_on_first_use`` on), ``tests/models/test_routing.py``,
+    ``tests/context/test_context_provider.py``,
+    ``tests/permissions/test_action_policy.py``,
+    ``tests/tools/test_egress_channel.py`` and ``tests/interfaces/test_cli.py``.
+    None of them is wrong: each installs a configuration because that is what it is
+    testing. What was missing is anything that scopes the effect to the test that
+    wanted it.
+
+    **Why it surfaced now.** Which tests share a worker with which is decided by
+    xdist's distribution mode, and ADR-0216 §3 obliges this suite to run
+    ``loadgroup`` (see :func:`pytest_configure`) where it used to run ``worksteal``.
+    The coupling is older than either: it was reproduced on a clean ``origin/main``
+    under ``--dist load``, and on this branch a run with the browser layer ignored
+    failed the same way, so it is neither the layer's nor ``loadgroup``'s. Both
+    ``just test-fast`` runs after this fixture landed were green where the three
+    before it were not.
+
+    **Autouse and unconditional**, in ``hermetic_assistant_env``'s spirit and for
+    its reason — a verdict must not depend on state the run happened to be left in.
+    It *restores* rather than resets: whatever a test inherited is what it hands on,
+    so a module that configures deliberately still sees its own configuration for
+    the length of the test that made it. Where structlog was **unconfigured** on the
+    way in it is returned to unconfigured, because
+    ``core.logging.install_redaction`` reads ``structlog.is_configured()`` and takes
+    a different path on each answer — and ``tests/core/test_logging.py`` is a test
+    of exactly that branch.
+
+    Yields:
+        Nothing; the configuration is restored on the way out.
+    """
+    was_configured = structlog.is_configured()
+    held = structlog.get_config()
+    snapshot = {**held, "processors": list(held["processors"])}
+    try:
+        yield
+    finally:
+        if structlog.is_configured() != was_configured or structlog.get_config() != snapshot:
+            if was_configured:
+                structlog.configure(**snapshot)
+            else:
+                structlog.reset_defaults()
 
 
 #: The launch arguments ADR-0216's layer needs, and the reason each is here.
