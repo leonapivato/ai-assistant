@@ -24,6 +24,7 @@ from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
+    ConversationDigest,
     DiscloserProvenance,
     GrantScope,
     NotificationCondition,
@@ -738,8 +739,14 @@ def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
 
     "None yet" is said rather than left blank: the hint was empty until a turn came
     back, and an empty line is what left the owner on the phone unable to tell a fresh
-    thread from a continued one. The other two clauses of #1371 — prior turns rendered
-    on resume, and a legible outcome for forget — are not taken here.
+    thread from a continued one.
+
+    That the button in the listing actually *moves* this line is a fact about a tap
+    and is asserted where ADR-0216 §2 puts it, in
+    ``test_browser_conversations.py``. The other two clauses of #1371 are taken
+    below, as far as the ratified contracts admit: the resumed thread's count and
+    span, and a stated outcome for a forget. What was *said* in a resumed thread is
+    #1818 and is on no operation a browser reaches.
     """
     script = _code("app.js")
     setter = _functions(script)["setConversation"]
@@ -749,6 +756,135 @@ def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
     # Said on load and not only after a turn, which is what makes the persisted id
     # visible at all.
     assert "setConversation(conversationId);" in _functions(script)["showConsole"]
+
+
+def test_the_page_says_what_a_resumed_thread_already_holds() -> None:
+    """#1371's second clause, in the half a reading can decide.
+
+    The line exists, ships hidden — a page that showed it empty on load would be
+    claiming something about a thread nobody has chosen — and is written from the
+    digest by the one function that reads one.
+    """
+    document = _asset("index.html")
+    functions = _functions(_code("app.js"))
+
+    assert '<p class="hint" id="resumed" hidden></p>' in document
+    assert "sayResumed(describeHeld(digest.conversation));" in functions["resumeConversation"]
+    assert (
+        'relay(half, "/conversation", { conversation_id: id }' in (functions["resumeConversation"])
+    )
+
+
+def test_the_resumed_line_is_built_from_the_digest_and_from_nothing_else() -> None:
+    """Derived from ``ConversationDigest`` rather than hardcoded against it.
+
+    ADR-0074 §8 fixed that shape as "the count and span rather than every turn", and
+    the page's rendering is bounded by *it* rather than by a limit the page chose —
+    which is the whole reason this clause could be answered without a contract
+    change. A member this page read that the digest does not carry would be the page
+    having invented one, and this is what says so.
+    """
+    held = _functions(_code("app.js"))["describeHeld"]
+    read = set(re.findall(r"\bheld\.(\w+)", held))
+
+    assert read
+    assert read <= set(ConversationDigest.model_fields)
+
+
+def test_a_resumed_count_is_cleared_by_every_route_that_could_make_it_stale() -> None:
+    """The invariant lives in ``setConversation``, which is why there is one clear.
+
+    Every route into that function invalidates the digest: a different conversation
+    makes the count about the wrong thread, and a turn's own answer — which arrives
+    through ``renderOutcome`` rather than through ``changeConversation`` — makes it
+    short by the turn that just landed. A stale count is worse than none, because a
+    reader cannot tell that it is stale.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "sayResumed(null);" in functions["setConversation"]
+    # Written in exactly one place and cleared in exactly one place, which is what
+    # makes the invariant checkable at all.
+    assert script.count("sayResumed(") == 3
+    assert "sayResumed(describeHeld" in functions["resumeConversation"]
+
+
+def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() -> None:
+    """The selection changes first, and unconditionally.
+
+    Continuing is the owner's own act and it is local — ``startFresh``'s comment
+    already records that the page "sends nothing" to leave a thread, and joining one
+    is the same kind of act. So a digest read that is slow, refused or unreachable
+    costs the sentence about what is in the thread and never the thread itself.
+
+    ``chose`` is the guard on the other side of that: the read is in flight while the
+    owner can still press "Start a new conversation", and this file's own device for
+    two acts racing over one value is what keeps a late digest from being announced
+    under a selection that has since changed.
+    """
+    resuming = _functions(_code("app.js"))["resumeConversation"]
+
+    assert resuming.index("changeConversation(id);") < resuming.index("await relay(")
+    assert "const mine = chose;" in resuming
+    assert "chose !== mine" in resuming
+
+
+def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> None:
+    """#1371's third clause, and the half of it that is a correctness fix.
+
+    ``forget_conversation`` "returns whether a conversation was destroyed — ``False``
+    where the id named nothing live", and this page had been discarding that answer:
+    a race with a terminal or another tab destroyed nothing and was reported as a
+    destruction. Both facts are said, and they are said differently.
+    """
+    document = _asset("index.html")
+    functions = _functions(_code("app.js"))
+
+    assert '<p class="notice" id="forget-outcome" hidden></p>' in document
+    assert (
+        "sayForgotten(statedForget(id, held, done.destroyed));" in (functions["forgetConversation"])
+    )
+    stated = functions["statedForget"]
+    assert "if (!destroyed)" in stated
+    assert "so nothing was destroyed." in stated
+    assert "is gone." in stated
+
+
+def test_the_forget_outcome_is_written_after_the_refresh_it_triggered() -> None:
+    """The order is load-bearing rather than cosmetic.
+
+    ``listConversations`` clears the slot on every read, so an outcome written
+    *before* the refresh would be erased by it, and an outcome left standing over a
+    listing read afresh from the panel's own button would be a claim about a listing
+    it was never made against. Writing after its own refresh is what makes the
+    outcome survive exactly one listing and no other.
+    """
+    functions = _functions(_code("app.js"))
+    forgetting = functions["forgetConversation"]
+
+    assert "sayForgotten(null);" in functions["listConversations"]
+    assert forgetting.index("await listConversations();") < forgetting.index("sayForgotten(stated")
+
+
+def test_the_forget_ceremony_is_unchanged_and_no_second_one_is_added() -> None:
+    """ADR-0175 §6: a front-end confirmation "is not a control and is not required".
+
+    Saying what a forget *did* is legibility and is written after the act. It is not
+    a second gate: the conversation surface shows exactly one ceremony, the
+    show-then-confirm ADR-0073 §5 asks for, in the one function that destroys — and
+    the two functions this lane added or changed beside it raise none.
+
+    The count is taken over that function rather than over the file, because the
+    file's other destructive controls each keep a ceremony of their own and this
+    case is not about them.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert functions["forgetConversation"].count("window.confirm(") == 1
+    assert "window.confirm(" not in functions["resumeConversation"]
+    assert "window.confirm(" not in functions["listConversations"]
+    assert "window.confirm(" not in functions["statedForget"]
 
 
 def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
