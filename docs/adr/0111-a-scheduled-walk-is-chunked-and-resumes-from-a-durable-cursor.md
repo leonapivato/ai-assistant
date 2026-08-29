@@ -168,60 +168,6 @@
   and ADR-0077 §8 each carry a sentence a reader would now read more widely than
   it holds. §10 names them, applies the test clause by clause, and states what is
   *not* owed and why. **Nothing here supersedes anything**, wholly or in part.
-- **Note (2026-08-29): §4's second normative clause is amended by
-  [ADR-0213](0213-a-record-carries-the-topics-it-is-about-proposed-once-at-write-and-never-inferred-at-read.md)
-  §1, which admits one bounded local operation that carries no deadline.** That
-  clause reads "A job may be chunked only if every operation it performs inside one
-  chunk is itself bounded by a deadline." ADR-0213 §5 puts an operation inside a
-  consolidation chunk — an in-memory accumulation of the topic labels of the records
-  each prompt carries, and an ordering of what it holds — which is synchronous, calls
-  no provider, waits on no I/O, and is bounded by a product of `scheduler_chunk_size`,
-  `MAX_TOPICS_PER_RECORD` and `DEFAULT_PAGE_SIZE` rather than by a timer. Read as
-  written, §4's clause makes a job carrying that operation one that may not be chunked;
-  after ADR-0213 it may. **A reader holding only this ADR would refuse a chunked job
-  over an operation ADR-0213 admits**, which is ADR-0070 §1's test met, so the record
-  is owed and is made here.
-
-  **The amendment is exactly this and no wider.** What §4 now admits is an operation
-  that is local and synchronous, cannot block indefinitely, and whose per-chunk cost is
-  a product of figures the configuration and ratified `core` constants already fix — and
-  whose admissibility is still **checked rather than assumed**, in the ADR that adds it,
-  which is what ADR-0213 §1 does at length. **Every operation that can block still owes
-  a deadline, unchanged.** §4's first and third normative clauses stand as written, as
-  do the run budget and its chunk-boundary check, the `[1, 2**63)` bound on
-  `scheduler_chunk_size`, the arithmetic "``max_attempts * timeout + total backoff``,
-  multiplied by the chunk's records", the duty-cycle reasoning and its starvation bound,
-  the re-arming rule, and §§1–3 and §§5–9 entire. Nothing about a provider call, a store
-  read or any awaited operation changes, and no other job's admissibility moves.
-
-  **What this note does not claim is that one chunk's duration is constant.** §4 already
-  makes a chunk's duration a per-record cost multiplied by the chunk's records, already
-  calls the chunk "both the unit of loss and the unit of overrun", and already says
-  "fifty is chosen small on purpose" because "a deployment whose per-record cost is high
-  wants it lower, which is precisely why it is a field rather than a constant". The
-  accumulation is one further per-record term in that same arithmetic, so a deployment
-  that raises `scheduler_chunk_size` lengthens a chunk exactly as it already did, for
-  exactly the reason §4 gives. The duty-cycle bound — a chunked job occupies the loop
-  "for at most one budget plus one chunk per interval" — therefore holds after this
-  amendment in precisely the form §4 states it, which is a bound *relative to* a chunk's
-  duration and never a promise about it. What the amendment admits is an operation with
-  no **timer**; what it does not do is take a chunk's cost out of §4's arithmetic, or
-  promise a wall-clock duration §4 never promised for any chunk.
-
-  **The hazard §4 was written against is unchanged, and is why the exception is this
-  narrow.** The ratification note above records round 1's finding "that §4's budget
-  bounds nothing if a chunk can block indefinitely", and this clause as the repair —
-  "making a per-operation deadline a precondition of being chunked at all". An operation
-  that cannot block is outside that hazard; one that can is not, and §4 reaches it
-  exactly as it did.
-
-  This `Status` line carries a leading `Partially superseded by` token, so under
-  ADR-0082 §2 **no qualifier is written on it and this note is the whole of the
-  record**. ADR-0213 ships in the same change as this note; while it stands `Proposed`
-  in that change this line names a decision that is drafted rather than ratified, which
-  is the form the note above already records `main` as carrying. Appended per ADR-0070
-  §1: no text below is rewritten and every clause of §4 stands as written. Refs #1720.
-
 - Partially superseded: 2026-08-29 by ADR-0212 — **where a walk begins when it has no
   usable position does not hold for the observation cursor: an absent *or discarded*
   watermark begins at the conversation's tail window, not at the first row of the
@@ -297,6 +243,69 @@
   written. The pair and this note land in the same change as ADR-0212
   itself, which is the existence condition ADR-0082 §7 states. Refs #1788, #1737,
   #632.
+- **Note (2026-08-29): §4's second normative clause is amended by
+  [ADR-0213](0213-a-record-carries-the-topics-it-is-about-proposed-once-at-write-and-never-inferred-at-read.md)
+  §1, which admits one bounded local operation that carries no deadline.** That
+  clause reads "A job may be chunked only if every operation it performs inside one
+  chunk is itself bounded by a deadline." ADR-0213 §5 puts an operation inside a
+  consolidation chunk — an in-memory accumulation of the topic labels of the records
+  each prompt carries, and an ordering of what it holds — which is synchronous, calls
+  no provider, waits on no I/O, and is bounded by a product of `scheduler_chunk_size`,
+  `MAX_TOPICS_PER_RECORD` and `DEFAULT_PAGE_SIZE` rather than by a timer. Read as
+  written, §4's clause makes a job carrying that operation one that may not be chunked;
+  after ADR-0213 it may. **A reader holding only this ADR would refuse a chunked job
+  over an operation ADR-0213 admits**, which is ADR-0070 §1's test met, so the record
+  is owed and is made here.
+
+  **The amendment is exactly this and no wider.** What §4 now admits is an operation
+  that is local and synchronous, cannot block indefinitely, and whose per-chunk cost is
+  a product of figures the configuration and ratified `core` constants already fix — and
+  whose admissibility is still **checked rather than assumed**, in the ADR that adds it,
+  which is what ADR-0213 §1 does at length. **Every operation that can block still owes
+  a deadline, unchanged.** §4's first and third normative clauses stand as written, as
+  do the run budget and its chunk-boundary check, the `[1, 2**63)` bound on
+  `scheduler_chunk_size`, the arithmetic "``max_attempts * timeout + total backoff``,
+  multiplied by the chunk's records", the duty-cycle reasoning and its starvation bound,
+  and the re-arming rule. Nothing about a provider call, a store read or any awaited
+  operation changes, and no other job's admissibility moves. **Every other section of
+  this ADR is left exactly where this amendment found it**, which is not the same as
+  saying each stands whole: the note above records ADR-0212 replacing §2's
+  absent-cursor clause and §7's restart position in the observation cursor's scope, and
+  nothing here touches, restores or re-reads either. This record reaches §4's second
+  normative clause and no other sentence of this ADR.
+
+  **What this note does not claim is that one chunk's duration is constant.** §4 already
+  makes a chunk's duration a per-record cost multiplied by the chunk's records, already
+  calls the chunk "both the unit of loss and the unit of overrun", and already says
+  "fifty is chosen small on purpose" because "a deployment whose per-record cost is high
+  wants it lower, which is precisely why it is a field rather than a constant". The
+  accumulation is one further per-record term in that same arithmetic, so a deployment
+  that raises `scheduler_chunk_size` lengthens a chunk exactly as it already did, for
+  exactly the reason §4 gives. The duty-cycle bound — a chunked job occupies the loop
+  "for at most one budget plus one chunk per interval" — therefore holds after this
+  amendment in precisely the form §4 states it, which is a bound *relative to* a chunk's
+  duration and never a promise about it. What the amendment admits is an operation with
+  no **timer**; what it does not do is take a chunk's cost out of §4's arithmetic, or
+  promise a wall-clock duration §4 never promised for any chunk.
+
+  **The hazard §4 was written against is unchanged, and is why the exception is this
+  narrow.** The ratification note above records round 1's finding "that §4's budget
+  bounds nothing if a chunk can block indefinitely", and this clause as the repair —
+  "making a per-operation deadline a precondition of being chunked at all". An operation
+  that cannot block is outside that hazard; one that can is not, and §4 reaches it
+  exactly as it did.
+
+  This `Status` line carries a leading `Partially superseded by` token, so under
+  ADR-0082 §2 **no qualifier is written on it and this note is the whole of the
+  record** — which is the same treatment the ADR-0212 note above states for its own
+  amendment half, on this same line. **Nothing of this record joins the supersession
+  pair that line now carries.** ADR-0070 §4's accumulation is how two *supersession*
+  tokens sit together, as ADR-0114's and ADR-0212's do there; an amendment on a
+  leading-token line is recorded four lines lower instead, and writing it on the line
+  anyway would add a token ADR-0082 §2 excludes and ADR-0070 §4 does not recognise.
+  ADR-0213 ships in the same change as this note and is ratified in it. Appended per
+  ADR-0070 §1: no text below is rewritten and §4's second normative clause is the only
+  sentence of this ADR this record reaches. Refs #1720.
 
 ## Context
 
