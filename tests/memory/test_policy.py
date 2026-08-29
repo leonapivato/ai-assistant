@@ -155,7 +155,7 @@ async def test_a_derived_proposal_citing_no_evidence_is_rejected_even_with_confl
     # Rule 2 precedes the conflict rules: an inadmissible proposal is not worth
     # deferring to the user about, and it must not be folded into a live record
     # either. A rule placed after rule 4 would rule ASK_USER here, and one placed
-    # after rule 8 would REINFORCE an unsupported belief onto a real one.
+    # after rule 9 would REINFORCE an unsupported belief onto a real one.
     proposal = _proposal(_semantic("unsupported", confidence=0.9, evidence=()))
     conflicts = [
         _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
@@ -743,7 +743,13 @@ async def test_a_low_confidence_proposal_beside_an_unrelated_conflict_stores_tem
 
 
 async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() -> None:
-    """ADR-0159 §4's last clause: the `ASK_USER` arm precedes this one and is untouched."""
+    """ADR-0159 §4's fourth clause, in the scope it still holds whole.
+
+    The deferral precedes ADR-0159 §4's arms and no relation reaches past it. ADR-0214
+    §1 partially supersedes that clause — but only where every asserted member of the
+    set *agrees* with the proposal, and this one does not (the contents differ), so
+    the clause rules here exactly as it was written.
+    """
     asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED, confidence=1.0, evidence=())
 
     decision = await DefaultMemoryPolicy().decide(
@@ -1212,24 +1218,205 @@ async def test_records_of_different_kinds_never_agree() -> None:
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
-async def test_an_observation_agreeing_with_an_assertion_still_defers() -> None:
-    """ADR-0121 §11's out-of-scope case, pinned so it is a decision and not a gap.
+#: The one belief the ADR-0214 §1 cases below are about, in the two positions that
+#: matter: the user asserted it, and the observation stage worked it out again.
+_ASSERTION = "the user prefers window seats"
 
-    An observation restating what the user told us still rules ``ASK_USER`` under
-    rule 5. The arm is stated over a ``USER_ASSERTED`` *proposal* because the fold's
-    ordinary arm would take the incoming record's source and **demote** the
-    assertion to an observation; fixing that means extending ADR-0103 §6's
-    corroboration rule again, on a path ADR-0120 §6 excludes from its measure anyway.
-    Filed, not fixed here.
+#: A belief the user also asserted and which *disagrees* with :data:`_ASSERTION` —
+#: the one-token edit ADR-0121 §1 argues from, which scores at the top of a
+#: similarity ranking and means the opposite thing.
+_OTHER_ASSERTION = "the user prefers aisle seats"
+
+
+@pytest.mark.parametrize(
+    "source", [MemorySource.OBSERVED, MemorySource.INFERRED], ids=["observed", "inferred"]
+)
+async def test_an_observation_agreeing_with_an_assertion_corroborates_it(
+    source: MemorySource,
+) -> None:
+    """ADR-0214 §1's arm: the question the owner should never have been asked, gone.
+
+    Before ADR-0214 rule 5 was unconditional over the conflict set, so a belief the
+    system had just re-derived from watching the user, matching what the user had
+    told it, produced a contradiction question in the deferral queue (#869). The arm
+    rules ``REINFORCE`` at the assertion instead, and the fold corroborates: the
+    survivor is the assertion, gaining the observation's evidence and its confirming
+    instant (ADR-0214 §4).
+
+    Run over both derived sources because §1's scope names both, and an
+    implementation keyed on ``OBSERVED`` alone would pass a case naming only the
+    stage that produces most of them today.
     """
-    proposal = _proposal(_semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED))
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION, source=source))
     theirs = _semantic(
-        "their-words", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "their-words"
+
+
+async def test_a_second_disagreeing_assertion_still_defers() -> None:
+    """ADR-0214 §1's one condition, which is what preserves ADR-0038 §3's asymmetry.
+
+    The set already holds two live contradictory assertions — reachable by routes
+    ADR-0121 §2 does not close — and the observation agrees with one of them. Folding
+    would refresh **that one's** currency (ADR-0103 §3) and leave the other to age,
+    so the system would have adjudicated a contradiction between two things the user
+    said on the strength of having watched them. That is "an inference may **never**
+    displace an assertion, silently or otherwise" reached by the softest available
+    route, and the condition forbids it: every ``USER_ASSERTED`` member must be in
+    the agreeing set or the proposal falls through to the deferral unchanged.
+    """
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
+    theirs = _semantic(
+        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+    also_theirs = _semantic(
+        "the-other-one",
+        content=_OTHER_ASSERTION,
+        source=MemorySource.USER_ASSERTED,
+        confidence=1.0,
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs, also_theirs])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_an_agreeing_import_is_no_target_and_does_not_rescue_the_arm() -> None:
+    """ADR-0214 §2's target class: an ``EXTERNAL`` member is never named by the arm.
+
+    The import agrees and the assertion does not, so there *is* an agreeing member —
+    and the arm still defers, because the one condition is stated over the asserted
+    members and an ``EXTERNAL`` record is outside :data:`~ai_assistant.memory.policy.
+    _AGREEMENT_FOLDABLE` besides. A `REINFORCE` folds at the target's id, an imported
+    record's id is the integrating system's idempotency key, and the next routine
+    sync overwrites the fold — an argument identity of content does nothing to.
+    """
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
+    imported = _semantic("from-the-calendar", content=_ASSERTION, source=MemorySource.EXTERNAL)
+    theirs = _semantic(
+        "their-words",
+        content=_OTHER_ASSERTION,
+        source=MemorySource.USER_ASSERTED,
+        confidence=1.0,
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported, theirs])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_the_arm_steps_over_a_better_ranked_agreeing_import() -> None:
+    """ADR-0214 §2's residue, stated rather than hidden.
+
+    Where the observation agrees with both an import and an assertion, the arm folds
+    onto the best-ranked member of the **foldable** agreeing set and the ``EXTERNAL``
+    member is never named — even ranked first. It is left live, which is the
+    one-target limit ADR-0121 §2 left and which #871 files.
+    """
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
+    imported = _semantic("from-the-calendar", content=_ASSERTION, source=MemorySource.EXTERNAL)
+    theirs = _semantic(
+        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported, theirs])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "their-words"
+
+
+async def test_an_external_proposal_agreeing_with_an_assertion_still_defers() -> None:
+    """ADR-0214 §1's **incoming-source** boundary — the case likeliest to be got wrong.
+
+    The branch this arm is added to is keyed on ``not is_asserted``, which admits
+    ``EXTERNAL``. Widening *that* branch instead of naming ``OBSERVED`` and
+    ``INFERRED`` would rule ``REINFORCE`` on a fold ADR-0214 §3 does not permit, and
+    ``_refuse_unsafe_fold`` would then turn a deferral into a ``MemoryStoreError`` —
+    a failure the writer-side conformance cases cannot catch, because the ruling
+    never reaches them from a conforming policy.
+    """
+    proposal = _proposal(
+        _semantic("sync", content=_ASSERTION, source=MemorySource.EXTERNAL, confidence=1.0)
+    )
+    theirs = _semantic(
+        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
     )
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_with_no_asserted_member_the_arm_is_not_consulted() -> None:
+    """ADR-0214 §1's **scope** boundary: ADR-0159 §4 rules exactly what it ruled.
+
+    The set holds an agreeing ``OBSERVED`` member and a member labelled
+    ``CONTRADICTS``, and no assertion at all. ADR-0159 §4(a)'s purity condition
+    ("**no** member is labelled ``CONTRADICTS``") blocks the reinforce exception,
+    §4(b)'s blocks the supersede one, and the proposal lands beside them — the
+    destroy-nothing outcome §4 rules for a set in which the stored records disagree
+    with each other.
+
+    ADR-0214 §1's arm carries no purity condition, so an implementation that stated
+    it over every non-asserted proposal would rule ``REINFORCE`` here instead. That
+    is the relitigation of #1188's decision §1's scope clause exists to refuse, and
+    this case is what makes it visible.
+    """
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
+    held = _semantic("already-held", content=_ASSERTION)
+    denied = _semantic("we-also-saw", content=_OTHER_ASSERTION)
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal,
+        conflicts=[held, denied],
+        relations={"we-also-saw": ConflictRelation.CONTRADICTS},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@pytest.mark.parametrize(
+    ("order", "expected"),
+    [(("observation", "assertion"), "already-held"), (("assertion", "observation"), "their-words")],
+    ids=["observation-first", "assertion-first"],
+)
+async def test_the_arm_names_the_best_ranked_member_and_not_the_assertion_by_source(
+    order: tuple[str, str], expected: str
+) -> None:
+    """ADR-0214 §1's target selection: **rank is the tie-break and not the ruling**.
+
+    The same two records in the two orders, and the arm names whichever came first.
+    They do not merely differ in ``target_id``: the two selections run different arms
+    of ``MemoryIngestor._merge`` (ADR-0214 §4). Naming the observation takes the
+    ordinary arm, which leaves the assertion untouched and is the record ADR-0159
+    §4(a) would itself have named; naming the assertion takes the corroboration arm,
+    which refreshes the assertion's currency. So an implementation preferring the
+    assertion *by source* rather than by rank would corroborate where the ordinary
+    arm is owed — and would pass every other case in this file.
+
+    Whether the arm *should* prefer an agreeing assertion is a real question and is
+    filed with #871 (ADR-0214 §9); what is pinned here is the answer ADR-0214 gives,
+    which is ADR-0121 §2's rule and ADR-0159 §4(a)'s.
+    """
+    records = {
+        "observation": _semantic("already-held", content=_ASSERTION),
+        "assertion": _semantic(
+            "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
+        ),
+    }
+    proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[records[name] for name in order]
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == expected
 
 
 #: ADR-0121 §1's four transformations and the ones it excludes, stated as pairs
