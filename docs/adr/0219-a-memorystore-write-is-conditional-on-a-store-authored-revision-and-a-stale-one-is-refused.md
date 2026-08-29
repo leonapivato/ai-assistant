@@ -655,6 +655,18 @@ extra="forbid"` — neither of which is true of this one.
 > revision is refused. It sits beside the migration test that plants a legacy row
 > with a `rowid` at or below zero and asserts it reads back at a positive revision.
 
+> **Normative.** **The migrated issuer survives a reopen too**, and it is a separate
+> arm because the one above is taken on a store this code created and never migrated.
+> Open a legacy store, migrate it, read a backfilled record, close the store, reopen
+> it on the same file, and rewrite that record: it reads back at a revision the
+> backfill did not hand out, and an `IF_UNCHANGED` carrying the pre-close revision is
+> refused. Without this arm a migration that stamps every legacy row correctly and
+> then persists its issuer at `0` passes both arms above — the rows do read back
+> positive, and the new-store reopen is untouched by it — while reissuing, on the
+> first write after the reopen, values it had already handed out. That is §1's
+> never-reissued clause breached by the one path that writes a stamp without going
+> through a write.
+
 > **Normative.** **`MemoryWrite`'s two invalid states are refused at construction**,
 > asserted in `core`'s own type tests rather than in the store suite, because they
 > never reach a store: an `IF_UNCHANGED` element with `expected_revision=None`, a
@@ -707,6 +719,18 @@ extra="forbid"` — neither of which is true of this one.
 > `BeliefSummary` gain nothing — `Belief`'s docstring already says it is
 > "Deliberately **not** a raw :class:`MemoryRecord`" — and no rendering of a
 > revision is authorised anywhere.
+
+> **Normative.** **That clause is about exposure and not about serialization**, and
+> the two are separated here so no lane reads a contradiction into §6. `revision`
+> **is** carried over the wire, as an ordinary member of the `MemoryRecord`s inside
+> `TurnResult.memories`; §6 runs ADR-0124 §9's test over both directions of that and
+> neither costs a version. What this section refuses is a **surface**: no `Belief` or
+> `BeliefSummary` field, no rendering, no client, spoke or gateway setting one, and no
+> component deciding anything from a revision it received (§6). The value crosses as
+> **data a receiver ignores**. No lane strips the field at the wire or mints a
+> projection to hide it — that would be surface bought to enforce a rule these two
+> clauses already state — and a later decision that gives a receiver a rule keyed on a
+> wire-received revision owes §9's test afresh, exactly as §6 binds.
 
 ### 9. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
