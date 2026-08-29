@@ -1,6 +1,6 @@
 # 217. A record carries who may receive it, the owner's act is final over a model's, and a model may only narrow
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
