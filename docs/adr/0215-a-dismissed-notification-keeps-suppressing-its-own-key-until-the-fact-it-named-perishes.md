@@ -288,11 +288,16 @@ retention **strictly** — "at the horizon it is still held, and past it it is n
 which is the boundary §9's conformance clause states" — and §1's horizon is
 half-open, a record speaking for its key strictly before the declared expiry. This
 ADR changes neither; it adds a second condition that must hold as well. So for a
-record dismissed at `D` with retention `R` and a candidate expiring at `E`: where
-`E` is later than `D + R`, the record is not purgeable before `E` and is purgeable
-at it, because it stops speaking there and retention elapsed strictly earlier;
-where `E` is not later than `D + R`, the record is purgeable exactly where
-ADR-0130 §7 already put it, strictly after `D + R`.
+record dismissed at `D`, **not** reached by a reconsideration `DROP`, with
+retention `R` and a candidate expiring at `E`: where `E` is later than `D + R`, the
+record is not purgeable before `E` and is purgeable at it, because it stops
+speaking there and retention elapsed strictly earlier; where `E` is not later than
+`D + R`, the record is purgeable exactly where ADR-0130 §7 already put it, strictly
+after `D + R`. **A record a `DROP` did reach is in the second case whatever its
+expiry says**, because §1 gives the `DROP` precedence and such a record speaks for
+nothing from the instant it ceased — so it is purgeable strictly after its
+retention horizon, exactly as ADR-0130 §7 has it, and the clause reaches it not at
+all.
 
 **This is the same correction §7 already made once, applied to the clause that
 moved.** ADR-0130 §7 argued: "Measured from admission, a record whose expiry sits
@@ -304,11 +309,13 @@ yields." Every word of that argument holds for a *dismissed* record under §2, a
 without this clause a deployment with a short retention would reproduce #1372 on a
 slower schedule.
 
-**It adds no unbounded case.** The guard's reach is `max(ceased + retention,
-expiry)`, and `expiry` is a bound ADR-0130 §7 already granted: the same record
-undismissed is unpurgeable until that same instant today, because it is actionable
-until then. A record with no expiry is unreached by this clause entirely, by §1's
-third clause.
+**It adds no unbounded case.** The guard's reach never exceeds the candidate's
+declared expiry. For a record dismissed and not dropped it is exactly
+`max(ceased + retention, expiry)`, and `expiry` there is a bound ADR-0130 §7
+already granted: the same record undismissed is unpurgeable until that same instant
+today, because it is actionable until then. For every other record — one a `DROP`
+reached, one that simply expired, one whose candidate declared no expiry at all —
+the reach is `ceased + retention` and this clause adds nothing.
 
 ### 5. What is kept whole, and no clause here may be read as reaching it
 
@@ -423,10 +430,14 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > predecessor declared **no** expiry is admitted after a dismissal, exactly as
 > before; that a record dropped by a reconsideration speaks for nothing after the
 > drop, including one carrying a dismissal stamp beside the drop; that a dismissal
-> frees the cap at once even while its key still speaks; and that a dismissed
-> record whose candidate's expiry falls **later** than its retention horizon is not
-> purged before that expiry and is purged at it, while one whose expiry falls at or
-> before that horizon is purged exactly where ADR-0130 §7 already put it.
+> frees the cap at once even while its key still speaks; that a dismissed record
+> whose candidate's expiry falls **later** than its retention horizon is not purged
+> before that expiry and is purged at it, while one whose expiry falls at or before
+> that horizon is purged exactly where ADR-0130 §7 already put it; and that a record
+> carrying **both** a dismissal and a reconsideration `DROP` is purged strictly
+> after its retention horizon however far in the future its candidate's expiry
+> lies, the `DROP` having ended its speech and this ADR's guard reaching it not at
+> all.
 
 > **Normative.** Those two of ADR-0130 §9's conformance obligations that state the
 > replaced rules are superseded by the clause above and are removed rather than
@@ -620,7 +631,8 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
   system with no attention signal should err in" — but it is a real loss, and §9
   states the condition that reopens it.
 - **A dismissed record stays in the store longer.** §4's guard holds a record
-  through `max(ceased + retention, expiry)` instead of `ceased + retention`. For
+  through `max(ceased + retention, expiry)` instead of `ceased + retention`, and
+  only where no `DROP` reached it. For
   the calendar producer that is minutes; for a producer declaring a distant expiry
   it is that expiry, which the same record already had while undismissed. It is
   bounded storage, not unbounded, and §9's delete surface still reaches it.
