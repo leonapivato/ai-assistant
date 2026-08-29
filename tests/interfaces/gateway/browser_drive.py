@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from pathlib import Path
 
-    from playwright.async_api import Browser, Page
+    from playwright.async_api import Browser, BrowserContext, Page
 
     from ai_assistant.core.types import Identifier, SpokenDeliveryReport, SpokenTurn
     from ai_assistant.core.types import SpokenAudio as SpokenAudioType
@@ -369,8 +369,15 @@ async def driving(
     # A context per case rather than a browser per case: it is milliseconds where a
     # launch is a quarter of a second, and it is what keeps one case's session,
     # storage and permissions out of the next one's.
-    context = await browser.new_context(permissions=["microphone"])
+    # Created *inside* the cleanup-protected region, and closed only if it exists.
+    # `gateway.start()` above has already bound a listening socket, so a refusal from
+    # `new_context()` would otherwise leave the gateway and its server running for the
+    # rest of the run -- and that refusal is the realistic one, because the browser is
+    # session-scoped and shared, so an earlier case may have crashed or closed it
+    # (adversarial review, round 7, `major`).
+    context: BrowserContext | None = None
     try:
+        context = await browser.new_context(permissions=["microphone"])
         await context.add_init_script(PROBE)
         page = await context.new_page()
         drive = Drive(page=page, gateway=gateway, engine=engine, origin=origin)
@@ -380,8 +387,16 @@ async def driving(
             await drive.admit()
         yield drive
     finally:
-        await context.close()
-        gateway.close()
-        server.close()
-        with contextlib.suppress(Exception):
-            await server.wait_closed()
+        # Nested rather than sequential, which is the same defect one line over: the
+        # browser is still torn down first, but a raising `close()` must not take the
+        # gateway's teardown with it. It still propagates -- a context that will not
+        # close is a fact about the run worth failing on -- it just no longer costs
+        # every later case a live port.
+        try:
+            if context is not None:
+                await context.close()
+        finally:
+            gateway.close()
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
