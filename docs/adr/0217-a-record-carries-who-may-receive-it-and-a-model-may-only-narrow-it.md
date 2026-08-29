@@ -481,12 +481,30 @@ that did not need guarding, which the owner can see and lift.
 > is captured as an episode by ADR-0074 §3 like any other, and `learning/`'s observer
 > distils a `PreferenceMemory` from it on its ordinary pass, by exactly the machinery
 > that distils every other preference — no new event kind, no new recogniser, no
-> utterance pattern, and no second store. A proposal under §4 is supplied the live
-> `PreferenceMemory` records of the store it is writing into.
+> utterance pattern, and no second store.
+
+> **Normative.** A proposal under §4 is supplied the live `PreferenceMemory` records
+> **only where the producer's own ratified seam already admits such an input**, and
+> today none does. `Observer.observe` takes a `Sequence[EpisodicMemory]` and its
+> Protocol makes the absence a scope limit rather than an omission — "It holds no store
+> handle … an implementation cannot fetch more, cannot widen its own batch, cannot read
+> a belief" — so an observer's proposal is made over the episodes it was handed and
+> nothing else. Giving that producer a second input is a change to a Protocol other
+> than `AssistantEngine`, which §9 forbids this ADR and its implementation, and which
+> golden rule 5 puts behind an ADR of its own. §12 records the deferral with the
+> condition that fires it.
+
+> **Normative.** Until that ADR exists, a proposal is made without a preference in
+> front of it and the preference reaches the owner rather than the model: the record it
+> is distilled from is a belief the owner can read, and the per-record act of §7 is
+> what actually changes an outcome. No lane cites this ADR as authority for a producer
+> reading preferences it was not handed, and no implementation gives one a store handle
+> to get them.
 
 > **Normative.** No preference so learned is itself a setter. It is evidence a proposal
-> may weigh and never a rule any read applies, it narrows and widens nothing on its
-> own, and no implementation reads one at a supply site.
+> may weigh where a ratified seam supplies it, and never a rule any read applies; it
+> narrows and widens nothing on its own; and no implementation reads one at a supply
+> site.
 
 **#1719's fourth point is honoured on the reading the vocabulary actually supports.**
 That point asks what happens when "Owner's placement vs the model's narrowing at the
@@ -512,11 +530,22 @@ provenance and the same supersession behaviour as every other belief it proposes
 
 **And the preference is deliberately not a setter.** A learned sentence like *"my coffee
 habits may be said aloud"* has no decidable extension over records — matching it to a
-record would be content inspection at the read, which ADR-0199 §2 forbids in terms. It
-is supplied to the *proposer*, which is a model at write, and its whole effect is that
-the model stops proposing a narrowing the owner keeps lifting. That is #1719's "The
-model is trained by the owner, not switched off", with the read left exactly as
-deterministic as it was.
+record would be content inspection at the read, which ADR-0199 §2 forbids in terms. The
+only place it could ever act is in front of the *proposer*, which is a model at write,
+where its whole effect would be that the model stops proposing a narrowing the owner
+keeps lifting.
+
+**#1719's "The model is trained by the owner, not switched off" is therefore delivered
+in part, and the missing part is named rather than implied.** The correction is
+deterministic and final (§3), and it is captured and distilled like any other belief, so
+the owner's ruling is durable and legible. What this ADR cannot deliver is the last hop
+— that ruling reaching the model on the *next* record — because the only producer with a
+model in front of it is `Observer`, whose Protocol makes "episodes in, proposals out" a
+scope limit rather than a signature detail, and widening it is a Protocol change §9
+forbids this ADR. Reporting the gap is better than writing a clause no implementation
+could satisfy without breaking a seam this ADR says it does not touch: the deferral is
+§12's, with the condition that fires it. Until then the corrective loop closes through
+the owner and the per-record act, and the read is exactly as deterministic as it was.
 
 ### 6. The default is ADR-0199 §3's placement, and this ADR adds narrowing only
 
@@ -554,8 +583,23 @@ would fail that test on the first turn.
 > async def unguard(self, record_id: Identifier) -> Placement | None: ...
 > ```
 >
-> `guard` writes reach `OWNER`, `unguard` writes reach `ANYONE`; both write setter
-> `OWNER_ACT` and the instant of the act, and both are subject to §3's precedence.
+> **Normative.** An act writes **only where §3's precedence lets it win, and only
+> where what it would write differs from what the record carries**. `guard` writes
+> reach `OWNER` with setter `OWNER_ACT` and the instant of the act; `unguard` writes
+> reach `ANYONE` with setter `OWNER_ACT` and the instant of the act. Where the
+> placement's setter is `DERIVED`, `unguard` writes **nothing** — §3's closing clause
+> is not lifted by an act — and neither does an act whose whole effect would be to
+> rewrite a placement it does not change in reach or in setter. Nothing else writes an
+> `OWNER_ACT` stamp.
+
+> **Normative.** The two consequences of that clause are stated so no implementation
+> has to derive them. A `guard` on a record whose placement is reach `OWNER` with
+> setter `PROPOSED` or `None` **does** write, because it changes the setter from one
+> the owner may lift to one this ADR calls final, which is a difference §3 acts on.
+> A second `guard` on the result writes nothing, so the instant does not move and the
+> returned value is identical — which is what makes both operations idempotent, and it
+> is idempotent in the strict sense that the second call returns exactly what the first
+> returned.
 
 > **Normative.** Each **returns the record's placement as it stands after the act**,
 > and `None` where `record_id` named nothing live — which is not an error, on
@@ -563,8 +607,9 @@ would fail that test on the first turn.
 > already satisfied"). Each raises `ValueError` where `record_id` is blank and
 > `MemoryStoreError` where reading or writing memory failed, and raises for no other
 > reason. In particular a **refusal raises nothing**: `unguard` on a placement whose
-> setter is `DERIVED` returns that placement unchanged, and a surface reads the
-> returned reach and setter to say why nothing moved. A raise was rejected because it
+> setter is `DERIVED` returns that placement unchanged — reach `OWNER`, setter
+> `DERIVED` — and a surface reads the returned reach and setter to say why nothing
+> moved. A raise was rejected because it
 > would make an act the system declines on ratified grounds indistinguishable, on
 > ADR-0197's routed path, from an operation that failed (`RouteOutcome.FAILED`), and
 > because it would make an idempotent act — `guard` on an already-guarded record — a
@@ -771,8 +816,17 @@ ADR-0201 closed.
 > **Normative.** The lane pins **the two operations, through the shared
 > `AssistantEngine` conformance suite**: each returns the record's placement after the
 > act; each returns `None` for an id naming nothing live; each raises `ValueError` on a
-> blank id; each is idempotent; and `unguard` on a `DERIVED` placement returns it
-> unchanged rather than raising.
+> blank id; and `unguard` on a `DERIVED` placement returns it unchanged — reach `OWNER`,
+> setter `DERIVED` — rather than raising.
+
+> **Normative.** The lane pins **the stamping cases of §7 one by one**, because they
+> are where an implementation can satisfy the prose and break §3. A `guard` on a
+> placement whose setter is `PROPOSED` or `None` writes setter `OWNER_ACT`; a second
+> `guard` on the result returns a value **identical to the first's**, the instant
+> included, because nothing was written; an `unguard` on a `DERIVED` placement leaves
+> the setter `DERIVED`, so a later `guard` and `unguard` pair cannot launder it to
+> `OWNER_ACT` and then to `ANYONE`; and a `guard` on a `DERIVED` placement changes
+> nothing and is not an error.
 
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
@@ -780,24 +834,36 @@ ADR-0201 closed.
 
 ### 11. What the implementing lane owes
 
-> **Normative.** The `core` change of §9 is **one change** — the three types, the two
-> field moves, the decode mapping and the two prose edits — because a tree in which the
-> field has moved and the decode has not is a tree that silently widens every narrowed
-> record. It rides with the `PROTOCOL_VERSION` bump and its `wire/envelope.py` log
-> entry.
+> **Normative.** **The `core` field move is not separable from its readers, and the
+> lane does not attempt it.** `Provenance.supplied_withheld_content` is read and written
+> today by `orchestration/disclosure.py`, `orchestration/observation.py`,
+> `orchestration/conversations.py`, `orchestration/engine.py` and
+> `ai_assistant/testing/writer.py`. A change removing the field without them leaves a
+> tree that does not type-check and, were it deployed, a spoken turn that raises on the
+> first record it places. So the removal, the addition on `MemoryBase`, the three new
+> types, the decode mapping of §9 and every production reader and writer of the old
+> field land in **one change**.
 
-> **Normative.** The `AssistantEngine` members of §7 land with their conformance-suite
-> arms and their canonical fake in the **same change** as the `orchestration`
-> implementation of them, on `CLAUDE.md`'s contract-seam exception — a Protocol member
-> and the primary implementation whose demands shape it are one unit of work
-> (ADR-0137 §2). That is the **second change**: the derivation writing the new field,
-> the supply sites reading it, `guard`/`unguard` on the engine, the suite arms and the
-> fake.
+> **Normative.** That same change carries §7's `AssistantEngine` members, their
+> conformance-suite arms, the canonical fake in `ai_assistant.testing`, the
+> `RoutableOperation` members and the routing that resolves and dispatches them
+> (`orchestration/routing.py`), the two prose edits of §9, and the
+> `PROTOCOL_VERSION` bump with its `wire/envelope.py` log entry. It is one unit of work
+> on `CLAUDE.md`'s contract-seam exception — a contract and the primary implementation
+> whose demands shape it, together (ADR-0137 §2) — and the lane states that exception
+> when it opens, because a change spanning `core`, `orchestration`, `wire` and
+> `testing` is otherwise more than one change.
 
-> **Normative.** The `learning/` and interface change carrying §4's proposal, §5's
-> statement, §7's `learn` flag and the two `RoutableOperation` members is a **third**.
-> Each change is one subsystem plus its tests (`CLAUDE.md`, "One subsystem per
-> change").
+> **Normative.** §4's model proposal is a **second change**, in `learning/` and its
+> tests alone. It lands after the first and depends on it, and it changes no `core`
+> definition and no Protocol.
+
+> **Normative.** §7's `learn` flag and any rendering of a placement are a **third
+> change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface adapters are
+> thin"). It lands after the first and is independent of the second.
+
+> **Normative.** No lane reads the ordering above as licence to widen any of the three.
+> Anything not named in one of them is a change of its own.
 
 > **Normative.** The records this decision owes on ADR-0204, ADR-0199 and ADR-0210 are
 > made in **this ADR's own PR** (ADR-0082 §1, ADR-0070 §1), and are header-only.
@@ -818,6 +884,12 @@ ADR-0201 closed.
 > own question and fired by a store on which the accumulation is measured, as #1775
 > measured ADR-0204's before ADR-0210 bounded it. Until then the two ratified routes —
 > a supersession, and a class ruling under ADR-0199 §6 — are the answer.
+
+> **Normative.** **Supplying a learned preference to the proposer** (§5). Fires with an
+> ADR that gives a model-backed producer an input beside the episodes it is handed —
+> `Observer.observe`'s signature is the seam, and widening it is a Protocol change
+> golden rule 5 puts behind its own ADR. Until then a proposal is made without one, and
+> the corrective loop closes through the owner's per-record act.
 
 > **Normative.** **Rendering a placement on a bounded surface.** §2 rules that nothing
 > is withheld there and §7 rules that nothing is obliged to render one. Whether a
@@ -895,8 +967,11 @@ about a disclosure-bearing field.
 with two ratified escapes. It is the price of keeping ADR-0204 §5's closing prohibition,
 and #1708 is why that price is worth paying.
 
-**Three lanes follow, not one**, and §11 orders them. The `core` change cannot land
-without the decode mapping in the same commit.
+**Three changes follow, not one**, and §11 orders them and bounds each. The first is
+large and cannot be made smaller: the field move, its decode mapping and every
+production reader of the removed field are one commit, because any split of them is a
+tree that does not type-check or a deployment that widens every narrowed record. It
+takes `CLAUDE.md`'s contract-seam exception and says so.
 
 ## Alternatives considered
 
