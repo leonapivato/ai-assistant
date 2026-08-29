@@ -13,6 +13,13 @@
   and the no-per-turn-trigger sentence is kept rather than narrowed. Named in
   §11(b).
 - **Partially supersedes**
+  [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md)
+  — §4's **second** normative clause, in the single scope of what "every operation"
+  reaches: it reaches the operations whose duration this process does not control,
+  and not a local store call on the hub's own data directory. §4's first and third
+  clauses, §5, §6, §7 and every other clause of ADR-0111 bind this job unchanged and
+  are relied on throughout. Named in §11(d).
+- **Partially supersedes**
   [ADR-0120](0120-a-measure-is-a-rate-over-the-trace-stream-read-offline-while-the-hub-is-stopped.md)
   — §3's second normative clause, in the single scope of the **machine** seam
   set's membership, which gains one member. The user set, the direct set, the
@@ -21,7 +28,7 @@
   schedules is ADR-0212's pass, performed against a conversation the run
   **names** — which is §3's own optional-id branch — so §3's "given none" default,
   §4's tail start, §5's advance and §8's three operations all bind unchanged.
-  §11(d) applies ADR-0082 §1's test to each and records nothing.
+  §11(e) applies ADR-0082 §1's test to each and records nothing.
 - **Contract surface, without a Protocol.** This ADR adds two `Settings` fields
   and changes the default of a third (§7). It touches no Protocol in
   `core/protocols.py`, no type or member in `core/types.py`, no member of the
@@ -494,10 +501,12 @@ non-empty page names a position "strictly above the watermark that pass read", a
 "the watermark never stands still across a pass over a non-empty page". So each pass
 strictly shrinks the unobserved span of the conversation it served, every candidate
 holds finitely many turns, and a conversation leaves the candidate set once its
-watermark reaches its highest turn. New turns arriving during a run make their
-conversation *not quiet*, which removes it from the due set rather than extending
-the run. The run budget bounds it in every case, including the pathological one
-where turns arrive faster than passes complete.
+watermark reaches its highest turn. **New turns arriving during a run remove only
+the *quiet* basis for due-ness, not the aged or full ones**, and this ADR does not
+rest termination on them: a candidate holding two pages of unobserved turns stays
+*full*, and therefore due, after a pass drains the first — which is the drain
+working, not a case an implementation may stop on. What bounds the run is the strict
+advance above and, where turns arrive faster than passes complete, the run budget.
 
 **One conversation may take the whole run, and that is the ordering working.** A
 candidate with many pages of unobserved turns stays at the head of the ascending
@@ -812,9 +821,9 @@ bounded by `model_timeout_seconds`; its writes reach the `Embedder` through
 `MemoryStore.write_atomic`, and that seam carries `embedding_timeout_seconds` since
 ADR-0118".
 
-**The clause's words are "every operation", and this section reads them as the
-corpus applies them rather than more widely — which is a reading, and it is stated
-so it can be argued with.** No store seam in this corpus carries a deadline:
+**The clause's words are "every operation", and this ADR narrows them — which is a
+partial supersession of §4's second normative clause and is recorded as one
+(§11(d)), not a reading offered in passing.** No store seam in this corpus carries a deadline:
 `MemoryStore.walk_records`, `MemoryStore.get`, `ConversationStore.turns` and the
 three operations ADR-0212 §8 adds all carry a *size* bound and no duration one. Read
 at its widest, §4's condition would therefore make `consolidate` — the first and
@@ -826,7 +835,19 @@ attempts* and never counts a store read into it. So the operations the clause
 reaches are the ones whose duration this process does not control, and a local
 SQLite call on the hub's own data directory is not one.
 
-**What that reading leaves genuinely unbounded is named rather than left implicit.**
+**And reading it at its widest makes the clause do the opposite of its purpose.**
+§4's condition binds a job *because* it is chunked. The retention purge and the
+conversation sweep are not chunked, so the condition does not reach them at all —
+each runs to exhaustion and delays its siblings for as long as it takes, which
+ADR-0083 §7 accepts by name. Under the widest reading, a job that can block the loop
+forever is admissible so long as it never bounds its own run, while one that bounds
+its run is refused for reaching the same store call. That is not what §4 is for: its
+purpose, in its own words, is that "a budget checked at a chunk boundary bounds
+nothing if the boundary can fail to arrive: a provider call that never returns holds
+the serial loop for as long as it hangs". The thing it is guarding against is the
+un-owned call, and the narrowing says so.
+
+**What the narrowed clause leaves unbounded is named rather than left implicit.**
 A store call blocked on a stalled filesystem holds ADR-0083 §7's serial loop for as
 long as it blocks, and no figure in `Settings` says so. That is true of the retention
 purge and the conversation sweep as well, neither of which is chunked, so it is a
@@ -969,7 +990,7 @@ as a value rather than asserted in prose.
 **What this ADR does not decide:**
 
 - **The cursor.** ADR-0212's, ratified, and used throughout without amendment
-  (§11(d)).
+  (§11(e)).
 - **Anything about the observer's proposals.** ADR-0077's — what may be proposed,
   the utility bar, the prompt, the payload, the route, the confidence function and
   the proposal bound. This ADR changes *when* episodes reach the producer and
@@ -1097,8 +1118,46 @@ earns its place, whether the share should span both seams, whether §3 wants a f
 set — are decisions about what should be measured, not clauses this ADR made false,
 and #1815 holds them.
 
-> **Normative.** **(d) This ADR records nothing against ADR-0212, ADR-0111,
-> ADR-0093, ADR-0214 or ADR-0074**, and each is used as written.
+> **Normative.** **(d) This ADR partially supersedes ADR-0111**, in exactly one
+> scope: **§4's second normative clause** — "A job may be chunked only if every
+> operation it performs inside one chunk is itself bounded by a deadline" — in the
+> single respect of what "every operation" reaches. It reaches the operations whose
+> duration this process does not control; it does not reach a local store call on
+> the hub's own data directory. The clause's second sentence, §4's other two
+> clauses, and §§1-3 and 5-9 of ADR-0111 are untouched.
+
+The test comes out yes: a reader holding only ADR-0111 reads the clause at its
+widest, finds that no store seam in this corpus carries a deadline, and concludes
+that **no** job may be chunked — including `consolidate`, which is on ADR-0083 §7's
+table today and was admitted on the discharge `core/config.py` records. §8 gives the
+three grounds: that discharge is the corpus's one landed application of the clause;
+§4's own arithmetic for a chunk's bound is a product over model attempts and never
+counts a store read; and the widest reading refuses a job for bounding its run while
+admitting an unchunked one that blocks the loop indefinitely, which inverts the
+clause's stated purpose. **The clause's own second sentence is not
+merely untouched; it is what makes the narrowing legible.** "A run's overrun past
+its budget is bounded by one chunk's duration, and that bound is worth exactly as
+much as those deadlines are" already states that the guarantee is conditional on
+what is deadlined and does not pretend otherwise, so narrowing which operations the
+first sentence reaches changes what the bound is worth and changes nothing about how
+to read it. **The narrowing is general rather than special-pleaded for this job** —
+it is the same reading `consolidate` already runs under — and what it
+leaves unbounded is named in §8 and filed as **#1817**, whose whole subject is
+whether a store seam owes a deadline and what a deciding lane would owe. This ADR
+does not decide that, and could not: §4 puts the remedy on the seam — "supplying a
+missing deadline belongs to whichever seam lacks it" — and a deadline on
+`ConversationStore` or `MemoryStore` is `core/protocols.py` surface under golden
+rule 5.
+
+**Nothing else of ADR-0111 is reached.** §4's run clause, §5's halt and §6's
+no-backoff retry are applied in §3, §8 and §9 exactly as written; §2's wall-clock
+exclusion is *not* reached, because the instant in §2 above decides a trigger and
+not a position, which that clause is stated over. §11's own deferral of "Enabling
+any job the scheduler ships disabled" is discharged by this ADR for one job, which
+is a stacked addition under ADR-0083 §15's rule and not an amendment.
+
+> **Normative.** **(e) This ADR records nothing against ADR-0212, ADR-0093,
+> ADR-0214 or ADR-0074**, and each is used as written.
 
 - **ADR-0212.** Every clause it states about a pass binds this job unchanged, and §3
   above is written to keep it that way: a scheduled pass takes §3's *named-id*
@@ -1108,11 +1167,6 @@ and #1815 holds them.
   hand-run race; §8's three operations are called at the bounds it gave them. §9
   named this lane as the one that would arm the job, which is a deferral discharged
   and therefore a stacked addition under ADR-0083 §15's rule.
-- **ADR-0111.** §4's run clause, §5's halt and §6's no-backoff retry are applied in
-  §3, §8 and §9 exactly as written; §2's wall-clock exclusion is *not* reached,
-  because the instant in §2 above decides a trigger and not a position, which that
-  clause is stated over. §11's own deferral of "Enabling any job the scheduler ships
-  disabled" is discharged by this ADR for one job, which is again a stacked addition.
 - **ADR-0093.** §6's clause is used in the direction it was written — it forbids
   transferring observation's disabled default to a sensor — and §5 above declines to
   transfer a sensor's disabled default back. Neither §6 nor §7 states a rule about

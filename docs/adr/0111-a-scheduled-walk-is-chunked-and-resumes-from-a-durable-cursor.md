@@ -1,6 +1,6 @@
 # 111. A scheduled walk is chunked, and resumes from a durable cursor that never leads its effects
 
-- Status: Partially superseded by ADR-0114 (the Surface bullet's classification that this decision's cursor needs no Protocol surface, and that the cursor's mechanics sit below each subsystem's own façade) and ADR-0212 (§2's absent-cursor clause and §7's restart position, only as they reach the observation cursor)
+- Status: Partially superseded by ADR-0114 (the Surface bullet's classification that this decision's cursor needs no Protocol surface, and that the cursor's mechanics sit below each subsystem's own façade) and ADR-0212 (§2's absent-cursor clause and §7's restart position, only as they reach the observation cursor) and ADR-0218 (§4's second normative clause, in the scope of what "every operation" reaches)
 - Date: 2026-08-06
 - **Partially superseded: 2026-08-06 by
   [ADR-0114](0114-the-store-contract-carries-the-walk.md), in the scope the
@@ -310,6 +310,65 @@
   content commit. Appended per
   ADR-0070 §1: no text below is rewritten and §4's second normative clause is the only
   sentence of this ADR this record reaches. Refs #1720.
+
+- Partially superseded: 2026-08-29 by ADR-0218 — **§4's second normative clause
+  reaches the operations whose duration the hub does not control, and not a local
+  store call on its own data directory.**
+  [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
+  §8 narrows it and §11(d) names the scope; this note records the ruling declared
+  there.
+
+  **Replaced — the scope of §4's second clause's first sentence.** "A job may be
+  chunked only if every operation it performs inside one chunk is itself bounded by
+  a deadline." Read at its widest that sentence admits no chunked job at all: **no
+  store seam in this corpus carries a deadline** — `MemoryStore.walk_records`,
+  `MemoryStore.get`, `ConversationStore.turns` and the three operations ADR-0212 §8
+  adds all carry a *size* bound and no duration one — so a reader holding only this
+  ADR concludes that `consolidate` may not be chunked, when it is on ADR-0083 §7's
+  table today and was admitted on the discharge `core/config.py` records at
+  `consolidation_interval` ("A chunk's model call is bounded by
+  `model_timeout_seconds`; its writes reach the `Embedder` through
+  `MemoryStore.write_atomic`, and that seam carries `embedding_timeout_seconds`
+  since ADR-0118"), with #820 closed against it. That is ADR-0070 §1's test met on
+  both limbs, and ADR-0218 §11(d) is where the judgement is made.
+
+  **Why the narrowing is this one.** §4's own arithmetic for a chunk's bound is
+  "``max_attempts * timeout + total backoff``, multiplied by the chunk's records" —
+  a product over *model attempts*, never counting a store read into it. §4's stated
+  purpose is the un-owned call: "a budget checked at a chunk boundary bounds nothing
+  if the boundary can fail to arrive: a provider call that never returns holds the
+  serial loop for as long as it hangs". And the widest reading inverts that purpose,
+  because this clause binds a job *because* it is chunked: the retention purge and
+  the conversation sweep are unchunked and are reached by nothing here, so a job that
+  can block the loop indefinitely stays admissible while one that bounds its own run
+  is refused for touching the same store call.
+
+  **Not replaced — everything else, and this ADR's other clauses bind that job
+  throughout.** The second sentence of the same clause stands and is what makes the
+  narrowing legible rather than hidden: "A run's overrun past its budget is bounded
+  by one chunk's duration, and that bound is worth exactly as much as those deadlines
+  are". §4's first clause (chunks until exhausted or budget spent, checked at a chunk
+  boundary) and its third (the two `Settings` fields) are untouched, as are §1, §2 —
+  whose wall-clock exclusion ADR-0218 expressly does **not** reach, since the instant
+  its trigger reads decides *whether to walk now* and not a position — §3, §5's halt,
+  §6's no-backoff retry and §7. §11's deferral of "Enabling any job the scheduler
+  ships disabled" is **discharged** for one job rather than amended, which is a
+  stacked addition under ADR-0083 §15's rule.
+
+  **What the narrowing leaves unbounded is filed, not absorbed.** A store call blocked
+  on a stalled filesystem still holds ADR-0083 §7's serial loop, for a chunked job and
+  an unchunked one alike. **#1817** states both readings of this clause, names the
+  seams that carry no deadline, and names what a deciding lane would owe — including
+  that supplying one is `core/protocols.py` surface under golden rule 5, which is why
+  ADR-0218 could not do it: §4 itself puts the remedy there, "supplying a missing
+  deadline belongs to whichever seam lacks it".
+
+  **This ADR's `Status` carries the leading `Partially superseded by` token**, so the
+  pair is accumulated on it under ADR-0070 §4 without dropping the two already there,
+  and under ADR-0082 §2 no amendment qualifier is written on the line. Appended note
+  per ADR-0070 §1: no text below is rewritten and §4's sentences stand as written.
+  This note lands in the same change as ADR-0218 itself, which is the existence
+  condition ADR-0082 §7 states. Refs #1737, #1782, #1817, #820.
 
 ## Context
 
