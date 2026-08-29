@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its no-cursor sentences)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -479,6 +479,64 @@
   flight); **ADR-0079** §3 and §4 (merged Accepted — the two obligations §5's
   third clause stacks on, its `MemoryStoreError` convention at this seam, and the
   distinguishable subclass it left open), #306, #104, #248, #425.
+
+- Partially superseded: 2026-08-29 by ADR-0212 — **§8's selection sentence is
+  replaced, and its no-cursor sentences are false: durable state now records what has
+  been observed.**
+  [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
+  §§1–5 decide the durable observation cursor this ADR forecast in §8 and filed in
+  §11. ADR-0212 §10(a) names these clauses, quotes them and applies ADR-0070 §1's
+  test; this note records the ruling declared there.
+
+  **Replaced — §8's selection sentence.** "The operation takes an optional
+  conversation id: it observes **that conversation's most recent
+  `observation_batch_size` turns**, or, given none, the same window over the **most
+  recently active** conversation" no longer states what a run selects. ADR-0212 §3
+  replaces it: a candidate is any conversation not stamped deleted holding at least
+  one turn above its watermark, candidates are ordered `last_active_at` **ascending**
+  with `id` as the tie-break, one conversation is observed per pass, and the page read
+  is the **lowest** `observation_batch_size` turns above the watermark rather than the
+  most recent ones. ADR-0212 §4 replaces it again for a conversation with no watermark
+  recorded, which is read at this ADR's window unchanged — its tail — and not from its
+  first turn. A reader holding only this ADR implements a tail read over the most
+  recently active conversation, re-reads it on every run and never reaches the turns
+  that window has passed, which is ADR-0070 §1's test.
+
+  **Replaced — §8's no-cursor sentences.** "**There is no durable cursor, and
+  re-observation is safe by construction.** No state records which episodes have been
+  observed" — the first half of the first sentence, and the whole of the second, are
+  false after ADR-0212: a per-conversation watermark on the conversation index is
+  exactly such state. "**re-observation is safe by construction**" is **kept and
+  relied on**: ADR-0212 §6 quotes §8's fold argument whole, rests its failure rule on
+  it, and forbids an implementation relying on the watermark to make re-observation
+  safe — "the fold is what does that, and the watermark only makes it rare."
+
+  **Not replaced — everything else in §8, which is nearly all of it.** The bound's
+  value and its maximum-not-quota reading; the skip-without-backfill rule and the
+  reason given for it; "This does not make the producer conversation-shaped"; the four
+  reasons the trigger is explicit; and the fold that makes repetition safe all bind
+  unchanged, and ADR-0212 relies on each. The **trigger** is untouched: observation
+  stays an explicit operation, and what would call it on a cadence is a separate
+  decision ADR-0212 §9 declines to make. §1's producer contract, §3's route, §4's gate
+  and §5's confidence function are untouched.
+
+  **§8's forecast and §11's deferral are discharged, not replaced.** §8 wrote that
+  closing its two named gaps "means knowing what has already been observed, which is
+  the cursor below, which is leg 5's", and §11 filed "the durable cursor that stops it
+  re-reading what it has seen (§8)". ADR-0212 is that cursor, and a discharged
+  deferral is a stacked addition under ADR-0082 §1 with nothing owed for it. **The two
+  notes of 2026-08-06 above stay exactly true of ADR-0111**, which narrowed §8's
+  placement sentence and expressly took nothing of the selector — "§8's window stays
+  this ADR's ground, and a cursor-driven second selector is that lane's to choose".
+  The selector is what ADR-0212 takes, in the scope named above and in that scope
+  alone.
+
+  **This ADR's `Status` carries the leading `Partially superseded by` token**, so the
+  pair is accumulated on it under ADR-0070 §4 without dropping the four already there,
+  and under ADR-0082 §2 no amendment qualifier is written on the line. Appended note
+  per ADR-0070 §1: no text below is rewritten, and §8's sentences stand exactly as
+  written. The pair and this note land in the same change as ADR-0212 itself, which is
+  the existence condition ADR-0082 §7 states. Refs #1788, #1737, #632, #785.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -238,6 +238,56 @@
   monotonic rule gives the overlap to the higher-numbered ADR, which is this one. No
   amendment qualifier is on the line, so ADR-0082 §2's move does not arise.
   Appended note per ADR-0070 §1; no ratified text below is rewritten. Refs #1700.
+
+- Partially superseded: 2026-08-29 by ADR-0212 — **§9's enumeration of what
+  `Conversation` carries, and of what the `ConversationStore` owes, are each short
+  again — the first by one member, the second by three operations.**
+  [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
+  §1 rules that the observation cursor is a per-conversation watermark over turn
+  ordinals, held on the conversation index rather than on the memory store or on the
+  scheduler. ADR-0212 §10(b) names this clause and applies ADR-0070 §1's test; this
+  note records the ruling declared there.
+
+  **Replaced — two enumerations in §9.** "**`core/types.py`** gains `Conversation`
+  (the identity, `started_at`, `last_active_at` … `last_turn_at` … and `deleted_at`,
+  the tombstone stamp of §8 …)" gains one member, `observed_through`, an `int | None`
+  defaulting to `None` and bounded below by `FIRST_TURN_ORDINAL`. And the list of what
+  `ConversationStore` owes gains three operations: read the lowest page of a
+  conversation's turns strictly above a given ordinal, ordinal ascending and bounded;
+  list the conversations holding at least one turn above their watermark, ordered
+  `last_active_at` ascending with `id` as the tie-break; and record a watermark
+  monotonically, refusing an ordinal above the conversation's own highest turn and
+  never lowering a recorded one. A reader holding only this ADR builds a conversation
+  row with nowhere to hold the position and a store with no way to advance it, which
+  is ADR-0070 §1's test.
+
+  **This is the move ADR-0205 already made on the same enumerations**, one pair back
+  along this line, and it is made the same way: an additive member on the index, and
+  operations that mint nothing the caller supplies. ADR-0074 §9's illustrative
+  signature is illustrative by its own words, so nothing turns on its spelling.
+
+  **Not replaced — everything else §9 decides.** The index still holds no content: a
+  turn's content is still exactly one `EpisodicMemory` in the `MemoryStore`, and a
+  watermark is state about the *walk*, not any part of the exchange. The store still
+  mints the id, allocates the ordinal and derives the episode id; the two-store
+  sequence still belongs to a coordinator and not to either store; the store still
+  owes both directions of the episode-to-turn relation; and §10's refusal to duplicate
+  the membership relation onto the record stands. §7's episode horizon, §8's deletion
+  protocol and its tombstone, and §9's two sweeps and their exclusion set are
+  untouched — ADR-0212 §7 rules the watermark additive and read by one consumer, so no
+  other read of the index changes its result or its meaning because a watermark is
+  present, absent, high or low.
+
+  **The five pairs on the `Status` line name different scopes** — ADR-0076's §9
+  obligation set, ADR-0084's §9 item 5 premise, ADR-0086's §5 refusal, ADR-0205's §9
+  enumerations for `ConversationTurn`, and this one's for `Conversation` — so they
+  accumulate under ADR-0070 §4. ADR-0205's scope and this one both reach §9's
+  enumerations and name different members of them; where a reader judges them to
+  overlap, ADR-0070 §4's monotonic rule gives the overlap to the higher-numbered ADR,
+  which is this one. No amendment qualifier is on the line, so ADR-0082 §2's move does
+  not arise. Appended note per ADR-0070 §1; no ratified text below is rewritten. The
+  pair and this note land in the same change as ADR-0212 itself, which is the
+  existence condition ADR-0082 §7 states. Refs #1788, #1737, #785.
 
 ## Context
 

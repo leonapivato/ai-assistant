@@ -27,9 +27,11 @@
   `ConversationExport.schema_version` to `Literal[2]` and — §8 — does **not** move
   `PROTOCOL_VERSION`, because no frame carries that document.
 - **The reciprocal `Status` records this decision owes on ADR-0077, ADR-0074 and
-  ADR-0111 are not made in this change**, because this lane's fence forbids
-  touching another ADR's text. §10 states each of them verbatim so the follow-up
-  is mechanical, and names the issue that tracks it.
+  ADR-0111 are made in this change**, atomically with the decision that owes them
+  (ADR-0070 §1, ADR-0082 §7, and ADR-0205 §10's "**Both records are made in this
+  change**"). Each is header-only — one pair accumulated on the `Status` line under
+  ADR-0070 §4, and one appended dated note — and no ratified text of any of the three
+  is rewritten. §10 states each pair verbatim and closes **#1788**.
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `orchestration/observation.py`, or from an issue — is of its text as it stood at
@@ -924,28 +926,29 @@ differently, or read one of its clauses more widely than it now holds?"
 > its disabled default are unchanged, and §13's deferral is discharged, which is
 > what a deferral is for.
 
-**The three reciprocal records are owed and are not made here, and that is a
-departure rather than a discretion.** ADR-0070 §1 lists "recording a supersession that
-has landed" among the permitted in-place header edits and notes that "ADR-0001 already
-requires this"; ADR-0082 §7 settles that "§1's condition is that the superseding ADR
-**exists**, not that it is ratified"; and the corpus practice is to make both records
-in one change (ADR-0205 §10: "**Both records are made in this change**"). So the
-record is owed on the day this ADR exists. **This lane's fence forbids touching another
-ADR's text**, which is the operator's instruction to this lane and not a reading of any
-ADR — and the instruction has a reason this ADR can see from inside: ADR-0070 §4's
-pairs **accumulate on one physical line**, and "Adding the second pair is a §1 Status
-edit […] and it does **not** drop the first: replacing the whole value would lose the
-earlier dead scope." Two ADR lanes running in parallel against the same `Status` line
-would each rewrite that line, and the one merged second would silently drop the other's
-pair unless the operator sequenced them. Deferring all three records to a single
-follow-up is how that is sequenced. So the record is deferred rather than declined: each one below is stated verbatim
-so the follow-up is a three-line edit, and issue **#1788** tracks all three. A reader
-who finds ADR-0074, ADR-0077 or ADR-0111 silent about this ADR should read that
-silence against #1788 and not as evidence that no supersession was intended. Each is a `Status`-line pair accumulated under
-ADR-0070 §4 without dropping the pairs already there, plus the appended dated note
-ADR-0070 §1 requires in every case; under ADR-0082 §2 no amendment qualifier goes on
-a leading-token line, so on ADR-0074, ADR-0077 and ADR-0111 alike the note is the
-whole of the record beyond the pair. The pairs are:
+**The three reciprocal records are made in this change, and this is where they are
+stated.** ADR-0070 §1 lists "recording a supersession that has landed" among the
+permitted in-place header edits and notes that "ADR-0001 already requires this";
+ADR-0082 §7 settles that "§1's condition is that the superseding ADR **exists**, not
+that it is ratified"; and the corpus practice is to make both records in one change
+(ADR-0205 §10: "**Both records are made in this change**"). So the record is owed on
+the day this ADR exists, and an earlier draft of this ADR that deferred all three to
+issue **#1788** was wrong on the ADRs — architecture review said so in seven
+consecutive rounds, and #1788 is closed by this change rather than outliving it.
+ADR-0136 §7 is the precedent for the placement and is on point: "a merged ADR-0136
+sitting beside an unrecorded ADR-0015 is the window ADR-0082 exists to close."
+
+Each record is a `Status`-line pair **accumulated** under ADR-0070 §4 without dropping
+the pairs already on the line — "it does **not** drop the first: replacing the whole
+value would lose the earlier dead scope" — plus the appended dated note ADR-0070 §1
+requires in every case. Under ADR-0082 §2 no amendment qualifier goes on a
+leading-token line, and all three lines carry the leading `Partially superseded by`
+token, so on ADR-0074, ADR-0077 and ADR-0111 alike the note is the whole of the record
+beyond the pair. **No ratified text of any of the three is rewritten**: the edit is the
+one `Status` line and one appended note in the header block, which is the whole of what
+ADR-0070 §1 permits in place. **A concurrent lane accumulating its own pair on one of
+these lines resolves the collision by keeping both pairs**, which is what ADR-0070 §4
+already directs and is a rebase conflict rather than a decision. The pairs are:
 
 - on ADR-0074: `and ADR-0212 (§9's enumeration of what Conversation carries and what
   ConversationStore owes)`;
@@ -954,7 +957,7 @@ whole of the record beyond the pair. The pairs are:
   observation cursor)`.
 
 No scope parenthesis carries an `ADR-NNNN` token, which is ADR-0070 §4's authoring
-constraint.
+constraint, and each pair as landed reads exactly as it is stated above.
 
 ## Consequences
 
