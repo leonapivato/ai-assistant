@@ -194,15 +194,33 @@ mechanics of withholding at supply.
 > | `set_by` | permitted `reach` | `set_at` |
 > | --- | --- | --- |
 > | `None` | `ANYONE` only | `None` only |
-> | `DERIVED` | `OWNER` only | set, or `None` for §9's decode of a pre-field record |
-> | `PROPOSED` | `OWNER` only | set, or `None` for §9's decode of a pre-field record |
-> | `OWNER_ACT` | `ANYONE` or `OWNER` | set |
+> | `DERIVED` | `OWNER` only | set, or `None` |
+> | `PROPOSED` | `OWNER` only | **required** |
+> | `OWNER_ACT` | `ANYONE` or `OWNER` | **required** |
 >
-> and the three refusals it states are: a `set_by` of `None` with any reach but
+> and the five refusals it states are: a `set_by` of `None` with any reach but
 > `ANYONE`, or with a `set_at`; a `set_by` of `DERIVED` or `PROPOSED` with reach
-> `ANYONE`; and a `set_at` with no `set_by`.
+> `ANYONE`; a `set_at` with no `set_by`; a `set_by` of `PROPOSED` with no `set_at`;
+> and a `set_by` of `OWNER_ACT` with no `set_at`.
 
-> **Normative.** The two refusals that matter are the two that are otherwise
+> **Normative.** **The one `None` the table admits beside a setter, and the division of
+> labour it forces.** A `PROPOSED` or `OWNER_ACT` placement with no instant is
+> reachable by no path this ADR states: §7's acts each write "the instant of the act"
+> in terms; a proposal under §4 is written with the instant of the pass that made it,
+> which this clause requires and §10 pins; and §9's decode maps a legacy `true` to
+> `DERIVED` alone and a legacy `false` or absence to the default. So the type refuses
+> both, and refusing them loses nothing while keeping the "model-proposed, and *when*"
+> stamp §4 owes. `DERIVED` with no instant is admitted for §9's decode alone — and it is
+> admitted at the type because **a validator cannot see which path constructed the
+> value**. `Placement` carries `reach`, `set_by` and `set_at` and nothing else; a
+> decode of a pre-field record and a fresh derivation are indistinguishable to it.
+> The obligation that closes the residue is therefore a **producer** obligation and is
+> stated as one: **every derivation this system performs writes the instant**, so a
+> `DERIVED` placement with no `set_at` is, in a store this decision's implementation
+> has written, a pre-field record and nothing else. §10 pins that obligation at the
+> producer, where it is visible, rather than at the type, where it is not.
+
+> **Normative.** Of the five, the two that matter most are the two that are otherwise
 > **silent**. `Placement(reach=ANYONE, set_by=DERIVED)` would be a record the
 > derivation narrowed rendered speakable on a channel of unbounded audience — the
 > laundering ADR-0204 §5 exists to stop, reachable by construction rather than by a
@@ -212,10 +230,10 @@ mechanics of withholding at supply.
 > clause of this ADR produces, so refusing them costs nothing and closes the two
 > routes by which a bug elsewhere becomes a disclosure.
 
-> **Normative.** A `set_at` of `None` beside a setter is **unknown, never
-> unrecorded-therefore-recent**, and it arises on exactly one path: §9's decode of a
-> record written before this field existed, which carries no instant for an act nobody
-> timed. No lane, implementation or later ADR reads such a `None` as evidence about
+> **Normative.** A `set_at` of `None` beside a setter — which by the table above is a
+> `DERIVED` setter and no other — is **unknown, never unrecorded-therefore-recent**,
+> and it arises on exactly one path: §9's decode of a record written before this field
+> existed, which carries no instant for an act nobody timed. No lane, implementation or later ADR reads such a `None` as evidence about
 > when the narrowing was made, and no surface renders it as one. This is ADR-0109's
 > reading of `last_confirmed_at` and ADR-0204 §1's fourth clause, applied to the one
 > place this type inherits the same gap.
@@ -939,7 +957,16 @@ ADR-0201 closed.
 > construction **and** on deserialisation, because a validator that runs only on the
 > first leaves the second as the route in: `reach=ANYONE` with `set_by=DERIVED` is
 > refused, and so is it with `PROPOSED`; `reach=OWNER` with `set_by=None` is refused;
-> a `set_at` with no `set_by` is refused; and every row of the table is constructible.
+> a `set_at` with no `set_by` is refused; `set_by=PROPOSED` with no `set_at` is
+> refused, and so is `set_by=OWNER_ACT` with no `set_at`; and every row of the table —
+> the `DERIVED` row taken with an instant and without one — is constructible.
+
+> **Normative.** The lane pins **§1's producer obligation at the producer**, because
+> the type cannot carry it: every placement this system's own code writes with setter
+> `DERIVED` carries a `set_at`. The arm is taken over the fold in `memory/ingest.py`
+> and every other derivation site §11's inventory names, and it is what makes an
+> untimed `DERIVED` placement in a store diagnostic of §9's decode rather than of a
+> producer that forgot.
 
 > **Normative.** The lane pins **the decode**: a stored record carrying
 > `supplied_withheld_content: true` and no placement decodes to reach `OWNER`, setter
@@ -963,8 +990,8 @@ ADR-0201 closed.
 
 > **Normative.** The lane pins **§4's boundary with a deterministic fake provider**,
 > which the precedence arms above cannot reach. Three arms: a proposal on a record whose
-> placement is the default *succeeds* and writes reach `OWNER` with setter `PROPOSED`,
-> so the mechanism is shown to work at all; the producer's provider-call **count** over
+> placement is the default *succeeds* and writes reach `OWNER` with setter `PROPOSED`
+> and the instant of the pass, so the mechanism is shown to work at all; the producer's provider-call **count** over
 > a pass is what it is without this decision, so no call is added; and on every read
 > path — supply, composition, delivery and any rendering — the provider-call count is
 > likewise **unchanged from what it is without this decision**, so a turn whose reply
