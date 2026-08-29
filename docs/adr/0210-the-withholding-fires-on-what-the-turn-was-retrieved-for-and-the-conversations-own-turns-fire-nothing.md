@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
