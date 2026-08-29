@@ -216,12 +216,19 @@ _GIT_RECORD_FIELDS = 3
 # name instead of a `Name` node.
 _NAMED_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
-# `--- a/path` and `+++ b/path`, with the path captured. The `a/`/`b/` prefixes are
-# pinned by the caller's `_diff_opts`, and a `diff --git` line resets the section,
-# so a patch is attributed to files without any second git invocation. A pathname
-# git chose to quote does not match, and its lines are then admitted to the
-# fallback — over-binding, which is the priced direction.
-_DIFF_PATH_RE = re.compile(r"^(?:\+\+\+|---) [ab]/(?P<path>.*)$")
+# `--- a/path` and `+++ b/path`, with the path captured, in both spellings git
+# writes: bare, and C-quoted where the pathname carries a `"`, a control byte or a
+# newline. The `a/`/`b/` prefixes are pinned by the caller's `_diff_opts`, and so is
+# `core.quotePath=false`, which takes non-ASCII out of the quoted set but not those
+# three — measured, not assumed. Reading only the bare form drops a quoted file's
+# changed lines, which is the under-binding ADR-0209 §5 forbids (adversarial review
+# of PR #1803, round 6).
+#
+# Escaping cannot hide the suffix or split the line: a newline inside a quoted path
+# is written `\n` and the header stays one physical line, and `.js`/`.sh` are ASCII
+# and are never themselves escaped. A `diff --git` line resets the section, so a
+# patch is attributed to files with no second git invocation.
+_DIFF_PATH_RE = re.compile(r'^(?:\+\+\+|---) "?[ab]/(?P<path>.*?)"?$')
 
 # Resolved once: `subprocess.run` with a bare "git" is a partial executable path,
 # and this module runs inside `ship`, which has already established that git is
@@ -600,8 +607,9 @@ class Pr:
         unconditional match between any two ADR lanes that the resolver closed.
 
         The attribution is read off the patch's own `--- a/…` / `+++ b/…` headers
-        rather than by asking git a second time: `ship` renders the patch once,
-        under pinned options, and this module is handed that text.
+        — in both the bare and the C-quoted spelling — rather than by asking git a
+        second time: `ship` renders the patch once, under pinned options, and this
+        module is handed that text.
         """
         kept: list[str] = []
         admitted = False

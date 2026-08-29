@@ -419,6 +419,32 @@ def test_a_word_a_changed_non_python_source_line_carries_is_a_symbol(
     assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
 
 
+#: The three pathname shapes git renders differently in a `---`/`+++` header, under
+#: the `core.quotePath=false` `ship` pins. Non-ASCII is *not* quoted there — measured
+#: against git rather than assumed, because adversarial round 6 gave `café.js` as its
+#: example and that one is bare — while a `"`, a newline and a control byte are.
+_QUOTED_PATHNAMES = ("assets/plain.js", 'assets/a"b.js', "assets/new\nline.js")
+
+
+@pytest.mark.parametrize("name", _QUOTED_PATHNAMES)
+def test_a_quoted_pathname_in_a_diff_header_is_still_attributed(tmp_path: Path, name: str) -> None:
+    """A file git had to quote must not lose its changed lines (round 6).
+
+    The attribution reads the patch's own headers, so a header spelling it does not
+    recognise leaves the section unadmitted and the lines are dropped — silently,
+    and in the direction ADR-0209 §5 forbids. A quoted path's escapes cannot hide
+    the `.js` suffix and its `\n` escape keeps the header on one physical line, so
+    the two spellings are all there is to read; these cases hold that.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing.")}, {name: "export function renderPane() {}\n"})
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is drawn by `renderPane`.")))
+
+    assert judged.owed, judged.stderr
+    assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
 _PANE = "class Pane {\n  async renderPane(response) {}\n}\n"
 
 
