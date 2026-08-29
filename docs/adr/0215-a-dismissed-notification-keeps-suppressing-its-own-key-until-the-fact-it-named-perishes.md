@@ -26,6 +26,15 @@
   retention-from-cessation stamp, and §8's cursorless-producer guarantee are not
   merely kept but are the **ground** of this decision — §5 below says so clause by
   clause.
+- **Contract change — flagged under golden rule 5.** §7 adds
+  `HeldNotification.speaks_for_its_key_at` to `src/ai_assistant/core/types.py` and
+  changes the behavioural contract of `NotificationStore`'s admission and purge.
+  No Protocol gains or loses a member and no signature moves, and
+  `PROTOCOL_VERSION` does not move; what makes it breaking is that a conforming
+  store written against ADR-0130 §§7-8 no longer conforms. So this ADR is reviewed
+  by the adversarial **and** architecture set, nothing implements against it until
+  it has merged (ADR-0015 §5), and its implementation lane's own merge is
+  **sequenced** rather than free — §7 and Consequences state that in terms.
 - **Durability clause.** Every reference below to an ADR is to its text as it
   stood at this ADR's base, `2ba14572`, not to its status on any later day. Where
   a later ADR moves one of the clauses quoted here, this decision is read against
@@ -459,9 +468,21 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > included.
 
 > **Normative.** The lane touches `core/types.py`, so it is a contract change: it
-> merges alone, it owes the adversarial **and** architecture review set (ADR-0015
-> §1), and nothing implements against this ADR until it has merged (golden rule 5,
-> ADR-0015 §5).
+> owes the adversarial **and** architecture review set (ADR-0015 §1), it is flagged
+> as breaking in its summary (golden rule 5), and nothing implements against this
+> ADR until this ADR has merged (ADR-0015 §5).
+
+> **Normative.** That lane **merges when no lane it could bind is open**, and is
+> not scheduled beside other work for the dispatcher's convenience. Its merge is a
+> floor move under ADR-0027 §3 as narrowed by ADR-0209: not §4's unconditional
+> limb, which reaches a `Protocol` class added or widened in
+> `src/ai_assistant/core/protocols.py` and which nothing here does, but §4's other
+> limb — a move to `src/ai_assistant/core/types.py` "binds where the PR's diff
+> touches a path under `src/ai_assistant/core/`, or where a name whose definition
+> the move changed in either file occurs in the PR's text". `HeldNotification`,
+> `is_purgeable_at` and `speaks_for_its_key_at` are such names, and they occur in
+> the text of any notification lane; ADR-0209 §6 binds anything undecidable
+> besides. In practice that is a clear board.
 
 **The named sites, so the lane does not have to find them.** The duplicate lookup
 is `SqliteNotificationStore._is_duplicate`, whose SQL narrows by the module
@@ -656,6 +677,16 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
   rise, because rulings that were `INTERRUPT` become `condition_duplicate`. That is
   the measure reporting the repair, not a regression, and it is worth saying once
   in the record so that nobody reads the step as a producer defect.
+- **The implementation lane has to wait for a clear board.** Its merge moves
+  `core/types.py`, which is floor under ADR-0027 §3, so under ADR-0209 §4 it costs
+  a fresh review round to every open PR whose diff reaches `src/ai_assistant/core/`
+  or whose text names one of the definitions it changed — and §6 binds anything
+  undecidable. That is real scheduling cost paid by lanes that have nothing to do
+  with notifications, and it is why §7 sequences the lane rather than leaving it to
+  the dispatch order. The cheaper alternative was to leave the predicate out of
+  `core` and let each store spell it, which §7 refuses for the reason
+  `is_actionable_at` is on the type: two conforming stores must not be able to
+  disagree about the instant a key stops speaking.
 - **A no-expiry candidate is left exactly where it was.** The decision buys
   nothing for a producer that declines to declare a horizon, and §9 says so
   plainly rather than implying coverage the clauses do not give.
