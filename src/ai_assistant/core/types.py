@@ -13430,12 +13430,15 @@ class ObservationReport(BaseModel):
             `models/`, and a `core` model is not the place to start constraining
             it.
         conversation_id: The conversation whose turns were read, or ``None`` when
-            the store held none to read. Carried because the operation *selects*
-            when it is given no id — "the most recently active" — and a report that
-            did not say which conversation was read would leave the user unable to
-            tell what the model was shown.
+            there was no candidate to read. Carried because the operation *selects*
+            when it is given no id — the first conversation with turns above its
+            observation watermark, least recently active first (ADR-0212 §3) — and a
+            report that did not say which conversation was read would leave the user
+            unable to tell what the model was shown. It names the conversation the
+            pass **targeted**, so it is present even where that pass read no turns.
         episodes_read: How many episodes the batch held. At most the configured
-            batch size, and **short** where a turn's episode no longer resolves.
+            batch size, **short** where a turn's episode no longer resolves, and
+            **zero** for a pass whose target held nothing above its watermark.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
