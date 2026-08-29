@@ -828,8 +828,21 @@ would fail that test on the first turn.
 > it returns is the placement the record carries after the act, which is the same
 > return this section already specifies for an act that wins nothing. So a `guard` or
 > `unguard` racing a derivation ends with the derivation's placement standing, never
-> with a laundered one, and neither operation gains an error to declare.
+> with a laundered one — and where the re-read shows a placement §3 refuses to widen,
+> that is the ordinary refusal above and not a conflict outcome at all.
 
+> **Normative.** **The retry is bounded at two attempts in all, and exhausting it
+> raises.** An act makes its attempt, and on a conflict exactly **one** re-read and one
+> further attempt; where that second attempt also conflicts it writes nothing and
+> raises `MemoryStoreError`, which both members **already declare** — "where reading or
+> writing memory failed" — so neither operation gains an error, and §7's exhaustive
+> `Raises` list is unmoved. No implementation loops unboundedly, and none returns a
+> placement it did not just read. The bound is safe because both acts are idempotent:
+> a caller that meant it repeats it, and a second `guard` on a record already guarded
+> returns the first's value unchanged. Livelock is refused rather than made
+> improbable — an act that cannot land while another writer is rewriting the same
+> record in a tight loop is a failure the caller can see, not a call that never
+> returns.
 > **Normative.** The **read discipline stands beside the gate and is not a substitute
 > for it**: each act decides §3's precedence over the record it read in the call that
 > writes it, never over one read earlier — a rendered list, a confirmation prompt.
@@ -1127,6 +1140,12 @@ ADR-0201 closed.
 > refuses the widening, and the record is left reach `OWNER` with setter `DERIVED` —
 > the returned value saying so. The arm is taken over the store's conditional write and
 > is why §11 orders that change first.
+
+> **Normative.** The lane pins **the exhausted retry**: with a writer changing the
+> record before each of the act's two attempts, the act raises `MemoryStoreError` and
+> the record is left exactly as the other writer left it, with nothing of the act's
+> written. The arm sits beside the one above because a bound that is never exercised is
+> a bound nobody has tested.
 
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
