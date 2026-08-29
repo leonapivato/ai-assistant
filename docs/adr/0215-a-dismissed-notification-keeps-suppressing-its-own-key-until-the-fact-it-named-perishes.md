@@ -194,8 +194,8 @@ tree already refuses the two writes that would break it: `dismiss` reports
 `False` on a record that is not actionable, "the cessation instant a retention
 horizon is measured from may not be moved by a second call", and a
 reconsideration never reaches a record already dropped,
-`HeldNotification.is_due_at` requiring `dropped_at is None`. §2 draws the
-consequence the implementing lane uses.
+`HeldNotification.is_due_at` requiring `dropped_at is None`. §2 says what does
+and does not follow from it for the lookup.
 
 **The horizon this adds is not a new one — it is the horizon the record already
 had.** An undismissed record whose candidate expires at `E` is actionable until
@@ -266,31 +266,37 @@ the same name, because it is the same predicate.
 > other two limbs — the last unit of budget and the last free slot under the
 > cap — are unchanged and still read the populations they always read.
 
-**At most one record per key suppresses at any instant, and it follows from the
-rule rather than being imposed on top of it.** A suppressing record makes every
-offer of its key a `DROP`, and a `DROP` writes nothing; so no second record for
-that key can be admitted while the first suppresses. That is what keeps the lookup
-single-valued and what keeps ADR-0131 §3b's record resolution — which matches an
-outbox entry's key to *the* actionable record carrying it — unambiguous, since a
-suppressing record that is no longer actionable is not a candidate for that match.
+> **Normative.** The lookup reads **every** record the store retains under the
+> offered key, and rules the offer `DROP` where any one of them speaks at the
+> ruling instant. No implementation may narrow that to a single record — the most
+> recently admitted or any other — on the strength of the one-record-per-key
+> property below, which reaches only records admitted under this decision.
 
-> **Normative.** Of the records a store retains under one key, only the **most
-> recently admitted** speaks at any instant at or after its admission, and an
-> offer ruled at such an instant is decided by that record alone. No
-> implementation is obliged to decode or evaluate any record for that key
-> admitted earlier, and one that does reaches the same ruling.
+**No second record for a key is admitted while the first speaks — and that is a
+property of what this decision admits, not of what a store already holds.** A
+suppressing record makes every offer of its key a `DROP`, and a `DROP` writes
+nothing, so from this decision onward at most one record per key speaks at any
+instant, and §1's monotonicity keeps every earlier one silent thereafter. **It
+does not reach backwards, and no clause here assumes it does.** A store that ran
+under ADR-0130 §8 admitted a second record for a key the moment the first was
+dismissed; where that first record's candidate declared the *later* expiry, both
+of the pair speak under §1 until the earlier horizon passes. That is why the
+clause above is written as a population read and not as a lookup of one row: the
+tempting shortcut — rule the offer against the most recently admitted record
+alone — is sound only for records this decision admitted, and a store cannot tell
+the two vintages apart without a marker no clause here adds.
 
-**Why exactly one record decides, and why it is the last admitted.** A record is
-admitted under a key only where no record carrying that key speaks at the ruling
-instant — the clause above, together with the atomicity limb that forbids two
-concurrent rulings proceeding on one absence. By §1's monotonicity, a record
-silent at that instant is silent at every later one. So every record admitted
-before the latest admission under a key is silent from that admission onward, and
-only the latest can speak. Where two records carry one key and one admission
-instant, those same two clauses let at most one of them speak, so the narrowing
-stays well defined whichever the store's own record ordering names first —
-`SqliteNotificationStore` orders by `admitted_at` and then by id. §7 says what
-this buys the implementing lane.
+**Such a pair needs no reconciliation and no migration, and the outcome it
+produces is the one this decision wants.** §1 is a predicate on a record and §2
+is a read of a population, so a legacy overlap suppresses the key until the later
+of the two horizons and then stops — a fact held until it perishes, which is
+exactly §1's rule. Nothing has to be swept, rewritten or stamped at deployment,
+and the pairs perish on their own. **ADR-0131 §3b's record resolution stays
+unambiguous through it**, because it matches an outbox entry's key to *the
+actionable* record carrying it: at most one record per key is actionable under
+either vintage — ADR-0130 §8 admitted a second only where the first was not — and
+a suppressing record that is no longer actionable is not a candidate for that
+match.
 
 **The expired half of ADR-0130 §7's sentence survives and is not superseded.** "A
 fact that recurs after its notification **expired** is a new candidate and not a
@@ -490,13 +496,11 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > frees the cap at once even while its key still speaks; that a record which has
 > stopped speaking never speaks again — a dismissal offered to a record after its
 > candidate's expiry changes nothing, and its key stays free at that instant and
-> at every later one; that where several retained records carry one key the offer
-> is ruled against the most recently admitted of them alone, observed under
-> `retention = None` where nothing is purged — a key freed by its first record's
-> expiry is admitted afresh, an offer of that key is then ruled `DROP` while the
-> second record stands dismissed and inside its own expiry, and at that expiry a
-> candidate carrying the same key with a live expiry is admitted again, the two
-> retained predecessors notwithstanding; that a dismissed record whose candidate's
+> at every later one; that under `retention = None`, where nothing is purged, a
+> key freed by its first record's expiry is admitted afresh, suppressed again
+> while that second record stands dismissed and inside its own expiry, and
+> admitted once more past it, the retained predecessors notwithstanding; that a
+> dismissed record whose candidate's
 > expiry falls **later** than its retention horizon is not purged before that
 > expiry and is purged at it, while one whose expiry falls at or before
 > that horizon is purged exactly where ADR-0130 §7 already put it; and that a record
@@ -545,34 +549,33 @@ is where the second condition joins. The canonical fake's counterparts are in
 `tests/core/notification_contract.py`. `SqliteNotificationOutbox` needs no change
 at all: every site it reads actionability at still means actionability.
 
-**No new index and no new column are *required*, and the rows retained under one
-key are not bounded.** Nothing here claims they are. ADR-0130 §7 grants
-`retention = None`, under which no record is ever purged, and a cursorless
-producer re-offers the same key after each candidate perishes, so that tail grows
-with the deployment's lifetime.
+**The cost this adds is the decode, and it is named rather than argued away.** Of
+`_UNCEASED`'s two halves the `dropped_at` one stays — a dropped record speaks for
+nothing under §1 — and only the dismissal narrowing goes. So the rows a store
+decodes per offer widen by the dismissed-and-not-dropped rows under the key: the
+price of reading a population ADR-0130 §8 did not read.
 
-**What this decision moves, stated exactly, because two costs are easily read as
-one.** The rows a store *examines* under a key are that whole tail, and they
-already were: ADR-0130's ratified lookup selects by `candidate_key` and then
-tests two stamp columns the key index does not carry, so every row under the key
-is fetched on every offer today. This decision neither adds that cost nor removes
-it. What it moves is the *decode and evaluate* — §2's narrowing makes the offer
-turn on the most recently admitted record for the key alone, so a store decodes
-one candidate per offer where the ratified lookup decodes every uncased row under
-the key, which in the growing-tail case is every row it has, those predecessors
-having expired rather than been dismissed. Less work than the ratified rule
-wherever more than one row survives, and never more. The ordering that names the
-record is the one the store already keeps, `admitted_at` then id.
+**The rows retained under one key are not bounded, and nothing here claims they
+are.** ADR-0130 §7 grants `retention = None`, under which no record is ever
+purged, and a cursorless producer re-offers the same key after each candidate
+perishes, so that tail grows with the deployment's lifetime. The rows a store
+**examines** under the key are that whole tail and already were: the two stamp
+columns the ratified lookup tests are not carried by the `candidate_key` index,
+so every row under the key is fetched on every offer today. This decision neither
+adds that cost nor removes it, and **#1801** records it against the ratified
+store where it already stands.
 
-**A backend may bound the scan as well, and this ADR neither requires nor forbids
-it.** A covering index over `(candidate_key, admitted_at, id)` would answer "the
-most recently admitted record for this key" from the index alone. Whether a
-backend carries one is a storage choice inside that backend rather than a term of
-this contract — the same line §7 draws in putting the predicate on the type and
-leaving the lookup to the store — and the shared conformance suite could not pin
-it in any case, running as it does against the canonical fake, which holds no
-index at all. **#1801** records the scan for the implementing lane to decide on,
-against the ratified store where it already stands. The *storage* the tail
+**No new index and no new column is a statement about what this decision
+requires, and it obliges nothing either way.** The lookup selects by
+`candidate_key` exactly as it does now, and what would narrow the decode is a
+denormalised expiry column — a value that then has to keep agreeing with the
+candidate it was copied from, which `SqliteNotificationStore._actionable` weighs
+and declines for the same population today. A backend is free to reach a
+different answer on its own evidence: that is a storage choice inside the
+backend rather than a term of this contract — the line §7 draws in putting the
+predicate on the type and leaving the lookup to the store — and the shared
+conformance suite could not pin it in any case, running as it does against the
+canonical fake, which holds no index and no column. The *storage* the tail
 occupies is ADR-0130 §7's own question and carries §7's own answer: it is
 "bounded by retention and emptied by §9's delete surface", the user's own choice
 and the user's own remedy.
@@ -745,6 +748,15 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
   decision and is not purged after it — §7's own deliberate escape, unchanged —
   and ADR-0130 §9's delete surface reaches it either way, which is the remedy §7
   already names for that case.
+- **A store that crosses this decision can hold two records speaking for one
+  key.** ADR-0130 §8 admitted a second record for a key the moment the first was
+  dismissed, and where that first one declared the later expiry both speak under
+  §1 until the earlier horizon passes. §2 is a read of a population and not a
+  lookup of one row, so such a pair simply suppresses its key until the later of
+  the two horizons — no migration, no sweep, no stamp at deployment, and the
+  pairs perish on their own. Only a store that already ran can hold one, and the
+  cost is that no implementation may take the one-row shortcut the
+  one-record-per-key property would otherwise offer.
 - **Two populations now exist where one did, and a reader has to hold both.**
   "Actionable" and "suppressing" differ in exactly one case — a dismissed record
   before its expiry — and every clause that names a population now has to name the
