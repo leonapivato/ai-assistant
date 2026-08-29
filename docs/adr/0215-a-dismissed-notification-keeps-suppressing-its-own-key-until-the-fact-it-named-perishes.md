@@ -311,18 +311,18 @@ slower schedule.
 
 **It bounds what it adds, and lengthens nothing that was already there.** The
 extension is the second half of the guard and only that: a record going on speaking
-after its dismissal, bounded by the candidate's own declared expiry and by nothing
-else. The record's *retention* is ADR-0130 §7's, untouched, and it may already
-outlast that expiry — a record dismissed at `D` whose candidate expired at `D + 1
-day` under the default seven-day retention was purgeable strictly after `D + 7
-days` before this ADR and still is. So for a record dismissed and not dropped the
-guard's reach is `max(ceased + retention, expiry)`, and **each half is a bound the
-corpus already granted**: the first is §7's retention, and the second is §7's too,
+after its dismissal, ending at the candidate's own declared expiry and at nothing
+else. The record's *retention* is ADR-0130 §7's and is untouched — `None` included,
+which means never purged there and still does here. It may already outlast the
+expiry: a record dismissed at `D` whose candidate expired at `D + 1 day` under the
+default seven-day retention was purgeable strictly after `D + 7 days` before this
+ADR and still is. So for a record dismissed and not dropped the guard's reach is
+`max(ceased + retention, expiry)`, and **this ADR introduces neither term**: the
+first is §7's retention with §7's own `None` case, and the second is §7's too,
 since the same record undismissed is unpurgeable until its expiry because it is
-actionable until then. Neither term is new and no term is unbounded. For every
-other record — one a `DROP` reached, one that simply expired, one whose candidate
-declared no expiry at all — the reach is `ceased + retention` and this clause adds
-nothing.
+actionable until then. For every other record — one a `DROP` reached, one that
+simply expired, one whose candidate declared no expiry at all — the reach is
+`ceased + retention` and this clause adds nothing.
 
 ### 5. What is kept whole, and no clause here may be read as reaching it
 
