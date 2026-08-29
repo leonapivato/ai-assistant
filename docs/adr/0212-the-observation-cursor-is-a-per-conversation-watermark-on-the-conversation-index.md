@@ -1,6 +1,6 @@
 # 212. The observation cursor is a per-conversation watermark on the conversation index, and a pass advances it once
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
