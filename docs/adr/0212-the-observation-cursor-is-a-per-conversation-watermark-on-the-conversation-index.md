@@ -757,6 +757,15 @@ ADR adds no failure count and no per-conversation retry state.
 > fault: it holds no evidence, answers no query, and a build that ignores it serves
 > every operation exactly as that build served it before.
 
+> **Normative.** Where the store persists conversations in a table, the watermark's
+> column is **nullable and carries no default**, is added to an existing table without
+> rewriting a row, and changes no existing column. That is what makes the clause above
+> true of a *file* and not only of a build: a build written before this member names
+> only the columns it knows in its `INSERT INTO conversations(...)`, so a `NOT NULL`
+> column with no default would make that build's `start` fail against an upgraded
+> database — a refusal to serve over a watermark, arriving through the schema instead
+> of through a read.
+
 > **Normative.** A build that reads it and finds none applies §4 — the tail window —
 > and not ordinal `FIRST_TURN_ORDINAL`.
 
@@ -795,6 +804,20 @@ is not replaced is §7's disposition itself**: discard rather than fault, never
 `IncompatibleStateError`, never a refusal to start, never advanced past a value that
 could not be read. Those bind here word for word, and are the whole of the clauses
 above.
+
+**The column's shape is ADR-0205 §3's precedent applied, and its reason is recorded in
+the code that applied it.** `SqliteConversationStore._migrate_delivery` adds that ADR's
+three columns to a `turns` table written before them with an `ALTER TABLE ... ADD
+COLUMN` rather than the rebuild its sibling migration performs, "because that is the
+whole of what is owed: the three are nullable with no default, so SQLite adds each in
+constant time without rewriting a row, and every existing turn comes back carrying no
+delivery". One table up, the same three properties are exactly what this member needs:
+a conversation written before the column comes back with no watermark, which §4 reads
+as a walk that has not started; the upgrade rewrites no row of the index; and a build
+that does not know the column keeps inserting the columns it does know. **It is stated
+as an obligation rather than left to the implementing lane** for the same reason the
+store-side clause below is: the failure it prevents is a resident process that will not
+start, found after a downgrade rather than in review.
 
 **The store-side clause is not a detail.** `ConversationStore` promises to raise
 `ConversationStoreError` "If the store cannot be read, **or a stored row is
@@ -860,6 +883,28 @@ read path to relabel *for*, and rewriting the meaning of a version nobody can re
 buys nothing. Moving to 2 here announces the shape that ships next. The gap is
 recorded as **#1793** rather than absorbed, and it is not this ADR's to decide beyond
 saying so.
+
+> **Normative.** What `schema_version` **1** may be relied on for is stated here rather
+> than left to a later reader to discover. A document labelled 1 was written by a build
+> before this one, and its turns may or may not carry `delivery` (ADR-0205 §3), so the
+> label separates 1 from 2 and does **not** separate those two shapes from each other.
+> **No reader may take a 1 as evidence of either shape.** Nothing in this system has
+> to: `ConversationStore` offers `export` and no import, restore or load, so no code
+> path reads a `ConversationExport` it did not just construct. The first lane that adds
+> a read path owes that disambiguation before it may rely on the label, and repairing
+> the label itself is **#1793**'s.
+
+**ADR-0014 §5 is not read differently after this ADR, which is why no record is made
+against it.** Its guarantee — "a reader must be able to tell which shape it is
+holding" — is already imperfect for label 1, and what made it so is ADR-0205 §3 landing
+a member inside this export without moving the version. Before this ADR a 1 covered two
+shapes; after it a 1 covers the same two and a 2 covers exactly one. A reader holding
+ADR-0014 alone therefore acts identically before and after, which is ADR-0070 §1's test
+and the reason nothing is recorded on ADR-0014 here: the record the breach may owe is
+owed by the repair, against the decision that shipped the unlabelled shape. Ratifying
+with the clause above is not ratifying the breach — it is refusing to let this ADR's own
+version be read as evidence about the one before it, which is the concrete harm an
+ambiguous label does.
 - **`core/protocols.py`** gains **exactly three operations on `ConversationStore`**,
   and no new Protocol. **All three are `async def`**, as every method of that Protocol
   already is: each reaches the store, and `CLAUDE.md` makes I/O-bound methods `async`.
@@ -1021,7 +1066,11 @@ watermark and returns `None` when asked to; `record_observed` refuses an ordinal
 above the conversation's highest and stamps nothing; two concurrent `record_observed`
 calls leave exactly one recorded value and it is the higher, pinned in the
 `ConversationStore` conformance suite beside the store's other concurrent-mutation
-rows; `record_observed` on a stamped conversation raises `UnknownConversationError`;
+rows; **an insert naming only the columns a build before this member names succeeds against
+the upgraded table**, and that conversation reads back with no watermark and enters
+`conversations_with_unobserved_turns` at its tail — §7's older-build clause pinned
+against the *schema* rather than assumed from the code;
+`record_observed` on a stamped conversation raises `UnknownConversationError`;
 **a conversation stamped deleted between a pass's page read and its advance leaves the
 watermark untouched, raises `UnknownConversationError` out of the pass, and is absent
 from the next `conversations_with_unobserved_turns`** — injected deterministically, and
