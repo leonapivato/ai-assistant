@@ -758,6 +758,29 @@ def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
     assert "setConversation(conversationId);" in _functions(script)["showConsole"]
 
 
+def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
+    """#1371's first clause, at the place the owner chooses from.
+
+    Found by driving the page rather than by reading it, which is the division
+    ADR-0216 §8 keeps: every other line about a conversation names it — the
+    indicator, the destroy ceremony, the outcome of a forget — and the listing all
+    three send the owner to named none of them. Three rows of two timestamps, and
+    the sentence that appears after a tap names an id that had never been on screen.
+
+    Its own full-width line rather than a clause of the instants: an id is a hub
+    value of no bounded length, and a row that makes it compete for horizontal space
+    with two timestamps is one long id away from #1385's "Remo ve".
+    """
+    script = _code("app.js")
+    stylesheet = _asset("app.css")
+    rendering = _functions(script)["renderConversation"]
+
+    assert 'line(item, `Conversation ${summary.id}`, "conversation-name");' in rendering
+    # First, so the id is above the row rather than between its two facts.
+    assert rendering.index("conversation-name") < rendering.index("Last turn")
+    assert "flex: 1 1 100%;" in _rule(stylesheet, ".conversation-name")
+
+
 def test_the_page_says_what_a_resumed_thread_already_holds() -> None:
     """#1371's second clause, in the half a reading can decide.
 
