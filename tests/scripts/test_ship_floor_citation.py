@@ -1349,12 +1349,16 @@ def test_ship_binds_when_the_floor_test_is_not_beside_it(tmp_path: Path) -> None
     assert "floor_test.py is missing" in result.stderr
 
 
-#: Patches that are not the shape `Pr._sections` reads. The first is round 9's
-#: worked case — a changed line with no section and no hunk around it; the second
-#: is a hunk opened before any `diff --git`.
+#: Patches that are not the shape `Pr._sections` reads, one per piece of a section
+#: it checks rather than assumes. Rounds 9 and 10: a changed line with no section
+#: and no hunk around it; a hunk opened before any `diff --git`; a section whose
+#: hunk names neither endpoint; and one that names only one.
+_SECTION = b"diff --git a/src/pkg/widget.ts b/src/pkg/widget.ts\n"
 _MALFORMED_PATCHES = (
     b"+renderPane\n",
     b"@@ -1 +1 @@\n+renderPane\n",
+    _SECTION + b"@@ -0,0 +1 @@\n+renderPane\n",
+    _SECTION + b"--- /dev/null\n@@ -0,0 +1 @@\n+renderPane\n",
 )
 
 
@@ -1363,10 +1367,16 @@ def test_a_patch_this_reader_cannot_place_a_line_in_binds(tmp_path: Path, patch:
     """§6 again: attribution that cannot be established is not a negative answer.
 
     The fallback reads a changed line's *file* off the patch's own structure, so a
-    patch whose structure is missing leaves every line unattributable. Treating that
-    as "no source file carried it" clears the floor on an unevaluable input, which
-    is what §6 exists to forbid. Every added or removed line of a well-formed patch
-    sits inside a hunk of a section, so the reader can tell the difference.
+    patch missing part of that structure leaves the line unattributable. Treating
+    that as "no source file carried it" clears the floor on an unevaluable input,
+    which is what §6 exists to forbid — and every case here is one that clears
+    under a reader which assumes the piece it did not get. A section carrying
+    content carries all of it, so each piece is checked: the section, its two
+    endpoint headers, the hunk, and the line inside the hunk.
+
+    Each of these names `src/pkg/widget.ts` or nothing, so under a correct reader
+    the token would be a symbol and the move would bind on the *fallback*; what
+    makes them bind here is §6, which the reason asserts rather than the verdict.
     """
     repo = tmp_path / "repo"
     _init(repo, {_ADR: _adr("The pane is drawn by `renderPane`.")}, {_PLAN: "a note\n"})

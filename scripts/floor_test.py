@@ -209,6 +209,11 @@ _PROSE_SUFFIXES = (".md", ".rst")
 #: binds rather than guessing at the boundary.
 _GIT_RECORD_FIELDS = 3
 
+#: The endpoint headers a patch section carrying content must have named before its
+#: first hunk: `---` and `+++`, one of which may be `/dev/null`. A hunk reached with
+#: any other number is a section whose files this cannot name, so §6 binds.
+_PATCH_SECTION_HEADERS = 2
+
 # **Python is read with `ast`, not with a pattern**, because a pattern here is an
 # enumeration of a grammar and the grammar keeps winning. Four successive rounds
 # of PR #1803's own review found a form the enumeration of the day did not have —
@@ -543,15 +548,19 @@ class Pr:
         and never twice with two ideas of what a header is.
 
         **A patch this reader cannot place a line in is an unevaluable input.**
-        Every added or removed line of a well-formed patch sits inside a hunk of a
-        section, and every pre-hunk line either opens the section, names one of its
-        endpoints, or is metadata carrying no ``+``/``-``. So a changed line met
-        outside a hunk, or a hunk met outside a section, means the patch is not the
-        shape this reads — and ADR-0209 §6 binds rather than attributing the line
-        to nothing and clearing (adversarial review, round 9). Nothing produces
-        that from `ship`, which renders the patch itself under pinned options; what
-        §6 is about is the case nobody foresaw, so it is answered by structure
-        rather than by trusting the caller.
+        A section that carries content carries all of it: ``diff --git``, then its
+        two endpoint headers, then hunks; and every added or removed line sits
+        inside one of those hunks, while every pre-hunk line either opens the
+        section, names an endpoint, or is metadata with no ``+``/``-`` of its own.
+        Each piece is therefore checked rather than assumed — a hunk outside a
+        section, a hunk whose section named neither endpoint, a changed line
+        outside a hunk — because the reader answers "which file is this line in"
+        and a piece it did not get is an answer it does not have. Attributing such
+        a line to nothing and clearing is the fail-open ADR-0209 §6 forbids, so
+        each raises instead (adversarial review, rounds 9 and 10). Nothing produces
+        those shapes from `ship`, which renders the patch itself under pinned
+        options; §6 is about the case nobody foresaw, and it is answered by
+        structure rather than by trusting the caller.
 
         **A ``---``/``+++`` line is a file header only before the first ``@@``.**
         They carry pathnames, not content, and §5's tests about "a symbol an added
@@ -578,18 +587,25 @@ class Pr:
         source = False
         in_hunk = False
         opened = False
+        headers = 0
         for line in self.diff_text.splitlines():
             if line.startswith("diff --git "):
                 sections.append((source, changed))
-                changed, source, in_hunk, opened = [], False, False, True
+                changed, source, in_hunk, opened, headers = [], False, False, True, 0
             elif line.startswith("@@ "):
                 if not opened:
                     raise UnevaluableError("the PR's patch opens a hunk outside any file section")
+                if headers != _PATCH_SECTION_HEADERS:
+                    raise UnevaluableError(
+                        f"the PR's patch opens a hunk after {headers} endpoint header(s), "
+                        f"not {_PATCH_SECTION_HEADERS}"
+                    )
                 in_hunk = True
             elif not in_hunk and (header := _DIFF_PATH_RE.match(line)) is not None:
+                headers += 1
                 source = source or _feeds_fallback(header["path"])
             elif not in_hunk and _FILE_HEADER_RE.match(line) is not None:
-                continue
+                headers += 1
             elif line[:1] in {"+", "-"}:
                 if not in_hunk:
                     raise UnevaluableError("the PR's patch carries a changed line outside any hunk")
