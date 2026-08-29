@@ -1,6 +1,6 @@
 # 204. A record carries whether the supply it was produced over held withheld content, and a channel of unbounded audience withholds one that does
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns)
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0203](0203-on-a-channel-of-unbounded-audience-the-withholding-binds-the-whole-turn.md)
@@ -40,6 +40,54 @@
   a later ADR changes one of the ADRs cited, this ADR is read against the text
   quoted here and that ADR's own record says what moved. This is ADR-0143's clause,
   taken for its reason.
+- **Partially superseded: 2026-08-29 by ADR-0210 — §2's second clause, §3's fourth
+  clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an
+  operation whose output channel's audience is unbounded, and nothing else of this
+  ADR.** The milestone-20 QA run (#1765) drove ADR-0199, ADR-0203 and this ADR end
+  to end on a live hub and filed **#1775**. Every clause behaved as ruled; what the
+  run measured is a composition. §2's second clause evaluates the disjunction over
+  "the one supply the turn already holds", and ADR-0074 §5 puts the conversation's
+  own recent turns in that supply because they are *the conversation* — its own
+  words call a user changing the subject mid-conversation "ordinary" and calling the
+  tail "best first" "a strain". So a spoken turn deflected, §2 stamped its episode,
+  the next turn's tail held that episode, §3 withheld it, the disjunction came back
+  `True` again, and nothing ever left the tail unstamped for as long as the
+  conversation ran. On the store #1775 measured, 12 of 13 episodes carried the field
+  — *"The user asked: What is the time?"* among them — and the spoken channel had no
+  history at all. #1775 sizes it `major` and states the property: the withholding
+  "is **monotonic and unbounded in practice**".
+
+  **Replaced — the set the evaluation ranges over, on one channel.** ADR-0210 §1
+  evaluates §2's disjunction, and the fact ADR-0199 §5's third clause carries to the
+  composing stage, over the members of the turn's supply that a relevance read taken
+  with the turn's own goal statement returned — the belief composition ADR-0072 §5
+  orders and ADR-0158's episodic supplement, ADR-0074 §5's second and third groups —
+  together with the turn's context facets. The test is what a read **returned** and
+  never which group the composition finally placed the record in, because ADR-0158
+  §4's deduplication drops from the supplement a record the tail already holds. A
+  reader holding only this ADR evaluates over the tail as well; after ADR-0210, on
+  one channel, they do not, which is ADR-0070 §1's line. §3's fourth clause is
+  recorded on the more demanding of its two readings — it may defer wholly to
+  ADR-0199 §5's third clause, or state the notification in its own voice — and
+  ADR-0210 §3 declines to rest on the reading that would save it a record. §5's
+  second clause is narrowed **for one producer only**: a turn on such a channel,
+  which §2's third clause is the sole route by which §5 reaches a turn at all. §8's
+  tests 4 and 9 keep the outcome each fixes and take the precondition ADR-0210 §1
+  narrows; neither is deleted.
+
+  **Not replaced — both terms, the field, the withholding, the ratchet and the
+  bounded channel.** Both terms of §2's disjunction survive and neither is dropped;
+  §1's field survives; §3's first three clauses survive, so a withheld record is
+  still removed wherever in the supply it stood and no record becomes speakable;
+  §4's bounded-channel rule is untouched entirely, which is what keeps #1708's
+  laundering path closed; and §5's **first, third, fourth and fifth** clauses — the
+  no-clearing ratchet, the `SUPERSEDE` rule, the retained target and the closing
+  prohibition — bind whole. A record ADR-0210 causes not to be stamped is a record
+  that was never stamped rather than one that was cleared. §5's second clause is
+  untouched for every other producer: an observer distilling a belief from a stamped
+  episode, a fold, a consolidation and a bounded-channel turn all still disjoin over
+  every record they were supplied. §6's residue and §7's version footing stand, and
+  §8's other thirteen tests are untouched.
 
 ## Context
 

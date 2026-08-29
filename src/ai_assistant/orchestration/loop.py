@@ -75,8 +75,9 @@ _log = structlog.get_logger(__name__)
 #: A filter over the supply one turn runs on, applied **between retrieval and
 #: planning** (ADR-0203 §2).
 #:
-#: It is handed what the turn assembled and what it retrieved, and returns what the
-#: rest of the turn may run over. It is a *filter*: it may remove members, and it may
+#: It is handed what the turn assembled, what it retrieved, and the ids of the
+#: records **this turn's relevance reads returned**, and returns what the rest of
+#: the turn may run over. It is a *filter*: it may remove members, and it may
 #: not add one, reorder what survives, assemble a second context, issue a retrieval,
 #: reach a ``ContextProvider`` or a ``MemoryStore``, or make a store query of any
 #: kind. It may also remove **nothing at all**:
@@ -86,8 +87,20 @@ _log = structlog.get_logger(__name__)
 #: retrieval and planning, on every conversational operation. This loop knows nothing
 #: of disclosure and applies whatever it is given, which is what keeps ADR-0199's
 #: posture in one module.
+#:
+#: **The third argument is the read set, and it is deliberately not a group boundary**
+#: (ADR-0210 §1, §10 item 1). It is the ids :meth:`LearningLoop._retrieve` returned
+#: together with the ids :meth:`LearningLoop._supplement`'s own read returned
+#: **before** ADR-0158 §4's deduplication — what a relevance read taken with this
+#: turn's goal statement *chose*, rather than where the composition finally put it.
+#: The two differ: a record both the conversation tail and the supplement's read
+#: carry is deduplicated out of the supplement and stands in the supply at the
+#: tail's position alone, so ``len(recent)`` cannot see that a relevance read
+#: selected it. What a filter does with the set is the filter's own business — this
+#: loop reads nothing off it and applies the same seam on every operation.
 type SupplyFilter = Callable[
-    [CurrentContext, tuple[MemoryRecord, ...]], tuple[CurrentContext, tuple[MemoryRecord, ...]]
+    [CurrentContext, tuple[MemoryRecord, ...], frozenset[str]],
+    tuple[CurrentContext, tuple[MemoryRecord, ...]],
 ]
 
 #: A user's own utterance is asserted, not inferred, so the goal it becomes
@@ -469,7 +482,21 @@ class LearningLoop:
         exactly what it returned. Nothing is refetched, widened, re-run or
         backfilled afterwards: a turn may reach the planner with fewer records than
         the same utterance would on a caller that narrows nothing, and that is the
-        decision working. ``memory_degraded`` is deliberately **upstream** of it —
+        decision working.
+
+        **The filter is also told what this turn's relevance reads returned**
+        (ADR-0210 §1, §10 item 1). Beside the flat sequence it is handed the ids
+        :meth:`_retrieve` returned and the ids :meth:`_supplement`'s own read
+        returned **before** ADR-0158 §4's deduplication — a *membership*, carrying
+        nothing about a score, a rank or a group. This method reads nothing off it
+        and computes it on every operation alike; what a filter makes of it is the
+        filter's, which is what keeps ADR-0199's posture in one module. A boundary
+        index would have been cheaper and is not enough: a record both the
+        conversation tail and the supplement's read carry stands in the supply at
+        the tail's position alone, and only the read's own answer records that a
+        relevance read chose it.
+
+        ``memory_degraded`` is deliberately **upstream** of it —
         it reports whether the history read and the retrieval succeeded, which is a
         fact about this method's I/O and not about what a caller then chose to be
         supplied (ADR-0203 §3).
@@ -488,12 +515,14 @@ class LearningLoop:
                 adapter to explain a distinction it cannot act on.
             narrow: A :data:`SupplyFilter` applied between retrieval and planning,
                 or ``None`` to plan over everything the turn assembled and
-                retrieved. ``converse_spoken`` supplies ADR-0199 §3's subtraction
-                here (ADR-0203 §1); ``converse`` and ``converse_streaming``, whose
-                channel audience is bounded, supply the filter that evaluates the
-                same predicate and removes nothing (ADR-0204 §2, §4). ``None``
-                remains valid and plans over everything: this method is the seam,
-                not the policy.
+                retrieved. It is given the assembled context, all three groups of
+                ``memories``, and the ids this turn's relevance reads returned
+                (ADR-0210 §1). ``converse_spoken`` supplies ADR-0199 §3's
+                subtraction here (ADR-0203 §1); ``converse`` and
+                ``converse_streaming``, whose channel audience is bounded, supply
+                the filter that evaluates the same predicate and removes nothing
+                (ADR-0204 §2, §4). ``None`` remains valid and plans over
+                everything: this method is the seam, not the policy.
 
         Returns:
             The turn's goal, context, assembled memories and plan — each of them
@@ -516,13 +545,22 @@ class LearningLoop:
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
         preceding = recent + retrieved
-        memories = preceding + await self._supplement(goal.statement, preceding=preceding)
+        supplement, supplement_read = await self._supplement(goal.statement, preceding=preceding)
+        memories = preceding + supplement
+        # ADR-0210 §1: what this turn's two relevance reads *returned*, taken with
+        # this turn's own goal statement. `supplement_read` is the read's own answer
+        # **before** ADR-0158 §4's deduplication, which is why this is a set of ids
+        # and not an index into `memories`: a record both the tail and that read
+        # carry is deduplicated out of the supplement and survives at the tail's
+        # position, where no boundary can distinguish it from a record the tail
+        # merely happened to hold (§1's second clause).
+        retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
         # ADR-0203 §1: between retrieval and planning, and applied to the context as
         # well as to the records — a facet no ADR has placed is withheld from the
         # planner exactly as an unplaced record is. Everything after this line, this
         # method's own return value included, runs over what it returned.
         if narrow is not None:
-            context, memories = narrow(context, memories)
+            context, memories = narrow(context, memories, retrieved_ids)
         plan = await self._planner.plan(goal, context=context, memories=memories)
         return TurnResult(
             goal=goal,
@@ -803,7 +841,7 @@ class LearningLoop:
 
     async def _supplement(
         self, query: str, *, preceding: Sequence[MemoryRecord]
-    ) -> tuple[MemoryRecord, ...]:
+    ) -> tuple[tuple[MemoryRecord, ...], frozenset[str]]:
         """Retrieve *episodes* relevant to ``query``, to append after the beliefs.
 
         ADR-0158 §1 admits the capability #791 held open: a question whose answer
@@ -875,6 +913,16 @@ class LearningLoop:
         Retrieval row, in the scope of this read alone; the belief path's
         all-or-nothing degradation is untouched.
 
+        **The read's own answer is returned beside the deduplicated supplement**
+        (ADR-0210 §1, §10 item 1). The two differ by exactly what the tail or the
+        belief composition already held, and the difference is load-bearing: a
+        stamped episode of this conversation that this read *does* return is
+        deduplicated away here and survives only at the tail's position, so a
+        caller reading the composed groups alone would conclude no relevance read
+        of this turn had chosen it. It is a set of ids and never the records —
+        the deduplicated copies are the ones the turn runs over, and a second set
+        of record objects at the same ids is a supply nobody supplied.
+
         Args:
             query: The turn's goal statement, the same query the belief
                 composition was read with.
@@ -884,13 +932,16 @@ class LearningLoop:
 
         Returns:
             Up to ``episodic_limit`` episodes, best first, none of them already
-            present in ``preceding``. Empty where the bound is zero, where the
-            separator is absent, or where the read failed.
+            present in ``preceding``, and the ids this read returned **before**
+            that deduplication. Both are empty where the bound is zero, where the
+            separator is absent, or where the read failed — in the last case
+            because nothing was returned to record, not because the answer is
+            being suppressed.
         """
         if self._episodic_limit <= 0:
-            return ()
+            return (), frozenset()
         if all(MemoryKind(record.kind) is MemoryKind.EPISODIC for record in preceding):
-            return ()
+            return (), frozenset()
         try:
             found = await self._memory.search(
                 query,
@@ -902,12 +953,15 @@ class LearningLoop:
             # Warned, not raised, and `memory_degraded` deliberately untouched by
             # the caller: this is the whole of ADR-0158 §4's failure rule.
             _log.warning("episodic_supplement_degraded", stage="supplement", exc_info=True)
-            return ()
+            return (), frozenset()
         # `capped` is unwrapped and not acted on (ADR-0128 §6), as the belief
         # composition's own read leaves it: a supplement is non-essential, so a
         # store's candidate ceiling shortening it is not a fact this turn reports.
         held = {record.id for record in preceding}
-        return tuple(record for record in found.records if record.id not in held)
+        return (
+            tuple(record for record in found.records if record.id not in held),
+            frozenset(record.id for record in found.records),
+        )
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as the reading stage's own error.

@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant)
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
   reaches an operation whose output channel's audience is unbounded, and nothing
@@ -81,6 +81,47 @@
   through ninth clauses shape a deflection that is unchanged. §1's audience test,
   §4's asymmetry, §6's user act, §7's household deferral, §8's gate and §9's
   deferrals are all as they were.
+- **Partially superseded: 2026-08-29 by ADR-0210 — §5's third clause, only as it
+  reaches an operation whose output channel's audience is unbounded, and nothing
+  else of §5 or of this ADR.** The milestone-20 QA run (#1765) drove this ADR,
+  ADR-0203 and ADR-0204 end to end on a live hub and filed **#1775**. §5's third
+  clause fires "Where content was withheld", over the whole of the turn's supply —
+  and ADR-0074 §5 puts the conversation's own recent turns in that supply because
+  they are *the conversation* rather than because they answered the question. So
+  once ADR-0204 stamped one spoken turn's episode, the next turn's tail held that
+  episode, ADR-0204 §3 withheld it, and the stage was told a withholding had
+  occurred on every later turn whatever was asked. #1775 records the owner-visible
+  result: the time of day answered with *"There's something else related to that I'd
+  rather not say out loud"*, and a spoken channel with no history to read back.
+
+  **Replaced — the clause's condition, and only on that channel.** ADR-0210 §1 tells
+  the composing stage where the withholding removed something standing in the
+  members of the turn's supply that a relevance read taken with the turn's own goal
+  statement returned — ADR-0074 §5's second and third groups, named by the read and
+  not by the group, because ADR-0158 §4's deduplication drops from the supplement a
+  record the tail already holds — **or a context facet**. It is not told where the
+  only thing removed stood in the conversation's own recent turns. A reader holding
+  only this ADR tells the stage whenever anything was withheld from the supply;
+  after ADR-0210, on one channel, they do not, which is ADR-0070 §1's line.
+
+  **Not replaced — what a deflection is and what it must contain.** The obligation
+  §5's third clause imposes on the answer is untouched: where the stage *is* told,
+  the answer still states the withholding, still carries no span of and no value
+  derived from what was withheld, and still names a bounded channel where one can be
+  named. Only the condition is narrowed. §5's first, second and fourth through ninth
+  clauses are untouched, so the withholding is still at supply and never a filter
+  over composed prose, and a turn on which nothing speakable remains still says so.
+
+  **Not replaced — §3, §2, and everything else.** §3's placements are computed
+  exactly as they are and no class becomes speakable or unspeakable; §3's sixth
+  clause, which puts the posture of a newly admitted facet on the admitting ADR, is
+  obeyed rather than moved — ADR-0210 §1 keeps facets in the evaluation for that
+  reason, so a facet arriving unplaced is loud rather than quiet. §2's
+  recorded-origin discipline binds whole: nothing ADR-0210 decides reads
+  `MemoryBase.content`, a facet's rendered text, a goal statement, a plan or a
+  composed reply, and nothing there asks a model what a passage is about. §1's
+  audience test, §4's asymmetry, §6's user act, §7's household deferral, §8's gate
+  and §9's deferrals are all as they were.
 
 ## Context
 
