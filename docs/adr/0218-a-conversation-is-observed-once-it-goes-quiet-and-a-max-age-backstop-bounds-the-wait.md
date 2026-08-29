@@ -257,17 +257,59 @@ decided by counting rows and by nothing a caller supplies. That is the same reas
 ADR-0212 §2 made the *cursor* an ordinal rather than an instant, applied to the
 trigger so that the two do not rest on different kinds of thing.
 
-**The arithmetic that makes the bound unconditional, stated because it is the
-guarantee.** A conversation that is never quiet is, by §1's definition, one whose
-`last_active_at` — the **store's** clock, set by `mark_active`, never a caller's —
-moves at least once every `observation_quiet_window`. Every such move is a turn
-beginning, and a turn that completes is a row above the watermark. So a candidate
-that is never quiet accumulates a full page within at most
-`observation_batch_size` quiet windows and is due on the full arm — 200 minutes at
-the shipped figures — **whatever any caller stamped on any turn**. The age arm then
-does what #1737 asked of it and fires *earlier* than that for a conversation
-trickling slowly enough (§7 sets its default so that it does), and it can only ever
-make a candidate due sooner, never later.
+**The arithmetic the full arm buys, stated with the condition it rests on rather
+than without it.** A conversation that is never quiet is, by §1's definition, one
+whose `last_active_at` — the **store's** clock, set by `mark_active`, never a
+caller's — moves at least once every `observation_quiet_window`. Where those moves
+are turns that are **recorded**, each one is a row above the watermark, so such a
+candidate accumulates a full page within at most `observation_batch_size` quiet
+windows and is due on the full arm — 200 minutes at the shipped figures —
+**whatever any caller stamped on any turn**. That is the guarantee, and its
+condition is stated in it: recorded turns, not activity.
+
+**The condition is load-bearing, because activity and a recorded turn are not the
+same event.** `mark_active` "Record[s] that a turn has *begun*" and is explicitly
+called before the work — "a turn that never completes still says the user was here,
+which is the honest input to 'which conversation?'" — while a row above the
+watermark exists only where `append` ran. So a conversation kept out of quiet by
+turns that never complete gains no rows, and if the one unobserved turn it already
+holds carries an `occurred_at` ahead of the store's clock, it is quiet on no
+reading, aged on no reading, and full on no reading. **That residual is real and it
+is accepted and named**, on four grounds and with a bound of its own:
+
+- **It requires three ordinary events to be suppressed at once, indefinitely.** The
+  candidate becomes due the moment the user stops for one quiet window, or the
+  moment `observation_batch_size` turns are recorded, or the moment the store's
+  clock passes the stamp. All three are the normal course; the residual is the
+  conjunction of all three failing to arrive.
+- **Its duration is bounded by the size of the clock error, not by this design.**
+  The age arm is deferred by exactly as long as the stamp is ahead, and no longer.
+  A clock stepped an hour ahead costs an hour.
+- **The material at risk is at most `observation_batch_size − 1` turns, and it is
+  delayed rather than lost.** The turns stay in the index, their episodes stay
+  retrievable, and the pass that eventually runs reads them all: nothing here
+  advances a watermark past a turn no pass read.
+- **Both closures a reviewer would reach for are ruled out by ratified text.**
+  Refusing a future `occurred_at` at `append` is a `core/protocols.py` change under
+  golden rule 5, and it would refuse what `Conversation` deliberately permits — "a
+  rule like `last_active_at >= started_at` would make a legitimate clock adjustment
+  unrepresentable rather than catching a bug" — turning a skew into a lost capture.
+  A store-stamped receipt instant on the turn is the shape ADR-0212 §9 declined by
+  name — "A durable record that a turn's episode landed […] It is not bought here:
+  it is a second store-written member and a second write on the capture path" —
+  with the condition that would fire it already written there. Buying either from a
+  trigger ADR would be deciding contract surface in the wrong place.
+
+This is the same disposition ADR-0212 §3 took for its own order's clock hazard,
+where a stepped clock can leave a busy conversation served ahead of an idle one
+"indefinitely": "That is **accepted and named**, not closed: closing it would take a
+durable service-order position, which is a second cursor with its own upgrade
+discipline and its own `core` surface, bought against a clock adjustment rather than
+against anything the walk does."
+
+**The age arm does what #1737 asked of it** and fires *earlier* than the full arm for
+a conversation trickling slowly enough (§7 sets its default so that it does), and it
+can only ever make a candidate due sooner, never later.
 
 **What the backstop closes, at its true size.** ADR-0077 §8 names two accepted gaps,
 of which the first is "a conversation the user never observes". ADR-0212 §3 closed
@@ -844,8 +886,11 @@ unobserved page's first turn; that the **full** arm fires on a page of exactly
 `observation_batch_size` turns; that a candidate whose earliest unobserved turn
 carries an `occurred_at` **ahead of the run's clock** is still reached — by the full
 arm, deterministically, with the age arm never firing — which is the case §2's
-second arm exists for and the one a reader would otherwise assume unreachable; that
-a run selects the first **due** candidate and not merely the first candidate; that
+second arm exists for and the one a reader would otherwise assume unreachable; that a
+candidate held out of quiet by turns that **begin and never complete**, holding one
+forward-stamped unobserved turn, is due on no arm — the residual §2 accepts, pinned
+so that it is a recorded decision rather than a surprise; that a run selects the
+first **due** candidate and not merely the first candidate; that
 the page read to decide is the page the pass reads, so no turn is read twice; that
 the budget is checked at a pass boundary and not inside one; that a deleted
 conversation drops rather than halting; that a run's writes carry the run's seam and
@@ -1021,10 +1066,14 @@ and #1815 holds them.
 **A fact told in chat becomes a belief without anybody running a command**, which is
 #1737's title and the point of the pair. At the shipped figures a conversation that
 ends is a belief within the quiet window plus one interval — twenty-five minutes —
-and one that never ends is read within two hours of its oldest unobserved turn, or,
-where a caller's clock has stamped that turn ahead of the store's, within
-`observation_batch_size` quiet windows of the page filling: 200 minutes, on ordinals
-alone and on no clock a caller supplies (§2). **What none of the three arms recovers
+and one that never ends becomes **due** two hours after its oldest unobserved turn
+— or, where a caller's clock stamped that turn ahead of the store's and its turns
+are recorded, within `observation_batch_size` quiet windows, 200 minutes, on
+ordinals alone (§2). **Due is not read**: ADR-0083 §7 re-arms this job at completion
+plus its interval and runs it serially, so a candidate that becomes due just after a
+tick waits up to one more `observation_interval`, plus whatever a sibling job on the
+loop adds — which §7 already rules "never a correctness bug". Every figure in this
+paragraph is a due threshold and the read follows it by at most that. **What none of the three arms recovers
 is the prefix below a first pass's tail**, which stays exactly where ADR-0212 §4
 priced it; what arming the job does is make that first pass early enough that little
 accumulates below it.
