@@ -763,10 +763,14 @@ saying so.
 - **`core/protocols.py`** gains **exactly three operations on `ConversationStore`**,
   and no new Protocol. **All three are `async def`**, as every method of that Protocol
   already is: each reaches the store, and `CLAUDE.md` makes I/O-bound methods `async`.
-  The signatures below are written in that form rather than leaving it to be inferred:
+  The signatures below are written in that form rather than leaving it to be inferred —
+  instance methods on the Protocol, `self` first, the conversation id positional and
+  `str` as `turns`, `append` and `record_delivery` already spell it, everything else
+  keyword-only:
 
-  1. `async def turns_after(conversation_id, *, after_ordinal: int | None = None,
-     limit: int | None = None) -> list[ConversationTurn]` — the **forward** page: the *lowest*
+  1. `async def turns_after(self, conversation_id: str, *, after_ordinal: int | None
+     = None, limit: int | None = None) -> list[ConversationTurn]` — the **forward**
+     page: the *lowest*
      `limit` turns whose ordinal is **strictly above** `after_ordinal`, ordinal
      ascending. `after_ordinal` `None` reads from the conversation's first turn;
      `limit` `None` asks for the store's configured replay window, exactly as
@@ -778,7 +782,7 @@ saying so.
      names a conversation stamped deleted, and `ConversationStoreError` for a store
      fault. A short page means there is nothing above it — which is a fact about the
      read and not a discriminator any advance rule may use (§5).
-  2. `async def conversations_with_unobserved_turns(*, limit: int = 50) ->
+  2. `async def conversations_with_unobserved_turns(self, *, limit: int = 50) ->
      list[Conversation]` — every conversation that is not stamped deleted and holds
      at least one turn whose ordinal is strictly above its `observed_through`, or
      any turn at all where that is `None`; ordered `last_active_at` ascending with
@@ -794,8 +798,8 @@ saying so.
      `ConversationStore.recent` already names for offset paging ("may skip or repeat
      a row") and `ConversationStore.stamped_conversation_ids` already refuses for a
      walk whose rows leave under it.
-  3. `async def record_observed(conversation_id, *, through_ordinal: int) ->
-     Conversation | None` — stamps the watermark and returns the conversation as stamped, or
+  3. `async def record_observed(self, conversation_id: str, *, through_ordinal: int)
+     -> Conversation | None` — stamps the watermark and returns the conversation as stamped, or
      `None` where it stamped nothing. It stamps if and only if `through_ordinal` is
      **strictly above** the recorded watermark **and at or below** the highest
      ordinal the conversation holds; where either fails it performs nothing,
