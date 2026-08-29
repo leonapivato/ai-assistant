@@ -407,6 +407,35 @@ only subtract.
 > reach of §1 the meet **is** ADR-0204 §5's disjunction, member for member, so no
 > producer's arithmetic changes.
 
+> **Normative.** **A propagated reach carries a propagated setter, and no propagation
+> strengthens one.** Where the meet above writes a reach onto a record — the fold's
+> survivor, or a record a producer derives from records of this store — the setter
+> written is the **strongest, in the total order this section states below, among the
+> setters of the sides that in fact carry the reach being written**; a side whose reach
+> is wider supplies no setter, having supplied none of the narrowing. The instant
+> written is that side's `set_at` and not the instant of the fold, because the stamp
+> names when the placement was set and not when a duplicate was merged. So a `DERIVED`
+> narrowing survives a fold as `DERIVED`; an `OWNER_ACT` narrowing folded against a
+> `PROPOSED` one at the same reach survives as `OWNER_ACT`; and a narrowing that
+> **only** a `PROPOSED` placement supplied survives as `PROPOSED`, so the owner still
+> lifts in one act exactly what a model proposed.
+
+> **Normative.** **No propagation writes `DERIVED` over a reach no derivation
+> supplied**, and this is the clause that makes the fold determinate rather than left to
+> an implementation. Reading the survivor as `DERIVED` because ADR-0204 §5's inheritance
+> is the machinery performing the fold would turn a model's guess into the one stamp
+> §3's closing clause forbids the owner to lift, on nothing but the accident that the
+> belief arrived twice — the mirror of the laundering that clause exists to prevent, and
+> a route by which `unguard` would refuse forever on a placement no derivation ever
+> made. ADR-0204 had no need of this rule, its field having one value and one writer;
+> this one has three setters and needs it stated.
+
+> **Normative.** **ADR-0204 §2's own evaluation is not a propagation and is untouched by
+> the two clauses above.** A record whose *production* the disjunction is `True` of is
+> written reach `OWNER` with setter `DERIVED` on that ground alone, whatever the
+> placements of the records it was supplied: that is a fact about this record's warrant
+> and not an inheritance of another record's stamp.
+
 > **Normative.** **ADR-0204 §5's closing prohibition binds unchanged, and it is the
 > limit of the owner's act.** No user act, configuration, setting or later lane widens
 > in place a placement whose setter is `DERIVED`. A supersession is the only route by
@@ -1218,6 +1247,20 @@ ADR-0201 closed.
 > proposal both place `OWNER` records setter `OWNER_ACT`; a record the derivation and an
 > owner's act both place `OWNER` records setter `DERIVED`.
 
+> **Normative.** The lane pins **§3's setter propagation over the fold itself, arm by
+> arm, on the ingestion path in `memory/ingest.py`** — the arms above are same-act ties
+> and none of them reaches a merge of two stored placements. A default-placed record
+> folded with an incoming reach `OWNER` setter `PROPOSED` yields reach `OWNER` setter
+> `PROPOSED`, and a later `unguard` on the survivor **succeeds**; the same fold with an
+> incoming `DERIVED` yields `DERIVED`, and a later `unguard` on the survivor writes
+> nothing; a stored `OWNER_ACT` folded with an incoming `PROPOSED` at the same reach
+> yields `OWNER_ACT`; a stored `DERIVED` folded with an incoming `OWNER_ACT` at the same
+> reach yields `DERIVED`; and the survivor's `set_at` is the winning side's, not the
+> instant of the fold. The `unguard` outcome is pinned beside the stamp in the first two
+> arms because the stamp is only observable to the owner through what they may then do,
+> and an implementation that returned the right reach with the wrong setter would pass
+> every other arm in this section.
+
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
 > turn exactly as it does today, with nothing withheld and no deflection composed.
@@ -1252,8 +1295,10 @@ ADR-0201 closed.
 
 > **Normative.** **§7's two acts are a change of their own and they are gated**, which
 > is the one place this ordering is not a preference. They carry the two
-> `AssistantEngine` members, their conformance-suite arms, the canonical fake in
-> `ai_assistant.testing`, the `RoutableOperation` members and the routing that resolves
+> `AssistantEngine` members, their conformance-suite arms, **every implementation that
+> suite binds** — `Engine` in `orchestration/engine.py`, the canonical fake in
+> `ai_assistant.testing`, and `HubEngineClient`'s two forwarding methods in
+> `wire/client.py` — the `RoutableOperation` members and the routing that resolves
 > and dispatches them (`orchestration/routing.py`), and their own `PROTOCOL_VERSION`
 > bump with its log entry, on §9's first ground. **They land after the ADR that gives
 > `MemoryStore` its conditional write and after that ADR's implementation** (§7,
@@ -1263,6 +1308,22 @@ ADR-0201 closed.
 > alone: the field move is complete, correct and unaffected by the window, and holding
 > it behind an ADR nobody has written yet would leave every ADR-0204 narrowing carried
 > by a member two decisions now describe differently.
+
+> **Normative.** **The wire client's two forwarding methods are inside that change, and
+> naming them is not in tension with the CLI route being outside the write-time one.**
+> The test is ADR-0137 §2's and it is about what a split *breaks*, never about how thin
+> a layer is: `TestHubEngineClientContract` binds `HubEngineClient` to the shared
+> `AssistantEngineContract` today, so a tree carrying the new suite arms without the
+> client's methods fails that suite on an implementation the arms are written for, and
+> no split of it passes. That is the same reason §11's first clause gives for the field
+> move's width. `assistant learn --guarded` is the opposite case in every respect:
+> `FeedbackEvent.guarded` carries a default, no existing suite or implementation fails
+> in its absence, and the route only adds a way to set a member that already works — so
+> ADR-0137 §4 sequences it and §2's exception does not reach it. Stated as one rule:
+> **a consumer that breaks on the contract change rides with it; a consumer that merely
+> gains from it is briefed after it merges.** The hub's own dispatch needs nothing
+> beyond this — `wire/server.py` resolves an operation by name on the engine — and no
+> gateway route, no rendering and no further client are admitted by this clause.
 
 > **Normative.** The **second change** is §7's write-time act, entire and atomic —
 > independent of the acts' gate, because a producer writing a fresh record reads nothing
