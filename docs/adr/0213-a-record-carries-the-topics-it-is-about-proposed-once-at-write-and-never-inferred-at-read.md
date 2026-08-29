@@ -321,8 +321,16 @@ the operation §4 was written to exclude, and the accumulation is outside all th
 provider call that never returns", and its instruction is that admissibility "must be
 checked rather than assumed". Checked, here: the accumulation's per-chunk cost is the
 two terms above, each a constant of the configuration and of this ADR and neither
-growing with the run; and the only operation in a consolidation chunk that can fail to
-return is the model call, which `model_timeout_seconds` already bounds and which this
+growing with the run. **"A constant of the configuration" is not "a constant"**, and §4
+is where that distinction already lives: the first term scales with
+`scheduler_chunk_size`, exactly as every per-record cost in §4's own arithmetic does,
+which is why §4 makes the chunk size a field, calls the chunk "both the unit of loss and
+the unit of overrun", and chooses fifty "small on purpose". A deployment that raises it
+lengthens a chunk for the reason §4 states, and §4's duty cycle — "at most one budget
+plus one chunk per interval" — is a bound relative to a chunk's duration rather than a
+promise about it, before this decision and after. And the only operation in a
+consolidation chunk that can fail to return is the model call, which
+`model_timeout_seconds` already bounds and which this
 decision does not touch. The rounds that raised this were right about the *earlier*
 draft — with no bound anywhere the per-record factor was the length of a tuple nothing
 limited, and the product §4 asks for could not be computed at all. §5 restates the
