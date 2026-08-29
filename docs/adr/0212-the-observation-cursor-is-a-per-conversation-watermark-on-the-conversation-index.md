@@ -1,6 +1,6 @@
 # 212. The observation cursor is a per-conversation watermark on the conversation index, and a pass advances it once
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0218 (§6's disposition of the deletion race, in the single respect of whether it halts a run of many passes)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
@@ -40,6 +40,50 @@
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `orchestration/observation.py`, or from an issue — is of its text as it stood at
   this ADR's base, `457caad4`, and not of its text on any later day.
+- Partially superseded: 2026-08-29 by ADR-0218 — **the deletion race drops the
+  candidate and the run continues; it does not halt a run of many passes.**
+  [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
+  §9 rules the disposition and §11(e) names the scope; this note records the ruling
+  declared there.
+
+  **Replaced — §6's disposition of the deletion race, and only the run-level half of
+  it.** §6's prose calls the race a failed pass — "the pass's `record_observed` then
+  raises `UnknownConversationError` (§8), which is a refusal and not a commit"; "the
+  failed one" — and then inherits ADR-0111 §5 whole, whose first clause is "the run
+  stops immediately […] and returns without processing any later chunk". ADR-0218 §9
+  rules instead that such a raise is not a failure of that pass at all: the run drops
+  that candidate and performs its next one. A reader holding only this ADR, building
+  the multi-pass run ADR-0111 §4 provides for, would halt the whole run because a
+  user deleted a conversation while it ran — which is ADR-0070 §1's test met on its
+  first limb.
+
+  **Why it is recorded rather than read as a gap.** This ADR has no run of many
+  passes to halt: §3 fixes one conversation per pass, and the job that performs many
+  in a row is the one ADR-0218 arms. The disposition is nonetheless *decided* here,
+  because §6 inherits the clause that decides it and inherits it whole — so the
+  question is answered on this page, and answered the other way, which is precisely
+  what a record is for.
+
+  **Not replaced — everything else of §6, and the rest of this ADR.** The three
+  normative clauses about where the watermark stands after a raise before its
+  attempt, at its attempt, and in the ambiguous half; the ruling that a deletion-race
+  page is never re-read and that none is owed; and the reasoning that ADR-0074 §8's
+  tombstone is what makes that right, all stand as written and are what ADR-0218 §9
+  defers to by name for every *other* raise. §2's per-conversation position, §3's
+  candidacy, order, per-pass bound and named-id branch, §4's tail start, §5's advance
+  and its overlap rule, §7, §8's three operations and their bounds, and §10's records
+  are untouched and are relied on throughout ADR-0218. §9's naming of the trigger
+  lane is a deferral **discharged** by that ADR, which is a stacked addition under
+  ADR-0083 §15's rule rather than an amendment.
+
+  **This ADR's `Status` gains the leading `Partially superseded by` token**, which
+  under ADR-0070 §4 drops `Accepted`, and under ADR-0082 §2 no amendment qualifier is
+  written on the line. The `Partially supersedes` bullets above are this ADR's own
+  records against ADR-0077, ADR-0074 and ADR-0111 and are untouched: a target and a
+  superseder are different roles and the header carries both. Appended note per
+  ADR-0070 §1: no text below is rewritten and §6's sentences stand as written. This
+  note lands in the same change as ADR-0218 itself, which is the existence condition
+  ADR-0082 §7 states. Refs #1737, #1782.
 
 ## Context
 
