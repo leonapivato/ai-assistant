@@ -976,6 +976,47 @@ class NotificationStoreContract(ABC):
         assert again.kind is not NotificationDispositionKind.DROP
         assert again.notification_id != first.notification_id
 
+    async def test_a_drop_silences_a_record_from_its_own_instant_and_not_before(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0215 §1: a dropped record speaks for nothing **after it ceased**.
+
+        Before that instant it is actionable, and an actionable record speaks —
+        the first disjunct, not the second. So a store ruling at an instant
+        *earlier* than a drop stamp it already holds must still read the record as
+        a duplicate. Only a clock that ran backwards between the two writes
+        produces one, and nothing in ADR-0130 promises a monotone clock: this seam
+        takes its instant from an injected reading and §1's predicate is total
+        over the record, answering at **any** instant rather than at the ones a
+        well-behaved deployment happens to supply.
+
+        **It is a store-divergence case rather than a deployment one**, which is
+        why it belongs here. A backend narrowing its lookup by ``dropped_at IS
+        NULL`` in storage answers "not a duplicate" where a backend asking the
+        record answers "duplicate" — the two conforming stores disagreeing about
+        the instant a key stops speaking, which is the drift ADR-0215 §7 puts the
+        predicate on the type to prevent.
+        """
+        clock = MutableClock()
+        store = factory(now=clock)
+        expiry = NOW + timedelta(days=1)
+        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        assert first.notification_id is not None
+        clock.advance(timedelta(hours=1))
+        await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
+        dropped = await store.reconsider(first.notification_id, policy=policy)
+        assert dropped is not None
+        assert dropped.kind is NotificationDispositionKind.DROP
+
+        clock.at = NOW + timedelta(minutes=30)  # before the drop this store holds
+        await store.set_preferences(reaching(CLASS, NotificationReach.HOLD))
+        again = await store.admit(
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+        )
+
+        assert again.kind is NotificationDispositionKind.DROP
+        assert again.reason is NotificationCondition.DUPLICATE
+
     async def test_a_record_that_has_stopped_speaking_never_speaks_again(
         self, factory: StoreFactory, policy: NotificationPolicy
     ) -> None:

@@ -155,19 +155,24 @@ _COLUMNS = (
     "admitted_at, retention, dismissed_at, dropped_at"
 )
 
-#: The rows no reconsideration has dropped — the narrowing the *suppressing*
-#: population admits (ADR-0215 §§1-2). A dropped record speaks for its key at no
-#: instant after it ceased, the ``DROP`` taking precedence over any dismissal
-#: beside it, so excluding these in SQL excludes nothing the lookup would have
-#: kept. Nothing narrower is available: the dismissal half of ADR-0130 §8's
-#: narrowing is exactly what ADR-0215 removes, and the expiry that bounds a
-#: dismissed record's speech lives inside the candidate's JSON.
-_UNDROPPED = "dropped_at IS NULL"
+#: The rows a ``DROP`` has not yet silenced, as of the instant bound beside the
+#: key — the widest narrowing the *suppressing* population admits (ADR-0215
+#: §§1-2). A dropped record speaks for its key at no instant **after it ceased**,
+#: the ``DROP`` taking precedence over any dismissal beside it; before that
+#: instant it is still actionable and still speaks, so the comparison is against
+#: the ruling instant rather than against ``NULL`` alone. A store whose clock
+#: never runs backwards finds the two spellings identical — and one whose clock
+#: does would otherwise admit a candidate the canonical fake drops, which asks
+#: every retained record the predicate and has no SQL to skip it. Nothing
+#: narrower is available: the dismissal half of ADR-0130 §8's narrowing is
+#: exactly what ADR-0215 removes, and the expiry that bounds a dismissed
+#: record's speech lives inside the candidate's JSON.
+_UNSILENCED = "(dropped_at IS NULL OR dropped_at > ?)"
 
 #: The rows a state narrowing calls "not yet ceased by an act". Expiry is
 #: deliberately absent: it lives inside the candidate and is judged by
 #: :meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at`.
-_UNCEASED = f"dismissed_at IS NULL AND {_UNDROPPED}"
+_UNCEASED = "dismissed_at IS NULL AND dropped_at IS NULL"
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -998,13 +1003,22 @@ class SqliteNotificationStore:
         was before — #1801 records that against the ratified store, where it
         already stands, and ADR-0215 §7 neither requires nor forbids the
         denormalised expiry column that would narrow the decode.
+
+        **The one narrowing kept is bound to the ruling instant rather than
+        spelled as a bare ``IS NULL``.** A ``DROP`` silences a record from the
+        instant it ceased and not before, so a drop stamp *later* than ``now`` —
+        which only a clock that ran backwards between the two writes produces —
+        leaves the record actionable and still speaking. Excluding it in SQL would
+        let this store admit a candidate the canonical fake drops, and two
+        conforming stores disagreeing about the instant a key stops speaking is
+        what keeping the predicate on the type is for.
         """
         rows = self._fetch(
             conn,
             "look up a candidate key",
             f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module constants, no input
-            f"WHERE candidate_key = ? AND {_UNDROPPED}",
-            (key,),
+            f"WHERE candidate_key = ? AND {_UNSILENCED}",
+            (key, _to_micros(now)),
         )
         return any(record.speaks_for_its_key_at(now) for record in map(_notification_from, rows))
 
