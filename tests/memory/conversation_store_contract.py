@@ -212,6 +212,23 @@ async def _walk_turns(store: ConversationStore, conversation_id: str, *, page: i
         cursor = batch[0].ordinal
 
 
+async def _walk_turns_after(
+    store: ConversationStore, conversation_id: str, *, page: int
+) -> list[int]:
+    """Walk every turn forwards through ``after_ordinal``, oldest first."""
+    seen: list[int] = []
+    cursor: int | None = None
+    while True:
+        batch = await store.turns_after(conversation_id, limit=page, after_ordinal=cursor)
+        if not batch:
+            return seen
+        assert [turn.ordinal for turn in batch] == sorted(turn.ordinal for turn in batch), (
+            "a forward page of turns must be ordinal ascending"
+        )
+        seen.extend(turn.ordinal for turn in batch)
+        cursor = batch[-1].ordinal
+
+
 async def _walk_episodes(store: ConversationStore, conversation_id: str, *, page: int) -> list[str]:
     """Walk every episode id forwards through ``after_id``, in ordinal order."""
     seen: list[str] = []
@@ -600,6 +617,69 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
+class _RecordObservedOp(_PairedOp):
+    """``record_observed`` — ADR-0212 §8's advance, its own lock site.
+
+    The two subjects are given a turn each in :meth:`prepare`, because the advance
+    refuses an ordinal above the conversation's highest and a conversation with no
+    turn has nothing to stamp — the call would then enter the resource and leave it
+    without writing, which tests the lock site but not the write behind it.
+    """
+
+    name = "record_observed"
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Start the two conversations and give each a turn to be observed through."""
+        await super().prepare(store)
+        await store.append(self.left, occurred_at=_NOW)
+        await store.append(self.right, occurred_at=_NOW)
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Advance the left conversation's watermark — the call that is cancelled."""
+        return store.record_observed(self.left, through_ordinal=FIRST_TURN_ORDINAL)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Advance the right one's concurrently."""
+        return store.record_observed(self.right, through_ordinal=FIRST_TURN_ORDINAL)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The concurrent advance landed; the cancelled one is all-or-nothing."""
+        right = await store.get(self.right)
+        assert right is not None
+        assert right.observed_through == FIRST_TURN_ORDINAL
+        left = await store.get(self.left)
+        assert left is not None
+        assert left.observed_through in (None, FIRST_TURN_ORDINAL)
+
+
+class _TurnsAfterOp(_ReadOp):
+    """``turns_after`` — the forward page, its own lock site (ADR-0212 §8)."""
+
+    name = "turns_after"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Page the left conversation forwards — the call that is cancelled."""
+        return store.turns_after(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Page the right one forwards concurrently."""
+        return store.turns_after(self.right)
+
+
+class _UnobservedOp(_ReadOp):
+    """``conversations_with_unobserved_turns`` — the candidate listing's lock site."""
+
+    name = "conversations_with_unobserved_turns"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """List the candidates — the call that is cancelled."""
+        return store.conversations_with_unobserved_turns()
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """List them again concurrently."""
+        return store.conversations_with_unobserved_turns()
+
+
 #: Every locked ``ConversationStore`` operation ADR-0060's case is run against:
 #: each is a distinct ``async with self._lock`` site. The mutations came first
 #: (#370's granularity, discharged here by #487); the eight reads are the same
@@ -611,8 +691,11 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _AppendOp,
     _StampDeletedOp,
     _DropIfEligibleOp,
+    _RecordObservedOp,
     _GetOp,
     _TurnsOp,
+    _TurnsAfterOp,
+    _UnobservedOp,
     _EpisodesToPurgeOp,
     _StampedConversationIdsOp,
     _RecentOp,
@@ -750,6 +833,8 @@ class ConversationStoreContract:
             store.mark_active("nobody"),
             store.append("nobody", occurred_at=_NOW),
             store.turns("nobody"),
+            store.turns_after("nobody"),
+            store.record_observed("nobody", through_ordinal=FIRST_TURN_ORDINAL),
             store.episodes_to_purge("nobody"),
         ):
             with pytest.raises(ConversationStoreError):
@@ -1223,6 +1308,14 @@ class ConversationStoreContract:
             await store.turns(conversation_id, limit=bad)
         with pytest.raises(ValueError, match="must be an int"):
             await store.episodes_to_purge(conversation_id, limit=bad)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.turns_after(conversation_id, limit=bad)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.turns_after(conversation_id, after_ordinal=bad)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.conversations_with_unobserved_turns(limit=bad)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.record_observed(conversation_id, through_ordinal=bad)
 
     @pytest.mark.parametrize("bad", [1.5, "3", True], ids=["float", "str", "bool"])
     async def test_a_paging_argument_that_is_not_an_integer_is_refused(
@@ -1247,34 +1340,56 @@ class ConversationStoreContract:
             await store.turns(conversation_id, limit=limit)
         with pytest.raises(ValueError, match="must be an int"):
             await store.episodes_to_purge(conversation_id, limit=limit)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.turns_after(conversation_id, limit=limit)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.turns_after(conversation_id, after_ordinal=limit)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.conversations_with_unobserved_turns(limit=limit)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.record_observed(conversation_id, through_ordinal=limit)
 
-    async def test_only_the_two_reads_that_document_it_accept_a_none_limit(
+    async def test_only_the_three_reads_that_document_it_accept_a_none_limit(
         self, store: ConversationStore
     ) -> None:
         """``None`` is a spelling, not a hole — and only where the contract gives it one.
 
-        On :meth:`turns` and :meth:`episodes_to_purge` it asks for the store's
-        configured default; :meth:`recent` has a named default of 50 and no
-        ``None`` spelling, so passing one there is the same malformed argument as
-        any other non-integer.
+        On :meth:`turns`, :meth:`turns_after` and :meth:`episodes_to_purge` it asks
+        for the store's configured default; :meth:`recent` and
+        :meth:`conversations_with_unobserved_turns` each have a named default of 50
+        and no ``None`` spelling, so passing one there is the same malformed argument
+        as any other non-integer.
         """
         conversation_id, turns = await _seed(store, 2)
 
         assert await store.turns(conversation_id, limit=None) == turns
+        assert await store.turns_after(conversation_id, limit=None) == turns
         assert await store.episodes_to_purge(conversation_id, limit=None) == [
             turn.episode_id for turn in turns
         ]
         with pytest.raises(ValueError, match="must be an int"):
             await store.recent(limit=cast("int", None))
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.conversations_with_unobserved_turns(limit=cast("int", None))
 
     async def test_an_ordinal_cursor_below_the_first_turn_is_refused(
         self, store: ConversationStore
     ) -> None:
-        """``before_ordinal`` names a position, and 0 names none."""
+        """An ordinal argument names a position, and 0 names none.
+
+        The same floor on all three: :meth:`turns`' ceiling, :meth:`turns_after`'s
+        floor, and the position :meth:`record_observed` records. ``None`` is the only
+        spelling of "no pass has recorded one" (ADR-0212 §4), so 0 is not a way to
+        write one either.
+        """
         conversation_id, _ = await _seed(store, 1)
 
         with pytest.raises(ValueError, match="must be an int"):
             await store.turns(conversation_id, before_ordinal=0)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.turns_after(conversation_id, after_ordinal=0)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.record_observed(conversation_id, through_ordinal=0)
 
     # --- the purge walk ------------------------------------------------------
 
@@ -1326,6 +1441,276 @@ class ConversationStoreContract:
             await store.episodes_to_purge(conversation_id, after_id=other_turns[0].episode_id)
         assert other_id != conversation_id
 
+    # --- the observation watermark (ADR-0212) --------------------------------
+
+    async def test_a_fresh_conversation_carries_no_watermark(
+        self, store: ConversationStore
+    ) -> None:
+        """§4: ``None`` is the only spelling of "no pass has recorded one".
+
+        No store, migration or ``start`` initialises a watermark to a sentinel, to
+        zero, or to ``FIRST_TURN_ORDINAL`` — an absent one is *read*, never written,
+        and it is what makes a first pass read the tail rather than walk forward.
+        """
+        conversation = await store.start()
+
+        assert conversation.observed_through is None
+        read = await store.get(conversation.id)
+        assert read is not None
+        assert read.observed_through is None
+
+    async def test_an_advance_is_carried_by_every_read_that_presents_the_conversation(
+        self, store: ConversationStore
+    ) -> None:
+        """§7: the member is on ``Conversation``, so every read returning one carries it.
+
+        ``get``, ``recent`` and the document ``export`` builds, plus the record
+        ``record_observed`` itself hands back — asserted together, because a store
+        that stamped the row and answered from a stale copy on one of them would
+        leave the walk reading a position that is not the one recorded.
+        """
+        conversation_id, _ = await _seed(store, 3)
+
+        stamped = await store.record_observed(conversation_id, through_ordinal=2)
+
+        assert stamped is not None
+        assert stamped.observed_through == 2
+        read = await store.get(conversation_id)
+        assert read is not None
+        assert read.observed_through == 2
+        assert [one.observed_through for one in await store.recent()] == [2]
+        assert [one.observed_through for one in (await store.export()).conversations] == [2]
+
+    async def test_the_watermark_never_moves_backwards(self, store: ConversationStore) -> None:
+        """§5: a request at or below the recorded position performs nothing.
+
+        ``None`` and no raise, which is ``record_delivery``'s shape and its reason —
+        an attempt that loses is an attempt whose position already stands, which is
+        the ordinary outcome of two overlapping passes rather than an error.
+        """
+        conversation_id, _ = await _seed(store, 3)
+        assert await store.record_observed(conversation_id, through_ordinal=2) is not None
+
+        assert await store.record_observed(conversation_id, through_ordinal=1) is None
+        assert await store.record_observed(conversation_id, through_ordinal=2) is None
+
+        read = await store.get(conversation_id)
+        assert read is not None
+        assert read.observed_through == 2
+        assert await store.record_observed(conversation_id, through_ordinal=3) is not None
+
+    async def test_an_advance_beyond_the_highest_turn_stamps_nothing(
+        self, store: ConversationStore
+    ) -> None:
+        """§8's second condition: the store holds ADR-0111 §3's "never lead" direction.
+
+        Unreachable through the observation stage, which only ever names an ordinal
+        it read from this store — and a property of the seam for exactly that reason,
+        since a consumer that is not the engine may hold this contract.
+        """
+        conversation_id, _ = await _seed(store, 2)
+
+        assert await store.record_observed(conversation_id, through_ordinal=3) is None
+
+        read = await store.get(conversation_id)
+        assert read is not None
+        assert read.observed_through is None
+        assert await store.record_observed(conversation_id, through_ordinal=2) is not None
+
+    async def test_a_conversation_with_no_turns_cannot_be_stamped(
+        self, store: ConversationStore
+    ) -> None:
+        """The same condition where there is no highest ordinal at all."""
+        conversation = await store.start()
+
+        assert await store.record_observed(conversation.id, through_ordinal=1) is None
+
+        read = await store.get(conversation.id)
+        assert read is not None
+        assert read.observed_through is None
+
+    async def test_two_concurrent_advances_leave_exactly_the_higher_recorded(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: reading the two conditions and writing the row are one indivisible step.
+
+        The whole of what makes two overlapping observation passes safe, and it is
+        asserted on the *value* rather than on which call won: "whichever order the
+        calls arrive in, the **higher** of the two positions stands and the lower
+        performs nothing" (§5). A store that read the recorded value outside its
+        exclusion would let the lower advance land second and lose coverage
+        silently.
+        """
+        conversation_id, _ = await _seed(store, 4)
+        wanted = (2, 4, 3)
+
+        results = await asyncio.gather(
+            *(store.record_observed(conversation_id, through_ordinal=at) for at in wanted)
+        )
+
+        read = await store.get(conversation_id)
+        assert read is not None
+        assert read.observed_through == 4, (
+            "the higher position must stand however the concurrent advances interleaved"
+        )
+        for at, result in zip(wanted, results, strict=True):
+            if result is not None:
+                assert result.observed_through == at, (
+                    "a call that reports having stamped returns the conversation as *it* "
+                    "stamped it, never as a concurrent call left it"
+                )
+
+    async def test_turns_after_returns_the_lowest_page_and_not_the_tail(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§8: the *forward* page — the lowest ``limit`` turns above the floor.
+
+        Paired against :meth:`turns` on one conversation, because a store answering
+        both from the tail passes every other case in this file: the two reads have
+        to disagree on a conversation longer than one page or neither is doing its
+        job.
+        """
+        store = _build(factory, tail_limit=2)
+        conversation_id, _ = await _seed(store, 5)
+
+        assert [turn.ordinal for turn in await store.turns_after(conversation_id, limit=2)] == [
+            1,
+            2,
+        ]
+        assert [turn.ordinal for turn in await store.turns(conversation_id, limit=2)] == [4, 5]
+        assert [
+            turn.ordinal
+            for turn in await store.turns_after(conversation_id, after_ordinal=2, limit=2)
+        ] == [3, 4]
+
+    async def test_turns_after_returns_a_short_page_at_the_end_of_a_conversation(
+        self, store: ConversationStore
+    ) -> None:
+        """A short page means there is nothing above it — a fact about the read.
+
+        Never a discriminator an advance rule may use (§5), which is why the page's
+        *ordinals* are what the stage computes a position from.
+        """
+        conversation_id, _ = await _seed(store, 3)
+
+        assert [
+            turn.ordinal
+            for turn in await store.turns_after(conversation_id, after_ordinal=2, limit=5)
+        ] == [3]
+        assert await store.turns_after(conversation_id, after_ordinal=3, limit=5) == []
+
+    async def test_turns_after_walks_the_whole_conversation_to_an_empty_page(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """The forward traversal is complete, terminates, and visits each turn once."""
+        store = _build(factory, tail_limit=2)
+        conversation_id, _ = await _seed(store, 7)
+
+        assert await _walk_turns_after(store, conversation_id, page=2) == list(range(1, 8))
+
+    async def test_turns_after_uses_the_configured_replay_window_by_default(
+        self, store: ConversationStore, tail_default: int
+    ) -> None:
+        """``None`` asks for the store's configured window, exactly as ``turns`` does."""
+        conversation_id, _ = await _seed(store, tail_default + 3)
+
+        page = await store.turns_after(conversation_id)
+
+        assert [turn.ordinal for turn in page] == list(range(1, tail_default + 1))
+
+    async def test_a_zero_forward_page_is_an_empty_page(self, store: ConversationStore) -> None:
+        """Asking for nothing is a question with an answer, not an unbounded read."""
+        conversation_id, _ = await _seed(store, 2)
+
+        assert await store.turns_after(conversation_id, limit=0) == []
+        assert await store.conversations_with_unobserved_turns(limit=0) == []
+
+    async def test_a_conversation_with_turns_and_no_watermark_is_a_candidate(
+        self, store: ConversationStore
+    ) -> None:
+        """§3: candidacy is "any turn at all" where no watermark is recorded."""
+        conversation_id, _ = await _seed(store, 1)
+
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            conversation_id
+        ]
+
+    async def test_a_conversation_with_no_turns_is_never_a_candidate(
+        self, store: ConversationStore
+    ) -> None:
+        """There is nothing above any watermark such a conversation could hold."""
+        await store.start()
+
+        assert await store.conversations_with_unobserved_turns() == []
+
+    async def test_a_candidate_stays_until_its_watermark_reaches_its_highest_turn(
+        self, store: ConversationStore
+    ) -> None:
+        """§3: a conversation longer than one page **stays** in the set after a pass.
+
+        The property the whole listing exists for — a conversation leaves once its
+        watermark reaches its highest turn and not before, which takes as many passes
+        as it has pages of unobserved turns.
+        """
+        conversation_id, _ = await _seed(store, 3)
+
+        await store.record_observed(conversation_id, through_ordinal=1)
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            conversation_id
+        ]
+        await store.record_observed(conversation_id, through_ordinal=3)
+        assert await store.conversations_with_unobserved_turns() == []
+
+        await store.append(conversation_id, occurred_at=_NOW)
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            conversation_id
+        ], "a turn recorded above the watermark makes it a candidate again"
+
+    async def test_the_candidate_listing_is_least_recently_active_first(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§3, §10(b): the one conversation read this contract orders **ascending**.
+
+        Descending is what ``recent`` answers with, and it cannot be the candidate
+        order: the busiest conversation would be selected on every pass and an idle
+        one never reached. The tie-break stays ``id`` ascending, so the order is
+        total for two conversations sharing an instant — asserted here against
+        ``recent``'s answer over the same rows, since a store that re-sorted one
+        listing out of the other is the failure this pins.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock, new_id=ScriptedIds(["b", "a", "c"]))
+        first = await store.start()  # "b"
+        second = await store.start()  # "a", same instant as "b"
+        clock.advance(_MINUTE)
+        third = await store.start()  # "c", later
+        for one in (first, second, third):
+            await store.append(one.id, occurred_at=_NOW)
+
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            "a",
+            "b",
+            "c",
+        ]
+        assert [one.id for one in await store.recent()] == ["c", "a", "b"]
+
+    async def test_the_candidate_listing_is_bounded_by_default(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§8: bounded at 50 — ``recent``'s figure and ADR-0073 §2's argument.
+
+        Not ``scheduler_chunk_size`` under another name: the two defaults being equal
+        is a coincidence of two independently argued figures, and lowering the chunk
+        size does not narrow this listing.
+        """
+        store = _build(factory)
+        for _ in range(51):
+            conversation = await store.start()
+            await store.append(conversation.id, occurred_at=_NOW)
+
+        assert len(await store.conversations_with_unobserved_turns()) == 50
+        assert len(await store.conversations_with_unobserved_turns(limit=51)) == 51
+
     # --- the tombstone -------------------------------------------------------
 
     async def test_a_stamped_conversation_is_hidden_from_every_presenting_read(
@@ -1344,8 +1729,13 @@ class ConversationStoreContract:
         assert (await store.export()).turns == ()
         assert await store.turn_of_episode(turns[0].episode_id) is None
         assert await store.turn_of_binding(binding) is None
+        assert await store.conversations_with_unobserved_turns() == []
         with pytest.raises(ConversationStoreError):
             await store.turns(conversation_id)
+        with pytest.raises(ConversationStoreError):
+            await store.turns_after(conversation_id)
+        with pytest.raises(ConversationStoreError):
+            await store.record_observed(conversation_id, through_ordinal=FIRST_TURN_ORDINAL)
 
         assert await store.episodes_to_purge(conversation_id) == [
             *(turn.episode_id for turn in turns),
@@ -1664,6 +2054,8 @@ class ConversationStoreContract:
             store.mark_active("nobody"),
             store.append("nobody", occurred_at=_NOW),
             store.turns("nobody"),
+            store.turns_after("nobody"),
+            store.record_observed("nobody", through_ordinal=FIRST_TURN_ORDINAL),
             store.episodes_to_purge("nobody"),
         ):
             with pytest.raises(UnknownConversationError):
@@ -1877,7 +2269,7 @@ class ConversationStoreContract:
             (first.id, 1),
             (first.id, 2),
         ]
-        assert exported.schema_version == 1
+        assert exported.schema_version == 2
 
     async def test_export_omits_a_stamped_conversation_and_its_turns(
         self, factory: ConversationStoreFactory

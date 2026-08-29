@@ -5,8 +5,9 @@ no writer — episodes in, proposals out (ADR-0077 §1) — so **selection** and
 **write path** belong here, in `orchestration`, the one layer that legitimately
 holds both durable stores by injection (ADR-0074 §9). This stage:
 
-* **selects** a bounded batch — a named conversation's most recent turns, or the
-  same window over the most recently active conversation (§8);
+* **selects** a bounded batch — the turns above a conversation's durable
+  observation watermark, ordinal ascending, from the conversation the caller named
+  or the first candidate by least recent activity (ADR-0212 §3);
 * **hands** the resolved :class:`~ai_assistant.core.types.EpisodicMemory` values
   to the injected :class:`~ai_assistant.core.protocols.Observer`;
 * **marks** each returned proposal with ADR-0204 §5's derivation value — the
@@ -22,10 +23,24 @@ holds both durable stores by injection (ADR-0074 §9). This stage:
 
 There is no polling, no background task and no per-turn trigger: nothing waits on
 an observation while a turn does, and leg 5's scheduler becomes a second caller of
-the same operation with no contract change (§8). There is no durable cursor
-either — a repeat folds into a ``REINFORCE`` and the producer's confidence is
-deterministic on its inputs, so a fold that takes the maximum finds nothing higher
-(§8).
+the same operation with no contract change (§8).
+
+**There is a durable cursor, and it is a position rather than a certificate**
+(ADR-0212 §1). The ``ConversationStore`` holds one watermark per conversation, this
+stage is its only consumer, and a pass reads the turns above it and then makes
+exactly one attempt to advance it — to the highest ordinal in the page whose episode
+resolved, or to the page's highest where none did (§5), never computed from the
+page's length. What the cursor buys is that repetition becomes **rare**; what makes
+repetition *safe* is still ADR-0077 §8's fold, unchanged and not weakened here — a
+repeat folds into a ``REINFORCE`` and the producer's confidence is deterministic on
+its inputs, so a fold that takes the maximum finds nothing higher. No clause below
+relies on the watermark for correctness of a re-observation.
+
+**A conversation with no watermark starts at its tail** (ADR-0212 §4): the pass reads
+ADR-0077 §8's window unchanged rather than walking forward from the first turn, which
+is what keeps it from re-paying for turns a hand-run ``observe`` already read and from
+grinding through an expired prefix. The turns below that first window are passed over
+permanently, and the watermark asserts nothing about them.
 
 Nothing concrete is imported: every collaborator arrives by injection and is seen
 only through its Protocol (CLAUDE.md golden rule 1).
@@ -35,13 +50,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import UnresolvedEvidenceError
+from ai_assistant.core.errors import UnknownConversationError, UnresolvedEvidenceError
 from ai_assistant.core.types import (
     EpisodicMemory,
     Evidence,
     MemoryKind,
     ObservationReport,
     ObservedProposal,
+    describe_untrusted,
 )
 from ai_assistant.orchestration.engine import learn_decision
 
@@ -54,6 +70,8 @@ if TYPE_CHECKING:
         Observer,
     )
     from ai_assistant.core.types import (
+        Conversation,
+        ConversationTurn,
         LearnDecision,
         MemoryIngestResult,
         MemoryUpdateProposal,
@@ -289,9 +307,9 @@ class ObservationStage:
             observer: The producer. It is handed episodes and returns proposals; it
                 holds no store, no writer and no policy, so it can neither widen
                 its own batch nor rule on its own output (ADR-0077 §1, §4).
-            conversations: The durable conversation index, read for the selection —
-                the most recently active conversation, and a conversation's most
-                recent turns.
+            conversations: The durable conversation index, read for the selection
+                and written once per pass: the candidate listing, the page above a
+                conversation's watermark, and the advance (ADR-0212 §§3, 5, 8).
             memory: Long-term memory, read to resolve each turn's episode. The same
                 store the write stage's writer persists to.
             writes: The orchestration **write stage** — the memory write path
@@ -304,10 +322,15 @@ class ObservationStage:
                 than a ``MemoryWriter`` of this stage's own because a producer's
                 stage holding the writer directly would silently lose the queue —
                 the second producer honouring ADR-0078 §3's one obligation.
-            batch_size: How many of a conversation's most recent turns one pass
-                reads. A **maximum, not a quota**: a window containing a turn whose
-                episode no longer resolves yields a shorter batch rather than
-                reaching further back (ADR-0077 §8).
+            batch_size: How many of a conversation's turns one pass reads — the
+                lowest that many above its watermark, or its most recent that many
+                where it has none (ADR-0212 §§3, 4). A **maximum, not a quota**: a
+                page containing a turn whose episode no longer resolves yields a
+                shorter batch rather than reaching further forward (ADR-0077 §8,
+                unchanged in value and in kind). It is the **only** count that bounds
+                the page: `scheduler_chunk_size` does not reach this job, and an
+                implementation handing it to ``turns_after`` or to
+                ``conversations_with_unobserved_turns`` is not implementing ADR-0212.
             route: The ``"provider:model"`` spec the observer reads through,
                 reported on every pass that actually called it (ADR-0013 §6).
 
@@ -329,23 +352,63 @@ class ObservationStage:
         The whole operation, in the order ADR-0077 §8 names: select, observe,
         ingest, report.
 
-        **Selection is conversation-scoped, and that is the ratified rule rather
-        than an implementation detail.** An id observes that conversation's most
-        recent ``batch_size`` turns; no id observes the same window over the **most
-        recently active** conversation. "The newest N episodes in the store" was
-        rejected explicitly: it would re-read the same N on every run, and the
-        N+1th could never be requested at all — it would expire unobserved with no
-        way for the user to reach it. With a conversation as the unit, everything
-        is reachable, because ``assistant conversations`` lists them and the user
-        can name any one.
+        **Selection is conversation-scoped and cursor-driven, and both halves are
+        ratified rules rather than implementation details.** An id names the
+        conversation; no id takes the **first candidate** from
+        ``conversations_with_unobserved_turns`` — every conversation holding a turn
+        above its watermark, least recently active first (ADR-0212 §3). "The newest N
+        episodes in the store" was rejected explicitly, and so was "the most recently
+        active conversation": the first re-reads the same N on every run and can
+        never be asked for the N+1th, and the second would re-select whichever
+        conversation the user happens to be using and never reach an idle one.
+
+        **One pass observes one conversation, and reads the lowest page above its
+        watermark** — at most ``batch_size`` turns, ordinal ascending, never the
+        tail (§3) — except where the conversation has **no** watermark, when it reads
+        ADR-0077 §8's tail window unchanged (§4). A run that wants more than one
+        conversation performs more than one pass; no pass mixes two conversations'
+        turns into one batch, because a batch is a prompt and two interleaved
+        transcripts are a different thing to observe.
 
         **A turn whose episode does not resolve is skipped, and the batch is not
         backfilled** (ADR-0074 §5's rule, applied unchanged). Backfilling would make
-        the window's *span* depend on how many gaps it contains, so two runs over
-        one conversation would read different stretches of it.
+        the page's *span* depend on how many gaps it contains, so two runs over one
+        conversation would read different stretches of it.
 
         **An empty batch reaches no observer.** There is nothing to observe, no
         provider is called, and the report names no route (§9.7).
+
+        **The advance is one attempt, at the end, and never computed from the page's
+        length** (ADR-0212 §5). A pass that read a **non-empty** page makes exactly
+        one ``record_observed`` call, after every proposal it produced has been ruled
+        — even where the page resolved to no episode, even where the observer was not
+        called, and even where nothing was proposed. It names the highest ordinal in
+        the page whose episode **resolved**, or, where none did, the page's highest
+        ordinal. That second branch is what stops a conversation whose unobserved
+        turns have all expired re-reading one dead page for ever; it passes over
+        nothing that was ever readable, since such a page reached no observer at all.
+        A pass that read **no** turns makes **no** attempt and writes nothing: there
+        is no ordinal for it to name.
+
+        **The ordering is ADR-0111 §3's, not a choice.** The effects land in the
+        memory store and the deferral queue, the watermark on the conversation index,
+        and where they live in different stores the effects are made durable first —
+        "a cursor that lags its effects costs repeated work; a cursor that leads them
+        costs coverage, permanently and silently". So a pass that raises **before**
+        its attempt moves the watermark by nothing and the whole page is re-read by
+        the next pass that reaches that conversation, which is safe rather than
+        merely tolerated: the repeat folds to a ``REINFORCE``. A pass that raises
+        **at** its attempt leaves the stamp either committed or not, and both are
+        safe — cancellation makes the ambiguity unavoidable rather than sloppy, and
+        no compensating write, confirming re-read or in-pass retry is added, since
+        each would be a second write to the watermark and none of them could tell the
+        two states apart anyway (§6).
+
+        **Two passes over one conversation may overlap, and nothing here serialises
+        them.** Each computes its position from its own page and its own resolution
+        of that page's episodes, and the two may legitimately differ. Overlap safety
+        rests on ``record_observed``'s monotonicity and on nothing else: the higher
+        position stands and the lower performs nothing (§5).
 
         **Each proposal is ingested in order and independently**, exactly as the
         feedback leg already does. There is no transaction — ``MemoryStore`` offers
@@ -367,10 +430,14 @@ class ObservationStage:
         bury a producer bug under the race that happened to accompany it.
 
         Args:
-            conversation_id: The conversation to observe, or ``None`` for the most
-                recently active one. Untrusted input from an adapter, relayed to the
-                store, which refuses an id it does not know rather than inventing a
-                conversation for it.
+            conversation_id: The conversation to observe, or ``None`` for the first
+                candidate. Untrusted input from an adapter, relayed to the store,
+                which refuses an id it does not know rather than inventing a
+                conversation for it. A named conversation with nothing above its
+                watermark is a pass that reads no turns and writes nothing — the
+                honest answer to "what has already been looked at", and the reason a
+                repeated ``assistant observe <id>`` does nothing the second time
+                (ADR-0212 §3; a deliberate re-observation is issue #1789).
 
         Returns:
             What was proposed, what became of each proposal, what was thrown away,
@@ -379,7 +446,8 @@ class ObservationStage:
         Raises:
             UnknownConversationError: If ``conversation_id`` names nothing, or names
                 a conversation the user deleted.
-            ConversationStoreError: If the conversation index cannot be read.
+            ConversationStoreError: If the conversation index cannot be read, or the
+                watermark cannot be written.
             MemoryStoreError: If an episode cannot be read, or the write path
                 failed. :class:`~ai_assistant.core.errors.UnresolvedEvidenceError`
                 — a subclass — reaches a caller only for a citation the batch never
@@ -401,9 +469,21 @@ class ObservationStage:
         target = await self._target(conversation_id)
         if target is None:
             return ObservationReport()
-        episodes = await self._select(target)
+        page = await self._page(target)
+        if not page:
+            # No ordinal for this pass to name, so no attempt is made and nothing is
+            # written anywhere (ADR-0212 §5). `None` is not a position and
+            # `record_observed` refuses anything below the first ordinal before any
+            # I/O, so there is nothing to call it with.
+            return ObservationReport(conversation_id=target.id)
+        episodes, through = await self._resolve(page)
         if not episodes:
-            return ObservationReport(conversation_id=target)
+            # The page reached no observer, so passing over it passes over nothing
+            # that was ever readable — and advancing in one pass rather than one turn
+            # at a time is what stops a conversation of expired turns becoming a
+            # permanent candidate re-reading one dead page (ADR-0212 §5).
+            await self._conversations.record_observed(target.id, through_ordinal=through)
+            return ObservationReport(conversation_id=target.id)
         outcome = await self._observer.observe(episodes)
         # The batch *is* the evidence: every citation is drawn from it by contract,
         # so a proposal's warrant renders out of what was already read, with no
@@ -433,33 +513,82 @@ class ObservationStage:
             if entry.decision is None:
                 dropped += 1
             proposals.append(entry)
+        # The pass's one and only write to the watermark, and it is the **last** act
+        # of the pass: every proposal above has been ruled by the write path, so the
+        # position records work that was done (ADR-0111 §3, ADR-0212 §5). The return
+        # value is deliberately unread — `None` means an overlapping pass already
+        # stands at or above this position, which is that rule working rather than a
+        # condition to handle.
+        await self._conversations.record_observed(target.id, through_ordinal=through)
         return ObservationReport(
             proposals=tuple(proposals),
             discarded_unusable=outcome.discarded_unusable,
             discarded_over_limit=outcome.discarded_over_limit,
             dropped_unsupported=dropped,
             route=self._route,
-            conversation_id=target,
+            conversation_id=target.id,
             episodes_read=len(episodes),
         )
 
-    async def _target(self, conversation_id: str | None) -> str | None:
+    async def _target(self, conversation_id: str | None) -> Conversation | None:
         """The conversation this pass reads, or ``None`` when there is none.
 
-        An id is taken as given — whether it names a conversation is the store's
-        question, and it refuses one it does not know. Without an id the selector
-        is ``recent``'s first row, which ADR-0074 §2 already made a **total** order
-        (``last_active_at`` descending, ``id`` ascending as the tie-break), so two
-        implementations cannot disagree about which conversation is "the most
-        recently active" one.
-        """
-        if conversation_id is not None:
-            return conversation_id
-        recent = await self._conversations.recent(limit=1)
-        return recent[0].id if recent else None
+        **The record rather than the id**, because the watermark travels on it: the
+        page this pass reads is defined against ``observed_through`` (ADR-0212 §3,
+        §4), and there is no operation on the seam that answers "where has the walk
+        got to" apart from reading the conversation.
 
-    async def _select(self, conversation_id: str) -> tuple[EpisodicMemory, ...]:
-        """Resolve the conversation's most recent turns into a batch of episodes.
+        Without an id the selector is the **head of a freshly-read candidate
+        listing** — ``last_active_at`` ascending with ``id`` ascending as the
+        tie-break, which ADR-0212 §3 makes a total order, so two implementations
+        cannot disagree about which conversation is first. It is read afresh on every
+        pass and never paged: a pass serves one conversation, and an offset over a
+        set whose membership and whose ordering key both move between passes would
+        skip or repeat a row.
+
+        With an id, the store's ``get`` answers ``None`` for a conversation that is
+        absent **and** for one stamped deleted — the two cases every presenting read
+        on that contract refuses — so the stage turns that answer into the refusal
+        this operation documents rather than reading no turns and reporting a quiet
+        nothing. A deletion landing *after* this read is the race ADR-0212 §6 rules,
+        and it surfaces from the page read or from the advance.
+
+        Raises:
+            UnknownConversationError: If ``conversation_id`` names nothing or names a
+                conversation stamped deleted.
+        """
+        if conversation_id is None:
+            candidates = await self._conversations.conversations_with_unobserved_turns(limit=1)
+            return candidates[0] if candidates else None
+        conversation = await self._conversations.get(conversation_id)
+        if conversation is None:
+            msg = f"no such conversation: {describe_untrusted(conversation_id)}"
+            raise UnknownConversationError(msg)
+        return conversation
+
+    async def _page(self, conversation: Conversation) -> list[ConversationTurn]:
+        """Read the turns this pass is to observe, ordinal ascending.
+
+        Two reads and one rule (ADR-0212 §§3, 4): above a recorded watermark the page
+        is the **lowest** ``batch_size`` turns strictly above it; with no watermark it
+        is ADR-0077 §8's **tail** window unchanged, because walking a pre-existing
+        conversation from its first turn would re-pay for turns a hand-run ``observe``
+        already read and grind through an expired prefix before reaching anything
+        live. The turns below that first window are then passed over permanently —
+        stated at its true size in §4, and not a claim the watermark makes about them.
+        """
+        if conversation.observed_through is None:
+            return await self._conversations.turns(conversation.id, limit=self._batch_size)
+        return await self._conversations.turns_after(
+            conversation.id,
+            after_ordinal=conversation.observed_through,
+            limit=self._batch_size,
+        )
+
+    async def _resolve(
+        self, page: Sequence[ConversationTurn]
+    ) -> tuple[tuple[EpisodicMemory, ...], int]:
+        """Resolve a page into its batch of episodes and the position it advances to.
 
         The store's read-time axes do the filtering for free: ``get`` never returns
         an expired or non-live record and a deleted conversation's episodes are
@@ -471,14 +600,31 @@ class ObservationStage:
         conversation turns, so this is unreachable in practice; it is written
         because the alternative — handing a non-episode to a seam typed for
         episodes — would be a contract breach discovered inside the producer.
+
+        **The position is computed here, from the page's ordinals and never from its
+        length** (ADR-0212 §5). The page is ordinal ascending, so the last turn that
+        resolved is the highest that did; where none resolved it is the page's own
+        highest ordinal. A trailing gap therefore gets a second reading on the next
+        pass and an interior one does not, which is the asymmetry §5 buys
+        deliberately: where captures of one conversation are sequential an in-flight
+        turn is always the newest, so the common case is covered by the rule itself.
+
+        Args:
+            page: The turns this pass read, ordinal ascending and **non-empty** —
+                a pass over an empty page names no position at all and does not
+                reach here.
+
+        Returns:
+            The resolved episodes in order, and the ordinal this pass advances to.
         """
-        turns = await self._conversations.turns(conversation_id, limit=self._batch_size)
         episodes: list[EpisodicMemory] = []
-        for turn in turns:
+        resolved_through: int | None = None
+        for turn in page:
             record = await self._memory.get(turn.episode_id)
             if isinstance(record, EpisodicMemory):
                 episodes.append(record)
-        return tuple(episodes)
+                resolved_through = turn.ordinal
+        return tuple(episodes), page[-1].ordinal if resolved_through is None else resolved_through
 
     async def _ingest(
         self, proposal: MemoryUpdateProposal, *, batch: Mapping[str, str]

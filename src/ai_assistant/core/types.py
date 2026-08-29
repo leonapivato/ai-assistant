@@ -5554,11 +5554,33 @@ class Conversation(BaseModel):
     append, and survives only so the deletion sweep can still name the episodes it
     must destroy.
 
+    **``observed_through`` is the observation walk's position, and it is a position
+    rather than a certificate** (ADR-0212 §1). It says the walk over this
+    conversation has advanced past that ordinal, and that no later pass of a build
+    which reads it selects a turn at or below it. It does **not** say that every
+    turn below it was read, that a belief was proposed, that a proposal was ruled,
+    that an episode resolved, or that a model was called: a conversation's first
+    pass starts at its tail window and leaves every turn below that window beneath
+    the first watermark recorded, and a turn whose episode did not resolve is
+    passed over (ADR-0212 §§4, 5). What a reader may conclude from a watermark of
+    *n* is that the turns **above** *n* are the walk's remaining work, and nothing
+    whatever about the turns below it.
+
+    **One consumer reads it and no other may branch on it** (ADR-0212 §7). Because
+    a watermark is present, absent, high or low, no read of this store selects a
+    different set of rows, orders them differently, refuses where it would have
+    answered, or returns a different value in any other member — the one exception
+    being ``ConversationStore.conversations_with_unobserved_turns``, whose whole
+    subject it is. A build that does not read it ignores it and does not refuse to
+    start over it.
+
     No cross-field ordering is validated. ``started_at``, ``last_active_at`` and
     ``last_turn_at`` all come from an injected clock, which this project never
     promises is monotonic (``core/clock.py``), so a rule like
     ``last_active_at >= started_at`` would make a legitimate clock adjustment
-    unrepresentable rather than catching a bug.
+    unrepresentable rather than catching a bug. ``observed_through`` is likewise
+    not validated against the conversation's turns here: the model cannot see them,
+    so the store discards a watermark its own turns do not reach (ADR-0212 §7).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5575,6 +5597,15 @@ class Conversation(BaseModel):
     deleted_at: UtcInstant | None = Field(
         default=None,
         description="Tombstone stamp: when the user's deletion was recorded (ADR-0074 §8).",
+    )
+    observed_through: int | None = Field(
+        default=None,
+        ge=FIRST_TURN_ORDINAL,
+        description=(
+            "Highest turn ordinal an observation pass has recorded for this conversation; "
+            "unset until one has (ADR-0212 §1). A position in the walk, never a claim that "
+            "the turns below it were read."
+        ),
     )
 
 
@@ -5676,14 +5707,30 @@ class ConversationExport(BaseModel):
     tie-break, ``turns`` by ``conversation_id`` then ``ordinal`` ascending. It is
     asserted by the conformance suite rather than validated here, so that filtering
     an export down — which preserves order — stays a total operation.
+
+    **``schema_version`` is 2 because ``Conversation`` gained
+    ``observed_through``** (ADR-0212 §8): this document carries
+    ``tuple[Conversation, ...]``, so that member changing the shape of the portable
+    document is exactly what the version exists to announce (ADR-0039 §10, ADR-0014
+    §5). **No migration is owed** — ``ConversationStore`` offers ``export`` and no
+    import, restore or load, so nothing in this system ever validates a
+    ``ConversationExport`` it did not just construct.
+
+    **What a document labelled 1 may be relied on for.** It was written by a build
+    before this one, and its turns may or may not carry ``delivery`` (ADR-0205 §3
+    added that member without moving the version). So the label separates 1 from 2
+    and does **not** separate those two shapes from each other: **no reader may take
+    a 1 as evidence of either shape.** Nothing here has to — there is no read path —
+    and the first lane that adds one owes that disambiguation before it may rely on
+    the label. Repairing the label itself is issue #1793.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = Field(
-        default=1,
+    schema_version: Literal[2] = Field(
+        default=2,
         description=(
-            "Shape of this export, pinned to exactly 1 (ADR-0039 §10, ADR-0014 §5): an "
+            "Shape of this export, pinned to exactly 2 (ADR-0039 §10, ADR-0014 §5): an "
             "export outlives the code that wrote it, so the label must be a fact about "
             "the document rather than a producer's unchecked claim."
         ),
