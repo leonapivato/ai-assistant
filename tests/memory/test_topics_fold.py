@@ -366,32 +366,61 @@ async def test_a_retire_carries_an_over_bound_targets_labels_whole(
 # --- §12.25's install half: a non-fold install is bounded too ---------------
 
 
-async def test_a_direct_install_over_the_bound_stores_the_bounded_subset(
-    make_writer: WriterFactory,
+@pytest.mark.parametrize(
+    "kind",
+    [
+        MemoryDecisionKind.ACCEPT,
+        MemoryDecisionKind.STORE_TEMPORARY,
+        MemoryDecisionKind.SUPERSEDE,
+    ],
+    ids=["accept", "store-temporary", "supersede-correction"],
+)
+async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
+    make_writer: WriterFactory, kind: MemoryDecisionKind
 ) -> None:
-    """§8's second admission arm, at the same seam and in the same sense as ADR-0086 §2.
+    """§8's second admission arm, over **every** ruling that takes it.
 
-    The record's own labels in canonical order, cut to the bound. It is the arm a
-    fold-only implementation misses entirely, and the one an ``ACCEPT`` takes.
+    The arm is the record's own labels in canonical order, cut to the bound, and §8
+    enumerates what reaches it: "an ``ACCEPT``, the surviving record of a
+    ``SUPERSEDE``, an owner act, or any other write that stores a proposal's content
+    at an id". §13.6 says the same thing from the seam's side — the bound is applied
+    to **every install**.
+
+    So one ruling is not the case. ``_installed`` is called at four sites, and a
+    regression that dropped it from the ``STORE_TEMPORARY`` arm or from the
+    ``SUPERSEDE`` correction would persist an over-bound record while a suite
+    covering only ``ACCEPT`` and the fold stayed green — which is what makes the
+    bound a property of the *seam* rather than of one ruling, and therefore what has
+    to be asserted per ruling rather than per implementation.
+
+    The owner act §8 also names is **not** here: it is §9's, deferred with its
+    surface to its own ADR and lane (§13's marked clause).
     """
     over_bound = (*_AT_BOUND, "zzz beyond the bound")
-    # Seeded with the cited episode alone: the proposal's own evidence has to
-    # resolve (ADR-0077 §5), and there is no target because an `ACCEPT` has none.
-    store = await _seeded(_target(topics=(), arm=_ORDINARY, content="an unrelated older note"))
-    writer = make_writer(
-        store, FakeMemoryPolicy(MemoryDecisionKind.ACCEPT), _fixed_now, lambda: _CORRECTION
+    # A target that the correction can genuinely overturn, so the `SUPERSEDE` arm
+    # reaches its own install rather than being refused as a restatement (ADR-0121
+    # §1, ADR-0159 §5). The other two arms ignore it and take the seeded episode,
+    # which their proposal's evidence has to resolve against (ADR-0077 §5).
+    store = await _seeded(
+        _target(topics=(), arm=_ORDINARY, content="prefers concise emails, an older note")
     )
+    writer = make_writer(store, FakeMemoryPolicy(kind), _fixed_now, lambda: _CORRECTION)
 
     result = await writer.ingest(
         MemoryUpdateProposal(
-            proposed=_incoming(topics=over_bound, record_id="fresh"), rationale="because"
+            proposed=_incoming(
+                topics=over_bound, record_id="fresh", preference="prefers detailed emails"
+            ),
+            rationale="because",
         )
     )
 
+    assert result.decision.kind is kind
     assert result.record_id is not None
     stored = await store.get(result.record_id)
     assert stored is not None
-    assert stored.topics == _AT_BOUND
+    assert stored.topics == _AT_BOUND, "the record installed carries the bounded subset"
+    assert "zzz beyond the bound" not in stored.topics
 
 
 # --- §12.16: a supersession carries nothing across --------------------------
