@@ -169,10 +169,13 @@ mechanics of withholding at supply.
 
 > **Normative.** `Placement` carries a **reach**, a `PlacementReach` defaulting to
 > `ANYONE`, and the stamp of who set it: a `PlacementSetter | None` defaulting to
-> `None`, and a `UtcInstant | None` defaulting to `None`. `PlacementReach` has exactly
-> two members: `ANYONE`, denoting every person, and `OWNER`, denoting the set whose one
-> member is the owner. `PlacementSetter` has exactly three: `OWNER_ACT`, `DERIVED` and
-> `PROPOSED`, which are §3's three setters and are exhaustive.
+> `None`, and a `UtcInstant | None` defaulting to `None`. `PlacementReach`'s members as
+> this ADR ships it are two — `ANYONE`, denoting every person, and `OWNER`, denoting the
+> set whose one member is the owner — and this enumeration is **the vocabulary as it
+> stands, not a cardinality this ADR fixes**. `PlacementSetter` has exactly three
+> members, `OWNER_ACT`, `DERIVED` and `PROPOSED`, and *that* enumeration **is**
+> exhaustive: they are §3's three setters and no implementation or later ADR adds a
+> fourth without superseding §3's first clause.
 
 > **Normative.** `Provenance.supplied_withheld_content` is **removed**, and the
 > question it answered is answered by this field: a record ADR-0204 §2 or §5 would have
@@ -189,9 +192,13 @@ mechanics of withholding at supply.
 
 > **Normative.** The reach is a **denotation of a set of people**, and the two members
 > above are the two sets this system can denote today. A later ADR that gives it
-> further denotations — named people, circles (#1718) — adds them; it supersedes no
-> clause of this ADR, because no clause here states that two is the number, and §2's
-> rule is stated over sets so that it does not move when a third arrives.
+> further denotations — named people, circles (#1718) — **adds** them, and does so as a
+> stacked addition under ADR-0082 §1: it changes no sentence of this ADR, because every
+> clause here is written over *a* reach rather than over the pair, `ANYONE` and `OWNER`
+> keep the denotations §1 gives them, and §2's rule is stated over sets so that it does
+> not move when a third arrives. What such an ADR may **not** do is redefine either
+> shipped denotation or restate §2's rule; either of those is a supersession and is
+> recorded as one.
 
 > **Normative.** **Vocabulary.** ADR-0199 §3 *places a class* as speakable **on a
 > channel**; this ADR *places a record* **for a set of people**. Neither renames the
@@ -349,10 +356,14 @@ only subtract.
 > setter of `OWNER_ACT` or `DERIVED`, and never runs on a record already in the store.
 
 > **Normative.** Where more than one setter would write in one act, the **narrower
-> reach stands**, and where two setters would write the same reach, the recorded setter
-> is the one whose narrowing the owner may not lift — `DERIVED` over `PROPOSED`, and
-> `DERIVED` over `OWNER_ACT`. No implementation records a setter whose narrowing is
-> weaker than the narrowing the record in fact carries.
+> reach stands**. Where two would write the same reach, the recorded setter is decided
+> by one total order, strongest first: **`DERIVED`, then `OWNER_ACT`, then
+> `PROPOSED`**. So a record a guarded write and a proposal both place `OWNER` records
+> `OWNER_ACT`, which is what makes the owner's act final over a model's in the
+> same-reach case as well as the differing-reach one; and a record the derivation and
+> an owner's act both place `OWNER` records `DERIVED`, because that narrowing is the one
+> §3's closing clause forbids lifting. No implementation records a setter weaker in this
+> order than the strongest that in fact wrote the reach the record carries.
 
 > **Normative.** **Neither an act nor a proposal reaches a floor.** No placement, by
 > any setter, admits a Tier 0 value to any output channel (ADR-0199 §3's first clause),
@@ -605,8 +616,13 @@ would fail that test on the first turn.
 > and `None` where `record_id` named nothing live — which is not an error, on
 > `AssistantEngine.forget`'s own reading of the same case ("the user's intent … is
 > already satisfied"). Each raises `ValueError` where `record_id` is blank and
-> `MemoryStoreError` where reading or writing memory failed, and raises for no other
-> reason. In particular a **refusal raises nothing**: `unguard` on a placement whose
+> `MemoryStoreError` where reading or writing memory failed, and declares no other
+> error in its own `Raises` block. `OversizedValueError` is **inherited, not
+> exempted**: `AssistantEngine`'s own clause declares it of "**every** method below …
+> and is not repeated in each one's `Raises` block", on the ground that
+> ":data:`Identifier` carries no maximum length, so even ``forget`` can be handed an
+> oversized argument", and these two are no different. Nothing here reads the
+> exhaustive list above as an exemption from ADR-0085 §8's bound. In particular a **refusal raises nothing**: `unguard` on a placement whose
 > setter is `DERIVED` returns that placement unchanged — reach `OWNER`, setter
 > `DERIVED` — and a surface reads the returned reach and setter to say why nothing
 > moved. A raise was rejected because it
@@ -734,17 +750,30 @@ ADR-0201 closed.
 > (ADR-0085 §1), provided by `orchestration` and consumed by `interfaces` — so adding
 > to it is golden rule 5's breaking change and carries golden rule 5's obligations.
 
-> **Normative.** **`PROTOCOL_VERSION` moves for this change**, and ADR-0124 §9's test
-> is applied rather than asserted past. A member is **removed** from `Provenance`, a
-> wire-carried `core` type, and a member carrying the same answer is added to
-> `MemoryBase`. Neither type sets `extra="forbid"`, so no decode *fails* in either
-> direction — and that is precisely the hazard: a peer at the older version decoding a
-> record from a hub at the newer one reads `supplied_withheld_content` as its `False`
-> default on a record whose placement is `OWNER`, and a peer at the newer version
-> decoding an older hub's record reads the default placement on a record that hub had
-> stamped. Both are ADR-0124 §9's second limb — "accepted by it with a different
-> meaning" — on a disclosure-bearing value, and the meaning that is lost is the
-> restrictive one.
+> **Normative.** **`PROTOCOL_VERSION` moves for this change**, on **two independent
+> grounds**, and ADR-0124 §9's test is applied rather than asserted past.
+
+> **Normative.** The **first ground is the promoted surface's method set.** §7 adds
+> `guard` and `unguard` to `AssistantEngine`, and ADR-0210 §8 names that limb of
+> ADR-0124 §9's reach in terms — "§9's reach is the frame — its encoding, the validity
+> of a wire-carried `core` type, and **the promoted surface's method set**". A frame a
+> peer at the new version may send names an operation a peer at the old version does not
+> serve. This ground stands on its own and is sufficient.
+
+> **Normative.** The **second ground is the wire-carried `core` type**, and it is
+> stated because it is the one with a disclosure consequence. `MemoryBase` and
+> `Provenance` *are* wire-carried: `TurnResult.memories` is `tuple[MemoryRecord, ...]`,
+> and ADR-0210 §8 reasons from exactly that — "`TurnResult.memories` — wire-carried
+> inside `TurnOutcome.turn`" and "every `Provenance` a hub at the new version emits is
+> valid for a peer at the old one". A member is **removed** from `Provenance` and a
+> member carrying the same answer added to `MemoryBase`. Neither type sets
+> `extra="forbid"`, so no decode *fails* in either direction — and that is precisely
+> the hazard: a peer at the older version decoding a record from a hub at the newer one
+> reads `supplied_withheld_content` as its `False` default on a record whose placement
+> is `OWNER`, and a peer at the newer version decoding an older hub's record reads the
+> default placement on a record that hub had stamped. Both are ADR-0124 §9's second
+> limb — "accepted by it with a different meaning" — on a disclosure-bearing value, and
+> the meaning that is lost is the restrictive one.
 
 > **Normative.** This is a different case from the one ADR-0204 §7 and ADR-0210 §8
 > settled, and neither is cited as having answered it. Both ruled on a value the hub
@@ -761,11 +790,15 @@ ADR-0201 closed.
 > section as having answered it.
 
 > **Normative.** **A record already in a store is decoded, never defaulted.** The
-> implementing lane maps a stored `provenance.supplied_withheld_content` of `true` to a
+> implementing lane maps a `provenance.supplied_withheld_content` of `true` to a
 > placement of reach `OWNER` and setter `DERIVED` at **decode**, and `false` or absent
 > to the default. The mapping is total, one-directional and applied wherever a record
-> is decoded, and no lane relies on a separate migration pass or on a store being
-> rewritten before it is read. Without it every record ADR-0204 narrowed would decode
+> carrying the legacy member is decoded, and no lane relies on a separate migration pass
+> or on a store being rewritten before it is read. **The load-bearing site is the
+> persistent store**, which holds records written under ADR-0204 and is read on the
+> first turn after the upgrade; the wire is covered by the same mapping and by the
+> version bump above, which is what keeps a peer at the old version from being handed
+> one of these records at all. Without it every record ADR-0204 narrowed would decode
 > as unnarrowed on the day this landed, which is ADR-0204 §1's fourth clause hazard —
 > a decode default read as a measurement — with a disclosure consequence.
 
@@ -828,6 +861,23 @@ ADR-0201 closed.
 > `OWNER_ACT` and then to `ANYONE`; and a `guard` on a `DERIVED` placement changes
 > nothing and is not an error.
 
+> **Normative.** The lane pins **§4's boundary with a deterministic fake provider**,
+> which the precedence arms above cannot reach. Three arms: a proposal on a record whose
+> placement is the default *succeeds* and writes reach `OWNER` with setter `PROPOSED`,
+> so the mechanism is shown to work at all; the producer's provider-call **count** over
+> a pass is what it is without this decision, so no call is added; and every read path —
+> supply, composition, delivery and any rendering — makes **zero** provider calls, which
+> is §4's second clause and is the one an implementation could otherwise breach while
+> passing every other arm here.
+
+> **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
+> `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
+> conformance suite beside the other members that carry it.
+
+> **Normative.** The lane pins **the same-reach tie**: a record a guarded write and a
+> proposal both place `OWNER` records setter `OWNER_ACT`; a record the derivation and an
+> owner's act both place `OWNER` records setter `DERIVED`.
+
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
 > turn exactly as it does today, with nothing withheld and no deflection composed.
@@ -835,14 +885,23 @@ ADR-0201 closed.
 ### 11. What the implementing lane owes
 
 > **Normative.** **The `core` field move is not separable from its readers, and the
-> lane does not attempt it.** `Provenance.supplied_withheld_content` is read and written
-> today by `orchestration/disclosure.py`, `orchestration/observation.py`,
+> lane does not attempt it.** `Provenance.supplied_withheld_content` is read or written
+> today at exactly these sites, and the inventory is stated in full rather than left to
+> be rediscovered: `core/types.py`, `memory/ingest.py` (the fold's disjunction on both
+> arms), `orchestration/consolidation.py` (the stamp assigned over the records
+> consolidated), `orchestration/disclosure.py`, `orchestration/observation.py`,
 > `orchestration/conversations.py`, `orchestration/engine.py` and
-> `ai_assistant/testing/writer.py`. A change removing the field without them leaves a
-> tree that does not type-check and, were it deployed, a spoken turn that raises on the
-> first record it places. So the removal, the addition on `MemoryBase`, the three new
-> types, the decode mapping of §9 and every production reader and writer of the old
-> field land in **one change**.
+> `ai_assistant/testing/writer.py`. A change removing the field without every one of
+> them leaves a tree that does not type-check and, were it deployed, a spoken turn that
+> raises on the first record it places, or a fold that silently drops ADR-0204 §5's
+> ratchet. So the removal, the addition on `MemoryBase`, the three new types, the decode
+> mapping of §9 and **every site above** land in **one change**.
+
+> **Normative.** That change therefore spans `core`, `memory`, `orchestration`, `wire`
+> and `testing`, and its width is a property of a `core` field removal rather than a
+> lane's choice: **no** split of it compiles. The lane states that in its PR
+> description, names this clause, and widens the change no further — a site not in the
+> inventory above and not required by §9 is outside it.
 
 > **Normative.** That same change carries §7's `AssistantEngine` members, their
 > conformance-suite arms, the canonical fake in `ai_assistant.testing`, the
