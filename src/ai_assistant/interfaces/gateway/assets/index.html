@@ -136,6 +136,20 @@
         -->
         <p class="hint" id="conversation"></p>
         <!--
+          What is already in the thread the owner just chose to continue (#1371's
+          second clause). Written only by the act of continuing one from the listing,
+          and cleared by every other change of selection and by every answer — so it
+          is never a count that a turn since has made wrong.
+
+          **It is the count and the span and not a transcript**, because that is the
+          whole of what the promoted surface hands a browser: `conversation` returns a
+          `ConversationDigest`, which ADR-0074 §8 fixed as "the count and span rather
+          than every turn". Rendering what was *said* would need an operation nobody
+          has decided on, so this says how much is there and how far back rather than
+          pretending to say more. #1818 holds that half.
+        -->
+        <p class="hint" id="resumed" hidden></p>
+        <!--
           The way out of a thread, and the only one there was not (#1429, adversarial
           review round 3). Until this page kept a conversation across a reload, a
           reload *was* the way to start a fresh one; now the selection comes back, so
@@ -250,6 +264,22 @@
 
       <section id="conversations" class="panel" hidden>
         <h2>Conversations</h2>
+        <!--
+          What a forget actually did (#1371's third clause). Before this line the
+          listing simply re-read itself, and a listing that is one row shorter is not
+          an outcome a person can read — least of all on a phone, where the row that
+          went is off the top of the panel by the time the refresh lands.
+
+          **It reports the answer rather than the request**: `forget_conversation`
+          returns whether there was one to destroy, and "there was nothing left to
+          forget" is a different fact from "it is gone" and is said as one.
+
+          It is not a confirmation and does not become one. ADR-0175 §6 rules that a
+          front-end confirmation "is not a control and is not required here"; this is
+          written *after* the act, and the show-then-confirm the page already does
+          before it is unchanged.
+        -->
+        <p class="notice" id="forget-outcome" hidden></p>
         <div id="conversation-list"></div>
       </section>
 
