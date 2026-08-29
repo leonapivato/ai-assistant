@@ -23,11 +23,11 @@
   of them and none is written.
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/types.py`, from `core/errors.py`, from `memory/`, or from an issue — is of
-  its text as it stood at this ADR's base, `1331dae3`, and not of its text on any
-  later day. ADR-0217 is quoted from PR #1811's branch at `647c1e95`, which is not
-  yet on `main`; where that text moves before it merges, this ADR is read against
-  the text quoted here and that ADR's own record says what moved. This is
-  ADR-0143's clause, taken for its reason.
+  its text as it stood at this ADR's base, `0fddb9e7`, and not of its text on any
+  later day. **ADR-0217 has merged**, and every quotation and section citation of it
+  below is of its `Accepted` text on `main` at that base — re-verified against it
+  sentence by sentence, with no quoted sentence changed and no cited section moved.
+  This is ADR-0143's clause, taken for its reason.
 
 ## Context
 
@@ -431,8 +431,9 @@ both existing doors already meet it.
 fold, and ADR-0046 §5 re-scoped it to this mechanism rather than to a different
 defect. An ADR that added the mechanism and left the fold unconditional would leave
 #248 exactly as open as it is today, with its own closure depending on a lane nobody
-had committed to — and would make the store's new mode surface with one consumer
-that is itself unmerged. Deciding it here costs no `core` surface: the fold's write
+had committed to — and would make the store's new mode surface with one consumer,
+and that consumer a change ADR-0217 §11 orders *after* this ADR's own
+implementation. Deciding it here costs no `core` surface: the fold's write
 already goes through `write_atomic`, so the change is which mode two call sites pass
 and what they do with a refusal.
 
@@ -883,7 +884,8 @@ different questions and read at different sites.
   arguably the minimum the gate demands. Rejected in §5: #248 is an issue about the
   fold, ADR-0046 §5 re-scoped *it* to this mechanism, and an ADR that added the
   mechanism without the consumer the issue is about would leave #248 open with
-  nothing scheduled — surface whose only consumer is an ADR that has not merged.
+  nothing scheduled — surface whose only consumer is a change ADR-0217 §11 orders
+  *after* this ADR's own implementation.
 - **A `MemoryStore.transaction()` handle spanning the conflict `search` and the
   write.** It closes the window at its source rather than at the write. Rejected as
   ADR-0046 §Alternatives rejected it, on surface: "a transaction context object,
