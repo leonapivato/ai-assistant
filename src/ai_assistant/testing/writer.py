@@ -45,6 +45,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
+    MAX_TOPICS_PER_RECORD,
     BeliefBand,
     ConflictRelation,
     DataTier,
@@ -1369,8 +1370,51 @@ def _bounded_evidence(evidence: Sequence[str], *, elided: int) -> tuple[tuple[st
     return tuple(evidence[displaced:]), elided + displaced
 
 
+def _bounded_topics(admitted: Sequence[str]) -> tuple[str, ...]:
+    """ADR-0213 §8's retained subset, stored in §1's canonical order.
+
+    Duplicated from ``MemoryIngestor`` for this module's standing reason:
+    ``ai_assistant.testing`` may not import a subsystem (golden rule 1), and a fake
+    looser than the contract certifies consumers a real writer rejects (ADR-0026
+    §7).
+
+    ``admitted`` is the install's **admission order** — which labels survive — and
+    the storage order is separate: the cut happens on admission order, and §1 then
+    fixes how the survivors are stored. Sorting after the cut rather than before is
+    the whole of the distinction, because sorting first would let a code-point-lesser
+    incoming label displace a target's.
+    """
+    admitted_once = tuple(dict.fromkeys(admitted))
+    return tuple(sorted(admitted_once[:MAX_TOPICS_PER_RECORD]))
+
+
+def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, ...]:
+    """The survivor's topics: ADR-0213 §8's bounded union, on both arms.
+
+    The rule this fake must not be looser than, and the direction it would be loose
+    in is the destructive one: a fake taking the incoming record's tuple would let a
+    record the owner filed under ``"health"`` quietly stop being reachable by a
+    health-scoped act the first time an unlabelled proposal reinforced it — ADR-0106
+    §4's laundering in this field's currency, performed by the object a consumer
+    reaches for instead of `memory`'s internals.
+
+    Admission order is the target's own labels first, then the incoming record's
+    that the target does not carry, both in code-point order. That keeps the ratchet
+    whole under §1's bound: a target conforming to the bound has all of its labels
+    fit ahead of any incoming one, so what the bound declines is always a label of
+    the incoming record — a suggestion §4 already rules may be ignored in whole.
+    """
+    carried = set(target.topics)
+    return _bounded_topics(
+        [
+            *sorted(target.topics),
+            *sorted(label for label in incoming.topics if label not in carried),
+        ]
+    )
+
+
 def _installed(record: MemoryRecord) -> MemoryRecord:
-    """``record`` with its evidence brought under the bound (ADR-0086 §2).
+    """``record`` with its evidence and its topics brought under their bounds.
 
     Applied at **every install** and at no retirement — ADR-0081 §1's distinction,
     the one :func:`_installed_at` already implements. A ``SUPERSEDE`` whose target
@@ -1386,12 +1430,15 @@ def _installed(record: MemoryRecord) -> MemoryRecord:
     """
     provenance = record.provenance
     retained, elided = _bounded_evidence(provenance.evidence, elided=provenance.evidence_elided)
-    if elided == provenance.evidence_elided:
+    topics = _bounded_topics(sorted(record.topics))
+    if elided == provenance.evidence_elided and topics == record.topics:
         return record
+    if elided == provenance.evidence_elided:
+        return record.model_copy(update={"topics": topics})
     bounded = Provenance.model_validate(
         provenance.model_dump() | {"evidence": retained, "evidence_elided": elided}
     )
-    return record.model_copy(update={"provenance": bounded})
+    return record.model_copy(update={"provenance": bounded, "topics": topics})
 
 
 def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
@@ -1583,6 +1630,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     withheld = (
         target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
     )
+    # And once more, on the envelope rather than on the warrant (ADR-0213 §8): the
+    # union is stated over the fold, so neither arm may take one side's tuple.
+    topics = _topics_of_fold(target, incoming)
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -1595,7 +1645,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             last_confirmed_at=confirmed_at,
             supplied_withheld_content=withheld,
         )
-        return target.model_copy(update={"provenance": corroborated})
+        return target.model_copy(update={"provenance": corroborated, "topics": topics})
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
@@ -1607,4 +1657,4 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         last_confirmed_at=confirmed_at,
         supplied_withheld_content=withheld,
     )
-    return incoming.model_copy(update={"id": target.id, "provenance": provenance})
+    return incoming.model_copy(update={"id": target.id, "provenance": provenance, "topics": topics})
