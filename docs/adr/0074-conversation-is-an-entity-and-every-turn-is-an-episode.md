@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -241,7 +241,9 @@
 
 - Partially superseded: 2026-08-29 by ADR-0212 — **§9's enumeration of what
   `Conversation` carries, and of what the `ConversationStore` owes, are each short
-  again — the first by one member, the second by three operations.**
+  again — the first by one member, the second by three operations; and §9's rule that
+  every conversation read is ordered by last activity *descending* no longer covers
+  every conversation read.**
   [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
   §1 rules that the observation cursor is a per-conversation watermark over turn
   ordinals, held on the conversation index rather than on the memory store or on the
@@ -263,8 +265,25 @@
 
   **This is the move ADR-0205 already made on the same enumerations**, one pair back
   along this line, and it is made the same way: an additive member on the index, and
-  operations that mint nothing the caller supplies. ADR-0074 §9's illustrative
-  signature is illustrative by its own words, so nothing turns on its spelling.
+  operations that mint nothing the caller supplies. §9's illustrative signature is
+  illustrative by its own words, so nothing turns on its spelling.
+
+  **Replaced — §9 item 3's descending order, for one operation.** "**Every read** is
+  bounded by default and totally ordered (ADR-0021 §4, ADR-0073 §2): turns by ordinal
+  ascending, conversations by last activity **descending** with the id as tie-break
+  (§2)" no longer covers every conversation read: ADR-0212 §3 orders
+  `conversations_with_unobserved_turns` by `last_active_at` **ascending**, with `id`
+  ascending as the tie-break. A conforming store cannot satisfy both, which is
+  ADR-0070 §1's test. **The replacement is one operation wide.** `recent` keeps its
+  descending order and the argument §2 and ADR-0073 §2 give for it; the *bounded by
+  default* half of item 3 binds unchanged and is honoured to the letter — a named
+  default of 50, the same figure `recent` sets, refusals rather than clamping; and the
+  *totally ordered* half binds unchanged, for item 3's own reason, since ascending
+  `last_active_at` with `id` as tie-break is as total as descending is. ADR-0212 §3
+  argues why the direction inverts for a candidate order: descending would re-select
+  the busiest conversation on every pass and never reach an idle one, which is
+  ADR-0077 §8's first named coverage gap arriving through the cursor that exists to
+  close it.
 
   **Not replaced — everything else §9 decides.** The index still holds no content: a
   turn's content is still exactly one `EpisodicMemory` in the `MemoryStore`, and a
@@ -280,8 +299,8 @@
 
   **The five pairs on the `Status` line name different scopes** — ADR-0076's §9
   obligation set, ADR-0084's §9 item 5 premise, ADR-0086's §5 refusal, ADR-0205's §9
-  enumerations for `ConversationTurn`, and this one's for `Conversation` — so they
-  accumulate under ADR-0070 §4. ADR-0205's scope and this one both reach §9's
+  enumerations for `ConversationTurn`, and this one's two scopes — so they accumulate
+  under ADR-0070 §4. ADR-0205's scope and this one both reach §9's
   enumerations and name different members of them; where a reader judges them to
   overlap, ADR-0070 §4's monotonic rule gives the overlap to the higher-numbered ADR,
   which is this one. No amendment qualifier is on the line, so ADR-0082 §2's move does

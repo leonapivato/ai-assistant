@@ -11,7 +11,9 @@
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) —
   §9's enumeration of what `Conversation` carries and what `ConversationStore`
   owes, in exactly the way ADR-0205 §10 already moved that enumeration for
-  `ConversationTurn`. Named in §10(b).
+  `ConversationTurn`; and §9's rule that every conversation read is ordered by last
+  activity descending, replaced for the one new listing operation and for no other.
+  Named in §10(b).
 - **Partially supersedes:**
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md)
   — §2's absent-cursor clause and §7's restart position, **only as they reach the
@@ -297,7 +299,10 @@ and the batch is not backfilled.**"
 
 **Why ascending activity, and not the `recent` order.** `ConversationStore.recent`
 orders "by `last_active_at` descending, ties broken by `id` ascending", and taking
-its head is what the stage does today. Descending cannot be the candidate order: a
+its head is what the stage does today. ADR-0074 §9 states that order as a rule over
+*every* conversation read — "conversations by last activity descending with the id as
+tie-break" — so this ADR replaces that rule for this one operation, and §10(b) records
+it rather than reading the rule down. Descending cannot be the candidate order: a
 conversation that keeps receiving turns would be selected on every pass and a
 conversation the user has stopped using would never be reached — which is ADR-0077
 §8's first named gap ("a conversation the user never observes") reintroduced through
@@ -756,10 +761,12 @@ buys nothing. Moving to 2 here announces the shape that ships next. The gap is
 recorded as **#1793** rather than absorbed, and it is not this ADR's to decide beyond
 saying so.
 - **`core/protocols.py`** gains **exactly three operations on `ConversationStore`**,
-  and no new Protocol:
+  and no new Protocol. **All three are `async def`**, as every method of that Protocol
+  already is: each reaches the store, and `CLAUDE.md` makes I/O-bound methods `async`.
+  The signatures below are written in that form rather than leaving it to be inferred:
 
-  1. `turns_after(conversation_id, *, after_ordinal: int | None = None, limit: int
-     | None = None) -> list[ConversationTurn]` — the **forward** page: the *lowest*
+  1. `async def turns_after(conversation_id, *, after_ordinal: int | None = None,
+     limit: int | None = None) -> list[ConversationTurn]` — the **forward** page: the *lowest*
      `limit` turns whose ordinal is **strictly above** `after_ordinal`, ordinal
      ascending. `after_ordinal` `None` reads from the conversation's first turn;
      `limit` `None` asks for the store's configured replay window, exactly as
@@ -771,7 +778,7 @@ saying so.
      names a conversation stamped deleted, and `ConversationStoreError` for a store
      fault. A short page means there is nothing above it — which is a fact about the
      read and not a discriminator any advance rule may use (§5).
-  2. `conversations_with_unobserved_turns(*, limit: int = 50) ->
+  2. `async def conversations_with_unobserved_turns(*, limit: int = 50) ->
      list[Conversation]` — every conversation that is not stamped deleted and holds
      at least one turn whose ordinal is strictly above its `observed_through`, or
      any turn at all where that is `None`; ordered `last_active_at` ascending with
@@ -787,8 +794,8 @@ saying so.
      `ConversationStore.recent` already names for offset paging ("may skip or repeat
      a row") and `ConversationStore.stamped_conversation_ids` already refuses for a
      walk whose rows leave under it.
-  3. `record_observed(conversation_id, *, through_ordinal: int) -> Conversation |
-     None` — stamps the watermark and returns the conversation as stamped, or
+  3. `async def record_observed(conversation_id, *, through_ordinal: int) ->
+     Conversation | None` — stamps the watermark and returns the conversation as stamped, or
      `None` where it stamped nothing. It stamps if and only if `through_ordinal` is
      **strictly above** the recorded watermark **and at or below** the highest
      ordinal the conversation holds; where either fails it performs nothing,
@@ -1022,12 +1029,29 @@ differently, or read one of its clauses more widely than it now holds?"
 > both, and the note on ADR-0077 records the narrowing beside the replacement.
 
 > **Normative.** **(b) This ADR partially supersedes ADR-0074**, in the same sense,
-> in exactly one scope: **§9's enumeration of what `Conversation` carries and what
-> `ConversationStore` owes.** The conversation gains `observed_through` and the store
-> gains `turns_after`, `conversations_with_unobserved_turns` and `record_observed`.
+> in exactly two scopes.
+>
+> **§9's enumeration of what `Conversation` carries and what `ConversationStore`
+> owes.** The conversation gains `observed_through` and the store gains
+> `turns_after`, `conversations_with_unobserved_turns` and `record_observed`.
 > This is the same move ADR-0205 §10 made on the same enumeration for
 > `ConversationTurn.delivery` and `record_delivery`, and §9's illustrative signature
-> is illustrative by its own words. Nothing else in §9 or in ADR-0074 changes — §7's
+> is illustrative by its own words.
+>
+> **§9's rule that every conversation read is ordered by last activity descending.**
+> Its item 3 reads "**Every read** is bounded by default and totally ordered […]
+> conversations by last activity **descending** with the id as tie-break", and §3 of
+> this ADR orders `conversations_with_unobserved_turns` **ascending**. A conforming
+> store cannot satisfy both, so the rule is replaced **for that one operation** and
+> for no other: `recent` keeps its descending order and its reason, the bounded-default
+> half of item 3 binds unchanged and is honoured (a default of 50, refusals rather than
+> clamping), and the totality half binds unchanged — the new order is total, with `id`
+> ascending as the tie-break, for exactly the reason item 3 gives. §3 of this ADR
+> argues why the direction inverts: descending would re-select the busiest conversation
+> on every pass and never reach an idle one, which is ADR-0077 §8's first named gap
+> arriving through the cursor.
+>
+> Nothing else in §9 or in ADR-0074 changes — §7's
 > horizon, §8's deletion protocol and its tombstone, §9's two sweeps and its
 > exclusion set, and §10's refusal to duplicate the membership relation onto the
 > record all bind exactly as they did.
@@ -1095,7 +1119,8 @@ these lines resolves the collision by keeping both pairs**, which is what ADR-00
 already directs and is a rebase conflict rather than a decision. The pairs are:
 
 - on ADR-0074: `and ADR-0212 (§9's enumeration of what Conversation carries and what
-  ConversationStore owes)`;
+  ConversationStore owes, and its rule that every conversation read is ordered by last
+  activity descending)`;
 - on ADR-0077: `and ADR-0212 (§8's selection sentence and its durable-cursor
   sentence)`;
 - on ADR-0111: `and ADR-0212 (§2's absent-cursor clause and §7's restart position,
