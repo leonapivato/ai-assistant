@@ -26,10 +26,11 @@
   unclassified rule and every measure below are untouched. Named in §11(c).
 - **Partially supersedes**
   [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
-  — §6's disposition of the **deletion race**, in the single respect of whether it
-  halts a run of many passes. §6's three normative clauses about the watermark, its
-  no-re-read consequence, and every other clause of ADR-0212 bind this job unchanged
-  and are relied on throughout. Named in §11(e).
+  — §6's **classification of the deletion race as a failed pass**. Under this ADR
+  that raise is caught: it is not logged as a fault, it does not propagate, and it
+  does not halt a run of many passes. §6's three normative clauses about the
+  watermark, its no-re-read consequence, and every other clause of ADR-0212 bind this
+  job unchanged and are relied on throughout. Named in §11(e).
 - **Otherwise this ADR uses ADR-0212 and does not amend it.** Every pass this
   decision schedules is ADR-0212's pass, performed against a conversation the run
   **names** — which is §3's own optional-id branch — so §3's "given none" default,
@@ -960,11 +961,13 @@ late has two figures to raise and it can see both.
 
 > **Normative.** An `UnknownConversationError` raised for the conversation a pass
 > selected is **not** a failure of that pass. It means the conversation was stamped
-> deleted between the listing and the read, the run drops that candidate, and the
-> run continues. It is never treated as a fault to log as one, and it never halts
-> the run. **This is the one disposition of ADR-0212 §6 that this ADR replaces**,
-> and it is recorded as a partial supersession on that ADR's header rather than
-> argued here: §11(e).
+> deleted between the listing and the read. The exception is **caught** — it does
+> not propagate out of `observe_due` as the clause above requires of every other
+> raise — the run drops that candidate, and the run continues. It is never treated
+> as a fault to log as one, and it never halts the run. **This is the one
+> classification of ADR-0212 §6 that this ADR replaces**, in all three of those
+> respects, and it is recorded as a partial supersession on that ADR's header
+> rather than argued here: §11(e).
 
 > **Normative.** A run whose passes all complete but which observed nothing —
 > because no candidate was due, or because every due candidate's page resolved to
@@ -1250,10 +1253,13 @@ any job the scheduler ships disabled" is discharged by this ADR for one job, whi
 is a stacked addition under ADR-0083 §15's rule and not an amendment.
 
 > **Normative.** **(e) This ADR partially supersedes ADR-0212**, in exactly one
-> scope: **§6's disposition of the deletion race** — the case in which
-> `UnknownConversationError` is raised for the conversation a pass selected — in the
-> single respect of whether it **halts a run of many passes**. §9 above drops that
-> candidate and continues. §6's three normative clauses about where the watermark
+> scope: **§6's classification of the deletion race as a failed pass** — the case in
+> which `UnknownConversationError` is raised for the conversation a pass selected.
+> The replacement has three limbs and the record names all three, because the first
+> two are observable even in a run of one pass: under §9 above that exception is
+> **caught** rather than allowed to escape, it is **not logged as a job failure**,
+> and it **does not halt** a run of many passes — the run drops that candidate and
+> performs its next one. §6's three normative clauses about where the watermark
 > stands, its ruling that such a page is never re-read and none is owed, and every
 > other clause of ADR-0212, are untouched.
 
@@ -1276,11 +1282,14 @@ error' — is not a chunk that failed to be recorded, and does not halt anything
 deletion is an ordinary act the user performs (ADR-0074 §8), the listing already
 excludes the state, and the error is reachable from exactly one thing — a deletion
 landing between two calls — so it belongs on the carve-out's side once a run performs
-many passes over many conversations. Two consequences follow that ADR-0212 could not
-have had: the run's remaining budget would be spent on nothing, and — since §9 above
-propagates a halting pass's exception — the deletion would reach the operational log
-as `hub_scheduler_job_failed` with a store error's class, which is ADR-0004 §5
-reporting a user's act as a fault.
+many passes over many conversations. Two consequences follow, and the **second is
+why the halt is not the whole of the scope**: the run's remaining budget would be
+spent on nothing, and — since §9 above propagates a halting pass's exception — the
+deletion would reach the operational log as `hub_scheduler_job_failed` with a store
+error's class, which is ADR-0004 §5 reporting a user's act as a fault. That second
+one is observable in a run of **one** pass, where there is no later pass to skip and
+nothing about halting to see, which is exactly why the record above states the
+classification and the logging alongside the halt rather than the halt alone.
 
 **And §5's contiguity argument does not reach this skip.** §5 halts because "a cursor
 is one position in one order" and a partially-advanced position "no longer means what

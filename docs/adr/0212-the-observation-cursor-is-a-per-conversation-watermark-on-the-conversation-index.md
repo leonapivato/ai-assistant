@@ -1,6 +1,6 @@
 # 212. The observation cursor is a per-conversation watermark on the conversation index, and a pass advances it once
 
-- Status: Partially superseded by ADR-0218 (§6's disposition of the deletion race, in the single respect of whether it halts a run of many passes)
+- Status: Partially superseded by ADR-0218 (§6's classification of the deletion race as a failed pass: the raise is caught, is not logged as a job failure, and does not halt a run of many passes)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
@@ -40,22 +40,27 @@
   `core/protocols.py`, from `core/types.py`, from `core/config.py`, from
   `orchestration/observation.py`, or from an issue — is of its text as it stood at
   this ADR's base, `457caad4`, and not of its text on any later day.
-- Partially superseded: 2026-08-29 by ADR-0218 — **the deletion race drops the
-  candidate and the run continues; it does not halt a run of many passes.**
+- Partially superseded: 2026-08-29 by ADR-0218 — **the deletion race is not a
+  failed pass: the raise is caught, is not logged as a fault, and does not halt a
+  run of many passes.**
   [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
   §9 rules the disposition and §11(e) names the scope; this note records the ruling
   declared there.
 
-  **Replaced — §6's disposition of the deletion race, and only the run-level half of
-  it.** §6's prose calls the race a failed pass — "the pass's `record_observed` then
-  raises `UnknownConversationError` (§8), which is a refusal and not a commit"; "the
-  failed one" — and then inherits ADR-0111 §5 whole, whose first clause is "the run
-  stops immediately […] and returns without processing any later chunk". ADR-0218 §9
-  rules instead that such a raise is not a failure of that pass at all: the run drops
-  that candidate and performs its next one. A reader holding only this ADR, building
-  the multi-pass run ADR-0111 §4 provides for, would halt the whole run because a
-  user deleted a conversation while it ran — which is ADR-0070 §1's test met on its
-  first limb.
+  **Replaced — §6's classification of the deletion race as a failed pass, in three
+  limbs.** §6's prose calls the race a failed pass — "the pass's `record_observed`
+  then raises `UnknownConversationError` (§8), which is a refusal and not a commit";
+  "the failed one" — and then inherits ADR-0111 §5 whole, whose first clause is "the
+  run stops immediately […] and returns without processing any later chunk".
+  ADR-0218 §9 rules instead that such a raise is **not a failure of that pass at
+  all**: it is caught rather than allowed to escape, it is not logged as a fault, and
+  the run drops that candidate and performs its next one. The first two limbs are
+  observable in a run of **one** pass, so this record does not confine itself to the
+  halt. A reader holding only this ADR would let that exception escape — where the
+  job is scheduled, into `hub_scheduler_job_failed` with a store error's class — and,
+  building the multi-pass run ADR-0111 §4 provides for, would halt the whole run
+  because a user deleted a conversation while it ran. That is ADR-0070 §1's test met
+  on its first limb.
 
   **Why it is recorded rather than read as a gap.** This ADR has no run of many
   passes to halt: §3 fixes one conversation per pass, and the job that performs many
