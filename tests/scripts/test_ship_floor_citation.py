@@ -376,10 +376,13 @@ def test_the_package_name_is_not_a_symbol_either(tmp_path: Path) -> None:
     assert judged.reasons == [_FREE]
 
 
-#: The JavaScript and shell spellings a resolver has to enumerate, and does not
-#: here. The first five are what rounds 1-3 of PR #1803's own review found the
-#: pattern of the day missing; the class methods are round 4's finding, which is
-#: the one that ended the enumeration rather than extending it a fifth time.
+#: The spellings a resolver has to enumerate, and does not here. The first five are
+#: what rounds 1-3 of PR #1803's own review found the pattern of the day missing;
+#: the class methods are round 4's finding, which is the one that ended the
+#: enumeration rather than extending it a fifth time. The last three are languages
+#: this repository does not track today — round 8's finding, and the reason the
+#: fallback names what it *excludes*: a `.ts` file, a `.rb` one and an extensionless
+#: script all have to land in it by default rather than fall out of a list.
 _NON_PYTHON_SPELLINGS = (
     ("src/pkg/assets/app.js", "export function renderPane() {}\n"),
     ("src/pkg/assets/app.js", "export default class renderPane {}\n"),
@@ -392,6 +395,9 @@ _NON_PYTHON_SPELLINGS = (
     ("src/pkg/assets/app.js", "class Pane {\n  *renderPane() {}\n}\n"),
     ("scripts/tidy.sh", "renderPane() {\n  :\n}\n"),
     ("scripts/tidy.sh", "readonly renderPane=1\n"),
+    ("src/pkg/widget.ts", "export class renderPane {}\n"),
+    ("src/pkg/widget.rb", "def renderPane\nend\n"),
+    ("scripts/tidy", "#!/bin/sh\nrenderPane() { :; }\n"),
 )
 
 
@@ -399,16 +405,18 @@ _NON_PYTHON_SPELLINGS = (
 def test_a_word_a_changed_non_python_source_line_carries_is_a_symbol(
     tmp_path: Path, path: str, body: str
 ) -> None:
-    """The one reading left for the languages nothing here resolves.
+    """The one reading left for every language nothing here resolves.
 
-    `src/ai_assistant/interfaces/gateway/assets/app.js` and the three shell
-    scripts are first-party source, so a moved ADR naming something in them is
-    naming this repository's own ground. Resolving those names needs a grammar,
-    and four consecutive review rounds each found the grammar of the day short one
-    form — silently, and in the direction ADR-0209 §5 forbids. So the question is
-    asked of the diff instead: a word a changed line of one of those files carries
-    is a symbol, whatever spelling declared it. Nothing below turns on the
-    spelling, which is exactly the property that ends the recurrence.
+    `src/ai_assistant/interfaces/gateway/assets/app.js` and the shell scripts are
+    first-party source, so a moved ADR naming something in them is naming this
+    repository's own ground. Resolving those names needs a grammar, and four
+    consecutive review rounds each found the grammar of the day short one form —
+    silently, and in the direction ADR-0209 §5 forbids. So the question is asked of
+    the diff instead: a word a changed line of such a file carries is a symbol,
+    whatever spelling declared it, and whatever language it is written in. Nothing
+    below turns on either, which is exactly the property that ends the recurrence —
+    the last three cases are languages this repository does not track at all, and a
+    rule listing the languages it reads would clear on every one of them.
     """
     repo = tmp_path / "repo"
     _init(repo, {_ADR: _adr("Nothing.")}, {path: body})
@@ -797,6 +805,27 @@ def test_a_removed_line_beginning_with_two_dashes_is_content_not_a_header(
 
     assert judged.owed
     assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
+def test_documentation_markup_is_the_one_thing_the_fallback_leaves_out(
+    tmp_path: Path,
+) -> None:
+    """The exclusion, asserted directly rather than inferred from #1799's fixtures.
+
+    The fallback is scoped by what it *excludes*, so this is the whole of that
+    scope: a `.md` file's changed lines are not read, whatever they carry, because
+    a backticked word in a document is not a definition (ADR-0088 §1(b)) and the
+    corpus writes `Status`, `Proposed` and `None` into every ADR PR's own diff.
+    Here the token is one no vocabulary excuse covers — the PR's prose names
+    `renderPane` outright — and it still clears, because prose is still not source.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing.")}, {_PLAN: "the pane is drawn by `renderPane`\n"})
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is drawn by `renderPane`.")))
+
+    assert not judged.owed, judged.stderr
+    assert judged.reasons == [_FREE]
 
 
 #: A changed line whose own content is a well-formed file header, in both

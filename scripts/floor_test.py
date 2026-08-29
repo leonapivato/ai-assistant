@@ -70,16 +70,14 @@ not parse — and it does, through the same ``except`` every other test here fal
 into. The search is deliberately generous in every other direction, per ADR-0209
 §5's asymmetry.
 
-**Python is resolved; the other two languages are answered from the diff side
-instead.** All but four of this repository's source files are Python, and those
-are read with :mod:`ast`, so what counts as a definition is decided by the
-language rather than by an enumeration of it. Both endpoints are read,
-deduplicated by blob, so a definition the PR itself deletes still resolves on the
-side that has it. The four that are left — one JavaScript file and three shell
-scripts — are not resolved at all. A token naming no Python definition is still a
-symbol where a changed line of one of the PR's **non-Python source** files
-carries it as a word: the rule this module applied to every token before #1799,
-kept here as the fallback.
+**Python is resolved; every other language is answered from the diff side
+instead.** Nearly all of this repository's code is Python, and it is read with
+:mod:`ast`, so what counts as a definition is decided by the language rather than
+by an enumeration of it. Both endpoints are read, deduplicated by blob, so a
+definition the PR itself deletes still resolves on the side that has it. Nothing
+else is resolved at all: a token naming no Python definition is still a symbol
+where a changed line of one of the PR's other files carries it as a word — the
+rule this module applied to every token before #1799, kept here as the fallback.
 
 **The fallback is what ends an enumeration, and dropping those files would
 under-bind.** Four consecutive rounds of PR #1803's own review each found a
@@ -89,10 +87,18 @@ behind ``async``/``static``/``get`` — so the pattern is deleted rather than
 extended a fifth time. Reading only Python was the other way to delete it, and it
 is the direction ADR-0209 §5 forbids: an ADR naming a function in ``app.js`` that
 a PR's diff changes would clear, and §3's path test answers for a cited *path*,
-never for a function inside one. What is left over-binds only where a moved ADR
-names a word some JavaScript or shell line of the diff happens to carry — the
-priced direction, and rare on four tracked files. Prose is still not source,
-which is the whole of what #1799 was matching.
+never for a function inside one.
+
+**So the fallback names what it excludes, never what it includes.** Its scope is
+"not Python, and not documentation markup", because a *list of source languages*
+is the same decaying enumeration one layer up: the day a ``.ts`` file lands, a
+moved ADR naming a class inside it clears, silently, by omission — which is
+ADR-0199 §3's argument and ADR-0209 §6's, and it is why §6 is written as a rule
+rather than a list. Stated as an exclusion, an unforeseen language falls *into*
+the fallback and over-binds, which §5 prices as acceptable. Only prose is kept
+out, and that is #1799's whole holding: ``docs/adr/template.md`` writes
+``- Status: Proposed`` into every ADR PR's own diff, so admitting a document
+would restore the unconditional match between any two ADR lanes.
 
 **No pattern is left anywhere in this path, and that is the point.** The line
 reader for a Python file :mod:`ast` refuses was the last one, and adversarial
@@ -187,12 +193,15 @@ _DEFINITION_RE = re.compile(
 
 # --- §3's "symbol": what the repository actually defines -----------------------
 #
-# The source this repository writes, split by how each half is read. A definition
-# in a language it does not write is not one it can have, and a `docs/**` or `.md`
-# "definition" is prose — which is the whole of what #1799 was matching, and the
-# reason the fallback below is scoped to source rather than to "not Python".
+# Python is resolved (`defined_names`); everything else is answered from the diff
+# side (`Pr.non_python_changed_lines`). The second set is stated as an EXCLUSION
+# and not as a list of languages, because a list is an enumeration that decays
+# silently in the forbidden direction: the day a `.ts` file lands, a moved ADR
+# naming a class inside it would clear by omission. Documentation markup is the one
+# thing kept out, and it is the whole of what #1799 was matching — `Status`,
+# `Proposed` and `None` are written into every ADR PR's own diff.
 _PYTHON_SUFFIX = ".py"
-_OTHER_SOURCE_SUFFIXES = (".js", ".sh")
+_PROSE_SUFFIXES = (".md", ".rst")
 
 #: Fields in one `git ls-tree -r -z` record's first half, and in one
 #: `git cat-file --batch` header: `<mode> <type> <oid>` and `<oid> <type> <size>`.
@@ -210,9 +219,9 @@ _GIT_RECORD_FIELDS = 3
 # ("an enumeration is a proxy for the property that is wanted, and it decays"), and
 # `ast` is the property itself: every name Python *binds*, decided by Python.
 #
-# There is no second pattern for the other two languages. A name in one of the four
-# JavaScript and shell files is reached by `Pr.non_python_changed_lines` instead —
-# the diff side of the same question, which needs no grammar at all.
+# There is no second pattern for any other language. A name in one of those files
+# is reached by `Pr.non_python_changed_lines` instead — the diff side of the same
+# question, which needs no grammar at all.
 
 # What a `Store` context does not cover, because Python's own node types carry the
 # name instead of a `Name` node.
@@ -227,9 +236,9 @@ _NAMED_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 # of PR #1803, round 6).
 #
 # Escaping cannot hide the suffix or split the line: a newline inside a quoted path
-# is written `\n` and the header stays one physical line, and `.js`/`.sh` are ASCII
-# and are never themselves escaped. A `diff --git` line resets the section, so a
-# patch is attributed to files with no second git invocation.
+# is written `\n` and the header stays one physical line, and the suffixes read here
+# are ASCII and are never themselves escaped. A `diff --git` line resets the
+# section, so a patch is attributed to files with no second git invocation.
 _DIFF_PATH_RE = re.compile(r'^(?:\+\+\+|---) "?[ab]/(?P<path>.*?)"?$')
 
 # Resolved once: `subprocess.run` with a bare "git" is a partial executable path,
@@ -333,6 +342,22 @@ def _blob(repo: Path, commit: str, path: str) -> str:
     """Return one endpoint's whole content, or raise :class:`UnevaluableError`."""
     raw = _run_git(repo, ["show", f"{commit}:{path}"])
     return raw.decode("utf-8", errors="replace")
+
+
+def _feeds_fallback(path: str) -> bool:
+    """Whether a changed file's lines answer §3's symbol test by the word rule.
+
+    Everything that is neither Python — which :func:`defined_names` resolves — nor
+    documentation markup, which #1799 held is not source. Stated as an exclusion so
+    that a language nobody has added yet lands here rather than falling out.
+
+    Args:
+        path: One endpoint's pathname, as the patch's own header spells it.
+
+    Returns:
+        Whether the section's added and removed lines feed the fallback.
+    """
+    return not path.endswith(_PYTHON_SUFFIX) and not path.endswith(_PROSE_SUFFIXES)
 
 
 def _python_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]:
@@ -458,8 +483,8 @@ def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
     forbids the converse. A file that will not parse is the one case it cannot be
     generous about, so that one raises and §6 binds.
 
-    JavaScript and shell are deliberately absent: nothing resolves them, and a
-    name of theirs reaches §3 through :attr:`Pr.non_python_changed_lines` instead.
+    Every other language is deliberately absent: nothing resolves them, and a name
+    of theirs reaches §3 through :attr:`Pr.non_python_changed_lines` instead.
 
     Args:
         repo: The checkout to read.
@@ -528,10 +553,10 @@ class Pr:
         (adversarial review of PR #1803, rounds 6 and 7).
 
         Returns:
-            One ``(is non-Python source, changed lines)`` pair per section, in
-            patch order. A section is source where **either** endpoint's pathname
-            carries one of :data:`_OTHER_SOURCE_SUFFIXES`, so a rename into or out
-            of one of those languages is admitted — the priced direction.
+            One ``(feeds the fallback, changed lines)`` pair per section, in
+            patch order. A section feeds it where **either** endpoint's pathname is
+            neither Python nor documentation markup, so a rename into or out of a
+            fallback language is admitted — the priced direction.
         """
         sections: list[tuple[bool, list[str]]] = []
         changed: list[str] = []
@@ -544,7 +569,7 @@ class Pr:
             elif line.startswith("@@ "):
                 in_hunk = True
             elif not in_hunk and (header := _DIFF_PATH_RE.match(line)) is not None:
-                source = source or header["path"].endswith(_OTHER_SOURCE_SUFFIXES)
+                source = source or _feeds_fallback(header["path"])
             elif not in_hunk and _FILE_HEADER_RE.match(line) is not None:
                 continue
             elif line[:1] in {"+", "-"}:
@@ -635,10 +660,15 @@ class Pr:
         applied to every token before #1799, narrowed to where it is still the
         best available reading.
 
-        **Scoped to source, and not to "every file that is not Python."** Prose is
-        what #1799 was matching: `docs/adr/template.md` puts `- Status: Proposed`
-        at the head of every ADR, so admitting `.md` here would restore the
-        unconditional match between any two ADR lanes that the resolver closed.
+        **The scope is stated as an exclusion, and only prose is excluded.** A list
+        of the languages this reads would be one more decaying enumeration: the day
+        a `.ts` file lands, a moved ADR naming a class inside it clears by omission
+        — silently, and in the direction §5 forbids. Named the other way round, an
+        unforeseen language over-binds instead, which §5 prices as acceptable. What
+        stays out is documentation markup, which is the whole of what #1799 was
+        matching: `docs/adr/template.md` puts `- Status: Proposed` at the head of
+        every ADR, so admitting a document restores the unconditional match between
+        any two ADR lanes that the resolver closed.
         """
         return "\n".join(line for source, lines in self._sections if source for line in lines)
 
