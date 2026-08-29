@@ -410,6 +410,17 @@ residue with the condition that fires it.
 > writer gains a provider call it did not have, no new model seam is created, and no
 > producer that makes no model pass makes a proposal.
 
+> **Normative.** **The producer that makes one today is `Observer`, and it is named
+> rather than left to the eligibility test.** An observer proposes a record from
+> material it was handed and its proposal is the first placement that record could
+> carry. `orchestration/consolidation.py` is also model-backed — it is constructed with
+> a `ModelProvider` — and it does **not** propose: what it produces is *derived from
+> records of this store*, so ADR-0204 §5's inheritance, generalised by §3, already
+> gives it the narrowest reach over everything it consolidated, and a second narrowing
+> keyed on the consolidated text would be a model re-judging material another model has
+> already judged. Widening the set of producers that propose is a later decision and
+> §12 records it.
+
 > **Normative.** It **never runs at read**. No supply site, no composing stage, no
 > delivery path and no rendering consults a model, or any classifier, to decide a
 > placement. The read is a field read, and ADR-0199 §2's decision procedure is
@@ -427,9 +438,9 @@ residue with the condition that fires it.
 
 **#1719's lean was "every belief write, budgeted; episodes inherit", and this is that
 lean given a mechanism.** "Every belief write" is unreachable as stated: a calendar
-import, a `MemoryStore.add` from a reader, a fold and a consolidation are all belief
-writes and none of them has a model in front of it. Riding the pass a producer already
-makes lands on the writes that actually matter — `learning/observer.py` proposes
+import, a `MemoryStore.add` from a reader and a fold in `memory/ingest.py` are all
+belief writes with no model in front of them. Riding the pass a producer already makes
+lands on the writes that actually matter — `learning/observer.py` proposes
 beliefs from episodes with a provider in hand, and that is where a belief the owner
 never explicitly typed comes from — and it makes "budgeted" exact rather than
 aspirational: the budget is the pass's, and the count of provider calls is unchanged.
@@ -581,10 +592,24 @@ would fail that test on the first turn.
 
 ### 7. The acts: one flag at write, two operations after the fact
 
-> **Normative.** The owner's explicit act at **write** is a flag on the existing
-> `learn` path that narrows the record being written to reach `OWNER`, setter
-> `OWNER_ACT`. It takes no value, it is a narrowing only, and its absence is not an act
-> of any kind.
+> **Normative.** The owner's explicit act at **write** is one additive member on
+> `FeedbackEvent` (`core/types.py`), `guarded: bool` defaulting to `False`, carried
+> unchanged through `AssistantEngine.learn` — whose signature does not move — and
+> honoured by the `FeedbackProcessor` that builds the record: where it is `True` every
+> record that event produces is written with reach `OWNER` and setter `OWNER_ACT`.
+> It is a narrowing only, and `False` is not an act of any kind.
+
+> **Normative.** It **ships with its route**, `assistant learn --guarded`, on
+> `about_person`'s own precedent in the same class: ADR-0100 §4's member ships with
+> `assistant learn --about-person` because "a field with no route would leave every
+> third-party belief constructing `about_person=None`". A `guarded` nobody can set is
+> the same defect.
+
+> **Normative.** The member is on `FeedbackEvent` and **not** encoded by an adapter,
+> because deciding a record's placement is not adapter work: golden rule 3 keeps
+> business logic out of `interfaces/`, and an adapter that translated a flag into a
+> placement would be deciding disclosure in the thinnest layer in the system. The
+> adapter sets a field; `learning/` reads it.
 
 > **Normative.** The owner's explicit act **after the fact** is two members added to
 > the `AssistantEngine` Protocol (`core/protocols.py`), whose signatures are exactly:
@@ -738,9 +763,11 @@ ADR-0201 closed.
 
 > **Normative.** The `core` change is exactly: `MemoryBase` gains `placement`;
 > `Provenance` loses `supplied_withheld_content`; `Placement`, `PlacementReach` and
-> `PlacementSetter` are added; `RoutableOperation` gains `GUARD` and `UNGUARD`; and the
-> `AssistantEngine` **Protocol** gains `guard` and `unguard` with §7's signatures. No
-> other Protocol and no member of one, no `Settings` field, no `ContextFacet`, no
+> `PlacementSetter` are added; `FeedbackEvent` gains `guarded: bool = False`;
+> `RoutableOperation` gains `GUARD` and `UNGUARD`; and the `AssistantEngine`
+> **Protocol** gains `guard` and `unguard` with §7's signatures. No other Protocol and
+> no member of one — `FeedbackProcessor`'s signature does not move, because the member
+> rides the event it already takes — no `Settings` field, no `ContextFacet`, no
 > `NotificationCandidate` member.
 
 > **Normative.** The Protocol change is the reason this ADR is ratified and merged
@@ -865,10 +892,21 @@ ADR-0201 closed.
 > which the precedence arms above cannot reach. Three arms: a proposal on a record whose
 > placement is the default *succeeds* and writes reach `OWNER` with setter `PROPOSED`,
 > so the mechanism is shown to work at all; the producer's provider-call **count** over
-> a pass is what it is without this decision, so no call is added; and every read path —
-> supply, composition, delivery and any rendering — makes **zero** provider calls, which
-> is §4's second clause and is the one an implementation could otherwise breach while
-> passing every other arm here.
+> a pass is what it is without this decision, so no call is added; and on every read
+> path — supply, composition, delivery and any rendering — the provider-call count is
+> likewise **unchanged from what it is without this decision**, so a turn whose reply
+> ADR-0170's composing stage produces still makes that stage's own call and no other.
+> The arm is *no additional call*, and it is not *no call*: composition is
+> model-backed by construction, and an arm demanding zero calls there would be a test
+> no conforming implementation could pass. What it catches is the breach §4's second
+> clause exists for — a classification call added at a read — which every other arm
+> here would let through.
+
+> **Normative.** The lane pins **the write-time act**: a `FeedbackEvent` carrying
+> `guarded=True` produces records placed reach `OWNER` with setter `OWNER_ACT`; one
+> carrying the default produces records placed by §6's default; and the flag reaches the
+> processor unread by any adapter, so the arm is taken at the `learning/` seam and not
+> through the CLI.
 
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
@@ -913,13 +951,17 @@ ADR-0201 closed.
 > when it opens, because a change spanning `core`, `orchestration`, `wire` and
 > `testing` is otherwise more than one change.
 
-> **Normative.** §4's model proposal is a **second change**, in `learning/` and its
-> tests alone. It lands after the first and depends on it, and it changes no `core`
-> definition and no Protocol.
+> **Normative.** §4's model proposal **and** the `FeedbackProcessor`'s honouring of
+> `FeedbackEvent.guarded` are a **second change**, in `learning/` and its tests alone.
+> It lands after the first and depends on it, and it changes no `core` definition and
+> no Protocol. Between the first change and this one the member exists and nothing
+> honours it, which is behaviour-neutral because its default is `False`.
 
-> **Normative.** §7's `learn` flag and any rendering of a placement are a **third
-> change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface adapters are
-> thin"). It lands after the first and is independent of the second.
+> **Normative.** `assistant learn --guarded` and any rendering of a placement are a
+> **third change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
+> adapters are thin"): the adapter sets `FeedbackEvent.guarded` and decides nothing.
+> It lands after the second, because a flag that reaches a processor which ignores it
+> is a control that silently does nothing.
 
 > **Normative.** No lane reads the ordering above as licence to widen any of the three.
 > Anything not named in one of them is a change of its own.
@@ -943,6 +985,12 @@ ADR-0201 closed.
 > own question and fired by a store on which the accumulation is measured, as #1775
 > measured ADR-0204's before ADR-0210 bounded it. Until then the two ratified routes —
 > a supersession, and a class ruling under ADR-0199 §6 — are the answer.
+
+> **Normative.** **Widening the set of producers that propose a placement** (§4).
+> Fires when a model-backed producer other than `Observer` writes a record that is not
+> derived from records of this store, or when a measurement shows the observer's
+> proposals leave a class of record unreached. Until then `Observer` is the only
+> proposer and §3's inheritance places everything else.
 
 > **Normative.** **Supplying a learned preference to the proposer** (§5). Fires with an
 > ADR that gives a model-backed producer an input beside the episodes it is handed —
@@ -1065,7 +1113,9 @@ other than the derivative.
 **A model proposal on every belief write.** #1719's stated lean. Rejected as unreachable
 rather than as wrong: a fold, a calendar import and a reader's proposal are belief writes
 with no model in front of them, so "every write" would mean minting a provider call at
-seams that have none — a new model seam in `memory/`, which golden rule 4 and ADR-0015 §5
+seams that have none — and the model-backed seam that is *not* the observer,
+`orchestration/consolidation.py`, produces records derived from records of this store,
+which §3's inheritance already places — a new model seam in `memory/`, which golden rule 4 and ADR-0015 §5
 would each want an ADR for. Riding the pass a producer already makes covers the writes
 that carry a model's judgement and makes "budgeted" exact.
 
