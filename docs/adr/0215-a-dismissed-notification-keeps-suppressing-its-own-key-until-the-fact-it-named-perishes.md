@@ -309,13 +309,20 @@ yields." Every word of that argument holds for a *dismissed* record under §2, a
 without this clause a deployment with a short retention would reproduce #1372 on a
 slower schedule.
 
-**It adds no unbounded case.** The guard's reach never exceeds the candidate's
-declared expiry. For a record dismissed and not dropped it is exactly
-`max(ceased + retention, expiry)`, and `expiry` there is a bound ADR-0130 §7
-already granted: the same record undismissed is unpurgeable until that same instant
-today, because it is actionable until then. For every other record — one a `DROP`
-reached, one that simply expired, one whose candidate declared no expiry at all —
-the reach is `ceased + retention` and this clause adds nothing.
+**It bounds what it adds, and lengthens nothing that was already there.** The
+extension is the second half of the guard and only that: a record going on speaking
+after its dismissal, bounded by the candidate's own declared expiry and by nothing
+else. The record's *retention* is ADR-0130 §7's, untouched, and it may already
+outlast that expiry — a record dismissed at `D` whose candidate expired at `D + 1
+day` under the default seven-day retention was purgeable strictly after `D + 7
+days` before this ADR and still is. So for a record dismissed and not dropped the
+guard's reach is `max(ceased + retention, expiry)`, and **each half is a bound the
+corpus already granted**: the first is §7's retention, and the second is §7's too,
+since the same record undismissed is unpurgeable until its expiry because it is
+actionable until then. Neither term is new and no term is unbounded. For every
+other record — one a `DROP` reached, one that simply expired, one whose candidate
+declared no expiry at all — the reach is `ceased + retention` and this clause adds
+nothing.
 
 ### 5. What is kept whole, and no clause here may be read as reaching it
 
