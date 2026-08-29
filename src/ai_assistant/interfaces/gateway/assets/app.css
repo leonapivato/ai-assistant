@@ -455,15 +455,21 @@ code {
  * the eye is looking for, and it is a hub value of no bounded length, so competing
  * for horizontal space with two timestamps is the one arrangement that cannot work.
  *
- * `overflow-wrap` because an id has no spaces to break at: without it a long one
- * pushes the row past the viewport, which is the class of defect a hand drive of
- * this page has already found once (#1385's "Remo ve").
+ * **No `overflow-wrap` of its own, deliberately.** An id has no spaces to break at,
+ * so a long one really would push the row past the viewport — but `body` already
+ * declares `overflow-wrap: anywhere` and it inherits, which is the arrangement issue
+ * #1340 chose in terms: "one declaration covers every surface on the page, including
+ * ones added later, where a rule per class would owe each of them a clause". An
+ * earlier draft of this rule restated it here, which is a second place for the sheet
+ * to drift and buys nothing. What holds the line is that the *page* does not scroll
+ * sideways for an unbroken id, and that is driven at 390px with one far wider than
+ * the viewport — the class of defect a hand drive of this page has already found once
+ * (#1385's "Remo ve").
  */
 .conversation-name {
   flex: 1 1 100%;
   margin: 0;
   font-weight: 600;
-  overflow-wrap: anywhere;
 }
 
 /*
