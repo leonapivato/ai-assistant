@@ -1437,6 +1437,29 @@ class Provenance(BaseModel):
     ADR-0199 §2 forbids as a decision procedure; this is the one stage upstream that
     is decidable from recorded origin, and it over-approximates deliberately.
 
+    **One exception, on one class of record** (ADR-0210 §1, §8). On an episode
+    captured from an operation whose **output channel's audience is unbounded**, both
+    routes above range over less than the whole supply: over the members of that
+    turn's supply a relevance read taken with the turn's own goal statement returned
+    — the belief composition and ADR-0158's episodic supplement, ADR-0074 §5's second
+    and third groups — together with the turn's context facets, and never over a
+    member the supply holds only because it stands in ADR-0074 §5's first group, the
+    conversation's own recent turns. Both routes survive and neither is dropped; what
+    narrows is the set they range over, and the test is what a relevance read
+    *returned* rather than which group the composition finally placed the record in.
+    The **withholding is not narrowed with it**: ADR-0204 §3 still removes such a
+    record from that turn's supply wherever in it the record stood, so what a member
+    of the first group loses is the power to set this field and nothing else. On
+    every **other** record — an episode of a bounded-channel turn, a belief, a record
+    written before that decision — this field is exactly what ADR-0204 §1 says.
+
+    **And that exception is why the field stops being monotone** (#1775). A
+    conversation tail is in the supply because it is *the conversation* and not
+    because it answered the question (ADR-0074 §5), so before ADR-0210 one spoken
+    turn's withholding stamped its episode, the next turn's tail carried that
+    episode, ADR-0204 §3 withheld it, and the mark propagated through the episodic
+    record for as long as the conversation ran — on any store, whatever was asked.
+
     **On this class rather than on :class:`EpisodicMemory`** (ADR-0204 §1), by
     :class:`MemoryBase`'s own placement rule — a field is placed by which question
     it answers. What material stood in front of the producer is where a record came
@@ -1541,10 +1564,15 @@ class Provenance(BaseModel):
             "Whether content ADR-0199 §3 withholds from a channel of unbounded "
             "audience stood in this record's warrant (ADR-0204 §1) — because the "
             "supply the turn that produced it ran over held such content, or "
-            "because it was derived from a record whose own field is set. A supply "
-            "site for a channel of unbounded audience withholds a record carrying "
-            "``True`` (ADR-0204 §3); a bounded channel's supply applies the test to "
-            "nothing."
+            "because it was derived from a record whose own field is set. On an "
+            "episode captured from an operation whose own output channel's audience "
+            "is unbounded, that supply is narrowed to what a relevance read taken "
+            "with the turn's goal statement returned, plus the turn's context "
+            "facets, and excludes the conversation's own recent turns (ADR-0210 "
+            "§1); on every other record it is the whole supply. A supply site for a "
+            "channel of unbounded audience withholds a record carrying ``True`` "
+            "(ADR-0204 §3), whichever group of the supply it stood in; a bounded "
+            "channel's supply applies the test to nothing."
         ),
     )
 
