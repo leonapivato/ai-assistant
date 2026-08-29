@@ -667,6 +667,16 @@ extra="forbid"` — neither of which is true of this one.
 > never-reissued clause breached by the one path that writes a stamp without going
 > through a write.
 
+> **Normative.** **The issuer survives a crash and not only a close**, which is §1's
+> own word and names the trap the reopen arms cannot reach: an implementation holding
+> the issuer in memory and flushing it on `close` passes every one of them and
+> reissues after a kill. `SqliteMemoryStore`'s test drives a subprocess that stores
+> records and is killed without closing the store, having first `delete`d the
+> highest-revision row; after the crash a record is stored at that id and an
+> `IF_UNCHANGED` carrying the pre-crash revision is refused. Reconstructing an issuer
+> from the rows currently present is what §1 forbids by name, and it is what this arm
+> catches — the deleted row is precisely the value no surviving row records.
+
 > **Normative.** **The migration rewrites no payload, asserted over the bytes.** The
 > migration test snapshots every legacy row's `data` blob before the migration runs
 > and compares it byte for byte afterwards. §10's clause is about the bytes and not
