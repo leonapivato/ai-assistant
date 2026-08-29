@@ -66,11 +66,12 @@ answering it twice would restore the match this closes.
 been evaluated, and the answer is that it is not a symbol. What binds under §6 is
 the resolver failing — an endpoint git will not read — and it does, through the
 same ``except`` every other test here falls into. The search is deliberately
-generous in the other direction, per ADR-0209 §5's asymmetry: every ``def``,
-``class``, ``function``, ``const``/``let``/``var``, shell function and bare
-binding — ``export``ed or not — in Python, JavaScript and shell alike, at *both*
-endpoints, so a definition the PR itself deletes still resolves on the side that
-has it.
+generous in the other direction, per ADR-0209 §5's asymmetry. Python — 664 of the
+667 source files — is read with :mod:`ast` rather than with a pattern, so what
+counts as a definition is decided by the language and not by an enumeration of it;
+JavaScript and shell are read line by line. Both endpoints are read, deduplicated
+by blob, so a definition the PR itself deletes still resolves on the side that has
+it.
 
 **One implementation, called from one place.** ADR-0209 §6 requires that
 ``scripts/ship.sh``'s acceptance loop and its ``--drill`` share it, and issue
@@ -109,8 +110,12 @@ import sys
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from citations import FILE, PATH, SYMBOL, adr_numbers, classified_tokens, word_in
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # --- ADR-0027 §3's floor, split by ADR-0209 §§1-2 -----------------------------
 #
@@ -153,47 +158,43 @@ _DEFINITION_RE = re.compile(
 # The source this repository writes. A definition in a language it does not write
 # is not one it can have, and a `docs/**` or `.md` "definition" is prose — which
 # is the whole of what #1799 was matching.
-_SOURCE_PATHSPECS = ("*.py", "*.js", "*.sh")
+_SOURCE_SUFFIXES = (".py", ".js", ".sh")
 
-# Handed to `git grep -E`, so POSIX ERE and nothing richer. It only has to be a
-# *superset* of `_DEFINED_NAME_RE` below, which re-reads every line it returns:
-# git narrows ~60k lines out of the tree and Python decides which of them defines
-# what. The leading class is negated rather than an ASCII identifier alphabet, so
-# a Unicode identifier reaches the second reader rather than being dropped before
-# it — dropping one would be an under-binding, the direction ADR-0209 §5 forbids.
-#
-# **`[[:blank:]]`, never `\t`.** POSIX ERE has no escape for a tab, and glibc reads
-# `\t` as a literal `t` — so `[^ \t=(:#]+` excluded the letter `t` from every name
-# it would accept, and `_artifact_for_tree() {` matched nothing. That is silent and
-# it under-binds, which is why `tests/scripts/test_floor_definition_index.py` asserts
-# over this repository's own source rather than over a handful of written-out lines.
-_DEFINITION_GREP = (
-    r"^[[:blank:]]*([^[:blank:]=:(#]+[[:blank:]]*(\(\)|(:[^=]*)?=)"
-    r"|(export[[:blank:]]+(default[[:blank:]]+)?)?(async[[:blank:]]+)?"
-    r"((def|class|const|let|var|local|readonly|declare|typeset|export)[[:blank:]]"
-    r"|function[[:blank:]*]))"
-)
+#: Fields in one `git ls-tree -r -z` record's first half, and in one
+#: `git cat-file --batch` header: `<mode> <type> <oid>` and `<oid> <type> <size>`.
+#: Fewer than three of either is git answering something this cannot read, and §6
+#: binds rather than guessing at the boundary.
+_GIT_RECORD_FIELDS = 3
 
-# A definition, across the three languages `_SOURCE_PATHSPECS` admits: a `def`,
-# `class` or `function` statement; a declaration under any of the keywords the
-# other two use (`const`, `let`, `var`, `local`, `readonly`, `declare`, `typeset`,
-# `export`), with the flags `declare -a` and friends take; a shell function
-# header; or a bare binding, which is what a constant, an enum member and an
-# annotated attribute all look like. Indentation is not read, so a local
-# counts too — over-binding, which ADR-0209 §5 prices as acceptable, against an
-# under-binding it forbids.
+# **Python is read with `ast`, not with a pattern**, because a pattern here is an
+# enumeration of a grammar and the grammar keeps winning. Three successive rounds
+# of PR #1803's own review found a form the enumeration of the day did not have —
+# `export function`, `async function*`, `type UtcInstant = ...` — and each miss is
+# silent and one-directional: a name the resolver cannot see is a symbol judged not
+# to be one, so a floor path clears and an owed round is not charged. ADR-0209 §6
+# makes exactly this argument about its own tests ("an enumeration is a proxy for
+# the property that is wanted, and it decays"), and `ast` is the property itself:
+# every name Python *binds*, decided by Python.
 #
-# JavaScript's own spellings are read for the same reason and are worth the two
-# extra branches: `export function render()`, `export default class Pane`,
-# `export const LIMIT = 5`, and the generator star in either position —
-# `src/ai_assistant/interfaces/gateway/assets/app.js` writes
-# `async function* streamValues(response)` today. A name the resolver cannot see
-# is a symbol judged not to be one, which is the under-binding ADR-0209 §5 forbids
-# rather than the over-binding it prices. Adversarial review of PR #1803, rounds
-# 1 and 2.
+# 664 of this repository's 667 source files are Python, so what is left to a
+# pattern is one JavaScript file and three shell scripts — a surface small enough
+# for `tests/scripts/test_floor_definition_index.py` to hold against an
+# independently written reader.
+
+# What a `Store` context does not cover, because Python's own node types carry the
+# name instead of a `Name` node.
+_NAMED_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+# A definition in the two line-oriented languages: a `function` statement, with the
+# generator star in either position; a declaration under any keyword JavaScript or
+# shell uses, with the flags `declare -a` and friends take; a shell function header;
+# or a bare binding. `export` is read because a JavaScript module writes its public
+# surface with it, and a public name is the one a moved ADR is likeliest to cite.
+# Indentation is not read, so a local counts too — over-binding, which ADR-0209 §5
+# prices as acceptable, against the under-binding it forbids.
 _DEFINED_NAME_RE = re.compile(
     r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?"
-    r"(?:(?:def|class)[ \t]+|function(?:[ \t]*\*[ \t]*|[ \t]+))(?P<kw>[^\W\d]\w*)"
+    r"(?:class[ \t]+|function(?:[ \t]*\*[ \t]*|[ \t]+))(?P<kw>[^\W\d]\w*)"
     r"|^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?"
     r"(?:const|let|var|local|readonly|declare|typeset|export)"
     r"(?:[ \t]+-+[^ \t]+)*[ \t]+(?P<decl>[^\W\d]\w*)"
@@ -279,23 +280,22 @@ class UnevaluableError(Exception):
     """A test could not be evaluated, so ADR-0209 §6 binds the base move."""
 
 
-def _run_git(repo: Path, args: list[str], *, allowed: tuple[int, ...] = (0,)) -> bytes:
+def _run_git(repo: Path, args: list[str], *, stdin: bytes | None = None) -> bytes:
     """Return a git command's stdout, raising :class:`UnevaluableError` on failure.
 
     Args:
         repo: The checkout to run in.
         args: The command, without the leading ``git``.
-        allowed: The exit statuses that are not failures. ``git grep`` reports
-            "nothing matched" as 1, which is an answer rather than an error;
-            everything else this module runs answers only with 0.
+        stdin: Bytes to write to the command, for the one that reads a request
+            list rather than taking it in argv.
     """
     try:
         result = subprocess.run(  # noqa: S603  # resolved git path, no shell
-            [_GIT, *args], cwd=repo, capture_output=True, check=False
+            [_GIT, *args], cwd=repo, capture_output=True, check=False, input=stdin
         )
     except OSError as exc:  # pragma: no cover - git is on PATH wherever ship runs
         raise UnevaluableError(f"git could not be run ({exc})") from exc
-    if result.returncode not in allowed:
+    if result.returncode != 0:
         raise UnevaluableError(f"`git {' '.join(args[:2])}` failed for this endpoint")
     return result.stdout
 
@@ -306,41 +306,113 @@ def _blob(repo: Path, commit: str, path: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def defined_names_at(repo: Path, commit: str) -> set[str]:
-    """Every name this repository's source defines at ``commit``.
+def _source_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]:
+    """Every distinct source blob across ``commits``, with a path it appears under.
 
-    The set is over-inclusive by construction — see :data:`_DEFINED_NAME_RE` —
-    because it decides whether a backticked token is a *symbol* at all, and
-    ADR-0209 §5 prices over-binding as acceptable and forbids the converse.
+    Deduplicated by object id, which is what makes reading two endpoints cost one
+    pass and a little: the base and the head of a pull request share every file the
+    PR does not touch, and git names those files by the same blob.
 
     Args:
         repo: The checkout to read.
-        commit: The commit to read it at.
+        commits: The commits to read, in the order their duplicates should resolve.
 
     Returns:
-        The names, bare and unqualified.
+        ``(path, content)`` per distinct blob.
 
     Raises:
-        UnevaluableError: git would not read the tree at that commit, which is
-            ADR-0209 §6's case and not this one's.
+        UnevaluableError: git would not list or read a tree (ADR-0209 §6).
     """
+    wanted: dict[str, str] = {}
+    for commit in commits:
+        listing = _run_git(repo, ["ls-tree", "-r", "-z", commit]).split(b"\0")
+        for record in listing:
+            if not record:
+                continue
+            info, _, raw_path = record.partition(b"\t")
+            name = raw_path.decode("utf-8", errors="surrogateescape")
+            fields = info.split(b" ")
+            if len(fields) < _GIT_RECORD_FIELDS or not name.endswith(_SOURCE_SUFFIXES):
+                continue
+            wanted.setdefault(fields[2].decode(), name)
+
+    if not wanted:
+        return []
+    # One `cat-file --batch`, NUL-delimited in both directions: a pathname is never
+    # written into it (object ids are), and the answer is read back by length.
     raw = _run_git(
         repo,
-        [
-            "grep",
-            "-h",  # names are all this reads; the file they came from is not asked
-            "-I",  # a binary file has no definitions to find
-            "-E",
-            "--no-color",
-            _DEFINITION_GREP,
-            commit,
-            "--",
-            *_SOURCE_PATHSPECS,
-        ],
-        allowed=(0, 1),
+        ["cat-file", "--batch", "-z"],
+        stdin=b"".join(oid.encode() + b"\0" for oid in wanted),
     )
+    blobs: list[tuple[str, bytes]] = []
+    offset = 0
+    for name in wanted.values():
+        # `<oid> <type> <size>\n<contents>\n`, one record per requested object.
+        end = raw.index(b"\n", offset)
+        header = raw[offset:end].split(b" ")
+        if len(header) < _GIT_RECORD_FIELDS:
+            raise UnevaluableError(f"`git cat-file` would not read a blob ({header!r})")
+        size = int(header[2])
+        start = end + 1
+        blobs.append((name, raw[start : start + size]))
+        offset = start + size + 1
+    return blobs
+
+
+def _python_definitions(source: bytes) -> set[str]:
+    """Every name a Python module binds, decided by Python.
+
+    ``Store`` context is the language's own statement of "a name is being bound
+    here", so it reaches an assignment, an annotated attribute, a `for` target, a
+    `with ... as`, a walrus and a comprehension target without any of them being
+    enumerated. What is added beside it is every node type that carries its bound
+    name as a plain ``str`` rather than as a :class:`ast.Name`: a `def`, a `class`,
+    a `type` alias, `global`/`nonlocal`, a `case` capture and an `except ... as`.
+
+    **An import is not a definition.** ``from ai_assistant.core import types`` binds
+    two names that this module defines nowhere, and reading them as definitions is
+    PR #1786's shape exactly — the package name matching every diff that mentions
+    it. Where an imported name is a real symbol, the file that defines it is in this
+    same tree and supplies it. A parameter is excluded for the same reason: it binds
+    a name without defining anything ADR-0088 §1's citation form could name.
+
+    Args:
+        source: One file's bytes.
+
+    Returns:
+        The names, or the line-oriented reader's answer where the file will not
+        parse — the generous direction, and never an exception: one unparseable
+        file is not an unevaluable test.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError, ValueError:
+        return _line_definitions(source)
     names: set[str] = set()
-    for line in raw.decode("utf-8", errors="replace").splitlines():
+    for node in ast.walk(tree):
+        if isinstance(node, _NAMED_DEFINITIONS):
+            names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+            names.add(node.name.id)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            names.update(node.names)
+        elif isinstance(node, ast.MatchAs | ast.MatchStar | ast.MatchMapping):
+            # A `case` capture binds through a `str` field rather than a `Name`.
+            captured = node.rest if isinstance(node, ast.MatchMapping) else node.name
+            if captured is not None:
+                names.add(captured)
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            names.add(node.name)
+    return names
+
+
+def _line_definitions(source: bytes) -> set[str]:
+    """Every name :data:`_DEFINED_NAME_RE` finds in a JavaScript or shell file."""
+    names: set[str] = set()
+    for line in source.decode("utf-8", errors="replace").splitlines():
         match = _DEFINED_NAME_RE.match(line)
         if match is not None:
             names.add(
@@ -349,6 +421,31 @@ def defined_names_at(repo: Path, commit: str) -> set[str]:
                 or match.group("fn")
                 or match.group("bound")
             )
+    return names
+
+
+def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
+    """Every name this repository's source defines across ``commits``.
+
+    The set is over-inclusive by construction — a local counts, an unparseable
+    Python file falls back to the line reader — because it decides whether a
+    backticked token is a *symbol* at all, and ADR-0209 §5 prices over-binding as
+    acceptable and forbids the converse.
+
+    Args:
+        repo: The checkout to read.
+        commits: The commits to read it at.
+
+    Returns:
+        The names, bare and unqualified.
+
+    Raises:
+        UnevaluableError: git would not read a tree, which is ADR-0209 §6's case
+            and not this one's.
+    """
+    names: set[str] = set()
+    for path, blob in _source_blobs(repo, commits):
+        names |= _python_definitions(blob) if path.endswith(".py") else _line_definitions(blob)
     return names
 
 
@@ -462,10 +559,7 @@ class Pr:
         head, and reading the head alone would clear the floor on precisely the
         PR the moved ADR is about.
         """
-        names: set[str] = set()
-        for commit in dict.fromkeys((self.base, self.head)):
-            names |= defined_names_at(self.repo, commit)
-        return frozenset(names)
+        return frozenset(defined_names(self.repo, [self.base, self.head]))
 
     def touches_under(self, prefix: str) -> bool:
         """Whether any endpoint of the PR's diff lies under ``prefix``."""
