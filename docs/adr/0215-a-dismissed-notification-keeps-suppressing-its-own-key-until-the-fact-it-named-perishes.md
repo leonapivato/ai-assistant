@@ -604,9 +604,10 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
 - **Nothing about the delivery seam has to know.** The outbox reads
   actionability at every site it reads anything, and every one of those still
   means what it meant. The repair lands entirely inside ADR-0130's ground.
-- **The rule is testable at an instant.** `suppresses_at` is a pure function of
-  two stamps and a declared expiry, so the conformance suite can pin the boundary
-  the way it already pins `is_actionable_at`'s, and two backends cannot drift.
+- **The rule is testable at an instant.** `speaks_for_its_key_at` is a pure
+  function of two stamps and a declared expiry, so the conformance suite can pin
+  the boundary the way it already pins `is_actionable_at`'s, and two backends
+  cannot drift.
 
 **Harder.**
 
