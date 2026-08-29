@@ -153,6 +153,29 @@ fi
 """
 
 
+# A `gh` that answers nothing, standing in for the operator's real one.
+#
+# `codex-review.sh` asks `gh pr view` for the PR description near the end of a
+# round (ADR-0209 §5's snapshot), and a throwaway repository under `tmp_path` has
+# no remote — so the real `gh` was only ever going to fail here. Letting it fail
+# for real is not free, and issue #1792 is what it cost: `gh` forks a DETACHED
+# `gh send-telemetry` child, which inherits every open descriptor of the round
+# that spawned it — including the one holding the round's in-flight `flock`. An
+# `flock` lives on the open file description, so the lock outlives the script for
+# as long as that telemetry child does, and the NEXT round in the same repository
+# is refused with "another '<persona>' review of this loop is already running in
+# this clone". That is the whole of the flake: it needs a second round (nothing
+# holds the fd before the first), it clears by itself (the child exits), and it
+# leaves nothing on disk (replaying the failing case passes).
+#
+# Exiting non-zero is the same answer the real `gh` gave here, so nothing that
+# reads `pr_desc` changes: the round records `pr_desc=unavailable`, which is the
+# no-PR-yet path `codex-review.sh` is written for.
+_GH_STUB = """#!/usr/bin/env bash
+exit 1
+"""
+
+
 def install_fake_codex(bin_dir: Path) -> Path:
     """Write the fake ``codex`` into ``bin_dir`` and return its path."""
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -162,6 +185,15 @@ def install_fake_codex(bin_dir: Path) -> Path:
     return codex
 
 
+def install_gh_stub(stub_dir: Path) -> Path:
+    """Write the inert ``gh`` into ``stub_dir`` and return its path."""
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    gh = stub_dir / "gh"
+    gh.write_text(_GH_STUB)
+    gh.chmod(0o755)
+    return gh
+
+
 def review_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     """A subprocess env with the fake on PATH and an isolated ``CODEX_HOME``.
 
@@ -169,6 +201,11 @@ def review_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     owns them — the read-only proof reads the fake rollout from this
     ``CODEX_HOME``, never the developer's real one. The CI-signal variables are
     cleared so a test running under Actions still exercises the local path.
+
+    ``gh`` is isolated for the same reason and pinned by ``_GH_STUB``'s comment:
+    the operator's real one leaves a detached telemetry child holding the round's
+    in-flight lock (issue #1792). The stub sits BEHIND ``tmp_path/"bin"`` on
+    ``PATH``, so a test that installs a ``gh`` of its own there still wins.
     """
     env = os.environ.copy()
     env.pop("GITHUB_ACTIONS", None)
@@ -177,11 +214,13 @@ def review_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
         if key.startswith("FAKE_CODEX_"):
             del env[key]
     bin_dir = tmp_path / "bin"
+    stub_dir = tmp_path / "stub-bin"
+    install_gh_stub(stub_dir)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
     private_tmp = tmp_path / "tmp"
     private_tmp.mkdir(exist_ok=True)
-    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["PATH"] = f"{bin_dir}{os.pathsep}{stub_dir}{os.pathsep}{env['PATH']}"
     env["CODEX_HOME"] = str(codex_home)
     env["TMPDIR"] = str(private_tmp)
     env.update(overrides)
