@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import pytest
 from browser_drive import driving
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Dialog, Locator
+    from playwright.async_api import Browser, Dialog, Locator, Route
 
 pytestmark = [
     pytest.mark.integration,
@@ -44,6 +45,38 @@ pytestmark = [
 #: *this* value, and a stamp derived at run time would put a second implementation
 #: of the formatting rule inside the assertion that checks it.
 _LAST_TURN = datetime(2026, 8, 22, 9, 15, tzinfo=UTC)
+
+#: Counts the page's own reads of a relayed body, per path, **after the body has been
+#: parsed** — installed before any of the bundle runs, in the manner of
+#: ``browser_drive``'s Web Audio probe and for the same reason: what the two ordering
+#: cases below need to know is when the page has *finished with* a response, and no
+#: fact about the network says that.
+#:
+#: **Why the count is a synchronisation and not a sleep** (ADR-0216 §7). The
+#: increment happens inside the ``await response.json()`` the page's ``relay``
+#: performs, so the handler that acts on that body is a microtask continuation of it.
+#: Every pending microtask drains before the next task runs, and a driver's
+#: ``wait_for_function`` poll *is* a later task — so a poll that observes the count
+#: has, by construction, run after the page finished deciding what to do with the
+#: body. That is the happens-after both cases need, and it is a condition the page
+#: reached rather than a duration guessed at.
+_SETTLED = """() => {
+window.__settled = {};
+const realFetch = window.fetch;
+window.fetch = async function (resource, options) {
+  const response = await realFetch.call(this, resource, options);
+  const path = new URL(typeof resource === "string" ? resource : resource.url, location.href)
+    .pathname;
+  const realJson = response.json.bind(response);
+  response.json = async function () {
+    const body = await realJson();
+    window.__settled[path] = (window.__settled[path] || 0) + 1;
+    return body;
+  };
+  return response;
+};
+}
+"""
 
 
 def _seed(drive: Drive, conversation_id: str, *, turns: int) -> None:
@@ -158,7 +191,7 @@ async def test_the_row_the_owner_taps_names_the_conversation_it_will_continue(
         said = await drive.page.inner_text("#conversation")
         assert said == f"{named}. Your next question continues it."
         assert await drive.page.evaluate(
-            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+            "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
 
 
@@ -181,7 +214,7 @@ async def test_tapping_continue_moves_the_indicator_to_that_conversation(
         await _open_listing(drive)
         await _first_row(drive).get_by_role("button", name="Continue").click()
         await drive.page.wait_for_function(
-            "document.getElementById('conversation').textContent.includes('c-1')"
+            "() => document.getElementById('conversation').textContent.includes('c-1')"
         )
         said = await drive.page.inner_text("#conversation")
         assert said == "Conversation c-1. Your next question continues it."
@@ -203,7 +236,8 @@ async def test_leaving_the_thread_moves_the_indicator_back(
         await drive.page.wait_for_selector("#new-conversation:not([hidden])")
         await drive.page.click("#new-conversation")
         await drive.page.wait_for_function(
-            "document.getElementById('conversation').textContent.includes('No conversation yet')"
+            "() => document.getElementById('conversation').textContent"
+            + ".includes('No conversation yet')"
         )
         assert await drive.page.is_hidden("#new-conversation")
 
@@ -356,10 +390,95 @@ async def test_declining_the_ceremony_destroys_nothing_and_states_nothing(
         answered = _answering(drive, accept=False)
         await _first_row(drive).get_by_role("button", name="Forget").click()
         assert await answered
-        await drive.page.evaluate("null")
+        await drive.page.evaluate("() => null")
         assert await drive.page.is_hidden("#forget-outcome")
         assert set(drive.engine.conversations_held) == {"c-1"}
         assert not [one for one in drive.engine.calls if one[0] == "forget_conversation"]
+
+
+async def test_an_answer_landing_first_is_not_undone_by_the_digest_behind_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A digest still in flight when a turn lands must not re-render a count it made stale.
+
+    Adversarial review round 1, ``major``, and the whole reason the guard counts
+    invalidations of the line rather than changes of selection. Continue ``c-1``, ask
+    a question in ``c-1`` while the digest read is still out, and let the answer
+    arrive first: ``renderOutcome`` reaches ``setConversation`` without touching
+    ``chose``, so a guard written against ``chose`` would let the digest through and
+    put back a count that is short by the turn just recorded.
+
+    The digest request is held rather than raced for: ADR-0216 §7 forbids a fixed
+    sleep, and a real ordering the driver *decides* is the only kind that cannot be
+    lost on a loaded runner. Nothing about the response is fabricated — the request is
+    released and answered by the same gateway.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        _seed(drive, "c-1", turns=3)
+        await drive.page.evaluate(_SETTLED)
+        released = asyncio.Event()
+
+        async def hold(route: Route) -> None:
+            await released.wait()
+            await route.continue_()
+
+        await drive.page.route(lambda url: urlparse(url).path == "/conversation", hold)
+        await _open_listing(drive)
+        await _first_row(drive).get_by_role("button", name="Continue").click()
+        await drive.page.fill("#utterance", "what did we decide?")
+        await drive.page.click("#ask-button")
+        # `releaseAsk` is the page's own "this turn is over", and it runs after the
+        # outcome has been rendered -- so past this the answer has already reached
+        # `setConversation` and cleared the line.
+        await drive.page.wait_for_selector("#ask-button:not([disabled])")
+        assert await drive.page.is_hidden("#resumed")
+        released.set()
+        await drive.page.wait_for_function("() => (window.__settled['/conversation'] || 0) === 1")
+        assert await drive.page.is_hidden("#resumed")
+
+
+async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listing(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A forget's outcome is the last word only while its own refresh still is.
+
+    Adversarial review round 1, ``major``. Accept a forget, hold the refresh it
+    triggers, press "Conversations", and let the owner's newer read return first: the
+    older refresh then resumes and writes its outcome into a slot the newer read had
+    cleared, above a listing it did not produce. Counting reads as they *begin* is
+    what lets the resuming one see that it is no longer the last word — and the
+    outcome is dropped rather than restored, because the page has no way to put it
+    back where it would be true.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        _seed(drive, "c-1", turns=3)
+        _seed(drive, "c-2", turns=1)
+        await drive.page.evaluate(_SETTLED)
+        reached = asyncio.Event()
+        released = asyncio.Event()
+        reads = {"n": 0}
+
+        async def hold_the_refresh(route: Route) -> None:
+            reads["n"] += 1
+            # The first read is the panel opening and the second is the forget's own
+            # refresh; only that one is held.
+            if reads["n"] == 2:
+                reached.set()
+                await released.wait()
+            await route.continue_()
+
+        await drive.page.route(lambda url: urlparse(url).path == "/conversations", hold_the_refresh)
+        await _open_listing(drive)
+        answered = _answering(drive, accept=True)
+        await _first_row(drive).get_by_role("button", name="Forget").click()
+        assert await answered
+        await reached.wait()
+        await drive.page.click("#conversations-button")
+        await drive.page.wait_for_function("() => (window.__settled['/conversations'] || 0) === 2")
+        assert await drive.page.is_hidden("#forget-outcome")
+        released.set()
+        await drive.page.wait_for_function("() => (window.__settled['/conversations'] || 0) === 3")
+        assert await drive.page.is_hidden("#forget-outcome")
 
 
 async def test_a_second_read_of_the_listing_clears_the_outcome_it_did_not_produce(
