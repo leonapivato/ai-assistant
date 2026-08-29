@@ -277,6 +277,16 @@ bounded, synchronous, in-memory operation raises is whether it also owes a *time
 Three things in §4 answer no, so this ADR applies that clause rather than narrowing it
 or amending it — §16 classifies it.
 
+- **ADR-0111's own header says what that clause was written to stop, and it is
+  blocking.** The clause is not a first draft's wording; it was added in review, and
+  ADR-0111's header records why. Its ratification note reports round 1's finding "that
+  §4's budget bounds nothing **if a chunk can block indefinitely**", "repaired by §4's
+  second normative clause making a per-operation deadline a precondition of being
+  chunked at all". A bounded synchronous loop cannot block indefinitely, and a
+  precondition written against indefinite blocking does not reach one. This is the
+  sentence of ADR-0111 that decides the question, and it is in ADR-0111's own file —
+  so a reader holding only that ADR reads the clause this way too, which is why §16
+  finds no record owed rather than arguing one away.
 - **§4 supplies no way to enforce one.** "**This ADR adds no cancellation mechanism**
   and does not reach inside a chunk." A deadline is enforceable only against an
   operation that yields — an `await` on a provider call or on I/O — because nothing
@@ -1272,6 +1282,18 @@ layout. Each names an input and the outcome it fixes.
 30. **A merge promises only over the records it reached.** A record installed carrying
     label A after the merge has read its set still carries A when the merge commits, and
     the merge reports the set it reached rather than a claim about the store.
+31. **Consolidation's own bad topics entry is ignored, asserted on
+    `ConsolidationReport`.** §4's rule binds both model-backed producers, and
+    consolidation has its own counters, so the assertion is made twice rather than
+    once. A consolidation response whose topics entry is absent, null, not a list,
+    carries a non-canonical string, or names more than `MAX_TOPICS_PER_PROPOSAL`
+    labels yields a record routed to the write stage with `topics=()`, with
+    `proposed` incremented and **`discarded_unusable` and `discarded_over_limit`
+    unchanged**. The failure this pins is the plausible implementation: a bad label
+    reaching `MemoryBase` construction raises a `ValidationError`, the parser treats
+    it as unusable output, and the whole belief is discarded and counted — which
+    trades a belief for a filing word, exactly as §4 forbids, on the producer whose
+    counters tests 6 and 7 do not reach.
 
 ### 13. What the implementing lane owes
 
@@ -1311,7 +1333,7 @@ rule 5). It owes:
    it a second time.
 7. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
    projection.
-8. **The thirty tests of §12**, less those of the owner's acts (20-22, 28 and 30),
+8. **The thirty-one tests of §12**, less those of the owner's acts (20-22, 28 and 30),
    which belong to the surface lane the clause below defers them to.
 
 > **Normative.** The owner's acts of §9 are **not** in the implementing lane above.
@@ -1530,18 +1552,32 @@ reader might expect a record and its absence should be argued rather than assume
   under this ADR" — and §4's own instruction that this "must be checked rather than
   assumed" is discharged here rather than altered.
 
-  **The reading under which a record *would* be owed is named, because it is an
-  available one.** If §4's "bounded by a deadline" reached every synchronous in-memory
-  operation, a decision admitting one on a cardinality bound alone would be narrowing
-  §4, and ADR-0082 §1 would want a record on it. §1 above sets out why that is not §4's
-  reading: §4 adds no cancellation mechanism, so a deadline is unenforceable against an
-  operation that never yields; §4's own chunk arithmetic has no term for local work; and
-  the reading forbids the two jobs §4 was written for, consolidation among them. On §4's
-  actual reading a reader holding only ADR-0111 admits exactly the jobs they admitted
-  before this decision, on exactly the test they applied, and no clause of it is read
-  more widely or more narrowly. That is ADR-0070 §1's line and this falls below it — the
-  same place the ADR-0074 §4 case above falls: an ADR applying an earlier one's stated
-  condition to new ground.
+  **The reading under which a record *would* be owed is named, and answered from
+  ADR-0111's own file, because ADR-0082 §1 asks the sentence to be named either way.**
+  If §4's "bounded by a deadline" reached every synchronous in-memory operation, then
+  admitting one on a cardinality bound alone would read that clause more narrowly than
+  it holds, and a record would be owed. **The sentence that settles it is ADR-0111's own
+  account of where the clause came from**: its ratification note records round 1's
+  finding "that §4's budget bounds nothing **if a chunk can block indefinitely**", and
+  the clause as the repair — "making a per-operation deadline a precondition of being
+  chunked at all". The hazard the clause was written against is an operation that can
+  block indefinitely; a loop bounded by two constants of the configuration is not one.
+  §1 above adds two further readings from §4's own text — that ADR-0111 supplies no
+  cancellation mechanism with which a deadline on a non-yielding operation could be
+  enforced, and that §4's chunk arithmetic carries no term for local work — and notes
+  that the wide reading would forbid consolidation and the retention purge, the two jobs
+  §4 was written for.
+
+  So a reader holding only ADR-0111 admits exactly the jobs they admitted before this
+  decision, on exactly the test they applied, and no clause of it is read more widely or
+  more narrowly. That is ADR-0070 §1's line and this falls below it — the same place the
+  ADR-0074 §4 case above falls: an ADR applying an earlier one's stated condition to new
+  ground. **And a record made anyway would be a mis-declaration**, which ADR-0082 §1
+  names as its own failure: "a later ADR that calls its change an amendment of ADR-N
+  without a clause of ADR-N failing §1's test has mis-declared it, and the record is
+  wrong however the declaration reads." A `Status` note asserting that this decision
+  narrowed §4 would tell every later reader that §4 once reached bounded local work,
+  which is the thing ADR-0111's own header says it never did.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
