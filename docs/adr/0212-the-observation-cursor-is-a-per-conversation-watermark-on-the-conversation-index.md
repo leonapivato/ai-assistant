@@ -14,9 +14,10 @@
   `ConversationTurn`. Named in §10(b).
 - **Partially supersedes:**
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md)
-  — §2's absent-cursor clause, **only as it reaches the observation cursor this
-  ADR decides**. Every other clause of ADR-0111 binds this walk unchanged and is
-  relied on throughout. Named in §10(c).
+  — §2's absent-cursor clause and §7's restart position, **only as they reach the
+  observation cursor this ADR decides**. §7's discard-rather-than-fault rule, and every
+  other clause of ADR-0111, bind this walk unchanged and are relied on throughout.
+  Named in §10(c).
 - **This is a contract change.** It adds one member to `Conversation` in
   `core/types.py` and three operations to `ConversationStore` in
   `core/protocols.py` — `core` surface, so this ADR is its own PR, ratified and
@@ -415,10 +416,12 @@ arrived, so an absent watermark cannot distinguish a conversation older than thi
 decision from one that gathered turns faster than the job reached it. A conversation
 that accumulates a long history before its first pass loses all of it below the tail,
 permanently, exactly as a pre-existing one does. What is true — and is the whole of the
-comfort available — is that the loss is **per first pass, not per pass**: once a
-watermark exists the walk only moves forward, so no later pass skips a turn it has not
-read, and the prefix at risk is only what accumulates before the *first* pass reaches
-that conversation. On the deployment this ADR is written for that is the whole backlog,
+comfort available — is that **this** loss is per *first* pass and not per pass: the
+prefix at risk is only what accumulates before the first pass reaches that
+conversation, and no later pass re-opens it. That is a statement about the tail start
+alone and about nothing else. §5's residual is a separate later-pass skip, much
+narrower and differently caused — a turn whose episode did not resolve while a later
+turn's did — and §1's second clause names both rather than either. On the deployment this ADR is written for that is the whole backlog,
 because `observation_interval` is unset and nothing runs the job; it shrinks toward
 zero once observation runs on a cadence, which is #1737's second ADR (§9) and the
 reason this one lands first.
@@ -665,13 +668,23 @@ cursor holds no evidence and answers no query. Discarding one costs a repeated w
 the cost §3 already accepted and ADR-0077 §8 already named — and returns nothing
 wrong to any client. So an unreadable cursor is not a state fault,
 `IncompatibleStateError` is not its class, and a build that refused to start over one
-would take a resident process down over scaffolding." The one difference is where the
-restart lands: ADR-0111 §7 restarts "from the beginning of its order" and this
-restarts at the tail, for §4's reasons and under §10(c)'s scope. **That difference
-changes the price of a discard, and §4 states it**: there a discard costs a repeated
-walk, here it costs the prefix below the tail the next pass reads — including turns the
-discarded value had already been advanced past. It is accepted for §4's reasons and
-because the alternative is the fault ADR-0111 §7 forbids.
+would take a resident process down over scaffolding."
+
+**Where the restart lands is the second clause of ADR-0111 this ADR replaces, and it
+is declared rather than described as a difference.** §7's own words are "the walk
+restarts **from the beginning of its order**", in both its clauses — the unreadable
+cursor and the cursor that disagrees with the store's contents. This ADR restarts at
+the tail instead, because a discarded watermark is read as absent and §4 governs an
+absent one. **That changes the price of a discard**: ADR-0111 §7 prices it as "a
+repeated walk", and here it is a skipped prefix — including turns the discarded value
+had already been advanced past — which §4 states at its true size. It is accepted for
+§4's three reasons and because the alternative is the fault §7 forbids outright; and
+because it is a change a reader of ADR-0111 would act on, §10(c) records it as a
+partial supersession rather than leaving it in the gap between two sections. **What
+is not replaced is §7's disposition itself**: discard rather than fault, never
+`IncompatibleStateError`, never a refusal to start, never advanced past a value that
+could not be read. Those bind here word for word, and are the whole of the clauses
+above.
 
 **The store-side clause is not a detail.** `ConversationStore` promises to raise
 `ConversationStoreError` "If the store cannot be read, **or a stored row is
@@ -900,7 +913,11 @@ reached** — pinned as §3's accepted behaviour rather than as a defect, so tha
 lane changing the order has to change this test deliberately; a watermark that
 is not an integer,
 below `FIRST_TURN_ORDINAL`, or above the conversation's highest ordinal is read as
-absent and no read of that conversation raises; a store whose watermark column is
+absent and no read of that conversation raises; **a conversation carrying such a
+watermark is then recovered end to end** — it appears in
+`conversations_with_unobserved_turns`, its next pass reads its tail and stamps a fresh
+watermark — so that an implementation coercing the value on one read and filtering it
+wrongly on another cannot leave the conversation permanently unreachable; a store whose watermark column is
 missing entirely opens, serves and starts; and an export round-trips a watermark
 while a *filtered* export restored into a fresh store leaves it discarded.
 
@@ -1002,15 +1019,29 @@ differently, or read one of its clauses more widely than it now holds?"
 > record all bind exactly as they did.
 
 > **Normative.** **(c) This ADR partially supersedes ADR-0111**, in the same sense,
-> in exactly one scope: **§2's absent-cursor clause — "A cursor absent from the store
-> means the walk has not started and the job begins at the first row of its order" —
-> and only as it reaches the observation cursor this ADR decides.** §4 replaces it
-> for that cursor: an absent watermark begins at the tail window. §2's second
-> sentence ("A cursor is never initialised to a sentinel value") is kept and restated
-> in §4. Every other clause of ADR-0111 binds this cursor unchanged — §1's placement
+> in exactly two scopes, both of them one rule seen twice: **where a walk begins when
+> it has no usable position**, and only as that reaches the observation cursor this ADR
+> decides.
+>
+> **§2's absent-cursor clause.** "A cursor absent from the store means the walk has not
+> started and the job begins at the first row of its order" is replaced for this cursor
+> by §4: an absent watermark begins at the tail window. §2's second sentence ("A cursor
+> is never initialised to a sentinel value") is kept and restated in §4.
+>
+> **§7's restart position.** "the walk restarts **from the beginning of its order**",
+> in both of §7's clauses — the unreadable or unsupported cursor, and the cursor that
+> disagrees with the store's contents — is replaced for this cursor by §7 of this ADR
+> read with §4: a discarded watermark is treated as absent, so the restart lands at the
+> tail. The consequence is stated rather than implied: ADR-0111 §7 prices a discard as
+> "a repeated walk" and here it is a skipped prefix, which §4 states at its true size.
+> **§7's disposition is kept whole** — discard rather than fault, never
+> `IncompatibleStateError`, never a refusal to start, never advanced past a value that
+> could not be read — and §7 of this ADR applies it word for word.
+>
+> Every other clause of ADR-0111 binds this cursor unchanged — §1's placement
 > and per-order-per-job rule, §2's totality and its excluded shapes, §3's ordering and
 > at-least-once guarantee, §4's run and chunk bounds, §5's halt, §6's absence of
-> backoff, §7's discard-rather-than-fault, and §8's serial loop — and §11's deferral
+> backoff, and §8's serial loop — and §11's deferral
 > of the observation selector is discharged rather than replaced. This record is made
 > under the fail-closed reading: on the narrower reading of §11, which names totality
 > as what binds this choice, §2's absent-cursor clause never reached this cursor and
@@ -1053,8 +1084,8 @@ already directs and is a rebase conflict rather than a decision. The pairs are:
   ConversationStore owes)`;
 - on ADR-0077: `and ADR-0212 (§8's selection sentence and its durable-cursor
   sentence)`;
-- on ADR-0111: `and ADR-0212 (§2's absent-cursor clause, only as it reaches the
-  observation cursor)`.
+- on ADR-0111: `and ADR-0212 (§2's absent-cursor clause and §7's restart position,
+  only as they reach the observation cursor)`.
 
 No scope parenthesis carries an `ADR-NNNN` token, which is ADR-0070 §4's authoring
 constraint, and each pair as landed reads exactly as it is stated above.
