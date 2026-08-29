@@ -1,7 +1,69 @@
 # 83. The hub is a resident process: lifecycle, exclusivity, and an internal scheduler
 
-- Status: Accepted, §7 amended by ADR-0111
+- Status: Partially superseded by ADR-0218 (§7's job-table row for observation, in its Default and Calls cells)
 - Date: 2026-07-31
+- Partially superseded: 2026-08-29 by ADR-0218 — **§7's job-table row for
+  observation is replaced in two cells: the job no longer ships disabled, and it no
+  longer calls the same façade operation the CLI calls.**
+  [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
+  §§3, 5 and 7 decide the trigger §7 shipped the job disabled awaiting, and §11(a)
+  names the scope; this note records the ruling declared there.
+
+  **Replaced — the row's Default cell.** "**disabled**" becomes a finite duration:
+  ADR-0218 §7 moves `observation_interval`'s default to fifteen minutes, keeping the
+  type, the `gt=timedelta(0)` refusal and the `None`-means-off spelling this section
+  requires. A reader holding only this ADR builds a hub whose observation job is
+  absent from the table unless an operator configures it, which is ADR-0070 §1's test
+  met.
+
+  **Replaced — the row's Calls cell.** "the `Engine` observation operation" becomes
+  `Engine.observe_due`, a **second** maintenance operation rather than the one the CLI
+  calls. ADR-0218 §3 gives three grounds: `observe` is a wire operation declared on
+  `AssistantEngine`, so an argument on it would move `PROTOCOL_VERSION` under ADR-0124
+  §9; one seam serving both callers would make an armed job's writes
+  indistinguishable from a user's under ADR-0120 §3; and `ObservationReport` describes
+  one pass while a run performs many. This is §8's own provision used rather than
+  changed — "The `Engine` therefore grows a maintenance surface" — and the job body is
+  still "a public `Engine` call" holding an `Engine` and nothing else.
+
+  **Not replaced — §7's fourth bullet, and the distinction is that bullet's own
+  conditional.** "Enabling it on a timer before the cursor exists buys repeated cost
+  and no new coverage. The interval exists so that enabling it is configuration; the
+  default is off until the cursor lands (§13)." Every sentence stays true as written:
+  the first is about the state *before* the cursor, and the second states the
+  condition under which the default holds. ADR-0212 satisfied that condition, so a
+  reader holding only this ADR reads the bullet correctly both before and after —
+  they need only ask whether the cursor has landed, which the bullet itself tells them
+  to ask. Recording a supersession against a conditional that fired would misdescribe
+  what happened, and §15's own rule is the precedent: "the deferring sentence stays
+  true and now has an answer".
+
+  **Not replaced — everything else of §7 and §8, each of which ADR-0218 relies on.**
+  The fixed delay after completion and a job structurally unable to overlap itself;
+  the serial loop and its accepted starvation, as ADR-0111 already bounded it for a
+  chunked job; "a missed or late tick is never a correctness bug"; "**A failing job
+  never takes the process down**"; "**No job gets new store surface**", which ADR-0218
+  keeps by calling only the three operations ADR-0212 §8 already added; the duration
+  discipline and "**'Disabled' is `None`, never `0`**", which ADR-0218 §7 follows for
+  both new fields; and §8's rule that every job is a public `Engine` call. §13's
+  deferral of the observation cursor was discharged by ADR-0212, not by ADR-0218, and
+  nothing here reaches it.
+
+  **The `Status` line's form changes, and the ADR-0111 record is not lost.** Adding a
+  leading `Partially superseded by` token drops `Accepted` (ADR-0070 §4), and under
+  ADR-0082 §2 "no amendment qualifier is written on that line" — so ", §7 amended by
+  ADR-0111" is removed from the line and stays in full in the two 2026-08-06 notes
+  below, where ADR-0082 §1 puts the invariant half of every record. Leaving it beside
+  a leading token would also break ADR-0070 §4's one authoring constraint — "a scope
+  names a clause, not another ADR […] every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target" — by declaring ADR-0111 a partial superseder of this
+  ADR, which it is not. The sentence in the note below beginning "This `Status` line
+  carries no leading token" is a conditional that has stopped applying rather than one
+  that has become false, and it is left standing exactly as written under ADR-0070
+  §1's append-only rule. Appended note per ADR-0070 §1: no text below is rewritten,
+  and §7's sentences stand as written. This note lands in the same change as ADR-0218
+  itself, which is the existence condition ADR-0082 §7 states. Refs #1737, #1782,
+  #632.
 - **Amended: 2026-08-06 by
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md)
   (§7 — its acceptance of unbounded starvation no longer reaches a chunked job,
