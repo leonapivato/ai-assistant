@@ -214,10 +214,13 @@ trade a total assertion for a sampled one.
 ### 3. Where it lives, how it is marked, and what it costs the anchors
 
 > **Normative.** The layer lives under `tests/interfaces/gateway/`, in modules
-> named for the behaviour they drive. Each is marked `pytest.mark.integration`, as
-> `tests/interfaces/gateway/test_gateway.py` already is, and carries a second
-> registered marker naming it as a browser drive so that it can be selected and
-> deselected by name.
+> named for the behaviour they drive, and each is marked
+> `pytest.mark.integration`, as `tests/interfaces/gateway/test_gateway.py`
+> already is.
+
+> **Normative.** Each such module also carries a second marker, registered in
+> `[tool.pytest.ini_options].markers`, naming it as a browser drive, so that the
+> layer can be named on a command line rather than only by path.
 
 > **Normative.** The layer is collected by an unqualified `uv run pytest` and by
 > `just test-fast`. No recipe deselects it, and it therefore runs at both of
@@ -229,9 +232,9 @@ trade a total assertion for a sampled one.
 > layer.
 
 > **Normative.** The layer's whole cost — the difference in wall clock between a
-> full suite run with it and one without — stays under 60 seconds. Exceeding that
-> is grounds to revisit this decision, and never grounds to deselect the layer
-> from an anchor.
+> serial `uv run pytest` over the whole suite with it and one without — stays
+> under 60 seconds. Exceeding that is grounds to revisit this decision, and never
+> grounds to deselect the layer from an anchor.
 
 ADR-0179 §3 made the distributed run whole — "`just test-fast` deselects nothing
 on its command line. Every test the tree declares is collected and answered" —
@@ -272,8 +275,10 @@ cannot change a verdict, and its docstring gives the same justification — "Dri
 through a real socket rather than through the object's methods, and that is
 deliberate". The browser layer adds a browser to a harness that exists. Session
 minting has a helper there too (`tests/interfaces/gateway/gateway_mint.py`'s
-`mint_bootstrap`), so the drive performs ADR-0182 §1's ordered mint rather than
-inventing a shortcut around it.
+`mint_bootstrap`), and ADR-0182 §1's obligation that a bootstrap value be minted,
+disclosed and only then promoted already binds any test that mints one — so
+nothing new is imposed here, and the drive has no reason to reach around a helper
+that exists.
 
 The second clause is ADR-0168 §10's other normative sentence — "the page it serves
 loads no asset, font, style, script or datum from any origin but the gateway's
@@ -298,6 +303,19 @@ stubbed the assets would forfeit exactly that.
 > the one the installed `playwright` version pins; nothing else is accepted as a
 > substitute.
 
+> **Normative.** The build installed and driven is the full `chromium`. The
+> lighter `chromium-headless-shell` may be substituted for it only where the
+> substituting change has established, by running this layer's own cases against
+> both builds, that they agree on every behaviour those cases assert — the Web
+> Audio and `MediaRecorder` paths included — and records that comparison in its
+> PR. Absent that evidence the full build is what is installed, locally and in
+> CI.
+
+> **Normative.** The layer drives Chromium and no other engine. Adding WebKit or
+> Firefox to it — with the install, the wall clock and the second set of
+> behaviours to keep green that each brings — is not authorised by this decision
+> and takes an ADR of its own.
+
 `pytest-playwright` is declined on a mechanical ground, not a preference: this
 suite is `asyncio_mode = "auto"` and the gateway harness is async, while that
 plugin's fixtures are synchronous and it adds command-line options of its own to
@@ -314,13 +332,21 @@ pinned Python, `uv sync --locked` — and the browser install belongs with those
 prepares the environment the fifth step runs in; it asserts nothing and can fail
 only as an environment failure.
 
-**Which build to install is left open, with both figures on the table.** The
-headless shell is 10.0 s and ~117 MiB against the full Chromium's 21.4 s and
-~283 MiB, and if the page's behaviour under test runs identically on it, it is the
-better buy for CI. Whether it does — Web Audio and `MediaRecorder` are the paths
-#1707 cares about — is a question the implementation lane must answer by running
-the cases, not by reading this ADR. It installs the full `chromium` unless it has
-verified the shell, and records which and why.
+**The build clause defaults to the expensive build on purpose.** The headless
+shell is 10.0 s and ~117 MiB against the full Chromium's 21.4 s and ~283 MiB, and
+if the page's behaviour under test runs identically on it, it is the better buy
+for CI. But "runs identically" is a claim about Web Audio and `MediaRecorder`
+under a stripped build, and those are precisely the paths #1707 exists for — so it
+is a claim to be *tested*, by running the cases on both builds, and not one to be
+assumed by whoever is trying to shave a CI step. The clause is written so that the
+cheap option is available and the evidence for it is not optional, and so that
+"the shell was already installed" is not by itself a reason.
+
+**The engine clause is a refusal, and it is marked because it refuses something a
+later lane could otherwise do** (ADR-0089 §1: "an ADR's declined alternatives are
+marked where they refuse something a later lane could otherwise do"). The page's
+ruled surface is one owner's browsers; cross-engine coverage is a different
+decision with different costs, and whoever wants it argues for it on those.
 
 ### 6. Where the browser is absent the layer skips, and CI is what makes that payable
 
@@ -380,6 +406,26 @@ the reason the layer can be fast.
 
 ### 8. What this does not decide
 
+One thing here is a refusal rather than a silence, so it is marked (ADR-0089 §1):
+
+> **Normative.** This decision changes nothing about the coding harness's own
+> browser — `.mcp.json`'s `playwright` server and `scripts/playwright-mcp.sh` —
+> and does not discharge `.claude/agents/worker.md`'s instruction that a lane
+> whose diff touches `src/ai_assistant/interfaces/gateway/assets/` drives the page
+> itself and records what it saw. The existence of this layer is not a ground for
+> a lane to skip that drive, and that drive is not required to use this layer.
+
+The two browsers share a vendor's name and nothing else. One is an editor's tool
+whose own header says "This is the coding harness's browser, not the assistant's
+tool", sitting "where `just review-codex` sits"; the other is a test dependency in
+the `dev` group. And they answer different questions: the hand-drive finds what
+nobody thought to assert — it found three defects on PR #1385 that had passed
+every check this project runs — while this layer re-checks what someone did think
+to assert, on every push. Neither substitutes for the other, which is why the
+clause is a refusal and not a note.
+
+The rest are genuine silences:
+
 - **Which behaviours get cases, and in what order.** That is the implementation
   lane's, seeded by #1707's `interruptPlayback`/`decodeAudioData` example and by
   #1371's three page gaps, which are exactly the shape a drive can pin and a
@@ -387,17 +433,6 @@ the reason the layer can be fast.
 - **Whether the page ever gets a build step.** ADR-0168 §10 left that to "whoever
   needs one … in the change that needs it", and this decision is not that change:
   the browser loads the shipped assets exactly as served.
-- **The coding harness's browser.** `.mcp.json`'s `playwright` server and
-  `scripts/playwright-mcp.sh` stay what their header says they are — developer
-  tooling, sitting "where `just review-codex` sits". `.claude/agents/worker.md`'s
-  instruction to drive the page by hand on a page-touching lane is untouched, is
-  not discharged by this layer, and is not required to use it. The two share a
-  vendor's name and nothing else: one is an editor's tool, the other is a test
-  dependency.
-- **Other engines.** Chromium only. WebKit and Firefox are three times the
-  install and a second set of behaviours to keep green, for a page whose ruled
-  surface is one owner's browsers; whoever wants cross-engine coverage argues for
-  it then.
 - **Coverage of any other interface.** The CLI and the wire client are tested as
   they are today. This decision is about the one surface that ships JavaScript.
 - **Whether `test_bundle.py` should shrink.** §2 forbids deleting cases *because*
@@ -473,8 +508,9 @@ now carries a dependency it mostly does not use.
 registration in `[tool.pytest.ini_options].markers`, the browser-launch fixture
 and its one-browser-per-run constraint, the `just setup` and `gate.yml` install
 steps, and the first cases — starting with #1707's own, a press over a live
-playback and a press during a held `decodeAudioData`. It reports which Chromium
-build it installed and why (§5), and the measured wall clock the layer adds (§3).
+playback and a press during a held `decodeAudioData`. It installs the full
+`chromium` unless it does the both-builds comparison §5 requires, and it reports
+the measured wall clock the layer adds against §3's budget.
 
 **Revisit if:** the layer's added wall clock passes the 60-second budget in §3;
 a `-n auto` run is observed launching more than one browser; the skip in §6 is
