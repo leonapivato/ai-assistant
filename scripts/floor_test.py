@@ -16,9 +16,11 @@ What it decides, per entry of the base move's file set:
   construction and no test is consulted.
 - **§3, a moved ADR.** Binds where the PR's text writes that ADR's number, or
   where the ADR's own text names a path this PR's diff touches or a symbol an
-  added or removed line of that diff carries. Both endpoints of a rename are
-  read, because §3's listing is rename-aware and an ADR renamed out of the tree
-  is still the decision the review was taken under.
+  added or removed line of that diff carries. A **symbol** is a backticked token
+  that names a definition this repository's own source carries — see below.
+  Both endpoints of a rename are read, because §3's listing is rename-aware and
+  an ADR renamed out of the tree is still the decision the review was taken
+  under.
 - **§4, a moved contract file.** ``core/protocols.py`` binds unconditionally
   where the move adds a ``Protocol`` or widens any ``Protocol``'s *effective*
   member surface — the members it declares plus those it inherits from its
@@ -31,6 +33,43 @@ What it decides, per entry of the base move's file set:
   entry whose status this module does not know — each of them costs the round.
   §6 is a *rule*, not a list, so the fallback is a bare ``except`` around each
   entry rather than an enumeration of the failures anyone thought of.
+
+**What §3's word "symbol" means, and why the shape of a token is not it.**
+ADR-0088 §1(b) defines a code citation as "a backticked name **identifying
+something in the repository**", and ADR-0209 §3 rests on exactly that form: a
+decision that governs a PR "is written in ADR-0088's citation form: it names the
+paths it governs and the symbols it constrains". §5 reuses `brief_check.py`'s
+extraction for the naming, and that extraction is two halves. :func:`classify`
+is the first — a *triage* by shape, whose own contract is ":data:`SYMBOL` for
+something **shaped like** a Python name" and whose comment says a dot, an
+underscore or a capital "is what makes a token worth searching for". The search
+is the second half, and `brief_check` does it: :func:`brief_check.grep_symbols`
+looks each candidate up in the tree and reports one found nowhere as absent.
+ADR-0088 §1's b3 says why both halves are needed — a bare backticked token is
+"**not mechanically separable** from the vocabulary the corpus also backticks".
+
+This module used to stop at the triage, and issue #1799 is what that cost: on
+PR #1795 five ADRs bound because they name ``None``, ``Status`` and ``Proposed``
+— ADR-0070 §4's header vocabulary and a Python literal, carried by essentially
+every ADR and written into every ADR PR's own diff — and PR #1786 bound on
+``ai_assistant``, the package name. Any two ADR lanes matched unconditionally, so
+the narrowing was inert for the lane type ADR-0209's Consequences names as the
+clearest case it relieves ("a process or docs lane"). So a ``symbol`` token is
+tested here for what §3 asks of it: its **member** — the token, or the last part
+of a dotted one — must name a definition in this repository's source at either
+endpoint §5 gives for the PR. A package or module name is deliberately not a
+definition: whether the PR changes that module is the *path* test's question, and
+answering it twice would restore the match this closes.
+
+**That is an evaluation, not a failure to evaluate.** §6 binds a test that
+*cannot* be evaluated; a token searched for and demonstrably found nowhere has
+been evaluated, and the answer is that it is not a symbol. What binds under §6 is
+the resolver failing — an endpoint git will not read — and it does, through the
+same ``except`` every other test here falls into. The search is deliberately
+generous in the other direction, per ADR-0209 §5's asymmetry: every ``def``,
+``class``, ``function``, ``const``/``let``/``var``, shell function and bare
+binding, in Python, JavaScript and shell alike, at *both* endpoints — so a
+definition the PR itself deletes still resolves on the side that has it.
 
 **One implementation, called from one place.** ADR-0209 §6 requires that
 ``scripts/ship.sh``'s acceptance loop and its ``--drill`` share it, and issue
@@ -105,6 +144,38 @@ _DEFINITION_RE = re.compile(
     r"^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)"
     r"|^\s*class\s+(?P<cls>[^\W\d]\w*)"
     r"|^\s*(?P<bound>[^\W\d]\w*)\s*(?::[^=\n]+)?=(?!=)",
+    re.UNICODE,
+)
+
+# --- §3's "symbol": what the repository actually defines -----------------------
+#
+# The source this repository writes. A definition in a language it does not write
+# is not one it can have, and a `docs/**` or `.md` "definition" is prose — which
+# is the whole of what #1799 was matching.
+_SOURCE_PATHSPECS = ("*.py", "*.js", "*.sh")
+
+# Handed to `git grep -E`, so POSIX ERE and nothing richer. It only has to be a
+# *superset* of `_DEFINED_NAME_RE` below, which re-reads every line it returns:
+# git narrows ~60k lines out of the tree and Python decides which of them defines
+# what. The leading class is negated rather than an ASCII identifier alphabet, so
+# a Unicode identifier reaches the second reader rather than being dropped before
+# it — dropping one would be an under-binding, the direction ADR-0209 §5 forbids.
+_DEFINITION_GREP = (
+    r"^[ \t]*([^ \t=(:#]+[ \t]*(\(\)|(:[^=]*)?=)"
+    r"|(async[ \t]+)?(def|class|function|const|let|var)[ \t])"
+)
+
+# A definition, across the three languages `_SOURCE_PATHSPECS` admits: a `def`,
+# `class` or `function` statement; a `const`/`let`/`var` declaration; a shell
+# function header; or a bare binding, which is what a constant, an enum member
+# and an annotated attribute all look like. Indentation is not read, so a local
+# counts too — over-binding, which ADR-0209 §5 prices as acceptable, against an
+# under-binding it forbids.
+_DEFINED_NAME_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?(?:def|class|function)[ \t]+(?P<kw>[^\W\d]\w*)"
+    r"|^[ \t]*(?:const|let|var)[ \t]+(?P<decl>[^\W\d]\w*)"
+    r"|^[ \t]*(?P<fn>[^\W\d]\w*)[ \t]*\(\)"
+    r"|^[ \t]*(?P<bound>[^\W\d]\w*)[ \t]*(?::[^=\n]+)?=(?!=)",
     re.UNICODE,
 )
 
@@ -185,15 +256,23 @@ class UnevaluableError(Exception):
     """A test could not be evaluated, so ADR-0209 §6 binds the base move."""
 
 
-def _run_git(repo: Path, args: list[str]) -> bytes:
-    """Return a git command's stdout, raising :class:`UnevaluableError` on failure."""
+def _run_git(repo: Path, args: list[str], *, allowed: tuple[int, ...] = (0,)) -> bytes:
+    """Return a git command's stdout, raising :class:`UnevaluableError` on failure.
+
+    Args:
+        repo: The checkout to run in.
+        args: The command, without the leading ``git``.
+        allowed: The exit statuses that are not failures. ``git grep`` reports
+            "nothing matched" as 1, which is an answer rather than an error;
+            everything else this module runs answers only with 0.
+    """
     try:
         result = subprocess.run(  # noqa: S603  # resolved git path, no shell
             [_GIT, *args], cwd=repo, capture_output=True, check=False
         )
     except OSError as exc:  # pragma: no cover - git is on PATH wherever ship runs
         raise UnevaluableError(f"git could not be run ({exc})") from exc
-    if result.returncode != 0:
+    if result.returncode not in allowed:
         raise UnevaluableError(f"`git {' '.join(args[:2])}` failed for this endpoint")
     return result.stdout
 
@@ -202,6 +281,52 @@ def _blob(repo: Path, commit: str, path: str) -> str:
     """Return one endpoint's whole content, or raise :class:`UnevaluableError`."""
     raw = _run_git(repo, ["show", f"{commit}:{path}"])
     return raw.decode("utf-8", errors="replace")
+
+
+def defined_names_at(repo: Path, commit: str) -> set[str]:
+    """Every name this repository's source defines at ``commit``.
+
+    The set is over-inclusive by construction — see :data:`_DEFINED_NAME_RE` —
+    because it decides whether a backticked token is a *symbol* at all, and
+    ADR-0209 §5 prices over-binding as acceptable and forbids the converse.
+
+    Args:
+        repo: The checkout to read.
+        commit: The commit to read it at.
+
+    Returns:
+        The names, bare and unqualified.
+
+    Raises:
+        UnevaluableError: git would not read the tree at that commit, which is
+            ADR-0209 §6's case and not this one's.
+    """
+    raw = _run_git(
+        repo,
+        [
+            "grep",
+            "-h",  # names are all this reads; the file they came from is not asked
+            "-I",  # a binary file has no definitions to find
+            "-E",
+            "--no-color",
+            _DEFINITION_GREP,
+            commit,
+            "--",
+            *_SOURCE_PATHSPECS,
+        ],
+        allowed=(0, 1),
+    )
+    names: set[str] = set()
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        match = _DEFINED_NAME_RE.match(line)
+        if match is not None:
+            names.add(
+                match.group("kw")
+                or match.group("decl")
+                or match.group("fn")
+                or match.group("bound")
+            )
+    return names
 
 
 # --- The two texts (ADR-0209 §5) ---------------------------------------------
@@ -305,6 +430,20 @@ class Pr:
             chunks.extend(_blob(self.repo, commit, path) for path, commit in endpoints)
         return "\n".join(chunks)
 
+    @cached_property
+    def defined_names(self) -> frozenset[str]:
+        """Every name this repository's source defines at either of §5's endpoints.
+
+        Both, and not only the head: a PR that *deletes* a definition the moved
+        ADR cites carries that name on a removed line and defines it nowhere at
+        head, and reading the head alone would clear the floor on precisely the
+        PR the moved ADR is about.
+        """
+        names: set[str] = set()
+        for commit in dict.fromkeys((self.base, self.head)):
+            names |= defined_names_at(self.repo, commit)
+        return frozenset(names)
+
     def touches_under(self, prefix: str) -> bool:
         """Whether any endpoint of the PR's diff lies under ``prefix``."""
         return any(path.startswith(prefix) for path in self.endpoints)
@@ -342,7 +481,17 @@ class Pr:
         a component of a path the diff touches. Matching the whole token clears
         the floor on exactly the PR the moved ADR is about; matching the last
         part alone would bind almost every diff.
+
+        Before any of that, the token has to *be* a symbol. `classify` triages by
+        shape and says so; §3 asks for a symbol, ADR-0088 §1(b) defines a code
+        citation as a backticked name "identifying something in the repository",
+        and the **member** is what must identify one — a package or module
+        qualifier is the path test's question, asked and answered there. A token
+        naming no definition at either endpoint has been *evaluated* and is not a
+        symbol (#1799); a resolver that will not answer raises, and §6 binds.
         """
+        if token.rpartition(".")[2] not in self.defined_names:
+            return False
         if word_in(token, self.changed_lines):
             return True
         if "." not in token:
