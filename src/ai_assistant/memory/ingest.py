@@ -33,6 +33,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
+    MAX_TOPICS_PER_RECORD,
     BeliefBand,
     ConflictRelation,
     DataTier,
@@ -1162,8 +1163,78 @@ def _bounded_evidence(evidence: Sequence[str], *, elided: int) -> tuple[tuple[st
     return tuple(evidence[displaced:]), elided + displaced
 
 
+def _bounded_topics(admitted: Sequence[str]) -> tuple[str, ...]:
+    """ADR-0213 §8's retained subset, stored in §1's canonical order.
+
+    ``admitted`` is the install's **admission order** — which labels survive — and
+    the two orders are deliberately different things. §8 fixes admission per arm
+    (:func:`_topics_of_fold` for a fold, the record's own canonical order for every
+    other install), takes the first :data:`MAX_TOPICS_PER_RECORD` of it, and then §1
+    fixes how the survivors are **stored**: strictly increasing by code point,
+    whatever order they were admitted in. Sorting after the cut rather than before
+    is the whole of the distinction — sorting first would let a code-point-lesser
+    incoming label displace a target's label, which is exactly the ratchet §8 exists
+    to hold.
+
+    Deduplicating in admission order rather than through ``sorted(set(...))``,
+    because the cut happens on that order and a duplicate must not spend a slot.
+    """
+    admitted_once = tuple(dict.fromkeys(admitted))
+    return tuple(sorted(admitted_once[:MAX_TOPICS_PER_RECORD]))
+
+
+def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, ...]:
+    """The survivor's topics: ADR-0213 §8's bounded union, on both arms.
+
+    **The union is ADR-0204 §5's disjunction with a wider carrier**, taken on
+    ADR-0106 §4's ratchet: a record the owner filed under ``"health"`` must not
+    quietly stop being reachable by a health-scoped act the first time an unlabelled
+    proposal reinforces it, and nothing about the survivor would look wrong
+    afterwards. So no fold drops a label the target carried and no arm writes one
+    side's tuple over the other's — which is why this is computed **once, before the
+    arms**, exactly as ``derived_from_external`` and ``supplied_withheld_content``
+    are and for the same reason: the rule is stated over the fold, so neither arm may
+    read one side alone.
+
+    **The admission order keeps that ratchet whole under §1's bound**: the target's
+    own labels first, then the labels of the incoming record the target does not
+    already carry. A target conforming to the bound — every record this deployment
+    installs — therefore has all of its labels fit ahead of any incoming one, so the
+    failure the union exists to stop is unreachable by construction. What the bound
+    declines is always a label of the *incoming* record, a suggestion of the same
+    standing as any other topics entry, which §4 already rules may be ignored in
+    whole without anything being counted. A target that itself exceeds the bound —
+    reachable only by import, or under a constant a later ADR raised — converges
+    downward on this same install rather than raising, keeping the first
+    :data:`MAX_TOPICS_PER_RECORD` of its own labels ahead of any incoming one.
+
+    **Code-point order among the incoming labels is the only order available**, and
+    that is a fact about this field rather than a preference. ADR-0086 §3 could read
+    position as age because ``Provenance.evidence`` is ordered by accumulation; §1
+    fixes this tuple's order by code point precisely so that order carries *no*
+    meaning, so position here is not age and cannot be read as any other property
+    either. Applying ADR-0086 §3's own method — ask which criteria the data actually
+    supports — leaves exactly the one §1's storage order already fixes:
+    deterministic, implementation-independent and identical on every store. It does
+    not need to be a *good* order among peers: by the paragraph above, every label it
+    ranks is one the surviving record was never previously filed under.
+
+    **Nothing is counted.** ADR-0086 §4's ``evidence_elided`` is deliberately not
+    copied (§1): ``evidence`` claims a warrant whose size ADR-0073 §4 obliges a
+    surface to convey, while §7 rules that a topic set is never a claim to
+    completeness. A count of labels not carried answers a question no surface asks.
+    """
+    carried = set(target.topics)
+    return _bounded_topics(
+        [
+            *sorted(target.topics),
+            *sorted(label for label in incoming.topics if label not in carried),
+        ]
+    )
+
+
 def _installed(record: MemoryRecord) -> MemoryRecord:
-    """``record`` with its evidence brought under the bound (ADR-0086 §2).
+    """``record`` with its evidence and its topics brought under their bounds.
 
     Applied at **every install** and at no retirement, which is the whole of the
     rule's scope. "Install" is ADR-0081 §1's sense, the one :func:`_installed_at`
@@ -1180,15 +1251,43 @@ def _installed(record: MemoryRecord) -> MemoryRecord:
     :class:`Provenance` through ``model_validate`` rather than
     ``model_copy(update=...)``, so the type's own validators run on the value that
     is stored (ADR-0026 §2's hazard).
+
+    **:data:`MAX_TOPICS_PER_RECORD` is enforced here too, and for ADR-0213 §1's own
+    reasons rather than by analogy.** That section puts the bound at this seam
+    deliberately — the type stays permissive so that a later ADR raising the constant
+    changes what this deployment *writes* and not what an older peer can *read*, and
+    so that §8's union has exactly one place to be bounded rather than two that can
+    disagree. This is §8's second admission arm: for every install that is not a
+    fold — an ``ACCEPT``, the surviving record of a ``SUPERSEDE``, or any other write
+    storing a proposal's content at an id — the admission order is the record's own
+    labels in canonical order. The fold's arm is :func:`_topics_of_fold`, which has
+    already brought its survivor under the bound by the time it reaches here, so this
+    is a no-op on that path rather than a second, differently-ordered cut.
+
+    **Every install and no retirement**, which is the scope both bounds share and
+    ADR-0213 §1 restates in ADR-0081 §1's sense: a write that merely retires an
+    existing record — storing it back with only its validity window narrowed
+    (:func:`_close_window`) — asserts nothing new about what the record is about,
+    changes no label, and carries the tuple as it stands. An over-bound record from
+    outside this deployment's bound therefore decodes, reads, converges downward on
+    its next install, and rides whole into the history ``export`` keeps.
+
+    **Nothing counts what a topics overflow declined**, and that asymmetry with
+    ``evidence_elided`` is ADR-0213 §1's decision rather than an omission: §7 rules
+    that a topic set is never a claim to completeness, so a count of labels not
+    carried answers a question no surface asks and no clause obliges.
     """
     provenance = record.provenance
     retained, elided = _bounded_evidence(provenance.evidence, elided=provenance.evidence_elided)
-    if elided == provenance.evidence_elided:
+    topics = _bounded_topics(sorted(record.topics))
+    if elided == provenance.evidence_elided and topics == record.topics:
         return record
+    if elided == provenance.evidence_elided:
+        return record.model_copy(update={"topics": topics})
     bounded = Provenance.model_validate(
         provenance.model_dump() | {"evidence": retained, "evidence_elided": elided}
     )
-    return record.model_copy(update={"provenance": bounded})
+    return record.model_copy(update={"provenance": bounded, "topics": topics})
 
 
 def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
@@ -1540,6 +1639,11 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     withheld = (
         target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
     )
+    # And once more, on the envelope rather than on the warrant: ADR-0213 §8 states
+    # the union over the fold, so neither arm may take one side's tuple. Computed
+    # here, before the arms, for the reason the three above are — one rule in one
+    # place cannot drift between two arms.
+    topics = _topics_of_fold(target, incoming)
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -1552,7 +1656,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             last_confirmed_at=confirmed_at,
             supplied_withheld_content=withheld,
         )
-        return target.model_copy(update={"provenance": corroborated})
+        return target.model_copy(update={"provenance": corroborated, "topics": topics})
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
@@ -1564,7 +1668,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         last_confirmed_at=confirmed_at,
         supplied_withheld_content=withheld,
     )
-    return incoming.model_copy(update={"id": target.id, "provenance": provenance})
+    return incoming.model_copy(update={"id": target.id, "provenance": provenance, "topics": topics})
 
 
 @dataclass(frozen=True, slots=True)
