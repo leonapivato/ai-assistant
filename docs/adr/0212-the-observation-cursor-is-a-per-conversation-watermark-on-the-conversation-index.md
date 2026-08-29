@@ -677,13 +677,31 @@ The simpler rule pays for that one turn instead.
 
 > **Normative.** Where a failed pass's advance attempt did **not** commit — every
 > failure before the attempt, and the half of the ambiguous case above in which the
-> stamp did not land — the whole page that pass read is re-read by the next pass, and
-> the repetition is safe rather than merely tolerated. Where the stamp **did** commit,
+> stamp did not land — the whole page that pass read is re-read by the next pass **that
+> reaches that conversation**, and the repetition is safe rather than merely tolerated.
+> Where the conversation is **stamped deleted** before any such pass reaches it, there
+> is no re-read and none is owed: §3 excludes a stamped conversation from candidacy and
+> `turns_after` refuses one named explicitly (§8), so the page is unreachable by
+> construction. Where the stamp **did** commit,
 > the whole page is not re-read and does not need to be: the next pass resumes above
 > the recorded position under §3's ordinary candidacy rule, and §5 lets a pass name
 > that position only after every proposal it produced has been ruled, so the position
 > records work that was done. In neither case may an implementation narrow a re-read to
 > "the turns whose proposals were not ruled".
+
+**The deletion race is the one way a page is never re-read, and it is ADR-0074 §8
+working rather than a page lost.** A pass reads its page; the user deletes the
+conversation; the pass's `record_observed` then raises `UnknownConversationError`
+(§8), which is a refusal and not a commit, so the watermark is untouched — and by then
+the conversation has left the candidate listing, so no later pass can re-read what the
+failed one read. The clause above says so rather than promising a re-read that ADR-0074
+§8 has made impossible — it extends ADR-0073 §5's ruling that "the store deletes what
+it is told to delete" to a conversation's episodes — and a belief the aborted pass would
+have proposed from those turns is precisely what a deletion is for.
+The same holds for the failure raised *before* the attempt in the same race. **What a
+pass had already ingested before the deletion is ADR-0074 §8's question and not this
+clause's** — it is the question a hand-run `observe` racing a delete has asked since
+ADR-0077 §8, and the watermark neither widens it nor closes it.
 
 **This is ADR-0111 §5, inherited whole.** "When a chunk cannot be recorded as done,
 the run stops immediately, leaves the cursor at the last chunk that was recorded,
@@ -724,8 +742,11 @@ ADR adds no failure count and no per-conversation retry state.
 
 > **Normative.** The watermark is **additive and acted on by one consumer only** —
 > the observation selector. `Conversation` carries the member, so every read that
-> returns a `Conversation` — `get`, `recent`, `turns`' conversation, `export` — carries
-> it too, and the export's version moves for exactly that reason (§8). What no other
+> returns a `Conversation` — `get`, `recent`, and the document `export` builds —
+> carries it too, as do `start` and `mark_active`, which hand one back; the export's
+> version moves for exactly that reason (§8). `ConversationStore.turns` returns
+> `list[ConversationTurn]` and carries no watermark, which is §8's decision to add no
+> member to `ConversationTurn` seen from the read side. What no other
 > read changes is its **behaviour**: because a watermark is present, absent, high or
 > low, no read selects a different set of rows, orders them differently, refuses where
 > it would have answered, or returns a different value in any other member. No consumer
@@ -1001,6 +1022,11 @@ above the conversation's highest and stamps nothing; two concurrent `record_obse
 calls leave exactly one recorded value and it is the higher, pinned in the
 `ConversationStore` conformance suite beside the store's other concurrent-mutation
 rows; `record_observed` on a stamped conversation raises `UnknownConversationError`;
+**a conversation stamped deleted between a pass's page read and its advance leaves the
+watermark untouched, raises `UnknownConversationError` out of the pass, and is absent
+from the next `conversations_with_unobserved_turns`** — injected deterministically, and
+pinned as §6's ruling that this is the one page never re-read rather than as a page
+lost;
 `turns_after` returns the lowest page rather than the tail, is ordinal ascending,
 returns a short page at the end of a conversation, and refuses both out-of-range
 arguments; `conversations_with_unobserved_turns` excludes a conversation whose every
