@@ -1,10 +1,16 @@
-"""ADR-0209 §3's word "symbol": what this repository actually defines.
+"""ADR-0209 §3's word "symbol": what this repository's Python actually defines.
 
 `scripts/floor_test.py` binds a moved ADR that names "a symbol occurring in an
 added or removed line of the PR's diff". A token is a symbol when it names a
 definition this repository carries — ADR-0088 §1(b)'s "a backticked name
 identifying something in the repository" — and `floor_test.defined_names` is what
-answers that.
+answers that for Python.
+
+It answers it for Python **only**. The four JavaScript and shell files this
+repository tracks are not resolved at all: a name of theirs is reached from the
+diff side, by `Pr.non_python_changed_lines`, and is pinned end-to-end through
+`ship` in `tests/scripts/test_ship_floor_citation.py` rather than here. That split
+is the point of this module's scope, not an omission from it.
 
 **The failure this module guards is silent and one-directional.** A name the
 resolver cannot see is a symbol judged not to be one, so a floor path clears and a
@@ -13,15 +19,16 @@ prices the other direction as acceptable and forbids this one, so every assertio
 below runs that way: a definition must reach the index, and the index may hold
 more.
 
-Three names were missed in three successive rounds of PR #1803's own review, each
-in a form the pattern of the day did not have — `export function`,
-`async function* streamValues`, `type UtcInstant = ...` — and a fourth was every
-shell function whose name contains the letter `t`, because POSIX ERE has no tab
-escape and glibc read the backslash-t in a bracket expression as the letter
-itself. That run is why Python is now read with `ast`: a pattern over Python is an
-enumeration of a grammar, and the grammar kept winning.
+Four names were missed in four successive rounds of PR #1803's own review, each in
+a form the pattern of the day did not have — `export function`,
+`async function* streamValues`, `type UtcInstant = ...`, and a class method behind
+`async` — and one more was every shell function whose name contains the letter
+`t`, because POSIX ERE has no tab escape and glibc read the backslash-t in a
+bracket expression as the letter itself. That run is why Python is read with `ast`
+and why the other two languages are no longer read by a pattern at all: a pattern
+over a grammar is an enumeration of it, and the grammar kept winning.
 
-So the three groups here answer three different questions, and the split is not
+So the two groups here answer two different questions, and the split is not
 arbitrary:
 
 - **Python, by form.** `_python_definitions` is checked against small sources, one
@@ -29,16 +36,12 @@ arbitrary:
   definition. A line-oriented reader cannot serve as the independent check here at
   all — a docstring that wraps "…a class for reading…" onto its own line reads as
   `class for` — which is itself the argument for `ast`.
-- **JavaScript and shell, over the corpus.** These two are still read by a
-  pattern, so the pattern is compared against an independently written reader over
-  the real files: one JavaScript file and three shell scripts.
 - **The corpus, both directions.** Real symbols this repository is built on must
   resolve, and issue #1799's ADR-header vocabulary must not.
 """
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -46,7 +49,7 @@ import pytest
 
 _ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(_ROOT / "scripts"))
-from floor_test import _python_definitions, _source_blobs, defined_names  # noqa: E402
+from floor_test import _python_definitions, defined_names  # noqa: E402
 
 # --- Python: one case per binding form ----------------------------------------
 
@@ -118,64 +121,6 @@ def test_a_python_file_that_will_not_parse_falls_back_rather_than_failing() -> N
     assert "render" in _python_definitions(b"render = 1\ndef (:\n")
 
 
-# --- JavaScript and shell: the pattern, against an independent reader ----------
-
-#: One independently written reader per line-oriented language, deliberately not
-#: sharing a line with `floor_test`'s. Each is the plainest statement of "this line
-#: defines a name", and a name either finds must be in the index.
-_READERS = {
-    ".js": (
-        re.compile(
-            r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?"
-            r"(?:function[ \t]*\*?[ \t]*|class[ \t]+|const[ \t]+|let[ \t]+|var[ \t]+)"
-            r"([A-Za-z_$][\w$]*)",
-            re.M,
-        ),
-    ),
-    ".sh": (
-        re.compile(r"^[ \t]*(?:function[ \t]+)?([A-Za-z_]\w*)[ \t]*\(\)", re.M),
-        re.compile(
-            r"^[ \t]*(?:local|readonly|export|typeset|declare(?:[ \t]+-\w+)*)"
-            r"[ \t]+([A-Za-z_]\w*)=",
-            re.M,
-        ),
-        re.compile(r"^[ \t]*([A-Za-z_]\w*)=(?!=)", re.M),
-    ),
-}
-
-
-def test_every_javascript_and_shell_definition_reaches_the_index() -> None:
-    """The two languages still read by a pattern, over the files that carry them.
-
-    `src/ai_assistant/interfaces/gateway/assets/app.js` and the three scripts are
-    first-party source with real symbols in them, and they are where every miss
-    this module records was found. Comparing readers over the *real* files is what
-    made the tab-escape defect visible: it was invisible in every hand-written
-    example, because none of them happened to hold a name containing a `t`.
-    """
-    index = defined_names(_ROOT, ["HEAD"])
-    assert index, "the resolver found no definitions at all, which cannot be right"
-
-    missing: dict[str, str] = {}
-    checked = 0
-    for path, blob in _source_blobs(_ROOT, ["HEAD"]):
-        readers = _READERS.get(Path(path).suffix)
-        if readers is None:
-            continue
-        checked += 1
-        text = blob.decode("utf-8", errors="replace")
-        for reader in readers:
-            for name in reader.findall(text):
-                if name not in index:
-                    missing.setdefault(name, path)
-
-    assert checked, "no JavaScript or shell file was read, so nothing was compared"
-    assert not missing, (
-        "these definitions are invisible to ADR-0209 §3's symbol test, so a moved "
-        f"ADR naming one would clear the floor: {sorted(missing.items())}"
-    )
-
-
 # --- The corpus, both directions ----------------------------------------------
 
 
@@ -187,7 +132,7 @@ def test_every_javascript_and_shell_definition_reaches_the_index() -> None:
         "MemoryStore",  # a Protocol class
         "PROTOCOL_VERSION",  # a module-level constant
         "UtcInstant",  # a `type` alias in `core/types.py`
-        "streamValues",  # `async function*` in the gateway's `app.js`
+        "judge",  # a module-level `def`, in `scripts/floor_test.py` itself
     ],
 )
 def test_a_real_symbol_of_this_repository_resolves(token: str) -> None:
