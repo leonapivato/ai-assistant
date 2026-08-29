@@ -1,6 +1,6 @@
 # 111. A scheduled walk is chunked, and resumes from a durable cursor that never leads its effects
 
-- Status: Partially superseded by ADR-0114 (the Surface bullet's classification that this decision's cursor needs no Protocol surface, and that the cursor's mechanics sit below each subsystem's own façade) and ADR-0212 (§2's absent-cursor clause, only as it reaches the observation cursor)
+- Status: Partially superseded by ADR-0114 (the Surface bullet's classification that this decision's cursor needs no Protocol surface, and that the cursor's mechanics sit below each subsystem's own façade) and ADR-0212 (§2's absent-cursor clause and §7's restart position, only as they reach the observation cursor)
 - Date: 2026-08-06
 - **Partially superseded: 2026-08-06 by
   [ADR-0114](0114-the-store-contract-carries-the-walk.md), in the scope the
@@ -169,14 +169,16 @@
   it holds. §10 names them, applies the test clause by clause, and states what is
   *not* owed and why. **Nothing here supersedes anything**, wholly or in part.
 
-- Partially superseded: 2026-08-29 by ADR-0212 — **§2's absent-cursor clause does not
-  hold for the observation cursor: an absent watermark begins at the conversation's
-  tail window, not at the first row of the order.**
+- Partially superseded: 2026-08-29 by ADR-0212 — **where a walk begins when it has no
+  usable position does not hold for the observation cursor: an absent *or discarded*
+  watermark begins at the conversation's tail window, not at the first row of the
+  order. §2's clause and §7's restart position are the same rule seen twice, and both
+  are replaced in that one scope.**
   [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
-  §4 rules it, and §10(c) names the clause, quotes it and applies ADR-0070 §1's test;
-  this note records the ruling declared there.
+  §4 and §7 rule it, and §10(c) names both clauses, quotes them and applies ADR-0070
+  §1's test; this note records the ruling declared there.
 
-  **Replaced, in one scope only.** "A cursor absent from the store means the walk has
+  **Replaced — §2's absent-cursor clause.** "A cursor absent from the store means the walk has
   not started and the job begins at the first row of its order" no longer holds **as
   it reaches the observation cursor ADR-0212 decides**, and holds unchanged for every
   other cursor. ADR-0212 §4 gives three reasons: beginning at the first turn re-pays a
@@ -190,13 +192,34 @@
   `None` is the only spelling of "no pass has recorded one", and no pass, store or
   migration writes a sentinel, a zero or `FIRST_TURN_ORDINAL` in its place.
 
+  **Replaced — §7's restart position, and only the position.** "the walk restarts
+  **from the beginning of its order**", in both of §7's clauses — the cursor this build
+  cannot read, and the cursor the store's contents do not support — no longer holds for
+  the observation cursor. ADR-0212 §7 discards such a watermark and treats the
+  conversation as one with no watermark, so §4 governs and the restart lands at the
+  tail. **The consequence is stated rather than implied, because it is a real cost:**
+  §7 above prices a discard as "a repeated walk", and for this cursor it is a *skipped
+  prefix* instead — the turns below the tail the next pass reads, including turns the
+  discarded value had already been advanced past. ADR-0212 §4 states that cost at its
+  true size and accepts it, for the same three reasons and because the alternative is
+  the state fault §7 forbids outright. A reader holding only this ADR would implement a
+  repeated walk where ADR-0212 requires a permanent skip, which is ADR-0070 §1's test
+  on this clause as much as on §2's.
+
+  **Not replaced — §7's disposition itself, which is the whole of why it exists.**
+  Discard rather than fault; `IncompatibleStateError` is not its class; no read raises
+  and the hub's start is never refused; nothing is advanced past a position that could
+  not be read; and the disagreement case is treated the same way as the unreadable one.
+  ADR-0212 §7 applies every one of those word for word, and adds a store-side clause
+  making the coercion the store's own so that a bad column cannot surface as a
+  `ConversationStoreError` on an unrelated read.
+
   **Not replaced — every other clause, and ADR-0212 relies on them throughout.** §1's
   placement and its one-cursor-per-order-per-job rule; §2's totality requirement and
   its four excluded shapes, which ADR-0212 §2 applies to the turn ordinal and against
   the proposal-set alternative it rejects; §3's ordering of effects before the cursor
   and its at-least-once guarantee; §4's run and chunk bounds; §5's halt, which
-  ADR-0212 §6 inherits whole; §6's absence of backoff; §7's discard-rather-than-fault,
-  which ADR-0212 §7 applies to an unreadable watermark; and §8's serial loop, which
+  ADR-0212 §6 inherits whole; §6's absence of backoff; and §8's serial loop, which
   ADR-0212 §5 relies on when it rules two overlapping passes safe. §2's
   high-water-mark limit — "A row updated in place below the cursor keeps its position
   and is not revisited […] for a *recurring* job it is usually correct, because the
@@ -207,16 +230,18 @@
   filed that selector as "ADR-0077's ground, not this ADR's" and bound the choice by
   §2's totality requirement; ADR-0212 §2 meets that requirement on the turn ordinal
   and shows it. **This record is made on the fail-closed reading.** On §11's narrower
-  reading — totality is what binds this selector's choice — §2's absent-cursor clause
-  never reached this cursor and no record would be owed at all. ADR-0212 §10(c)
-  declares it anyway, because the direction that cannot leave a reader of this ADR
+  reading — totality is what binds this selector's choice — neither §2's absent-cursor
+  clause nor §7's restart position reached this cursor and no record would be owed at
+  all. ADR-0212 §10(c) declares both anyway, because the direction that cannot leave a reader of this ADR
   acting on a clause ADR-0212 contradicts is the one to take.
 
   **This ADR's `Status` carries the leading `Partially superseded by` token**, so the
   pair is accumulated on it under ADR-0070 §4 beside ADR-0114's, which names a
   different scope, and under ADR-0082 §2 no amendment qualifier is written on the
-  line. Appended note per ADR-0070 §1: no text below is rewritten and §2's clause
-  stands as written. The pair and this note land in the same change as ADR-0212
+  line. The two scopes it names are one rule seen twice, so ADR-0070 §4's
+  overlap-precedence rule does not arise between them. Appended note per ADR-0070 §1:
+  no text below is rewritten, and §2's clause and §7's sentence both stand as
+  written. The pair and this note land in the same change as ADR-0212
   itself, which is the existence condition ADR-0082 §7 states. Refs #1788, #1737,
   #632.
 
