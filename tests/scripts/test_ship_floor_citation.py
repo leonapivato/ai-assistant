@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 from _repo_template import seed_bare_repo, seed_repo
 from test_ship import _VERDICT, _fake_gh, _git, _record_review, _run_ship
@@ -374,35 +376,134 @@ def test_the_package_name_is_not_a_symbol_either(tmp_path: Path) -> None:
     assert judged.reasons == [_FREE]
 
 
-def test_javascripts_own_spellings_are_definitions_the_resolver_can_see(
+#: The JavaScript and shell spellings a resolver has to enumerate, and does not
+#: here. The first five are what rounds 1-3 of PR #1803's own review found the
+#: pattern of the day missing; the class methods are round 4's finding, which is
+#: the one that ended the enumeration rather than extending it a fifth time.
+_NON_PYTHON_SPELLINGS = (
+    ("src/pkg/assets/app.js", "export function renderPane() {}\n"),
+    ("src/pkg/assets/app.js", "export default class renderPane {}\n"),
+    ("src/pkg/assets/app.js", "export const renderPane = 1;\n"),
+    ("src/pkg/assets/app.js", "async function* renderPane(response) {}\n"),
+    ("src/pkg/assets/app.js", "export async function *renderPane(response) {}\n"),
+    ("src/pkg/assets/app.js", "class Pane {\n  async renderPane(response) {}\n}\n"),
+    ("src/pkg/assets/app.js", "class Pane {\n  static renderPane() {}\n}\n"),
+    ("src/pkg/assets/app.js", "class Pane {\n  get renderPane() {}\n}\n"),
+    ("src/pkg/assets/app.js", "class Pane {\n  *renderPane() {}\n}\n"),
+    ("scripts/tidy.sh", "renderPane() {\n  :\n}\n"),
+    ("scripts/tidy.sh", "readonly renderPane=1\n"),
+)
+
+
+@pytest.mark.parametrize(("path", "body"), _NON_PYTHON_SPELLINGS)
+def test_a_word_a_changed_non_python_source_line_carries_is_a_symbol(
+    tmp_path: Path, path: str, body: str
+) -> None:
+    """The one reading left for the languages nothing here resolves.
+
+    `src/ai_assistant/interfaces/gateway/assets/app.js` and the three shell
+    scripts are first-party source, so a moved ADR naming something in them is
+    naming this repository's own ground. Resolving those names needs a grammar,
+    and four consecutive review rounds each found the grammar of the day short one
+    form — silently, and in the direction ADR-0209 §5 forbids. So the question is
+    asked of the diff instead: a word a changed line of one of those files carries
+    is a symbol, whatever spelling declared it. Nothing below turns on the
+    spelling, which is exactly the property that ends the recurrence.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("Nothing.")}, {path: body})
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is drawn by `renderPane`.")))
+
+    assert judged.owed, judged.stderr
+    assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
+_PANE = "class Pane {\n  async renderPane(response) {}\n}\n"
+
+
+def test_a_dotted_citation_of_a_javascript_method_the_pr_changes_is_owed(
     tmp_path: Path,
 ) -> None:
-    """`src/ai_assistant/interfaces/gateway/assets/app.js` is first-party source.
+    """`Pane.renderPane` — the citation form ADR-0088 §1(b) actually writes.
 
-    JavaScript writes a module's public names behind `export` and its streaming
-    readers as generators — that file declares
-    `async function* streamValues(response)` today. A resolver blind to either
-    spelling reports the name as identifying nothing and clears the floor, which
-    is an under-binding and the one direction ADR-0209 §5 forbids. Adversarial
-    review of PR #1803, rounds 1 and 2.
+    This is why reading only Python was rejected: the ADR names a *method inside*
+    a JavaScript file, and §3's path test answers for a cited path, never for a
+    function within one. Dropping the file would clear the floor on the PR the
+    moved ADR is about, which is the under-binding §5 forbids. The dotted split is
+    unchanged — the member must be touched, the qualifier need only be present —
+    and `class Pane` is present in the PR's own file.
     """
-    for i, line in enumerate(
-        (
-            "export function renderPane() {}\n",
-            "export default class renderPane {}\n",
-            "export const renderPane = 1;\n",
-            "async function* renderPane(response) {}\n",
-            "export async function *renderPane(response) {}\n",
-        )
-    ):
-        case = tmp_path / f"case-{i}"
-        repo = case / "repo"
-        _init(repo, {_ADR: _adr("Nothing.")}, {"src/pkg/assets/app.js": line})
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing."), "src/pkg/assets/app.js": _PANE},
+        {"src/pkg/assets/app.js": _PANE.replace("(response)", "(response, options)")},
+    )
 
-        judged = _judge(repo, case, _edit(_ADR, _adr("The pane is drawn by `renderPane`.")))
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is drawn by `Pane.renderPane`.")))
 
-        assert judged.owed, f"{line!r}: {judged.stderr}"
-        assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+    assert judged.owed, judged.stderr
+    assert any("`Pane.renderPane`" in r for r in judged.reasons)
+
+
+def test_a_dotted_citation_of_a_javascript_method_the_pr_leaves_alone_is_free(
+    tmp_path: Path,
+) -> None:
+    """The other direction of the same fallback, and the reason it is not a licence.
+
+    The method is right there in the tree at both endpoints — but this PR changes
+    no line of the file that holds it, so nothing it adds or removes carries the
+    name and the moved ADR is not about it. A rule that read the *file* rather
+    than the *changed lines* would bind here, which would give back the
+    unconditional match the resolver was written to close.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing."), "src/pkg/assets/app.js": _PANE},
+        {_PLAN: "the pane is unchanged in this lane\n"},
+    )
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The pane is drawn by `Pane.renderPane`.")))
+
+    assert not judged.owed, judged.stderr
+    assert judged.reasons == [_FREE]
+
+
+def test_a_prose_line_beside_a_javascript_one_is_still_not_a_symbol(tmp_path: Path) -> None:
+    """#1799's shape, in a PR that also changes a file the fallback does read.
+
+    The fallback is attributed per file, off the patch's own headers, and this is
+    what that has to be worth: a lane touching `assets/app.js` and an ADR in the
+    same diff must not thereby make `Status`, `Proposed` and `None` symbols. A
+    reader that admitted a whole patch once any section of it was source — or that
+    failed to reset at the next `diff --git` — would bind both moved ADRs here and
+    hand #1795 its round straight back.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr(_BOILERPLATE), _ADR_OTHER: _adr(_BOILERPLATE)},
+        {
+            # `assets/` sorts before `docs/`, so the source section is rendered
+            # first and a missing reset would carry into the prose one.
+            "assets/app.js": "export function renderPane() {}\n",
+            "docs/adr/0044-a-lane-of-its-own.md": (
+                "# 44. A lane of its own\n\n- Status: Proposed\n\n"
+                "## Decision\n\nThe reconciler records `None` where it declines to rule.\n"
+            ),
+        },
+    )
+
+    def mutate(r: Path) -> None:
+        for path in (_ADR, _ADR_OTHER):
+            (r / path).write_text(_adr(_BOILERPLATE + "\nRatified.\n"))
+
+    judged = _judge(repo, tmp_path, mutate)
+
+    assert not judged.owed, judged.stderr
+    assert judged.reasons == [_FREE, _FREE]
 
 
 def test_a_symbol_resolver_that_will_not_answer_binds_under_section_6(tmp_path: Path) -> None:

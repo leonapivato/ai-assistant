@@ -16,8 +16,9 @@ What it decides, per entry of the base move's file set:
   construction and no test is consulted.
 - **§3, a moved ADR.** Binds where the PR's text writes that ADR's number, or
   where the ADR's own text names a path this PR's diff touches or a symbol an
-  added or removed line of that diff carries. A **symbol** is a backticked token
-  that names a definition this repository's own source carries — see below.
+  added or removed line of that diff carries. A **symbol** is a backticked
+  token that names a definition this repository's Python carries, or that a
+  changed line of one of its non-Python source files carries — see below.
   Both endpoints of a rename are read, because §3's listing is rename-aware and
   an ADR renamed out of the tree is still the decision the review was taken
   under.
@@ -66,12 +67,31 @@ answering it twice would restore the match this closes.
 been evaluated, and the answer is that it is not a symbol. What binds under §6 is
 the resolver failing — an endpoint git will not read — and it does, through the
 same ``except`` every other test here falls into. The search is deliberately
-generous in the other direction, per ADR-0209 §5's asymmetry. Python — 664 of the
-667 source files — is read with :mod:`ast` rather than with a pattern, so what
-counts as a definition is decided by the language and not by an enumeration of it;
-JavaScript and shell are read line by line. Both endpoints are read, deduplicated
-by blob, so a definition the PR itself deletes still resolves on the side that has
-it.
+generous in the other direction, per ADR-0209 §5's asymmetry.
+
+**Python is resolved; the other two languages are answered from the diff side
+instead.** All but four of this repository's source files are Python, and those
+are read with :mod:`ast`, so what counts as a definition is decided by the
+language rather than by an enumeration of it. Both endpoints are read,
+deduplicated by blob, so a definition the PR itself deletes still resolves on the
+side that has it. The four that are left — one JavaScript file and three shell
+scripts — are not resolved at all. A token naming no Python definition is still a
+symbol where a changed line of one of the PR's **non-Python source** files
+carries it as a word: the rule this module applied to every token before #1799,
+kept here as the fallback.
+
+**The fallback is what ends an enumeration, and dropping those files would
+under-bind.** Four consecutive rounds of PR #1803's own review each found a
+definition form the line pattern of the day did not have — ``export function``,
+``async function*``, ``type UtcInstant = ...``, then a class method written
+behind ``async``/``static``/``get`` — so the pattern is deleted rather than
+extended a fifth time. Reading only Python was the other way to delete it, and it
+is the direction ADR-0209 §5 forbids: an ADR naming a function in ``app.js`` that
+a PR's diff changes would clear, and §3's path test answers for a cited *path*,
+never for a function inside one. What is left over-binds only where a moved ADR
+names a word some JavaScript or shell line of the diff happens to carry — the
+priced direction, and rare on four tracked files. Prose is still not source,
+which is the whole of what #1799 was matching.
 
 **One implementation, called from one place.** ADR-0209 §6 requires that
 ``scripts/ship.sh``'s acceptance loop and its ``--drill`` share it, and issue
@@ -140,7 +160,9 @@ _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 # A definition in one of the two contract files: a class, a `def`, or a bound
 # name — which is what an enum member and an annotated attribute look like.
 # ADR-0209 §4's second limb turns on "a name whose *definition* the move
-# changed", never on every identifier a hunk happens to contain.
+# changed", never on every identifier a hunk happens to contain. `_line_definitions`
+# reuses it for the one Python file `ast` refuses, so that the fallback is this
+# module's existing pattern rather than a second one.
 # `--- a/path`, `+++ b/path`, `--- /dev/null`. The prefixes are pinned by the
 # caller's `_diff_opts` (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), so
 # these are the only three shapes the rendered patch can carry.
@@ -155,10 +177,12 @@ _DEFINITION_RE = re.compile(
 
 # --- §3's "symbol": what the repository actually defines -----------------------
 #
-# The source this repository writes. A definition in a language it does not write
-# is not one it can have, and a `docs/**` or `.md` "definition" is prose — which
-# is the whole of what #1799 was matching.
-_SOURCE_SUFFIXES = (".py", ".js", ".sh")
+# The source this repository writes, split by how each half is read. A definition
+# in a language it does not write is not one it can have, and a `docs/**` or `.md`
+# "definition" is prose — which is the whole of what #1799 was matching, and the
+# reason the fallback below is scoped to source rather than to "not Python".
+_PYTHON_SUFFIX = ".py"
+_OTHER_SOURCE_SUFFIXES = (".js", ".sh")
 
 #: Fields in one `git ls-tree -r -z` record's first half, and in one
 #: `git cat-file --batch` header: `<mode> <type> <oid>` and `<oid> <type> <size>`.
@@ -167,41 +191,29 @@ _SOURCE_SUFFIXES = (".py", ".js", ".sh")
 _GIT_RECORD_FIELDS = 3
 
 # **Python is read with `ast`, not with a pattern**, because a pattern here is an
-# enumeration of a grammar and the grammar keeps winning. Three successive rounds
+# enumeration of a grammar and the grammar keeps winning. Four successive rounds
 # of PR #1803's own review found a form the enumeration of the day did not have —
-# `export function`, `async function*`, `type UtcInstant = ...` — and each miss is
-# silent and one-directional: a name the resolver cannot see is a symbol judged not
-# to be one, so a floor path clears and an owed round is not charged. ADR-0209 §6
-# makes exactly this argument about its own tests ("an enumeration is a proxy for
-# the property that is wanted, and it decays"), and `ast` is the property itself:
-# every name Python *binds*, decided by Python.
+# `export function`, `async function*`, `type UtcInstant = ...`, a class method
+# behind `async` — and each miss is silent and one-directional: a name the resolver
+# cannot see is a symbol judged not to be one, so a floor path clears and an owed
+# round is not charged. ADR-0209 §6 makes exactly this argument about its own tests
+# ("an enumeration is a proxy for the property that is wanted, and it decays"), and
+# `ast` is the property itself: every name Python *binds*, decided by Python.
 #
-# 664 of this repository's 667 source files are Python, so what is left to a
-# pattern is one JavaScript file and three shell scripts — a surface small enough
-# for `tests/scripts/test_floor_definition_index.py` to hold against an
-# independently written reader.
+# There is no second pattern for the other two languages. A name in one of the four
+# JavaScript and shell files is reached by `Pr.non_python_changed_lines` instead —
+# the diff side of the same question, which needs no grammar at all.
 
 # What a `Store` context does not cover, because Python's own node types carry the
 # name instead of a `Name` node.
 _NAMED_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
-# A definition in the two line-oriented languages: a `function` statement, with the
-# generator star in either position; a declaration under any keyword JavaScript or
-# shell uses, with the flags `declare -a` and friends take; a shell function header;
-# or a bare binding. `export` is read because a JavaScript module writes its public
-# surface with it, and a public name is the one a moved ADR is likeliest to cite.
-# Indentation is not read, so a local counts too — over-binding, which ADR-0209 §5
-# prices as acceptable, against the under-binding it forbids.
-_DEFINED_NAME_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?"
-    r"(?:class[ \t]+|function(?:[ \t]*\*[ \t]*|[ \t]+))(?P<kw>[^\W\d]\w*)"
-    r"|^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?"
-    r"(?:const|let|var|local|readonly|declare|typeset|export)"
-    r"(?:[ \t]+-+[^ \t]+)*[ \t]+(?P<decl>[^\W\d]\w*)"
-    r"|^[ \t]*(?P<fn>[^\W\d]\w*)[ \t]*\(\)"
-    r"|^[ \t]*(?P<bound>[^\W\d]\w*)[ \t]*(?::[^=\n]+)?=(?!=)",
-    re.UNICODE,
-)
+# `--- a/path` and `+++ b/path`, with the path captured. The `a/`/`b/` prefixes are
+# pinned by the caller's `_diff_opts`, and a `diff --git` line resets the section,
+# so a patch is attributed to files without any second git invocation. A pathname
+# git chose to quote does not match, and its lines are then admitted to the
+# fallback — over-binding, which is the priced direction.
+_DIFF_PATH_RE = re.compile(r"^(?:\+\+\+|---) [ab]/(?P<path>.*)$")
 
 # Resolved once: `subprocess.run` with a bare "git" is a partial executable path,
 # and this module runs inside `ship`, which has already established that git is
@@ -306,8 +318,8 @@ def _blob(repo: Path, commit: str, path: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _source_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]:
-    """Every distinct source blob across ``commits``, with a path it appears under.
+def _python_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]:
+    """Every distinct Python blob across ``commits``, with a path it appears under.
 
     Deduplicated by object id, which is what makes reading two endpoints cost one
     pass and a little: the base and the head of a pull request share every file the
@@ -332,7 +344,7 @@ def _source_blobs(repo: Path, commits: Sequence[str]) -> list[tuple[str, bytes]]
             info, _, raw_path = record.partition(b"\t")
             name = raw_path.decode("utf-8", errors="surrogateescape")
             fields = info.split(b" ")
-            if len(fields) < _GIT_RECORD_FIELDS or not name.endswith(_SOURCE_SUFFIXES):
+            if len(fields) < _GIT_RECORD_FIELDS or not name.endswith(_PYTHON_SUFFIX):
                 continue
             wanted.setdefault(fields[2].decode(), name)
 
@@ -410,27 +422,31 @@ def _python_definitions(source: bytes) -> set[str]:
 
 
 def _line_definitions(source: bytes) -> set[str]:
-    """Every name :data:`_DEFINED_NAME_RE` finds in a JavaScript or shell file."""
+    """Every name :data:`_DEFINITION_RE` finds — the reader for a file `ast` refused.
+
+    This is not a second grammar: it is §4's own Python definition pattern, reused
+    for the one case :func:`_python_definitions` cannot hand to the language. A
+    Python file that will not parse is rare and is not an unevaluable *test*, so
+    the module reads what it can rather than binding the whole move on it.
+    """
     names: set[str] = set()
     for line in source.decode("utf-8", errors="replace").splitlines():
-        match = _DEFINED_NAME_RE.match(line)
+        match = _DEFINITION_RE.match(line)
         if match is not None:
-            names.add(
-                match.group("kw")
-                or match.group("decl")
-                or match.group("fn")
-                or match.group("bound")
-            )
+            names.add(match.group("def") or match.group("cls") or match.group("bound"))
     return names
 
 
 def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
-    """Every name this repository's source defines across ``commits``.
+    """Every name this repository's **Python** defines across ``commits``.
 
     The set is over-inclusive by construction — a local counts, an unparseable
     Python file falls back to the line reader — because it decides whether a
     backticked token is a *symbol* at all, and ADR-0209 §5 prices over-binding as
     acceptable and forbids the converse.
+
+    JavaScript and shell are deliberately absent: nothing resolves them, and a
+    name of theirs reaches §3 through :attr:`Pr.non_python_changed_lines` instead.
 
     Args:
         repo: The checkout to read.
@@ -444,8 +460,8 @@ def defined_names(repo: Path, commits: Sequence[str]) -> set[str]:
             and not this one's.
     """
     names: set[str] = set()
-    for path, blob in _source_blobs(repo, commits):
-        names |= _python_definitions(blob) if path.endswith(".py") else _line_definitions(blob)
+    for _path, blob in _python_blobs(repo, commits):
+        names |= _python_definitions(blob)
     return names
 
 
@@ -552,7 +568,7 @@ class Pr:
 
     @cached_property
     def defined_names(self) -> frozenset[str]:
-        """Every name this repository's source defines at either of §5's endpoints.
+        """Every name this repository's Python defines at either of §5's endpoints.
 
         Both, and not only the head: a PR that *deletes* a definition the moved
         ADR cites carries that name on a removed line and defines it nowhere at
@@ -560,6 +576,53 @@ class Pr:
         PR the moved ADR is about.
         """
         return frozenset(defined_names(self.repo, [self.base, self.head]))
+
+    @cached_property
+    def non_python_changed_lines(self) -> str:
+        """The changed lines lying in a source file this module does not resolve.
+
+        §3's symbol test still needs an answer for JavaScript and shell, and a
+        resolver for them is an enumeration of two more grammars — the shape four
+        rounds of PR #1803's own review kept defeating, one form at a time. So
+        those languages are answered from the *diff* side instead: a token no
+        Python definition accounts for is a symbol where a line this PR adds or
+        removes in one of them carries it as a word. That is the rule this module
+        applied to every token before #1799, narrowed to where it is still the
+        best available reading.
+
+        **Scoped to source, and not to "every file that is not Python."** Prose is
+        what #1799 was matching: `docs/adr/template.md` puts `- Status: Proposed`
+        at the head of every ADR, so admitting `.md` here would restore the
+        unconditional match between any two ADR lanes that the resolver closed.
+
+        The attribution is read off the patch's own `--- a/…` / `+++ b/…` headers
+        rather than by asking git a second time: `ship` renders the patch once,
+        under pinned options, and this module is handed that text.
+        """
+        kept: list[str] = []
+        admitted = False
+        for line in self.diff_text.splitlines():
+            if line.startswith("diff --git "):
+                admitted = False
+            elif (header := _DIFF_PATH_RE.match(line)) is not None:
+                admitted = admitted or header["path"].endswith(_OTHER_SOURCE_SUFFIXES)
+            elif _FILE_HEADER_RE.match(line) is not None:
+                continue
+            elif admitted and line[:1] in {"+", "-"}:
+                kept.append(line)
+        return "\n".join(kept)
+
+    def is_symbol(self, member: str) -> bool:
+        """Whether ``member`` is a name ADR-0209 §3 can be about at all.
+
+        ADR-0088 §1(b) is "a backticked name identifying something in the
+        repository", and there are two ways to identify something here: a
+        definition this repository's Python carries at either of §5's endpoints,
+        or a word a changed line of one of the PR's JavaScript or shell files
+        carries. The resolver is asked first, so a resolver that will not answer
+        raises and §6 binds rather than the fallback quietly standing in for it.
+        """
+        return member in self.defined_names or word_in(member, self.non_python_changed_lines)
 
     def touches_under(self, prefix: str) -> bool:
         """Whether any endpoint of the PR's diff lies under ``prefix``."""
@@ -604,10 +667,11 @@ class Pr:
         citation as a backticked name "identifying something in the repository",
         and the **member** is what must identify one — a package or module
         qualifier is the path test's question, asked and answered there. A token
-        naming no definition at either endpoint has been *evaluated* and is not a
-        symbol (#1799); a resolver that will not answer raises, and §6 binds.
+        identifying nothing, by either reading :meth:`is_symbol` gives, has been
+        *evaluated* and is not a symbol (#1799); a resolver that will not answer
+        raises, and §6 binds.
         """
-        if token.rpartition(".")[2] not in self.defined_names:
+        if not self.is_symbol(token.rpartition(".")[2]):
             return False
         if word_in(token, self.changed_lines):
             return True
