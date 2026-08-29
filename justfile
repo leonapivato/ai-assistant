@@ -235,15 +235,23 @@ test-fast *args:
     # the cleanup below removed this one would be the hazard this recipe exists to
     # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
     #
-    # `--dist worksteal` leads for that same reason, and is there because xdist's
-    # default (`load`) hands each worker its next test only when it finishes one,
-    # so a worker that draws a long test late leaves the others idle at the tail;
-    # worksteal lets an idle worker take work off a busy one's queue instead.
-    # Measured worth ~5% of the wall clock on this suite (#1752). It changes which
-    # worker runs a test, and neither what is collected nor whether it runs, so
-    # ADR-0166 §1 is untouched -- it is one of that clause's options "that changes
-    # neither what is collected nor whether it runs", alongside `-n 4` and `-q`.
-    if uv run pytest -n auto --dist worksteal "$@" --basetemp="$tmp"; then
+    # **No `--dist` here any more, and that is deliberate.** It used to lead with
+    # `--dist worksteal`, because xdist's default (`load`) hands each worker its
+    # next test only when it finishes one, so a worker that draws a long test late
+    # leaves the others idle at the tail; worksteal lets an idle worker take work
+    # off a busy one's queue instead, and was measured worth ~5% of the wall clock
+    # on this suite (#1752).
+    #
+    # ADR-0216 §3 bought that 5% back for a browser: the gateway's executable layer
+    # shares ONE browser per run, "whether it is serial or distributed", which holds
+    # only where every case of it lands on one worker -- and `worksteal` ignores the
+    # `xdist_group` marker that says so, while `loadgroup` honours it. So the mode is
+    # now `addopts` in `pyproject.toml`, where the workers read it too (a worker
+    # re-parses the controller's argv and ini, not its options), and a flag here
+    # would override it and scatter the layer across ~570-600 MB browsers.
+    #
+    # It still changes only which worker runs a test, so ADR-0166 §1 is untouched.
+    if uv run pytest -n auto "$@" --basetemp="$tmp"; then
         rm -rf "$tmp" "$tmp.lease"
     else
         status=$?
@@ -602,5 +610,13 @@ clone-sync *args:
 # First-time developer setup
 setup:
     uv sync
+    # The browser ADR-0216 §5 pins, fetched rather than locked: "The browser build
+    # is not vendored, not committed and not in `uv.lock`. It is fetched by
+    # `playwright install`, which `just setup` runs locally". The full `chromium`
+    # and not `chromium-headless-shell` -- §5 defaults to the expensive build on
+    # purpose, and licenses the lighter one only against a recorded comparison over
+    # the layer's own cases. Where it is absent the layer skips and says this
+    # command (§6), so a clone that skips this step still has a working `pytest`.
+    uv run playwright install chromium
     uv run pre-commit install --install-hooks
     git config commit.template .gitmessage

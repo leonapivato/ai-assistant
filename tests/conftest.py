@@ -37,6 +37,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 import pytest
+import pytest_asyncio
+from playwright.async_api import Error as BrowserError
+from playwright.async_api import async_playwright
 
 from ai_assistant.core.config import Settings
 
@@ -61,8 +64,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 from collection_guard import pytest_pycollect_makeitem  # noqa: F401  # a hook, by name
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
+    from playwright.async_api import Browser
     from test_protocol_triad import CheckOutcome, TriadEvidence
 
 # Options that narrow what is collected or run. If any is in play the record is
@@ -161,6 +165,72 @@ def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
         if variable.upper().startswith(_SETTINGS_ENV_PREFIX):
             monkeypatch.delenv(variable, raising=False)
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+#: The launch arguments ADR-0216's layer needs, and the reason each is here.
+#:
+#: The first two hand Chromium its own synthetic capture device, so ``getUserMedia``
+#: resolves and ``MediaRecorder`` writes a real WebM/Opus blob with no microphone, no
+#: prompt and no operator on a CI runner. The third is about the *playback* side: a
+#: page whose audio context the browser suspends until a gesture decodes perfectly and
+#: sounds nothing, which is the one failure this layer must not read as the page's own.
+LAUNCH_ARGUMENTS = (
+    "--use-fake-device-for-media-stream",
+    "--use-fake-ui-for-media-stream",
+    "--autoplay-policy=no-user-gesture-required",
+)
+
+#: What ADR-0216 §6 tells a developer to run when the browser build is absent.
+#: Named in the skip message, because a skip that says only "no browser" leaves the
+#: reader to find the command themselves.
+_BROWSER_INSTALL = "uv run playwright install chromium"
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def gateway_browser() -> AsyncIterator[Browser]:
+    """The one browser the gateway's executable layer drives (ADR-0216 §3, §5, §6).
+
+    **Session-scoped, and in this file because it has to be.** §3 says the browser
+    "is started once and shared by every case in the layer", and a session-scoped
+    fixture defined in a test module and imported into a second one is two fixture
+    definitions and therefore two browsers. ``tests/conftest.py`` is the only
+    conftest this corpus has -- mypy refuses a second module named ``conftest``
+    where the test tree carries no packages -- so this is the only place a fixture
+    can be shared across the layer's modules. Everything else about the layer lives
+    beside its cases, in ``tests/interfaces/gateway/browser_drive.py``.
+
+    **The full ``chromium``, named rather than defaulted.** §5 makes the full build
+    what is installed and driven, and Playwright launches the lighter
+    ``chromium-headless-shell`` for a headless launch unless the channel says
+    otherwise. ``channel="chromium"`` is what asks for the build §5 names; the shell
+    may be substituted only against the recorded comparison that section requires.
+
+    **Absent build, skip** (§6): "Where the browser build the installed
+    ``playwright`` pins is not present, the layer skips, with a message naming the
+    command that installs it. That skip is a condition the suite declares, in
+    ADR-0166 §1's sense, and an anchor discharged by a run carrying it is
+    discharged." Only that condition skips: a browser that is present and will not
+    start -- a missing system library, a sandbox refusal -- is a failure and is
+    reported as one.
+
+    Yields:
+        The browser, closed when the session ends.
+    """
+    async with async_playwright() as driver:
+        try:
+            browser = await driver.chromium.launch(channel="chromium", args=list(LAUNCH_ARGUMENTS))
+        except BrowserError as refusal:
+            if "Executable doesn't exist" not in str(refusal):
+                raise
+            pytest.skip(
+                "the browser ADR-0216 §5 pins is not installed in this clone; "
+                f"`{_BROWSER_INSTALL}` installs it "
+                "(`just setup` runs that, and CI installs it unconditionally)"
+            )
+        try:
+            yield browser
+        finally:
+            await browser.close()
 
 
 @dataclass
