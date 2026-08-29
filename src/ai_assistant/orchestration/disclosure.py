@@ -43,6 +43,35 @@ only the boolean — so the turn plans over everything it retrieved, exactly as
 ADR-0203 §1's last clause requires, and its capture still records that such
 content stood in its warrant. One predicate, in one module, two uses.
 
+**And since ADR-0210 §1 the two uses differ in the set they range over, which is
+the only thing that separates them.** ``_speakable`` is still the whole predicate
+and is still applied to every record alike; what varies is which records may set
+the boolean. On a channel of **unbounded** audience the boolean is
+ADR-0204 §2's disjunction taken over the members of the supply that a relevance
+read with this turn's own goal statement returned — ADR-0074 §5's second and
+third groups, named by the read rather than by the group — together with the
+turn's context facets. On a channel of **bounded** audience it is taken over the
+whole supply, first group included, exactly as ADR-0204 §2 and §4 state it. The
+**subtraction is not narrowed by any of that**: a record ADR-0199 §3 or ADR-0204
+§3 withholds is removed wherever it stood, so what a member of the conversation's
+own recent turns loses is the power to set a boolean and nothing else.
+
+**Why the tail is taken off the evaluation rather than out of the supply**
+(ADR-0210 §1). ADR-0074 §5 put the conversation's recent turns in the supply
+because they are *the conversation*, not because they answered the question — its
+own words call a user changing the subject mid-conversation "ordinary" and calling
+the tail "best first" "a strain". A boolean whose meaning is "something bearing on
+this turn was held back" cannot be set by a group whose membership does not depend
+on the turn; and while it could, one deflection stamped its episode, the next
+turn's tail held that episode, and the withholding was permanent on every store
+(#1775).
+
+**The read set is a membership and never a magnitude** (ADR-0210 §6). Nothing here
+reads a retrieval score, a rank, a similarity threshold or any other quantity the
+ranking produced, and nothing here reads content in order to decide whether a
+withholding bore on the question. The test is that a relevance read returned the
+record, and the ADR refuses the alternatives in terms.
+
 **The withholding subtracts and adds nothing** (ADR-0199 §5, ADR-0203 §1). What
 this module builds is the *supply the whole turn runs over*, so the
 :class:`~ai_assistant.core.types.TurnResult` such a turn produces is produced over
@@ -141,14 +170,22 @@ def supply_for_unbounded_audience(
     memories: tuple[MemoryRecord, ...],
     *,
     speakable_attested_sources: frozenset[str],
+    retrieved_ids: frozenset[str],
 ) -> tuple[CurrentContext, tuple[MemoryRecord, ...], bool]:
     """Return the supply the turn may run over, and whether anything was held back.
 
     **The whole turn, not the composing stage alone** (ADR-0203 §1). This is applied
     between retrieval and planning, so what it returns is what the planner is given,
     what the composing stage is given, and what the ``TurnResult`` carries. It reads
-    nothing but the three recorded-origin fields of a record and the exact type of a
-    facet, and it makes no store call of any kind.
+    nothing but the four recorded-origin fields of a record, the exact type of a
+    facet and a record's ``id``, and it makes no store call of any kind.
+
+    **Two sets, and they are deliberately different** (ADR-0210 §1). The
+    subtraction runs over the whole of ``memories``; the boolean runs over
+    ``retrieved_ids``. A record ADR-0199 §3 or ADR-0204 §3 withholds is removed
+    wherever it stood in ADR-0074 §5's three groups, so this function gives no
+    stage a record it did not have before — what a member of the conversation's
+    own recent turns loses is only the power to set the third return value.
 
     Args:
         context: The situational context the turn assembled. Never modified; where a
@@ -163,24 +200,76 @@ def supply_for_unbounded_audience(
             what identity it carries (ADR-0190 §7's minted discriminator included).
             Empty where no calendar is configured, which withholds every attested
             record rather than guessing at a name.
+        retrieved_ids: The ids of the records a relevance read taken with this
+            turn's own goal statement returned — the belief composition's, and the
+            episodic supplement's read **before** ADR-0158 §4's deduplication
+            (ADR-0210 §1, :data:`~ai_assistant.orchestration.loop.SupplyFilter`).
+            A *membership* and never a score, a rank or a group boundary: a record
+            both the conversation tail and the supplement's read carry stands in
+            ``memories`` at the tail's position alone, and it is named here because
+            that read chose it. An id absent from this set is subtracted exactly as
+            a present one is and sets nothing.
 
     Returns:
-        The context and the memories the turn may run over, and whether anything was
-        withheld from them. The third value is what the composing stage is eventually
-        told: **that** a withholding occurred, and nothing about what it was. It is
-        also ADR-0204 §2's disjunction, over this one evaluation and with no second
-        pass over the supply — its first term because an unplaced record or an
-        unplaced facet was dropped, and its second because :func:`_speakable` refuses
-        a record already carrying ``supplied_withheld_content``, so a supply holding
-        one cannot come back as "nothing was withheld".
+        The context and the memories the turn may run over, and whether anything
+        **that this turn's relevance reads returned, or any context facet**, was
+        withheld from them (ADR-0210 §1). The third value is what the composing
+        stage is eventually told: **that** a withholding occurred, and nothing about
+        what it was. It is also ADR-0204 §2's disjunction as ADR-0210 §1 narrows it,
+        over this one evaluation and with no second pass over the supply — its first
+        term because a record of that set or a facet was unplaced, and its second
+        because :func:`_speakable` refuses a record already carrying
+        ``supplied_withheld_content``, so a supply whose *retrieved* groups hold one
+        cannot come back as "nothing was withheld". A record withheld from the
+        conversation's own recent turns and from nowhere else is subtracted and
+        leaves this value ``False``, which is the whole of §1.
     """
-    kept = tuple(
-        record
-        for record in memories
-        if _speakable(record, speakable_attested_sources=speakable_attested_sources)
-    )
+    kept: list[MemoryRecord] = []
+    withheld = False
+    for record in memories:
+        if _speakable(record, speakable_attested_sources=speakable_attested_sources):
+            kept.append(record)
+        elif record.id in retrieved_ids:
+            # Subtracted either way (above); this branch only decides whether the
+            # removal is one the composing stage and capture are told about.
+            withheld = True
     narrowed, context_withheld = _speakable_context(context)
-    return narrowed, kept, context_withheld or len(kept) != len(memories)
+    return narrowed, tuple(kept), withheld or context_withheld
+
+
+def _withheld_over_whole_supply(
+    context: CurrentContext,
+    memories: tuple[MemoryRecord, ...],
+    *,
+    speakable_attested_sources: frozenset[str],
+) -> bool:
+    """ADR-0204 §2's disjunction over **every** member of a supply, unnarrowed.
+
+    The bounded channel's evaluation, and ADR-0210 §1's last clause is why it has a
+    function of its own rather than a flag: "On an operation whose output channel's
+    audience is **bounded** the evaluation is exactly ADR-0204 §2's and §4's, over
+    the whole supply as assembled and retrieved, first group included, with nothing
+    subtracted from that turn." The predicate is
+    :func:`_speakable`, identically; only the set differs, and #1708's laundering
+    path runs entirely on this side, which is what makes it untouchable here.
+
+    Args:
+        context: The situational context the turn assembled. Never modified — the
+            narrowed copy :func:`_speakable_context` builds is discarded, because
+            nothing is subtracted from a bounded channel's turn.
+        memories: What the turn retrieved, in ADR-0074 §5's three groups.
+        speakable_attested_sources: The identities ADR-0199 §3 places, as
+            :func:`supply_for_unbounded_audience` takes them.
+
+    Returns:
+        Whether ADR-0199 §3 would have withheld any record of that supply, or any
+        context facet, from a channel of unbounded audience.
+    """
+    _, context_withheld = _speakable_context(context)
+    return context_withheld or any(
+        not _speakable(record, speakable_attested_sources=speakable_attested_sources)
+        for record in memories
+    )
 
 
 @dataclass(slots=True)
@@ -204,29 +293,48 @@ class UnboundedAudienceSupply:
     an application that removes nothing cannot clear a withholding an earlier one
     recorded — the fail-closed direction, and the only one this module takes.
 
+    **And since ADR-0210 §1 it records less than it removes.** The subtraction is
+    unchanged and runs over the whole supply; :attr:`withheld` is set only where
+    what was removed stood in what this turn's relevance reads returned, or was a
+    context facet. So a stamped episode of this conversation's own recent turns is
+    still taken out of everything the turn runs over — and the composing stage is
+    not told, and capture writes ``False``. That is the whole of #1775's answer:
+    before it, one withholding stamped the next turn's tail, and the stamp then
+    propagated through the episodic record for as long as the conversation ran.
+
     Attributes:
         speakable_attested_sources: The identities ADR-0199 §3 places, as
             :func:`supply_for_unbounded_audience` takes them.
-        withheld: Whether anything was held back from this turn's supply.
+        withheld: Whether anything a relevance read of this turn returned, or any
+            context facet, was held back from this turn's supply (ADR-0210 §1).
     """
 
     speakable_attested_sources: frozenset[str]
     withheld: bool = False
 
     def __call__(
-        self, context: CurrentContext, memories: tuple[MemoryRecord, ...]
+        self,
+        context: CurrentContext,
+        memories: tuple[MemoryRecord, ...],
+        retrieved_ids: frozenset[str],
     ) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
         """Subtract what ADR-0199 §3 withholds, recording that it happened.
 
         Args:
             context: The context the turn assembled.
             memories: What the turn retrieved.
+            retrieved_ids: The ids this turn's relevance reads returned, which is
+                the set :attr:`withheld` is evaluated over (ADR-0210 §1). The
+                subtraction below ignores it and runs over the whole supply.
 
         Returns:
             The context and the memories the turn may run over.
         """
         narrowed, kept, withheld = supply_for_unbounded_audience(
-            context, memories, speakable_attested_sources=self.speakable_attested_sources
+            context,
+            memories,
+            speakable_attested_sources=self.speakable_attested_sources,
+            retrieved_ids=retrieved_ids,
         )
         self.withheld = self.withheld or withheld
         return narrowed, kept
@@ -256,29 +364,49 @@ class BoundedAudienceSupply:
     occurred, and on this channel none did. Latched exactly as the unbounded twin's
     is, for the same fail-closed reason.
 
+    **ADR-0210 §1 narrows the twin and leaves this class alone**, which is where the
+    two now differ. Its last clause is explicit — on a bounded channel "the
+    evaluation is exactly ADR-0204 §2's and §4's, over the whole supply as assembled
+    and retrieved, first group included" — so a stamped episode standing only in the
+    conversation's recent turns sets this boolean and would not set the twin's.
+    That is not an oversight to tidy up later: #1708's laundering path runs entirely
+    through this channel's captures, and a narrowing here would reopen it.
+
     Attributes:
         speakable_attested_sources: The identities ADR-0199 §3 places, as
             :func:`supply_for_unbounded_audience` takes them.
         withheld: Whether ADR-0199 §3 would have held anything back from this turn's
-            supply — ADR-0204 §2's disjunction, over a supply nothing was taken from.
+            supply — ADR-0204 §2's disjunction, over a supply nothing was taken from
+            and nothing was narrowed out of (:func:`_withheld_over_whole_supply`).
     """
 
     speakable_attested_sources: frozenset[str]
     withheld: bool = False
 
     def __call__(
-        self, context: CurrentContext, memories: tuple[MemoryRecord, ...]
+        self,
+        context: CurrentContext,
+        memories: tuple[MemoryRecord, ...],
+        retrieved_ids: frozenset[str],
     ) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
         """Evaluate what ADR-0199 §3 would withhold, and subtract none of it.
 
         Args:
             context: The context the turn assembled.
             memories: What the turn retrieved.
+            retrieved_ids: What this turn's relevance reads returned. **Accepted
+                and not read** (ADR-0210 §1's last clause): this channel's
+                evaluation is ADR-0204 §2's and §4's, over the whole supply as
+                assembled and retrieved. The parameter is on the seam because
+                :data:`~ai_assistant.orchestration.loop.SupplyFilter` is one seam
+                for both postures, and discarding it here is the narrowing being
+                declined rather than forgotten.
 
         Returns:
             Exactly what it was given, unnarrowed and unreordered.
         """
-        _, _, withheld = supply_for_unbounded_audience(
+        del retrieved_ids
+        withheld = _withheld_over_whole_supply(
             context, memories, speakable_attested_sources=self.speakable_attested_sources
         )
         self.withheld = self.withheld or withheld

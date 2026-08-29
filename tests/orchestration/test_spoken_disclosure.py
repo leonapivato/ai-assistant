@@ -11,6 +11,20 @@ binding the supply the *whole turn* runs over rather than the composing stage's
 alone: #1692's two-turn chain, #1693's return value, the negative arm, the step
 consequence §3 admits, the three degradation rules held unmoved on the withholding
 route, and the bounded channel left as it was.
+
+The fourth is **ADR-0204 §8's fifteen cases**, about what a record's warrant held.
+Two of them — 4 and 9 — are restated under ADR-0210 §10 item 7 with the record
+standing where §1 narrows the evaluation to, and the section's banner comment
+accounts for the other thirteen one line each.
+
+The fifth is **ADR-0210 §9's nine obligations**, about *which members* of a spoken
+turn's supply may set the boolean ADR-0204 §2 carries to capture and ADR-0199 §5's
+third clause carries to the composing stage: the retrieved groups and the context
+facets, and never the conversation's own recent turns. The cases that turn on which
+relevance read returned a record are driven through
+:class:`~ai_assistant.orchestration.loop.LearningLoop`, where both reads and
+ADR-0158 §4's deduplication happen; the cases about what the stage is told and what
+capture writes are driven through the engine.
 """
 
 from __future__ import annotations
@@ -54,28 +68,36 @@ from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
     TimeOfDay,
+    TurnOutcome,
 )
-from ai_assistant.orchestration import RoutingStage
+from ai_assistant.orchestration import LearningLoop, MemoryWriteStage, RoutingStage
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.disclosure import (
+    UnboundedAudienceSupply,
     placed_facet_kinds,
     speakable_sources,
     supply_for_unbounded_audience,
 )
 from ai_assistant.testing import (
     FakeContextProvider,
+    FakeDeferralStore,
+    FakeFeedbackProcessor,
+    FakeMemoryPolicy,
     FakeMemoryStore,
+    FakeMemoryWriter,
     FakeModelProvider,
+    FakePlanner,
     FakeRoutingRecorder,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
+    StreamAttempt,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryWrite
+    from ai_assistant.core.types import MemoryWrite, TurnResult
 
 _AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 _MP4: Final = SpokenAudioFormat.MP4
@@ -137,14 +159,28 @@ def _supply(
     *records: MemoryRecord,
     context: CurrentContext = _CONTEXT,
     sources: frozenset[str] = frozenset(),
+    retrieved_ids: frozenset[str] | None = None,
 ) -> tuple[CurrentContext, tuple[MemoryRecord, ...], bool]:
     """ADR-0203 §1's subtraction, over one context and one group of records.
 
     The narrowing predicate is applied to what the turn assembled and retrieved
     rather than to a ``TurnResult``, because since ADR-0203 §1 there is no turn yet
     when it runs: it sits between retrieval and planning.
+
+    ``retrieved_ids`` defaults to **every** record given, which is the reading the
+    placement cases below want: ADR-0210 §1 narrows which members of a supply may
+    set the boolean and changes no placement (§3), so a case about a placement puts
+    its subject where a relevance read returned it. The cases that turn on the
+    narrowing state the set themselves.
     """
-    return supply_for_unbounded_audience(context, records, speakable_attested_sources=sources)
+    return supply_for_unbounded_audience(
+        context,
+        records,
+        speakable_attested_sources=sources,
+        retrieved_ids=(
+            frozenset(one.id for one in records) if retrieved_ids is None else retrieved_ids
+        ),
+    )
 
 
 # --- §3: which classes are placed as speakable -------------------------------
@@ -961,6 +997,28 @@ async def test_the_bounded_channel_still_plans_over_its_whole_supply() -> None:
 
 
 # --- ADR-0204 §8: what a record's warrant held, stamped and read at supply ----
+#
+# **Two of §8's fifteen cases are restated by ADR-0210 §10 item 7**, whose header
+# records the supersession. Test 4 states its input as "a `converse_spoken` turn
+# whose supply held a withheld record" and test 9 as "a turn supplied a withheld
+# record that parks", neither saying **where** in the supply the record stood — so
+# each was satisfied by a fixture holding it in the conversation tail alone, and
+# after ADR-0210 §1 such a fixture captures `False`. Both are written below with the
+# record standing in the narrowed set — a relevance read of the turn's own goal
+# statement returned it — and both assert the **same outcome** each test fixes.
+# Neither is deleted and neither outcome is weakened.
+#
+# **The other thirteen are unaffected, one line each** (§10 item 7):
+#
+# * 1, 2, 5 and 14 run on `converse`, which ADR-0210 §1's last clause leaves whole.
+# * 3's record is one "whose retrieval returns it" — its precondition already names
+#   the narrowed set.
+# * 6 withholds nothing, so there is no evaluation for §1 to narrow.
+# * 7, 8, 10 and 15 reach no spoken turn's supply at all: a fold, a decode, a
+#   resumption and a routed pass, and a supersession.
+# * 11, 12 and 13 are about a producer that is **not** a turn — an observer
+#   distilling from records it was supplied — which ADR-0210 §2's third clause
+#   leaves untouched word for word.
 
 
 def _stamped(records: Sequence[MemoryRecord]) -> set[str]:
@@ -998,6 +1056,53 @@ async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> N
     assert _WITHHELD_CONTENT in captured[0].content, (
         "the episode's content is unchanged — the stamp is what withholds it, not a filter"
     )
+
+
+async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
+    """§8 case 1's third caller: ``converse_streaming`` (#1728).
+
+    ADR-0204 §8's fifteen cases name ``converse`` and ``converse_spoken`` and no
+    third operation, but :meth:`Engine._run_turn` has three callers and the streamed
+    one mints its own
+    :class:`~ai_assistant.orchestration.disclosure.BoundedAudienceSupply`. What held
+    that in place was the type checker alone — ``supply`` is a required keyword
+    argument, so removing it is a ``mypy`` error rather than a silent change — and
+    what was unpinned is the weaker mutation: a streamed caller passing a
+    differently configured supply, or a later lane restoring a ``None`` default on
+    that parameter.
+
+    The claim is ADR-0204 §4's, on the operation ADR-0173 §4 adds: the turn is
+    supplied everything it retrieved, and its capture records that content ADR-0199
+    §3 withholds stood in its warrant. ADR-0210 §1's last clause leaves this channel
+    exactly here.
+    """
+    stage = ComposingStage(
+        model=FakeModelProvider(_ANSWER),
+        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=(_ANSWER,)),)),
+    )
+    harness = Harness(composing=stage, planner=_EchoingPlanner())
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    chunks: list[str] = []
+    outcome: TurnOutcome | None = None
+    async for value in harness.engine.converse_streaming(_ASKED, timeout=PATIENT):
+        if isinstance(value, TurnOutcome):
+            outcome = value
+        else:
+            chunks.append(value.text)
+
+    assert outcome is not None, "ADR-0173 §4: the outcome is always the last value"
+    assert outcome.turn is not None
+    assert "rec-2" in _ids(outcome.turn.memories), (
+        "§4: a bounded channel's supply is not narrowed, on this operation either"
+    )
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is True
 
 
 async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode() -> None:
@@ -1072,13 +1177,26 @@ async def test_the_typed_turns_stamped_episode_is_withheld_from_a_later_spoken_t
 
 
 async def test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoken_turn() -> None:
-    """§8 case 4: #1703's path, refused.
+    """§8 case 4 as ADR-0210 §10 item 7 restates it — and §9's sixth clause.
 
     The withholding turn's own question is carried unrewritten into its episode
     (``_exchange_of``), which is why ADR-0203 §4's fifth clause recorded this path as
     open. It closes on the fact that the turn withheld something at all — a fact
     about the turn's supply, decided from recorded origin, and not a judgement about
     what its question said.
+
+    **The precondition is narrowed and the outcome is not** (ADR-0210 §8's header,
+    §10 item 7). §8 case 4 says only "a `converse_spoken` turn whose supply held a
+    withheld record"; after ADR-0210 §1 the record has to have stood in the narrowed
+    set, so this fixture states that mechanically — the store holds **no episode**
+    when the first turn runs, so ADR-0074 §5's first group is empty and the belief
+    about Alice can only have reached the supply through the belief composition's
+    relevance read. ADR-0210 §4 is the same point in the ADR's own words: "a turn
+    that asks about the withheld class is a turn whose *retrieval* surfaces the
+    withheld record — the question is the query".
+
+    This is also §9's sixth clause: #1703's chain end to end, a deflecting spoken
+    turn captured stamped and a later spoken turn not supplied that episode.
     """
     goals = iter(f"g-{n}" for n in range(1, 10))
     harness = _wired(
@@ -1091,6 +1209,11 @@ async def test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoke
         harness,
         _belief("rec-1", _SPEAKABLE_CONTENT),
         _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    assert not _episodes(await harness.memory.export()), (
+        "no episode exists yet, so the first turn's tail is empty and the withheld "
+        "belief stands in ADR-0074 §5's second group (ADR-0210 §1)"
     )
 
     first = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
@@ -1205,7 +1328,7 @@ async def test_milestone_19s_exit_test_is_unaffected() -> None:
 
 
 async def test_a_parked_turns_resolution_inherits_its_stamp() -> None:
-    """§8 case 9: both of one turn's episodes carry it, and neither is spoken back.
+    """§8 case 9 as ADR-0210 §10 item 7 restates it: both episodes carry it.
 
     ADR-0074 §3 captures a parking turn twice, and the second capture renders the
     **parked turn's** goal and plan from a pass that retrieves nothing of its own.
@@ -1213,6 +1336,15 @@ async def test_a_parked_turns_resolution_inherits_its_stamp() -> None:
     §2's fourth clause): an implementation that recomputed it at the resolution
     would evaluate an empty supply, answer ``False``, and read that turn's own
     rationale aloud one turn later.
+
+    **The precondition is narrowed and the outcome is not.** §8 case 9 says only "a
+    turn supplied a withheld record that parks"; the parking turn here is the first
+    of a fresh conversation over a store holding no episode, so its tail is empty
+    and the belief about Alice reached its supply through the relevance read — the
+    narrowed set ADR-0210 §1 names. Test 9's second half is untouched by a different
+    route: ADR-0204 §2's fourth clause makes the resolution carry the parking turn's
+    own retained value and forbids recomputing it, and ADR-0210 §2's first clause
+    keeps that whole.
     """
     goals = iter(f"g-{n}" for n in range(1, 10))
     harness = _wired(
@@ -1226,6 +1358,11 @@ async def test_a_parked_turns_resolution_inherits_its_stamp() -> None:
         harness,
         _belief("rec-1", _SPEAKABLE_CONTENT),
         _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    assert not _episodes(await harness.memory.export()), (
+        "no episode exists yet, so the parking turn's tail is empty and the withheld "
+        "belief stands in ADR-0074 §5's second group (ADR-0210 §1)"
     )
 
     parked = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
@@ -1385,4 +1522,492 @@ async def test_a_belief_derived_from_a_stamped_episode_is_stamped_and_withheld()
     supplied = {one.id for one in spoken.outcome.turn.memories}
     assert not supplied & {one.id for one in distilled}, (
         "a belief derived from a stamped record is withheld from this channel too"
+    )
+
+
+# --- ADR-0210 §9: what the evaluation is taken over --------------------------
+# ADR-0210 §1 narrows one boolean on one channel: on a channel of unbounded
+# audience ADR-0204 §2's disjunction and the fact ADR-0199 §5's third clause
+# carries to the composing stage are evaluated over the members of the supply a
+# relevance read taken with this turn's own goal statement returned — ADR-0074
+# §5's second and third groups, named by the read and not by the group — together
+# with the turn's context facets, and never over a member the supply holds only
+# because it stands in the conversation's own recent turns.
+#
+# The **subtraction is untouched** and runs over the whole supply, first group
+# included (§1's fourth clause), which is why every case below that asserts a
+# boolean also asserts what the turn was supplied. What a member of the first
+# group loses is the power to set a boolean.
+
+
+def _ids(records: Sequence[MemoryRecord]) -> tuple[str, ...]:
+    """The ids of ``records`` in order.
+
+    Compared instead of the records themselves because the belief composition
+    hands the loop ``model_copy`` results carrying a ``score`` — the same records
+    at the same ids, and not the objects a test seeded.
+    """
+    return tuple(one.id for one in records)
+
+
+def _stamped_belief(record_id: str, content: str) -> SemanticMemory:
+    """§9's inherited-term fixture: a belief ADR-0199 §3 would place **speakable**.
+
+    ``about_person`` unset and a placed ``Provenance.source``, so §3's third clause
+    places it and the *first* term of ADR-0204 §2's disjunction is false of it. What
+    withholds it is ``supplied_withheld_content`` alone — §5's inherited route,
+    which is the term §9's third clause requires pinned separately. A fixture §3
+    withholds on its own account would fire the first term and prove nothing about
+    the second.
+    """
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_AT,
+            supplied_withheld_content=True,
+        ),
+    )
+
+
+def _episode(
+    episode_id: str,
+    content: str,
+    *,
+    stamped: bool = False,
+    about_person: str | None = None,
+) -> EpisodicMemory:
+    """A captured turn, as ``orchestration.conversations`` writes one.
+
+    ``OBSERVED``, which ``band_of`` maps to ``DERIVED`` — the band ADR-0158 §3 pins
+    the episodic supplement to, and the band every episode this system writes lands
+    in. ``about_person`` is the knob that makes §3 withhold it on its own account;
+    ``stamped`` is the knob that makes ADR-0204 §3 withhold it while §3's third
+    clause still places it speakable.
+    """
+    return EpisodicMemory(
+        id=episode_id,
+        content=content,
+        occurred_at=_AT,
+        about_person=about_person,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_AT,
+            supplied_withheld_content=stamped,
+        ),
+    )
+
+
+def _spoken_loop(memory: FakeMemoryStore) -> LearningLoop:
+    """A :class:`LearningLoop` over ``memory``, canonical fakes everywhere else.
+
+    The seam ADR-0210 §10 item 1 puts the read set on is
+    :data:`~ai_assistant.orchestration.loop.SupplyFilter`, between retrieval and
+    planning, and the loop is where both relevance reads happen — so the cases that
+    turn on *which* read returned a record are driven here rather than through the
+    engine, where the store, the query and the deduplication would all be several
+    stages away. The engine cases below drive the consequences: what the composing
+    stage is told, and what capture writes down.
+    """
+    return LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writes=MemoryWriteStage(
+            writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AT),
+            deferrals=FakeDeferralStore(now=lambda: _AT),
+        ),
+        planner=FakePlanner(now=lambda: _AT),
+        feedback=FakeFeedbackProcessor(),
+        now=lambda: _AT,
+        id_factory=lambda: "goal-1",
+    )
+
+
+async def _spoken_supply(
+    memory: FakeMemoryStore, utterance: str, *, history: Sequence[MemoryRecord] = ()
+) -> tuple[TurnResult, UnboundedAudienceSupply]:
+    """One turn through the loop under the unbounded channel's filter.
+
+    Returns the turn and the filter, so a case can assert both halves of §1 — what
+    the turn was supplied (the subtraction, unnarrowed) and what the filter
+    recorded (the evaluation, narrowed).
+    """
+    supply = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
+    turn = await _spoken_loop(memory).respond(utterance, history=history, narrow=supply)
+    return turn, supply
+
+
+async def _store(*records: MemoryRecord) -> FakeMemoryStore:
+    memory = FakeMemoryStore(now=lambda: _AT)
+    for record in records:
+        await memory.add(record)
+    return memory
+
+
+async def test_the_inherited_term_fires_from_the_relevance_retrieved_group() -> None:
+    """§9's third clause, first placement: the second term, over ADR-0074 §5's second group.
+
+    ADR-0210 §1's third clause keeps **both** terms of ADR-0204 §2's disjunction and
+    changes only the set they range over. This fixture is placed speakable by
+    ADR-0199 §3's third clause on its own account, so the only thing that withholds
+    it is the stamp — which is what makes this case able to fail an implementation
+    that narrowed §1 by dropping the inherited route instead.
+    """
+    stamped = _stamped_belief("b-1", "the user hikes on Tuesdays")
+
+    turn, supply = await _spoken_supply(await _store(stamped), "hikes")
+
+    assert supply.withheld is True
+    assert _ids(turn.memories) == (), "and it is subtracted, exactly as before"
+    unstamped = _belief("b-1", "the user hikes on Tuesdays")
+    _, kept, would_withhold = _supply(unstamped)
+    assert (would_withhold, _ids(kept)) == (False, ("b-1",)), (
+        "ADR-0199 §3 places this class speakable, so the stamp is the whole of the finding"
+    )
+
+
+async def test_the_inherited_term_fires_from_the_episodic_supplement() -> None:
+    """§9's third clause, second placement — and §9's fourth clause's second arm.
+
+    The same fixture in ADR-0158's supplement rather than in the belief
+    composition. §9 requires **both** placements because an implementation reaching
+    the supplement only through the deduplication collision below would carry the
+    belief composition's records and the colliding ids and nothing of an ordinary
+    supplemented turn — passing every other case here and under-firing on the
+    commonest supplement there is.
+    """
+    separator = _belief("b-1", "the user hikes on Tuesdays")
+    stamped = _episode("e-1", "the user asked what they do on hikes", stamped=True)
+
+    turn, supply = await _spoken_supply(await _store(separator, stamped), "hikes")
+
+    assert supply.withheld is True
+    assert _ids(turn.memories) == ("b-1",), "the episode was subtracted; the belief was not"
+    unstamped = _episode("e-1", "the user asked what they do on hikes")
+    _, kept, would_withhold = _supply(separator, unstamped)
+    assert (would_withhold, _ids(kept)) == (False, ("b-1", "e-1")), (
+        "an unstamped episode of this class is speakable, so the stamp is the finding"
+    )
+
+
+async def test_a_withheld_class_in_the_episodic_supplement_fires_the_direct_term() -> None:
+    """§9's fourth clause, first arm: the supplement standing on its own, first term.
+
+    A record ADR-0199 §3 withholds on its own account, returned by
+    ``_supplement``'s own read and kept by ADR-0158 §4's deduplication because
+    neither the conversation tail nor the belief composition holds it. The pair with
+    the case above is what §9's fourth clause asks for: both terms, on the third
+    group, separately from the collision.
+    """
+    separator = _belief("b-1", "the user hikes on Tuesdays")
+    withheld = _episode("e-1", "the user asked about hikes with Alice", about_person="Alice")
+
+    turn, supply = await _spoken_supply(await _store(separator, withheld), "hikes")
+
+    assert supply.withheld is True
+    assert _ids(turn.memories) == ("b-1",)
+
+
+async def test_a_supplement_read_that_collides_with_the_tail_still_fires() -> None:
+    """§9's eighth clause, and the reason ADR-0210 §1's second clause is stated over the reads.
+
+    ``LearningLoop._supplement`` computes ``held = {record.id for record in
+    preceding}`` and returns only what is not in it, so an episode of this
+    conversation that the supplement's read **does** return is deduplicated away and
+    survives at the tail's position alone. §1's second clause rules that such a
+    record fires — "the supplement's read selected it for this goal, and the
+    deduplication decides where one copy sits rather than why it was chosen" — so an
+    implementation evaluating over the composed groups answers ``False`` here.
+
+    The second drive is the same collision with the stamp removed, and it is what
+    shows the collision is real rather than assumed: one copy of the episode, at
+    index 0, the tail's position, and none in the supplement.
+    """
+    separator = _belief("b-1", "the user hikes on Tuesdays")
+    stamped = _episode("e-1", "the user asked what they do on hikes", stamped=True)
+
+    turn, supply = await _spoken_supply(
+        await _store(separator, stamped), "hikes", history=(stamped,)
+    )
+
+    assert supply.withheld is True
+    assert _ids(turn.memories) == ("b-1",)
+
+    unstamped = _episode("e-1", "the user asked what they do on hikes")
+    plain, plain_supply = await _spoken_supply(
+        await _store(separator, unstamped), "hikes", history=(unstamped,)
+    )
+    assert _ids(plain.memories) == ("e-1", "b-1"), (
+        "one copy, at the tail's position: ADR-0158 §4 deduplicated the supplement's"
+    )
+    assert plain_supply.withheld is False
+
+
+async def test_a_tail_no_relevance_read_returned_fires_nothing() -> None:
+    """§9's eighth clause's negative twin, and #1775's mechanism at the loop.
+
+    The same stamped episode in the tail, and a supplement read that does **not**
+    return it. Nothing a relevance read of this turn returned was withheld, so §1's
+    evaluation is ``False`` — while the episode is still subtracted from everything
+    the turn runs over. Without this twin the case above passes on an implementation
+    that simply evaluated the whole supply.
+    """
+    separator = _belief("b-1", "the user hikes on Tuesdays")
+    stamped = _episode("e-1", "the user asked about a cardiology appointment", stamped=True)
+
+    turn, supply = await _spoken_supply(
+        await _store(separator, stamped), "hikes", history=(stamped,)
+    )
+
+    assert supply.withheld is False, (
+        "no relevance read of this turn returned it: ADR-0210 §1's first clause"
+    )
+    assert _ids(turn.memories) == ("b-1",), (
+        "and it is still removed — §1's fourth clause leaves the subtraction whole"
+    )
+
+
+#: A later question sharing no term with the episode the first turn captured.
+#: ``FakeMemoryStore`` scores by substring, so "the withheld record is in the
+#: conversation tail and in no retrieved group" is arranged by choosing words —
+#: neither ``cycles`` nor ``weekends`` occurs in ``The user asked: what is on this
+#: week`` or in either belief that turn was supplied.
+_LATER: Final = "cycles weekends"
+
+#: The one belief the later question does retrieve. Seeded **after** the first
+#: turn, so it is not in that turn's rationale and therefore not in the episode
+#: the tail carries — which is what keeps the two queries independent.
+_LATER_CONTENT: Final = "the user cycles at weekends"
+
+
+async def _tail_holding_a_stamped_episode(
+    model: FakeModelProvider, planner: _EchoingPlanner
+) -> tuple[Harness, str, str]:
+    """#1775's fixture: a conversation whose tail holds a stamped episode.
+
+    A typed turn over a store holding a belief about Alice captures an episode
+    ADR-0204 §2 stamps. The belief is then deleted and a fresh speakable one seeded,
+    so a second turn in the same conversation retrieves something and retrieves
+    **nothing withheld** — the stamped episode stands in ADR-0074 §5's first group
+    and in no other, which is exactly the state #1775 measured and the state
+    ADR-0210 §1 is about.
+
+    Returns:
+        The harness, the conversation the turns share, and the id of the stamped
+        episode the first turn captured.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = _wired(
+        model,
+        planner=planner,
+        loop_id_factory=lambda: next(goals),
+        transcriber=FakeSpeechTranscriber(transcripts=[_LATER]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+
+    typed = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert typed.conversation_id is not None
+    await harness.memory.delete("rec-2")
+    await _seed(harness, _belief("rec-3", _LATER_CONTENT))
+
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is True, (
+        "the tail's episode is stamped — ADR-0204 §2 over the typed turn's own supply"
+    )
+    return harness, typed.conversation_id, captured[0].id
+
+
+async def test_a_stamped_episode_in_the_tail_alone_is_not_reported_as_a_withholding() -> None:
+    """§9's first clause: #1775's engine, pinned.
+
+    Before ADR-0210 this turn deflected and its episode was stamped, so the next
+    turn's tail held two stamped episodes and the next held three — "monotonic and
+    unbounded in practice", and the reason ADR-0204 §6's continuity claim stopped
+    being true after the first withholding. The stamped episode is still removed
+    from everything this turn runs over; what it no longer does is set a boolean.
+    """
+    model = FakeModelProvider(_ANSWER)
+    planner = _EchoingPlanner()
+    harness, conversation, stamped_id = await _tail_holding_a_stamped_episode(model, planner)
+
+    spoken = await harness.engine.converse_spoken(
+        _RECORDING, plays=(_MP4,), timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert _ids(spoken.outcome.turn.memories) == ("rec-3",), (
+        "this turn's relevance reads returned one belief, and nothing withheld"
+    )
+    assert "NOT AVAILABLE ON THIS CHANNEL" not in _prompt(model, 1), (
+        "ADR-0199 §5's third clause as ADR-0210 narrows it: the stage is not told"
+    )
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 2
+    assert _stamped(captured) == {stamped_id}, (
+        "the spoken turn's own episode carries False, so the spoken channel keeps "
+        "its conversation (ADR-0204 §6, restored)"
+    )
+
+
+async def test_a_stamped_episode_in_the_tail_alone_is_still_subtracted() -> None:
+    """§9's ninth clause: §1's fourth clause, which leaves the subtraction whole.
+
+    The boolean is ``False`` and the record is gone anyway — from the supply the
+    ``TurnResult`` carries, from what the planner was handed, and from what the
+    composing stage was handed. ADR-0210 "gives no stage a record it did not have
+    before", and without this case a narrowing that also stopped removing would pass
+    the case above.
+    """
+    model = FakeModelProvider(_ANSWER)
+    planner = _EchoingPlanner()
+    harness, conversation, stamped_id = await _tail_holding_a_stamped_episode(model, planner)
+
+    spoken = await harness.engine.converse_spoken(
+        _RECORDING, plays=(_MP4,), timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert stamped_id not in _ids(spoken.outcome.turn.memories)
+    assert stamped_id not in _ids(planner.calls[-1][1]), "not among the planner's inputs"
+    prompt = _prompt(model, 1)
+    assert _WITHHELD_CONTENT not in prompt
+    assert _ASKED not in prompt, "the earlier turn's own question, carried in that episode"
+    assert "NOT AVAILABLE ON THIS CHANNEL" not in prompt, "and the boolean is False"
+
+
+async def test_the_bounded_channel_still_fires_on_the_conversation_tail() -> None:
+    """§9's fifth clause: ADR-0210 §1's last clause, and #1708's path left alone.
+
+    The same conversation and the same stamped episode, typed. Nothing is
+    subtracted, the disjunction ranges over the whole supply — first group included
+    — and the capture is stamped. A narrowing on this channel would let one typed
+    turn strip the stamp off the whole warrant, which is what ADR-0204 §2 was
+    written to close.
+    """
+    model = FakeModelProvider(_ANSWER)
+    planner = _EchoingPlanner()
+    harness, conversation, stamped_id = await _tail_holding_a_stamped_episode(model, planner)
+
+    typed = await harness.engine.converse(_LATER, timeout=PATIENT, conversation_id=conversation)
+
+    assert typed.turn is not None
+    assert stamped_id in _ids(typed.turn.memories), (
+        "ADR-0204 §4: a bounded channel's turn is supplied everything it retrieved"
+    )
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 2
+    assert _stamped(captured) == {one.id for one in captured}
+
+
+async def test_a_withheld_record_a_relevance_read_returned_is_told_and_stamped() -> None:
+    """§9's second clause: the exit test's arm, unchanged by ADR-0210.
+
+    The turn is the first of a fresh conversation, so ADR-0074 §5's first group is
+    empty and every member of its supply stood in a group a relevance read taken
+    with this turn's own goal statement returned. §1 narrows what may fire and
+    narrows nothing here: the composing stage is told and the episode is stamped
+    exactly as before.
+    """
+    model = FakeModelProvider(_ANSWER)
+    harness = _wired(
+        model,
+        planner=_EchoingPlanner(),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(
+        harness,
+        _belief("rec-1", _SPEAKABLE_CONTENT),
+        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
+    )
+    assert not _episodes(await harness.memory.export()), "no episode exists, so the tail is empty"
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert _ids(spoken.outcome.turn.memories) == ("rec-1",)
+    assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0)
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is True
+
+
+class _FixedContext:
+    """A ``ContextProvider`` returning one context **without revalidating it**.
+
+    ``FakeContextProvider`` snapshots by ``model_dump`` and
+    ``CurrentContext.model_validate``, which is right for what it is for and
+    coerces a *subclass* of a placed facet back to the declared type — so the
+    canonical fake cannot deliver an unplaced facet to a turn at all. ADR-0199 §3's
+    fourth clause is entirely about that case, so it needs a double that hands the
+    object over as it is.
+
+    Structurally implements
+    :class:`~ai_assistant.core.protocols.ContextProvider`.
+    """
+
+    def __init__(self, context: CurrentContext) -> None:
+        self._context = context
+
+    async def assemble(self) -> CurrentContext:
+        """The configured context, unchanged. ``CurrentContext`` is frozen."""
+        return self._context
+
+
+async def test_an_unplaced_facet_fires_both_consequences_over_a_clean_retrieval() -> None:
+    """§9's seventh clause: the facet arm unmoved, and both of its consequences.
+
+    A facet is *assembled* rather than retrieved, so it is the one arm on which §1's
+    set is not what a relevance read returned — and ADR-0210 §1 keeps it in
+    deliberately, on ADR-0199 §3's sixth clause: an unplaced facet should be loud
+    rather than quiet. Both consequences are asserted because a test reading only
+    "the evaluation fires" would not distinguish an implementation that dropped the
+    facet from the notification while keeping it in the stamp.
+    """
+
+    class HealthFacet(CalendarFacet):
+        """A facet nobody has placed, standing in for the next source to land."""
+
+    model = FakeModelProvider(_ANSWER)
+    harness = _wired(
+        model,
+        planner=_EchoingPlanner(),
+        context=_FixedContext(
+            CurrentContext(
+                now=_AT,
+                time_of_day=TimeOfDay.AFTERNOON,
+                is_weekend=False,
+                within_working_hours=True,
+                calendar=HealthFacet(
+                    source="health", read_at=_AT, entries_in_progress=1, covers_until=_AT
+                ),
+            )
+        ),
+        transcriber=FakeSpeechTranscriber(transcripts=[_ASKED]),
+    )
+    await _seed(harness, _belief("rec-1", _SPEAKABLE_CONTENT))
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.turn is not None
+    assert _ids(spoken.outcome.turn.memories) == ("rec-1",), "nothing retrieved is withheld"
+    assert spoken.outcome.turn.context.calendar is None, "the unplaced facet was subtracted"
+    assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0), "consequence one"
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1
+    assert captured[0].provenance.supplied_withheld_content is True, "consequence two"
+    assert placed_facet_kinds() == {CalendarFacet, EmailFacet}, (
+        "and §3's list is what it was — this ADR places and unplaces nothing"
     )
