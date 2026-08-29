@@ -697,7 +697,9 @@ would fail that test on the first turn.
 > `about_person`'s own precedent in the same class: ADR-0100 §4's member ships with
 > `assistant learn --about-person` because "a field with no route would leave every
 > third-party belief constructing `about_person=None`". A `guarded` nobody can set is
-> the same defect.
+> the same defect. **"Ships with" is an ordering claim and not only a design one**:
+> §11 puts the route inside the same change as the member, so no released version
+> carries one without the other.
 
 > **Normative.** The member is on `FeedbackEvent` and **not** encoded by an adapter,
 > because deciding a record's placement is not adapter work: golden rule 3 keeps
@@ -1222,11 +1224,23 @@ ADR-0201 closed.
 > back and races nobody:
 > `FeedbackEvent.guarded` in `core/types.py`, the `FeedbackProcessor` implementations
 > in `learning/` that honour it, the guarded-event arm on `FeedbackProcessorContract`,
-> `FakeFeedbackProcessor` in `ai_assistant.testing`, and its own `PROTOCOL_VERSION`
-> bump with its `wire/envelope.py` entry. It spans `core`, `learning` and `testing` on
+> `FakeFeedbackProcessor` in `ai_assistant.testing`, its own `PROTOCOL_VERSION` bump
+> with its `wire/envelope.py` entry, **and `assistant learn --guarded` in
+> `interfaces/`**. It spans `core`, `learning`, `testing` and `interfaces` on
 > `CLAUDE.md`'s contract-seam exception (ADR-0137 §2) — a contract member, the
 > conformance suite that binds it, the canonical fake and the primary implementation
 > are one unit of work — and §7's last clause is why no split of it is admissible.
+
+> **Normative.** **The route is inside that change and not after it**, because §7 says
+> the member "ships with its route" and the two cannot both be honoured by an ordering
+> that releases the member first. A released version carrying a client-settable
+> `guarded` with no way for the owner to set it is the defect ADR-0100 §4 named — "a
+> field with no route would leave every third-party belief constructing
+> `about_person=None`" — arriving one release early, and the `PROTOCOL_VERSION` bump in
+> this same change is what makes that release reachable by a client. The adapter half
+> is admitted into the change on its own thinness and on nothing else: it sets
+> `FeedbackEvent.guarded` from a flag and decides nothing (golden rule 3), so it adds a
+> subsystem to the change without adding a decision to it.
 
 > **Normative.** §4's model proposal is a **further change**, in `learning/observer.py`
 > and its tests alone. It changes no `core` definition and no Protocol. It lands
@@ -1235,16 +1249,17 @@ ADR-0201 closed.
 > justification rests on being absent, and §3's answer to ADR-0130 §11 — "the owner can
 > lift it in one act (§7)" — would be false of that tree.
 
-> **Normative.** `assistant learn --guarded` and any rendering of a placement are a
-> **further change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
-> adapters are thin"): the adapter sets `FeedbackEvent.guarded` and decides nothing.
-> It lands after the second, because a flag reaching a processor that ignored it would
-> be a control silently doing nothing.
+> **Normative.** **Any rendering of a placement** is a **further change**, in
+> `interfaces/` and its tests alone (`CLAUDE.md`, "Interface adapters are thin"), and
+> it is optional in the sense §7's last clause gives it: nothing here obliges a surface
+> to render a placement, so no lane is blocked by its absence and no ordering depends
+> on it.
 
 > **Normative.** No lane reads the ordering above as licence to widen any of them.
 > Anything not named in one of them is a change of its own. The order is: the field
-> move; §7's write-time act; #248's conditional write, in its own ADR; §7's two acts;
-> §4's proposal; and the adapter's flag, which follows the write-time act.
+> move; §7's write-time act **with its route**; #248's conditional write, in its own
+> ADR; §7's two acts; and §4's proposal. Any rendering of a placement is unordered
+> against all of them.
 
 > **Normative.** The records this decision owes on ADR-0204, ADR-0199 and ADR-0210 are
 > made in **this ADR's own PR** (ADR-0082 §1, ADR-0070 §1), and are header-only.
