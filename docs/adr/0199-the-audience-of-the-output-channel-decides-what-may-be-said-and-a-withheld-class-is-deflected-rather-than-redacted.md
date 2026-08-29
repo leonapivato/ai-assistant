@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns)
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns) and ADR-0217 (§3's third clause, only as it reaches a record whose own placement does not admit the audience of the channel it would be emitted on — whichever of the owner's explicit act, a model's proposal or ADR-0204's derivation set that placement)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
   reaches an operation whose output channel's audience is unbounded, and nothing
@@ -122,6 +122,38 @@
   composed reply, and nothing there asks a model what a passage is about. §1's
   audience test, §4's asymmetry, §6's user act, §7's household deferral, §8's gate
   and §9's deferrals are all as they were.
+
+- **Partially superseded: 2026-08-29 by ADR-0217 — §3's third clause, only as it
+  reaches a record whose own placement does not admit the audience of the channel it
+  would be emitted on, and nothing else of §3 or of this ADR.** ADR-0204 already
+  carved one case out of §3's third clause: a record whose provenance recorded that
+  content §3 withholds stood in its warrant. The owner's design note **#1719** asks
+  for the general instrument that case is a special one of — *this particular fact is
+  sensitive* — and observes that §6's owner-side control is about a **class** and
+  `about_person` is about a **subject**, so neither reaches one record on the owner's
+  own wish. ADR-0217 puts a **placement** on every record in the store — who may
+  receive it — set by the owner's explicit act, by ADR-0204's derivation, or by a
+  model's write-time proposal that may only narrow.
+
+  **Replaced — one further class of record, and no placement of any class.** A record
+  whose placement does not admit the audience of the channel is withheld from that
+  channel however §3's third clause would place it. ADR-0217 §2 states the rule in its
+  general form — a record is emitted only if every person who can perceive the
+  emission is a member of its placement — and that rule is a **conjunct beside** §3
+  rather than a replacement of it: nothing there places a class, unplaces one, or makes
+  speakable anything §3 withholds. On today's two audiences it reduces to exactly §1's
+  bounded/unbounded split.
+
+  **Not replaced — the floors, the withheld list, the deflection and §6.** §3's first
+  clause (the Tier 0 floor), its second clause (the withheld list, `about_person`
+  foremost), and its fourth through eighth clauses (the notification key, the
+  admitting-ADR obligation, the audience-alone reading of a placement, the egress
+  disclaimer) all bind exactly as they did, and ADR-0217 §8 says so clause by clause.
+  §5's deflection keeps its shape and its prohibitions whole. **§6 is not amended**:
+  its clauses are about a *class* posture and a store for one, ADR-0217 builds
+  neither, and its per-record act is a stacked addition recorded in its own text
+  (ADR-0082 §1). §6's **fourth** clause — the Tier 0 and `about_person` floors no
+  owner act may reach — is adopted verbatim by ADR-0217 §3 for the per-record act.
 
 ## Context
 
