@@ -68,8 +68,9 @@ the resolver failing — an endpoint git will not read — and it does, through 
 same ``except`` every other test here falls into. The search is deliberately
 generous in the other direction, per ADR-0209 §5's asymmetry: every ``def``,
 ``class``, ``function``, ``const``/``let``/``var``, shell function and bare
-binding, in Python, JavaScript and shell alike, at *both* endpoints — so a
-definition the PR itself deletes still resolves on the side that has it.
+binding — ``export``ed or not — in Python, JavaScript and shell alike, at *both*
+endpoints, so a definition the PR itself deletes still resolves on the side that
+has it.
 
 **One implementation, called from one place.** ADR-0209 §6 requires that
 ``scripts/ship.sh``'s acceptance loop and its ``--drill`` share it, and issue
@@ -162,7 +163,8 @@ _SOURCE_PATHSPECS = ("*.py", "*.js", "*.sh")
 # it — dropping one would be an under-binding, the direction ADR-0209 §5 forbids.
 _DEFINITION_GREP = (
     r"^[ \t]*([^ \t=(:#]+[ \t]*(\(\)|(:[^=]*)?=)"
-    r"|(async[ \t]+)?(def|class|function|const|let|var)[ \t])"
+    r"|(export[ \t]+(default[ \t]+)?)?(async[ \t]+)?"
+    r"(def|class|function|const|let|var)[ \t])"
 )
 
 # A definition, across the three languages `_SOURCE_PATHSPECS` admits: a `def`,
@@ -171,9 +173,18 @@ _DEFINITION_GREP = (
 # and an annotated attribute all look like. Indentation is not read, so a local
 # counts too — over-binding, which ADR-0209 §5 prices as acceptable, against an
 # under-binding it forbids.
+#
+# The `export` prefix is read because a JavaScript module writes its public
+# surface with it, and a *public* name is the one a moved ADR is likeliest to
+# cite: `export function render()`, `export default class Pane`,
+# `export const LIMIT = 5`. Adversarial review of PR #1803, round 1 — a name the
+# resolver cannot see is a symbol judged not to be one, which is the under-binding
+# ADR-0209 §5 forbids rather than the over-binding it prices.
 _DEFINED_NAME_RE = re.compile(
-    r"^[ \t]*(?:async[ \t]+)?(?:def|class|function)[ \t]+(?P<kw>[^\W\d]\w*)"
-    r"|^[ \t]*(?:const|let|var)[ \t]+(?P<decl>[^\W\d]\w*)"
+    r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?"
+    r"(?:async[ \t]+)?(?:def|class|function)[ \t]+(?P<kw>[^\W\d]\w*)"
+    r"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?"
+    r"(?:const|let|var)[ \t]+(?P<decl>[^\W\d]\w*)"
     r"|^[ \t]*(?P<fn>[^\W\d]\w*)[ \t]*\(\)"
     r"|^[ \t]*(?P<bound>[^\W\d]\w*)[ \t]*(?::[^=\n]+)?=(?!=)",
     re.UNICODE,

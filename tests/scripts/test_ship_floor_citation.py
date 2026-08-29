@@ -374,6 +374,32 @@ def test_the_package_name_is_not_a_symbol_either(tmp_path: Path) -> None:
     assert judged.reasons == [_FREE]
 
 
+def test_a_javascript_export_is_a_definition_the_resolver_can_see(tmp_path: Path) -> None:
+    """A module's public surface is what a moved ADR is likeliest to cite.
+
+    `src/ai_assistant/interfaces/gateway/assets/app.js` is first-party source
+    with real symbols in it, and JavaScript writes its public names behind
+    `export`. A resolver blind to that prefix would report `renderPane` as naming
+    nothing and clear the floor — an under-binding, the one direction ADR-0209 §5
+    forbids. Adversarial review of PR #1803, round 1.
+    """
+    for i, line in enumerate(
+        (
+            "export function renderPane() {}\n",
+            "export default class renderPane {}\n",
+            "export const renderPane = 1;\n",
+        )
+    ):
+        case = tmp_path / f"case-{i}"
+        repo = case / "repo"
+        _init(repo, {_ADR: _adr("Nothing.")}, {"src/pkg/assets/app.js": line})
+
+        judged = _judge(repo, case, _edit(_ADR, _adr("The pane is drawn by `renderPane`.")))
+
+        assert judged.owed, f"{line!r}: {judged.stderr}"
+        assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
 def test_a_symbol_resolver_that_will_not_answer_binds_under_section_6(tmp_path: Path) -> None:
     """Found nowhere is decided; unable to look is not.
 
