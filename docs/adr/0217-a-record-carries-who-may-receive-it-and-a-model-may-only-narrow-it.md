@@ -149,9 +149,9 @@ It cannot name a person, because there is no person identity in this system (#69
 ADR-0199 §7). It therefore cannot express a placement of *some* people, only the two
 sets #1719 ships. It cannot decide the household question ADR-0199 §7 deferred and
 #1718 holds. It cannot decide a **class-level** act — "guard everything about my
-health" — because no record carries a topic; that axis is ADR-0213's (#1791, ratified
-on its branch and not merged at this ADR's base), and this ADR cites it by number and
-subject and depends on no sentence of its text. And it cannot decide the surface
+health" — because no record carries a topic; that axis is ADR-0213's (#1791, merged and
+`Accepted` at this ADR's base), and this ADR cites it by number and subject and depends
+on no sentence of its text. And it cannot decide the surface
 ADR-0199 §6 deferred for the owner's **class** postures; §7 below builds a per-record
 act and states the test that keeps them apart.
 
@@ -537,9 +537,11 @@ reachable — which is exactly when a resident process is still noticing."
 **And it is the shape ADR-0213 takes for topics, deliberately.** #1719 states the
 parallel: "topics are proposed by a model when a record is written and recorded on it,
 deterministic thereafter, so ADR-0199 §2 holds (a read keys on a recorded stamp, never
-on the words)". ADR-0213 (#1791) is ratified on its branch and not merged at this ADR's
-base, so it is cited here **by number and subject only**; no clause below depends on a
-sentence of its text.
+on the words)". ADR-0213 (#1791) is merged and `Accepted` at this ADR's base, and it is
+still cited here **by number and subject only**: the parallel is drawn to the *shape* it
+takes, and no clause below depends on a sentence of its text or is weakened if that text
+later moves. Its one clause this ADR does read is §11's version ruling, and §9 states
+where the two cases part.
 
 **The objection worth stating is that a model now reads content to decide something
 about disclosure, and ADR-0199 §2's answer is narrower than it first looks.** §2's
@@ -1005,6 +1007,20 @@ ADR-0201 closed.
 > limb — "accepted by it with a different meaning" — on a disclosure-bearing value, and
 > the meaning that is lost is the restrictive one.
 
+> **Normative.** **It is also a different case from the one ADR-0213 §11 settled, and
+> the difference is the removal.** That section ruled no bump for adding `topics` to
+> `MemoryBase` on the ground that "the new member has a default, so an older peer
+> decoding a newer hub's record ignores a member it does not know", and distinguished
+> ADR-0181 §3's field as "required with no default on a model that sets
+> `extra='forbid'`". Both readings are correct and neither reaches this change: a pure
+> addition is ignored by an old peer, but a member **removed** from `Provenance` is not
+> ignored — its default is *read*, and `supplied_withheld_content` defaults to `False`,
+> so an old peer decoding a new hub's record reads a definite "nothing was withheld" on
+> a record whose placement is `OWNER`. That is ADR-0124 §9's "accepted with a different
+> meaning", on the one value where the meaning lost is the restrictive one. ADR-0213
+> §11 stays true of its own change; nothing here narrows it, and no lane cites this
+> section as authority for bumping on an addition alone.
+
 > **Normative.** This is a different case from the one ADR-0204 §7 and ADR-0210 §8
 > settled, and neither is cited as having answered it. Both ruled on a value the hub
 > **computes** for a field whose shape is unmoved; ADR-0210 §8's own words are "No
@@ -1317,6 +1333,13 @@ ADR-0197 §3's widening rule presupposes that the promoted surface grows. This i
 stacked addition under ADR-0082 §1, recorded in this ADR and nowhere else. What it is
 *not* is a change anyone may make without an ADR: golden rule 5 binds, which is why the
 header flags the Protocol break and why this ADR is merged before its implementation.
+
+**Against ADR-0213 no record is owed**, on ADR-0070 §1's test applied to its text: §11's
+version ruling stays true of the change it ruled on — a defaulted addition to
+`MemoryBase` — and §9 above distinguishes this change rather than restating it, so no
+sentence of ADR-0213 becomes false or over-wide. Its `topics` field and this ADR's
+`placement` are two additive members on one envelope, deciding different questions and
+read at different sites; neither ADR constrains the other's.
 
 **Against ADR-0203, ADR-0100, ADR-0197, ADR-0201, ADR-0130 and ADR-0021 no record is
 owed.** ADR-0203 §1's subtraction and §2's bounds are used as given and every sentence of
