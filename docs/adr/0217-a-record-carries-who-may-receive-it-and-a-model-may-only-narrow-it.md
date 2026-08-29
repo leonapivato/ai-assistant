@@ -253,7 +253,23 @@ mechanics of withholding at supply.
 > keep the denotations §1 gives them, and §2's rule is stated over sets so that it does
 > not move when a third arrives. What such an ADR may **not** do is redefine either
 > shipped denotation or restate §2's rule; either of those is a supersession and is
-> recorded as one.
+> recorded as one. The one thing such an addition **owes** is the next clause's.
+
+> **Normative.** **The order on the reach is total today, and a later denotation owes
+> the meet.** §2's read rule is a membership test and needs no order at all. §3's
+> ratchet does: it is stated over a **meet**, and on the two members shipped here the
+> order is total and the meet is closed — `OWNER` meet `ANYONE` is `OWNER`, which is
+> ADR-0204 §5's disjunction member for member, so every fold this ADR can express has a
+> representable answer. A later ADR adding denotations **not** totally ordered with
+> these two — `{person A}` beside `{owner}` — owes two things in its own text before
+> either can be folded: the meet for every pair it makes reachable, and a
+> representation for a meet that is **empty**, which `PlacementReach` as shipped has no
+> member for. Supplying them is a stacked addition on ADR-0082 §1's own precedent — an
+> instruction where this ADR gave none, not one it replaces — and §3's sentence stays
+> true, the narrowest still standing. Redefining the meet of the pair shipped here, or
+> rounding an unrepresentable meet **up** to a wider reach, is not: each is a
+> supersession of §3 and is recorded as one. **No implementation folds two reaches
+> whose meet this ADR or a later one does not state.**
 
 > **Normative.** **Vocabulary.** ADR-0199 §3 *places a class* as speakable **on a
 > channel**; this ADR *places a record* **for a set of people**. Neither renames the
@@ -774,15 +790,36 @@ would fail that test on the first turn.
 > between an act's read and its write, overwritten by a stale `unguard`, is exactly the
 > laundering §3's precedence refuses whenever it can see it.
 
-> **Normative.** The lane therefore closes it by **the invariant and not by a new
-> Protocol member**, which is the second of the two answers ADR-0046 §5 itself names —
-> "either a store CAS (the extension below) or a tested single-writer invariant".
-> **Every write of a placement in a running composition goes through one writer over
-> one store**, the two acts included, so no two writers race a placement. §10 pins it.
-> A composition that cannot hold that invariant has fired #248's own trigger and owes
-> the compare-and-swap in an ADR of its own under golden rule 5; this ADR neither
-> pre-empts that decision nor performs it, and no lane adds the mode or the concurrency
-> token without it.
+> **Normative.** **This decision fires ADR-0046 §5's trigger; it does not close it, and
+> the implementing lane closes nothing on its own authority.** The acts are performed
+> by an engine holding a `MemoryStore`; #262's serialisation is an `asyncio.Lock` "held
+> by that one ingestor" and is reachable through no declared seam; and neither
+> `MemoryStore` nor `MemoryWriter` offers a conditional or placement-only write. An act
+> is therefore **a second writer on one store**, which is the consumer ADR-0046 §5
+> named in terms — "If a composition ever does run two writers on one store, closing
+> #248 is that lane's trigger". Closing it needs what that section specified, "a
+> `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode": a `MemoryStore` change
+> behind golden rule 5 and #248's own ADR. **No lane implementing this ADR mints that
+> surface, and none fabricates a `MemoryUpdateProposal` to borrow the ingestor's
+> lock** — a placement act is not a belief proposal, and routing one through the write
+> path would collect a conflict ruling and a policy decision it has no meaning under.
+
+> **Normative.** What the lane owes instead is the discipline that **is** available at
+> the declared seams, and it is ADR-0073 §5's, applied. Each act decides §3's
+> precedence over the record **it read in the call that writes it**, never over one
+> read earlier — a rendered list, a confirmation prompt.
+> `AssistantEngine.forget` already carries that ruling for the same window over the
+> same store — "The show and the delete are two calls. A write landing between them is
+> destroyed without having been shown, and this is named rather than closed" — and its
+> consent is "consent to forget **the belief that id names**, not a guarantee that the
+> bytes destroyed are the bytes rendered". A confirmed `guard` or `unguard` is read the
+> same way, and ADR-0197 §7's confirmation is not a second writer's lock.
+
+> **Normative.** The residue is **named and filed, not assumed away**: the window
+> between an act's read and its write can lose a narrowing the derivation made inside
+> it, which is #248's lost update with a disclosure consequence in place of a content
+> one. §12 records it with the condition that fires it, and no clause of this ADR is
+> read as claiming the window closed.
 
 > **Normative.** The added members carry the obligations any member of a Protocol
 > carries: the shared `AssistantEngine` conformance suite gains an arm for each clause
@@ -1051,13 +1088,13 @@ ADR-0201 closed.
 > default produces records placed by §6's default. The arm is taken at that seam and
 > not through the CLI, because the flag reaches the processor unread by any adapter.
 
-> **Normative.** The lane pins **§7's single-writer invariant**: every site that writes
-> a placement — the derivation, the proposal, the write-time flag and the two acts —
-> writes through one writer over one store in the composition `app/` wires, so no act
-> can overwrite a narrowing that landed after it read. Where a lane closes the window
-> with a conditional write instead, it says so in its PR and pins the interleaving
-> directly; either way the residue named in §7 is tested rather than assumed
-> (ADR-0046 §5, #248).
+> **Normative.** The lane pins **§7's read discipline**: each act decides over the
+> stored record as read in the call that writes it, so an act performed after a render
+> that showed a different placement follows the stored value and not the rendered one —
+> a `guard` offered against a `PROPOSED` placement and performed on a record the
+> derivation has since placed `DERIVED` leaves `DERIVED` and writes nothing (§3). What
+> the lane does **not** pin, and must not claim, is the interleaving itself: that
+> window is #248's and stands open (ADR-0046 §5, §7 above).
 
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
@@ -1155,6 +1192,14 @@ ADR-0201 closed.
 > `Observer.observe`'s signature is the seam, and widening it is a Protocol change
 > golden rule 5 puts behind its own ADR. Until then a proposal is made without one, and
 > the corrective loop closes through the owner's per-record act.
+
+> **Normative.** **Closing the acts' read-modify-write window** (§7). It is #248's,
+> re-scoped by ADR-0046 §5 to "a compare-and-swap extension of `write_atomic` (a
+> `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode), gated on a consumer
+> that runs two writers on one store" — and this decision is that consumer. Fires with
+> the ADR that adds the token and the mode to `MemoryStore`. Until then the window
+> stands, bounded by §7's read discipline, and its disclosure-flavoured case is
+> recorded on #248 rather than left in this ADR alone.
 
 > **Normative.** **Stating a proposal to the owner in the turn that produced it**
 > (§5). Fires with a decision that puts the proposal in front of a producer that
