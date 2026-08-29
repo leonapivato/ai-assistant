@@ -1,6 +1,6 @@
 # 215. A dismissed notification keeps suppressing its own key until the fact it named perishes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0130](0130-a-notification-is-a-proposal-and-only-a-perishable-one-earns-an-interruption.md)
