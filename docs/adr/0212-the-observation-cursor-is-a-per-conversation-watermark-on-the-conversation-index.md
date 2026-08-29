@@ -161,10 +161,21 @@ about.
 > `MemoryStore`, not held in a store of its own, and not passed as an argument to
 > any `Engine` operation.
 
-> **Normative.** The watermark's meaning is exactly this and nothing wider: **every
-> turn of that conversation whose ordinal is at or below it has been read by an
-> observation pass.** It does not record that a belief was proposed, that a proposal
-> was ruled, that an episode resolved, or that a model was called.
+> **Normative.** The watermark's meaning is exactly this and nothing wider: **the
+> observation walk over that conversation has advanced past that ordinal, and no
+> later pass selects a turn at or below it.** It is a **position in the walk, not a
+> certificate of coverage**: it does not record that every turn below it was read, that
+> a belief was proposed, that a proposal was ruled, that an episode resolved, or that a
+> model was called.
+
+> **Normative.** Two named cases leave turns below a watermark that no pass read, and
+> they are stated here rather than left to be discovered. A conversation whose **first**
+> pass begins at its tail window (§4) leaves every turn below that window beneath the
+> first watermark recorded; and a turn whose episode did not resolve is passed over
+> (§5). Neither is a defect of the watermark, because the watermark asserts nothing
+> about them. What a reader may conclude from a watermark of *n* is that the turns
+> above *n* are the walk's remaining work — and nothing whatever about the turns
+> below it.
 
 **The placement is ADR-0111 §1's, applied.** Its first clause puts a job's
 resumption position in "the subsystem whose store the job walks", and its decisive
@@ -179,8 +190,8 @@ per-conversation exclusion its other mutations run under (§8).
 That section rejects hosting a non-belief in the memory store because "it would
 make the store's records a mix of beliefs and non-beliefs, which is the exact
 distinction ADR-0072/ADR-0073 spent two ADRs making legible". A watermark is
-bookkeeping about what has been read; it is not a belief of any band, contributes
-no confidence and no evidence, and must not be reachable by `MemoryStore.search`,
+bookkeeping about how far the walk has got; it is not a belief of any band,
+contributes no confidence and no evidence, and must not be reachable by `MemoryStore.search`,
 `MemoryStore.export` or `assistant beliefs`. Holding it as a memory record would
 put it in all three.
 
@@ -389,6 +400,23 @@ Three reasons, in the order they bind:
    `observation_batch_size` `MemoryStore.get` calls and produces no belief, and
    live material sits behind it for as many passes as the prefix is long.
 
+**This rule reads the same for a conversation created after the cursor lands, and that
+is the honest limit of a watermark carrying no epoch.** Nothing on the index records
+when the cursor arrived, so an absent watermark cannot distinguish a conversation older
+than this decision from one that gathered turns faster than the job reached it. A
+conversation holding more than `observation_batch_size` turns at its first pass
+therefore loses the turns below that window, by this same rule and permanently. The
+three reasons above are why the loss is accepted for a pre-existing conversation; for a
+new one the honest statement is narrower — it is bounded at one window's worth of
+history per conversation, **once**, it shrinks to nothing as observation runs on a
+cadence (#1737's second ADR, §9), and it is zero for any conversation whose first pass
+happens while it holds no more turns than the bound. §1's second clause is worded so
+that the watermark never claims those turns were read, and the Consequences state the
+gap this leaves rather than the one this closes. Buying it back takes either a durable
+epoch on the index — a second store-written fact, which §5's closing paragraph prices
+and §9 defers — or a deliberate re-observation that ignores the watermark, which is
+**#1789**. Neither is bought here.
+
 **Nothing is skipped in ADR-0111 §3's sense.** Its at-least-once clause forbids an
 implementation that "turns that repetition into a skip" — it governs a chunk whose
 effects happened and whose cursor did not advance. This clause is about where a walk
@@ -396,11 +424,19 @@ effects happened and whose cursor did not advance. This clause is about where a 
 
 ### 5. The advance: one attempt per pass, to the highest turn it handed over
 
-> **Normative.** A pass makes **exactly one** attempt to advance the watermark, after
-> every proposal it produced has been ruled by the write path — one `record_observed`
-> call and no other write to the watermark. It makes that attempt even where the page
-> resolved to no episode, even where the observer was not called, and even where
-> nothing was proposed.
+> **Normative.** A pass that read a **non-empty** page makes **exactly one** attempt to
+> advance the watermark, after every proposal it produced has been ruled by the write
+> path — one `record_observed` call and no other write to the watermark. It makes that
+> attempt even where the page resolved to no episode, even where the observer was not
+> called, and even where nothing was proposed.
+
+> **Normative.** A pass that read **no turns** makes **no** attempt and writes nothing.
+> That is every pass with no target — §3's "given none and no candidate" — and every
+> pass over a conversation holding no turn above its watermark, including one the
+> operator named explicitly. There is no ordinal for such a pass to name, `None` is not
+> one, and `record_observed` refuses anything below `FIRST_TURN_ORDINAL` before any I/O
+> (§8). Such a pass calls no model, writes nothing anywhere, and reports nothing
+> observed.
 
 > **Normative.** The position it names is **the highest ordinal in the page whose
 > episode resolved** — the highest turn the pass actually handed to the observer. Where
@@ -717,8 +753,8 @@ saying so.
 > `stamp_deleted` and `drop_if_eligible`: per conversation those mutations "never
 > interleave; each observes the conversation, decides, and writes as one indivisible
 > step". Reading the two conditions above and writing the row is one such step, so
-> two concurrent advances leave the higher value recorded and neither leaves a
-> conversation claiming coverage it does not have.
+> two concurrent advances leave the higher value recorded and neither leaves the walk
+> positioned above what one of the two passes actually read.
 
 > **Normative.** The **second** condition on `record_observed` — at or below the
 > conversation's highest ordinal — is the store holding ADR-0111 §3's "never lead"
@@ -726,6 +762,28 @@ saying so.
 > the stage this ADR describes, which only ever names an ordinal it read from this
 > store, and it is a property of the seam because `ConversationStore` is a
 > cross-subsystem contract and a consumer that is not the engine may hold it.
+
+> **Normative.** `record_observed` **bounds** the position and does not **certify**
+> it. The store takes the caller's ordinal, refuses one that would lead the
+> conversation's own turns and one that would lower the recorded value, and asserts
+> nothing about what the caller read to compute it. A caller that stamps an ordinal it
+> never read has mis-positioned the walk, which is a defect in that caller, not a false
+> statement by the row — §1's second clause is worded so that the row makes no claim
+> that could be false.
+
+**Why the store issues no evidence of the page it served, and could not.** A rule
+requiring `record_observed` to accept only a position the store itself vouched for
+would have the store hold per-reader state about which page each caller had been
+handed — durable if it is to survive a restart, and growing with readers and pages.
+That is ADR-0111 §2's first excluded shape in a different spelling ("**A set of
+identifiers** is unbounded durable state that grows with the store, so the mechanism
+that exists to make a walk affordable becomes the largest thing in the database").
+The alternative — folding selection, observation and advance into one store operation
+— would put the model call inside `ConversationStore`, which golden rule 1 forbids and
+which §5 separately rules out, since holding the per-conversation exclusion across a
+pass would hold it across a model call. ADR-0111 §1 already settles the division this
+leaves: the walking job computes the position and the store makes it durable. No cursor
+in this corpus is certified by its store, and this one is not the first.
 
 > **Normative.** `PROTOCOL_VERSION` does not move for this decision, and the
 > implementing lane does not bump it. ADR-0124 §9's rule is that it "is bumped by
@@ -758,9 +816,10 @@ saying so.
 
 > **Normative.** The `orchestration` half owes the selector of §3 in
 > `ObservationStage`, §4's uncursored start, §5's single advance **attempt** — one
-> `record_observed` call per pass, at the highest ordinal in the page whose episode
-> resolved, or at the page's highest where none did, and **never** computed from the
-> page's length — and §6's failure disposition including its commit-ambiguous case. It
+> `record_observed` call per pass that read a non-empty page, at the highest ordinal in
+> the page whose episode resolved, or at the page's highest where none did, and
+> **never** computed from the page's length — **no** call at all on a pass that read no
+> turns, and §6's failure disposition including its commit-ambiguous case. It
 > owes the
 > module docstring of `orchestration/observation.py` corrected, which today states
 > "There is no durable cursor either".
@@ -770,9 +829,13 @@ saying so.
 > `wire/` changes, and no file under `interfaces/` changes.
 
 Tests the lane owes, named so they are written rather than assumed: a pass over a
-conversation with no watermark reads its tail and records the tail's highest ordinal;
+conversation with no watermark reads its tail and records the tail's highest ordinal,
+and the turns below that window stay below the watermark and are never selected again;
 the next pass over the same conversation with no new turns reads no turns, calls no
-model and records nothing; a pass over a conversation whose page is entirely
+model and records nothing; **a pass with no candidate at all, and a pass over an
+explicitly named conversation with nothing above its watermark, each make no
+`record_observed` call whatever** — asserted on the store, not only on the reported
+result; a pass over a conversation whose page is entirely
 unresolvable calls no observer and still advances to that page's highest ordinal **in
 one pass**, not one turn at a time; a page whose *last* turn is unresolvable advances
 to the highest ordinal below it, and the next pass over that turn alone advances past
@@ -970,13 +1033,17 @@ constraint, and each pair as landed reads exactly as it is stated above.
   tick rate. The interval is still `None` by default and flipping it is the trigger
   ADR's act (§9), but the reason `core/config.py` gives for holding it off — "buys
   repeated cost and no new coverage" — stops being true.
-- **Both of ADR-0077 §8's named coverage gaps close for everything recorded after
-  the cursor lands, under the fairness §3 states and no more widely.** A conversation
+- **Both of ADR-0077 §8's named coverage gaps close for everything recorded above a
+  conversation's first watermark, under the fairness §3 states and no more widely.** A conversation
   the user never names becomes reachable, because candidacy is not restricted to the
   most recently active one; and turns older than the tail become reachable, because
   the walk moves forward instead of re-reading the tail. Two qualifications are part
-  of the claim rather than footnotes to it: for conversations that existed before the
-  cursor, §4 keeps the second gap exactly as wide as it is today; and "reachable"
+  of the claim rather than footnotes to it: the second gap closes for every turn
+  recorded **above a conversation's first watermark**, and not for the turns below it
+  — §4 starts an absent watermark at the tail, which keeps that gap exactly as wide as
+  it is today for a conversation that existed before the cursor and opens it once, at
+  one window's width, for any conversation already longer than the bound when its first
+  pass reaches it (§4 names the bound and what would buy it back); and "reachable"
   becomes "reached in a bounded number of passes" only where the clock advances
   monotonically, since §3 accepts that a stopped or stepped-back clock can leave one
   candidate served ahead of another indefinitely. Under that clock a conversation can
