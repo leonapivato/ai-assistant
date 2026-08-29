@@ -374,20 +374,25 @@ def test_the_package_name_is_not_a_symbol_either(tmp_path: Path) -> None:
     assert judged.reasons == [_FREE]
 
 
-def test_a_javascript_export_is_a_definition_the_resolver_can_see(tmp_path: Path) -> None:
-    """A module's public surface is what a moved ADR is likeliest to cite.
+def test_javascripts_own_spellings_are_definitions_the_resolver_can_see(
+    tmp_path: Path,
+) -> None:
+    """`src/ai_assistant/interfaces/gateway/assets/app.js` is first-party source.
 
-    `src/ai_assistant/interfaces/gateway/assets/app.js` is first-party source
-    with real symbols in it, and JavaScript writes its public names behind
-    `export`. A resolver blind to that prefix would report `renderPane` as naming
-    nothing and clear the floor — an under-binding, the one direction ADR-0209 §5
-    forbids. Adversarial review of PR #1803, round 1.
+    JavaScript writes a module's public names behind `export` and its streaming
+    readers as generators — that file declares
+    `async function* streamValues(response)` today. A resolver blind to either
+    spelling reports the name as identifying nothing and clears the floor, which
+    is an under-binding and the one direction ADR-0209 §5 forbids. Adversarial
+    review of PR #1803, rounds 1 and 2.
     """
     for i, line in enumerate(
         (
             "export function renderPane() {}\n",
             "export default class renderPane {}\n",
             "export const renderPane = 1;\n",
+            "async function* renderPane(response) {}\n",
+            "export async function *renderPane(response) {}\n",
         )
     ):
         case = tmp_path / f"case-{i}"

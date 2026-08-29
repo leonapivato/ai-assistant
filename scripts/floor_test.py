@@ -161,30 +161,42 @@ _SOURCE_PATHSPECS = ("*.py", "*.js", "*.sh")
 # what. The leading class is negated rather than an ASCII identifier alphabet, so
 # a Unicode identifier reaches the second reader rather than being dropped before
 # it — dropping one would be an under-binding, the direction ADR-0209 §5 forbids.
+#
+# **`[[:blank:]]`, never `\t`.** POSIX ERE has no escape for a tab, and glibc reads
+# `\t` as a literal `t` — so `[^ \t=(:#]+` excluded the letter `t` from every name
+# it would accept, and `_artifact_for_tree() {` matched nothing. That is silent and
+# it under-binds, which is why `tests/scripts/test_floor_definition_index.py` asserts
+# over this repository's own source rather than over a handful of written-out lines.
 _DEFINITION_GREP = (
-    r"^[ \t]*([^ \t=(:#]+[ \t]*(\(\)|(:[^=]*)?=)"
-    r"|(export[ \t]+(default[ \t]+)?)?(async[ \t]+)?"
-    r"(def|class|function|const|let|var)[ \t])"
+    r"^[[:blank:]]*([^[:blank:]=:(#]+[[:blank:]]*(\(\)|(:[^=]*)?=)"
+    r"|(export[[:blank:]]+(default[[:blank:]]+)?)?(async[[:blank:]]+)?"
+    r"((def|class|const|let|var|local|readonly|declare|typeset|export)[[:blank:]]"
+    r"|function[[:blank:]*]))"
 )
 
 # A definition, across the three languages `_SOURCE_PATHSPECS` admits: a `def`,
-# `class` or `function` statement; a `const`/`let`/`var` declaration; a shell
-# function header; or a bare binding, which is what a constant, an enum member
-# and an annotated attribute all look like. Indentation is not read, so a local
+# `class` or `function` statement; a declaration under any of the keywords the
+# other two use (`const`, `let`, `var`, `local`, `readonly`, `declare`, `typeset`,
+# `export`), with the flags `declare -a` and friends take; a shell function
+# header; or a bare binding, which is what a constant, an enum member and an
+# annotated attribute all look like. Indentation is not read, so a local
 # counts too — over-binding, which ADR-0209 §5 prices as acceptable, against an
 # under-binding it forbids.
 #
-# The `export` prefix is read because a JavaScript module writes its public
-# surface with it, and a *public* name is the one a moved ADR is likeliest to
-# cite: `export function render()`, `export default class Pane`,
-# `export const LIMIT = 5`. Adversarial review of PR #1803, round 1 — a name the
-# resolver cannot see is a symbol judged not to be one, which is the under-binding
-# ADR-0209 §5 forbids rather than the over-binding it prices.
+# JavaScript's own spellings are read for the same reason and are worth the two
+# extra branches: `export function render()`, `export default class Pane`,
+# `export const LIMIT = 5`, and the generator star in either position —
+# `src/ai_assistant/interfaces/gateway/assets/app.js` writes
+# `async function* streamValues(response)` today. A name the resolver cannot see
+# is a symbol judged not to be one, which is the under-binding ADR-0209 §5 forbids
+# rather than the over-binding it prices. Adversarial review of PR #1803, rounds
+# 1 and 2.
 _DEFINED_NAME_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?"
-    r"(?:async[ \t]+)?(?:def|class|function)[ \t]+(?P<kw>[^\W\d]\w*)"
-    r"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?"
-    r"(?:const|let|var)[ \t]+(?P<decl>[^\W\d]\w*)"
+    r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?"
+    r"(?:(?:def|class)[ \t]+|function(?:[ \t]*\*[ \t]*|[ \t]+))(?P<kw>[^\W\d]\w*)"
+    r"|^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?"
+    r"(?:const|let|var|local|readonly|declare|typeset|export)"
+    r"(?:[ \t]+-+[^ \t]+)*[ \t]+(?P<decl>[^\W\d]\w*)"
     r"|^[ \t]*(?P<fn>[^\W\d]\w*)[ \t]*\(\)"
     r"|^[ \t]*(?P<bound>[^\W\d]\w*)[ \t]*(?::[^=\n]+)?=(?!=)",
     re.UNICODE,
