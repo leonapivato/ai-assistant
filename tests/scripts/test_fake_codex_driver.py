@@ -1,15 +1,23 @@
-"""The shared driver's own contract: a failing round diagnoses itself.
+"""The shared driver's own contract: it diagnoses, and it isolates.
 
 ``_fake_codex.run_review`` is what every module under ``tests/scripts`` drives
-``scripts/codex-review.sh`` through, so what it does with a non-zero exit decides
-whether a failure in any of them is readable.
+``scripts/codex-review.sh`` through. Two properties of the driver itself — not of
+the script — are pinned here, because issue #1792 turned on both of them.
 
-``subprocess.run(check=True)`` raises a
+**It surfaces the script's own words.** ``subprocess.run(check=True)`` raises a
 ``CalledProcessError`` whose ``str()`` is the command line and the exit status;
 the captured streams sit on the exception and pytest never renders them. Four
 occurrences of #1792 were filed with no message attached for exactly that reason,
 each one costing a reproduction to recover a sentence the script had already
 printed.
+
+**It keeps the operator's tools out of the subprocess.** ``review_env`` already
+redirects ``CODEX_HOME`` and ``TMPDIR`` and clears the CI signals. ``gh`` belongs
+in the same list, and its absence from it was the *cause* of #1792 rather than
+merely its illegibility: ``gh pr view`` forks a detached ``gh send-telemetry``
+child, which inherits the descriptor the round holds its in-flight ``flock`` on,
+so the lock outlived the round and the next round in that repository was refused
+as a concurrent one.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import ReviewFailed, run_review
+from _fake_codex import ReviewFailed, install_fake_codex, review_env, run_review
 from _repo_template import seed_repo
 
 _GIT = shutil.which("git")
@@ -94,3 +102,32 @@ def test_check_false_still_returns_the_completed_process(tmp_path: Path) -> None
 
     assert result.returncode == 1
     assert "could not prove the review ran read-only" in result.stderr
+
+
+def test_the_operators_gh_never_reaches_the_round(tmp_path: Path) -> None:
+    """``gh`` resolves inside ``tmp_path``, so no real one is ever forked.
+
+    Issue #1792: the real ``gh`` daemonizes a telemetry child that inherits the
+    round's in-flight lock descriptor, and an ``flock`` lives on the open file
+    description — so the lock outlives the round and the next one in that
+    repository is refused. A round has no business calling the operator's ``gh``
+    anyway; the repository under ``tmp_path`` has no remote to ask about.
+    """
+    env = review_env(tmp_path)
+
+    resolved = shutil.which("gh", path=env["PATH"])
+
+    assert resolved is not None, "the script's `command -v gh` guard must still find one"
+    assert Path(resolved).is_relative_to(tmp_path), resolved
+
+
+def test_a_test_installed_gh_outranks_the_stub(tmp_path: Path) -> None:
+    """The stub sits behind ``tmp_path/"bin"``, which is where a test's own ``gh`` goes."""
+    install_fake_codex(tmp_path / "bin")
+    mine = tmp_path / "bin" / "gh"
+    mine.write_text("#!/usr/bin/env bash\nexit 0\n")
+    mine.chmod(0o755)
+
+    resolved = shutil.which("gh", path=review_env(tmp_path)["PATH"])
+
+    assert resolved == str(mine)
