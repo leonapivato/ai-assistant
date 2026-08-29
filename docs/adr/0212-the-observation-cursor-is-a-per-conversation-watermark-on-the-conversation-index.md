@@ -4,8 +4,9 @@
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
-  sentence and its no-cursor sentence, and nothing else of §8 or of ADR-0077. The
-  scopes are named clause by clause in §10(a).
+  sentence and its "there is no durable cursor" sentence, and nothing else of §8 or of
+  ADR-0077. The scopes are named clause by clause in §10(a), where §8's remaining
+  no-cursor sentence is recorded as narrowed rather than replaced.
 - **Partially supersedes:**
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) —
   §9's enumeration of what `Conversation` carries and what `ConversationStore`
@@ -400,22 +401,44 @@ Three reasons, in the order they bind:
    `observation_batch_size` `MemoryStore.get` calls and produces no belief, and
    live material sits behind it for as many passes as the prefix is long.
 
-**This rule reads the same for a conversation created after the cursor lands, and that
-is the honest limit of a watermark carrying no epoch.** Nothing on the index records
-when the cursor arrived, so an absent watermark cannot distinguish a conversation older
-than this decision from one that gathered turns faster than the job reached it. A
-conversation holding more than `observation_batch_size` turns at its first pass
-therefore loses the turns below that window, by this same rule and permanently. The
-three reasons above are why the loss is accepted for a pre-existing conversation; for a
-new one the honest statement is narrower — it is bounded at one window's worth of
-history per conversation, **once**, it shrinks to nothing as observation runs on a
-cadence (#1737's second ADR, §9), and it is zero for any conversation whose first pass
-happens while it holds no more turns than the bound. §1's second clause is worded so
-that the watermark never claims those turns were read, and the Consequences state the
-gap this leaves rather than the one this closes. Buying it back takes either a durable
-epoch on the index — a second store-written fact, which §5's closing paragraph prices
-and §9 defers — or a deliberate re-observation that ignores the watermark, which is
-**#1789**. Neither is bought here.
+**What this rule costs, stated at its true size.** A tail start passes over **every
+turn below the window it reads**, and that prefix is as long as the conversation is:
+1,000 turns at a bound of 20 loses 980, not 20. The three reasons above are why that
+loss is accepted for a conversation that existed before the cursor — those turns were
+already written off by ADR-0077 §8's second gap and ADR-0074 §7's horizon — but the
+rule does not know which conversations those are, and its cost is not bounded by the
+window.
+
+**It reads the same for a conversation created after the cursor lands, and that is the
+limit of a watermark carrying no epoch.** Nothing on the index records when the cursor
+arrived, so an absent watermark cannot distinguish a conversation older than this
+decision from one that gathered turns faster than the job reached it. A conversation
+that accumulates a long history before its first pass loses all of it below the tail,
+permanently, exactly as a pre-existing one does. What is true — and is the whole of the
+comfort available — is that the loss is **per first pass, not per pass**: once a
+watermark exists the walk only moves forward, so no later pass skips a turn it has not
+read, and the prefix at risk is only what accumulates before the *first* pass reaches
+that conversation. On the deployment this ADR is written for that is the whole backlog,
+because `observation_interval` is unset and nothing runs the job; it shrinks toward
+zero once observation runs on a cadence, which is #1737's second ADR (§9) and the
+reason this one lands first.
+
+**And it recurs on a discard.** §7 treats an unreadable or unsupported watermark as
+absent, so the next pass over that conversation is a first pass again and skips
+everything below its tail — including turns the discarded value had already been
+advanced past. ADR-0111 §7 prices a discard as "a repeated walk"; under §4 it is a
+skipped prefix instead, which is a strictly worse price and is named here rather than
+left in the gap between two sections. It is accepted because the alternative is the one
+ADR-0111 §7 forbids outright — a bookkeeping column refusing the hub's start — and
+because the discard is reachable only from a corrupt or unsupported value and never
+from ordinary operation.
+
+**None of this is a claim the row makes.** §1's second clause is worded so the
+watermark never asserts those turns were read, and the Consequences state the gap this
+leaves beside the one it closes. Buying the prefix back takes either a durable epoch on
+the index — a second store-written fact, which §5's closing paragraph prices and §9
+defers — or a deliberate re-observation that ignores the watermark, which is **#1789**.
+Neither is bought here.
 
 **Nothing is skipped in ADR-0111 §3's sense.** Its at-least-once clause forbids an
 implementation that "turns that repetition into a skip" — it governs a chunk whose
@@ -644,7 +667,11 @@ wrong to any client. So an unreadable cursor is not a state fault,
 `IncompatibleStateError` is not its class, and a build that refused to start over one
 would take a resident process down over scaffolding." The one difference is where the
 restart lands: ADR-0111 §7 restarts "from the beginning of its order" and this
-restarts at the tail, for §4's reasons and under §10(c)'s scope.
+restarts at the tail, for §4's reasons and under §10(c)'s scope. **That difference
+changes the price of a discard, and §4 states it**: there a discard costs a repeated
+walk, here it costs the prefix below the tail the next pass reads — including turns the
+discarded value had already been advanced past. It is accepted for §4's reasons and
+because the alternative is the fault ADR-0111 §7 forbids.
 
 **The store-side clause is not a detail.** `ConversationStore` promises to raise
 `ConversationStoreError` "If the store cannot be read, **or a stored row is
@@ -944,15 +971,24 @@ differently, or read one of its clauses more widely than it now holds?"
 > the producer conversation-shaped", the four reasons the trigger is explicit, and
 > the fold that makes repetition safe.
 >
-> **§8's no-cursor sentences.** "**There is no durable cursor, and re-observation is
-> safe by construction.** No state records which episodes have been observed" — the
-> first half of the first sentence and the second sentence are replaced: durable
-> state now records it. "re-observation is safe by construction" is **kept and
-> relied on**, and §6 of this ADR quotes the argument behind it rather than
+> **§8's "there is no durable cursor" sentence.** "**There is no durable cursor, and
+> re-observation is safe by construction.**" — the first half is replaced: a durable
+> per-conversation position now exists. "re-observation is safe by construction" is
+> **kept and relied on**, and §6 of this ADR quotes the argument behind it rather than
 > weakening it. §8's forecast that closing its two named gaps "means knowing what
 > has already been observed, which is the cursor below, which is leg 5's" is
 > discharged rather than replaced, and so is §11's deferral of "the durable cursor
 > that stops it re-reading what it has seen (§8)".
+>
+> **§8's next sentence is narrowed, not replaced, and §1 is the reason.** "No state
+> records which episodes have been observed" stays **true as written**: §1 rules the
+> watermark a position in the walk and not a certificate of coverage, nothing this ADR
+> adds is per-episode or per-turn, and §1 names the two cases in which a turn below a
+> watermark was never read. What becomes over-wide is the further reading that nothing
+> durable records observation *progress* — the reading a selector that re-reads the
+> tail is built from, and the one §3 replaces. So the sentence is kept with that
+> reading narrowed, the `Status` pair's scope names the cursor sentence rather than
+> both, and the note on ADR-0077 records the narrowing beside the replacement.
 
 > **Normative.** **(b) This ADR partially supersedes ADR-0074**, in the same sense,
 > in exactly one scope: **§9's enumeration of what `Conversation` carries and what
@@ -1015,7 +1051,8 @@ already directs and is a rebase conflict rather than a decision. The pairs are:
 
 - on ADR-0074: `and ADR-0212 (§9's enumeration of what Conversation carries and what
   ConversationStore owes)`;
-- on ADR-0077: `and ADR-0212 (§8's selection sentence and its no-cursor sentences)`;
+- on ADR-0077: `and ADR-0212 (§8's selection sentence and its durable-cursor
+  sentence)`;
 - on ADR-0111: `and ADR-0212 (§2's absent-cursor clause, only as it reaches the
   observation cursor)`.
 
@@ -1040,10 +1077,11 @@ constraint, and each pair as landed reads exactly as it is stated above.
   the walk moves forward instead of re-reading the tail. Two qualifications are part
   of the claim rather than footnotes to it: the second gap closes for every turn
   recorded **above a conversation's first watermark**, and not for the turns below it
-  — §4 starts an absent watermark at the tail, which keeps that gap exactly as wide as
-  it is today for a conversation that existed before the cursor and opens it once, at
-  one window's width, for any conversation already longer than the bound when its first
-  pass reaches it (§4 names the bound and what would buy it back); and "reachable"
+  — §4 starts an absent watermark at the tail, so every turn below that first window is
+  passed over permanently, however long the prefix is, for a conversation that existed
+  before the cursor and equally for one that accumulated a backlog before its first
+  pass reached it, and a §7 discard makes a conversation a first-pass one again (§4
+  states the cost at its true size and names what would buy it back); and "reachable"
   becomes "reached in a bounded number of passes" only where the clock advances
   monotonically, since §3 accepts that a stopped or stepped-back clock can leave one
   candidate served ahead of another indefinitely. Under that clock a conversation can
