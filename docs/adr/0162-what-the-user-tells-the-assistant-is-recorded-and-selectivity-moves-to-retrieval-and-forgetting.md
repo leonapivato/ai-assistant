@@ -1,6 +1,6 @@
 # 162. What the user tells the assistant is recorded, and selectivity moves to retrieval and forgetting
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark)
 - Date: 2026-08-19
 - Amended: 2026-08-19 (§7 — its progress-over-overlap sentence names one instance of
   a property that has two). §7 rules that consecutive windows overlap by *k* episodes
@@ -234,6 +234,49 @@
   note that names the set and its outcome, and nothing else.
 - Refs #1210, #1029, #1179, #1185, #545, #1162, ADR-0077, ADR-0156, ADR-0158,
   ADR-0159, ADR-0160, ADR-0100, ADR-0121
+- Partially superseded: 2026-08-29 by ADR-0220 — **§7's window overlap is forgone for
+  an observation walk whose page is selected by the ADR-0212 watermark: *k* is 0 there,
+  and nothing extends a page below the watermark its own pass read.**
+  [ADR-0220](0220-the-watermark-driven-observation-walk-tiles-contiguously-and-forgoes-the-window-overlap.md)
+  §1 rules the resolution and §6(a) names the scope; this note records the ruling declared
+  there.
+
+  **Replaced — §7's window-overlap clauses, only as they reach that walk.** §7's overlap
+  clause and its floor of *k* ≥ 1 cannot hold together with
+  [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
+  §1's rule that "no later pass of a build that reads the watermark selects a turn at or
+  below it", §3's page of "turns above its watermark … the lowest such page, not the
+  tail", and §5's advance to "the highest ordinal in the page whose episode resolved". An
+  overlap of *k* ≥ 1 is exactly such a re-selection, and the only way to buy it back is an
+  advance to the highest resolved ordinal minus *k*, which §5 names no position for.
+  ADR-0220 rules that ADR-0212's clauses stand. So §7's last clause — "these clauses bind
+  … any durable-cursor walk (ADR-0111 §1) if one is built" — no longer reaches the walk
+  ADR-0212 decides, and the benchmark harness's ingestion driver, once it drives such a
+  build, tiles contiguously rather than overlapping. A reader holding only this ADR would
+  build that walk with an overlap; that is ADR-0070 §1's test met.
+
+  **Inside the scope: the bound on *k* goes with the clause it bounds.** "*k* is at least
+  1 and at most `observation_batch_size // 2`" is one of the window-overlap clauses the
+  scope names, so for a watermark-paged walk it is replaced rather than narrowed —
+  otherwise a floor of 1 and a *k* of 0 would both be in force over one walk. §7's
+  batch-of-1 exception and the 2026-08-19 amendment's progress-over-overlap floor are
+  inside the scope for the same reason and in that walk only; neither is contradicted,
+  both are left without work to do. ADR-0220 §6(a) states this.
+
+  **Not replaced — every other application of §7, and every other section of this ADR.**
+  Outside a walk paged by the watermark, §7 binds exactly as it did, bound on *k*,
+  batch-of-1 exception, amendment floor and reasons whole: it binds the benchmark
+  harness's driver while that driver drives a tail-reading build, it binds any tiling a
+  later lane introduces elsewhere, and its clause making an episode carried in by an
+  overlap "a full member of the window it is carried into" governs wherever an overlap
+  exists. §1's completeness rule and every other section stand as ratified.
+
+  **This ADR's `Status` gains the leading `Partially superseded by` token**, which under
+  ADR-0070 §4 drops `Accepted`. No amendment qualifier was on the line, so ADR-0082 §2's
+  move-to-the-note operation has nothing to carry. Appended note per ADR-0070 §1: no text
+  below is rewritten and §7's clauses stand as written. This note lands in the same change
+  as ADR-0220 itself, which is the existence condition ADR-0082 §7 states. Refs #1237,
+  #1829, #1782.
 
 ## Context
 

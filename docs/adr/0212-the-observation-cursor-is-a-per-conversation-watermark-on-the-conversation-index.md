@@ -89,6 +89,28 @@
   ADR-0070 §1: no text below is rewritten and §6's sentences stand as written. This
   note lands in the same change as ADR-0218 itself, which is the existence condition
   ADR-0082 §7 states. Refs #1737, #1782.
+- Amended: 2026-08-29 by ADR-0220 (§10's closing stacked-addition clause — its "no other
+  ratified clause read differently after it" is over-wide by one).
+  [ADR-0220](0220-the-watermark-driven-observation-walk-tiles-contiguously-and-forgoes-the-window-overlap.md)
+  §6(b) names the clause and applies ADR-0082 §1's test to it; this note records the
+  ruling declared there.
+
+  **What is over-wide.**
+  [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
+  §7 rules that consecutive tiling observation windows overlap by *k* ≥ 1 episodes, and
+  its last clause binds "any durable-cursor walk (ADR-0111 §1) if one is built". §§1, 3
+  and 5 of this ADR build that walk and forbid the re-selection an overlap is. So ADR-0162
+  §7 **is** a ratified clause read differently after this ADR — narrower by exactly the
+  walk decided here — and §10's closing sentence, which a reader takes as the exhaustive
+  list of what this ADR disturbs, would leave them not thinking to check ADR-0162 at all.
+  ADR-0220 §6(a) records the partial supersession on ADR-0162 in the same change.
+
+  **Nothing of this ADR is replaced or rewritten.** §10(a), §10(b) and §10(c)'s three
+  supersessions and their scopes stay correct and complete as declarations; §§1-9 stand as
+  written and are what ADR-0220 §1 rules in favour of. The record is the appended dated
+  note alone, because this `Status` line already carries a leading `Partially superseded
+  by` token and ADR-0082 §2 rules that no amendment qualifier is written on such a line.
+  Refs #1237, #1829, #1782.
 
 ## Context
 
