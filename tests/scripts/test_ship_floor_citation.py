@@ -1140,6 +1140,28 @@ def test_a_core_types_move_binds_a_pr_that_touches_core(tmp_path: Path) -> None:
 # --- §6: every input that can fail to arrive ----------------------------------
 
 
+def test_a_python_file_that_will_not_parse_binds(tmp_path: Path) -> None:
+    """§6 names "a parse failure at either endpoint" as its own first instance.
+
+    The alternative was carried on this branch and adversarial review broke it: a
+    line-oriented fallback is one more enumeration of Python's grammar, and the
+    form it lacked was `type Widget = object`. A definition dropped that way is
+    invisible, so a moved ADR citing it clears a floor that was owed — the one
+    direction ADR-0209 §5 forbids. Binding is loud instead, and it names the file.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing."), "src/pkg/broken.py": "type Widget = object\ndef (:\n"},
+        {_PLAN: "an unrelated note\n"},
+    )
+
+    judged = _judge(repo, tmp_path, _edit(_ADR, _adr("Rendering is `Widget`.")))
+
+    assert judged.owed, judged.stderr
+    assert any("§6" in r and "broken.py" in r for r in judged.reasons), judged.reasons
+
+
 def test_an_unretrievable_pr_description_binds(tmp_path: Path) -> None:
     """§5 names the live body, so a body that will not come back is undecidable.
 
