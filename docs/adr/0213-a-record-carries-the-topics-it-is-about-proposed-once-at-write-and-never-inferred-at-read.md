@@ -101,11 +101,15 @@ recording it once is what stops three lanes minting three incompatible answers.
 need a provider)". Half of that does not hold, and the half that does not is the
 half that decides the design.
 
-`ModelProvider` reaches exactly four production components:
-`ModelBackedObserver` (`learning/observer.py`), `ConsolidationStage`
-(`orchestration/consolidation.py`), the composing stage
-(`orchestration/composing.py`) and the routing stage
-(`orchestration/routing.py`). The reader-ingestion path holds none:
+Of the five producers that write records — the five §6 answers by name — exactly two
+hold a `ModelProvider`: `ModelBackedObserver` (`learning/observer.py`) and
+`ConsolidationStage` (`orchestration/consolidation.py`). That is the inventory this
+decision turns on, and it is deliberately scoped to record producers rather than
+stated as a count of everything in the tree that holds a provider: the composing stage
+(`orchestration/composing.py`), the routing stage (`orchestration/routing.py`),
+`ModelBackedPlanner` (`planning/planner.py`) and `ModelBackedReconciler`
+(`memory/_reconciler.py`) each hold one too, and none of them authors the record whose
+topics are in question. The reader-ingestion path holds none:
 `IngestionStage.__init__` takes `reader`, `writes`, `grants`, `reads` and `now`,
 and nothing else. Neither does capture (`orchestration/conversations.py`), and
 neither does `RuleBasedFeedbackProcessor` (`learning/processor.py`), which is
