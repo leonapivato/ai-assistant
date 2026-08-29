@@ -1120,6 +1120,188 @@ legible (ADR-0086 §1).
 """
 
 
+MAX_TOPIC_LABEL_LENGTH: Final[int] = 64
+"""How many characters a :data:`TopicLabel` may carry (ADR-0213 §4).
+
+A label is a filing word the owner reads in a listing, not a sentence: 64 is
+generous for the longest ordinary compound and short enough that a producer
+writing prose into the field is refused rather than accommodated. It is the same
+figure :data:`MAX_EVIDENCE_CITATIONS` takes for the adjacent kind of bound.
+
+A fixed constant and deliberately **not** a ``Settings`` field (§4): the axis's
+whole value is that a record's topic set is small enough for the owner to read,
+and a deployment that raised this could not be seen to have done so from the data.
+"""
+
+MAX_TOPICS_PER_PROPOSAL: Final[int] = 4
+"""How many labels one producer may propose for one record (ADR-0213 §4).
+
+Four is the number at which a topic set stays readable at a glance and a
+topic-scoped act stays meaningful; a record that is genuinely about five things is
+a record that is about one thing the vocabulary has not learned to name.
+
+**This bounds a producer's suggestion, and :data:`MAX_TOPICS_PER_RECORD` bounds an
+installed record** (§1). The two are one rule at two seams over two different
+objects, and neither is a second enforcement point for the other. A response
+naming more than this yields **no topics on that record** — the entry is ignored,
+never truncated to the bound and never repaired (§4).
+"""
+
+MAX_TOPICS_PER_RECORD: Final[int] = 16
+"""How many labels a :class:`MemoryBase` this system **installs** may carry (ADR-0213 §1).
+
+**It is enforced at the ``MemoryWriter`` seam and nowhere on this type**, which is
+:data:`MAX_EVIDENCE_CITATIONS`'s placement and is taken for that bound's reasons
+plus one of this field's own. ADR-0086 §2's test — "does it refuse something that
+already worked" — is answered *no* here, so a ``max_length`` on
+:attr:`MemoryBase.topics` would be available; what rules it out is the direction
+this field will be changed in. A later ADR raising this constant would, with a
+``max_length`` in force, make a record written at the new bound unreadable to a
+peer at the old one — taking back exactly the compatibility ADR-0213 §11 relies on
+when it declines to move ``PROTOCOL_VERSION``. The writer seam has no such edge: it
+decides what this deployment *writes*, never what it may *read*. And §8's union is
+a ratchet whose overflow must yield a *bounded record* rather than a raised write,
+which only the seam computing the union can arrange; a bound above it would enforce
+nothing that seam does not and would add a way for the two to disagree.
+
+So a longer tuple is admissible on the type, a record decoded from storage carrying
+one is read rather than refused, and such a record converges downward on its next
+install (§8) rather than being repaired on the read path.
+
+**16, and the arithmetic is §1's.** It is four times
+:data:`MAX_TOPICS_PER_PROPOSAL`, so a record accumulates through several disjoint
+folds before the bound can bite at all — a bound at or near the per-proposal cap
+would make ordinary reinforcement displace. It is small enough that a record's topic
+set stays readable at a glance and a topic-scoped act over such a record still means
+something. It is a ceiling nobody should reach, not a quota to fill.
+"""
+
+
+def _topic_label(value: str) -> str:
+    r"""Require ADR-0213 §3's canonical form, refusing anything else unchanged.
+
+    Admissible exactly when the value is non-empty, is at most
+    :data:`MAX_TOPIC_LABEL_LENGTH` characters, equals its own ``str.casefold()``,
+    contains no whitespace character other than ``U+0020 SPACE``, has no leading or
+    trailing space, and contains no run of two consecutive spaces.
+
+    **Refused rather than folded**, on ADR-0100 §6's reasoning: "a value that is
+    *nearly* right is harder to spot than one that is missing. A normalised name is
+    nearly right." One step stronger here — a label arriving non-canonical means a
+    producer did not fold its model's output, and folding it under them hides that in
+    the one place nobody looks. Refusing puts the failure at the producer, which is
+    where ADR-0213 §4 puts the obligation. Nothing anywhere in this system
+    case-folds, strips, stems, singularises, transliterates, aliases or
+    de-duplicates a label on the way in or on the way out (§3).
+
+    **The whitespace test is ``str.isspace()`` and not a list of the characters
+    someone remembered.** ``U+00A0`` is the case that separates the two: it is
+    whitespace, it survives ``casefold()``, it is not ``U+0020``, and a check written
+    against ``{" ", "\\t"}`` admits it. A rule over "every whitespace character" does
+    not rot the way an enumeration does (ADR-0085 §4c).
+
+    **A validator that refuses on decode is available here and is not available
+    everywhere**, and the difference is ADR-0086 §2's test: no record in any store
+    carries a topic today, so this refuses nothing that already worked. That stops
+    being true the moment records carry topics, so **widening this form later must
+    answer the same test on the data of that day** — a wider form admits values an
+    older peer refuses, which is the direction that breaks. Narrowing it is worse.
+
+    **The message carries the value as given**, through
+    :func:`describe_untrusted`, because the whole point of refusing is that the
+    producer can see what it actually emitted; a message quoting a folded form would
+    report a value nobody wrote.
+
+    Raises:
+        ValueError: If the value is not already in the canonical form.
+    """
+    fault = _topic_label_fault(value)
+    if fault is not None:
+        msg = f"a topic label {fault} (ADR-0213 §3), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+def _topic_label_fault(value: str) -> str | None:
+    """Which clause of ADR-0213 §3 ``value`` breaks, or ``None`` if it breaks none.
+
+    Split from :func:`_topic_label` so the clause a value broke is available to a
+    caller that does not want an exception — the producers of ADR-0213 §4, which
+    **ignore** a topics entry they cannot use rather than letting a
+    ``ValidationError`` discard the belief that carried it. One implementation of
+    the form, read two ways, so a producer's check and the type's cannot drift.
+    """
+    clauses: tuple[tuple[bool, str], ...] = (
+        (not value, "must not be empty"),
+        (
+            len(value) > MAX_TOPIC_LABEL_LENGTH,
+            f"must be at most {MAX_TOPIC_LABEL_LENGTH} characters",
+        ),
+        (value != value.casefold(), "must equal its own str.casefold()"),
+        (
+            any(character.isspace() and character != " " for character in value),
+            "must carry no whitespace other than U+0020 SPACE",
+        ),
+        (value[:1] == " " or value[-1:] == " ", "must have no leading or trailing space"),
+        ("  " in value, "must carry no run of two consecutive spaces"),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+type TopicLabel = Annotated[EncodableText, AfterValidator(_topic_label)]
+"""What a record is about, as one canonical filing word (ADR-0213 §3).
+
+**Equality of the stored characters is the only relation this type has.** Nothing
+treats two unequal labels as one topic, nothing treats one label as narrower or
+broader than another, and no hierarchy, synonym set, stem, embedding or model
+judgement is a topic relation. Any wider matching rule — case-insensitivity beyond
+the canonical form, prefixes, hierarchy, synonymy, or a similarity measure — is
+reserved to a later ADR, which is the only instrument that may lift that; no lane
+reaches it by implementing one (§3).
+
+The canonical form is deliberately thin, and it is the whole of what buys
+convergence at the type level: it makes ``"Health"`` and ``"health"`` the same
+value and ``"health"`` and ``"wellbeing"`` different ones. The first is a spelling,
+the second is a judgement, and a type that tried to decide the second would be the
+classifier ADR-0199 §2 forbids, moved to construction time.
+
+**A label is not an identifier** (§14). It names no entity, resolves to nothing, is
+not a key into anything, and is not usable as a cross-hub or cross-store reference.
+
+Layered on :data:`EncodableText` rather than on ``str``: see that alias's note on
+why no ``str`` field in this module opts out.
+"""
+
+
+def _strictly_increasing_topics(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Require ADR-0213 §1's order: strictly increasing by code point.
+
+    A tuple that is unsorted, or that repeats a label, is refused at construction.
+    Order carries no meaning on this field, so **fixing** one is what makes two
+    equal sets one value: serialise-and-reconstruct parity, digest stability and a
+    store comparison all follow from it, and none of them survives a field where
+    ``("health", "sleep")`` and ``("sleep", "health")`` are different bytes.
+
+    Refused rather than sorted, for :func:`_topic_label`'s reason read over a set:
+    a producer that did not put its labels in order is a producer whose output
+    nobody folded, and quietly folding it here hides that. ADR-0213 §8 states the
+    same separation from the other side — an admission order decides *which* labels
+    survive a bounded install, and this order decides how the tuple is **stored**.
+
+    Raises:
+        ValueError: If the tuple is not strictly increasing by code point.
+    """
+    for earlier, later in pairwise(value):
+        if earlier >= later:
+            fault = "repeats a label" if earlier == later else "is not sorted"
+            msg = (
+                f"topics must be strictly increasing by code point (ADR-0213 §1); "
+                f"this one {fault}: {describe_untrusted(value)}"
+            )
+            raise ValueError(msg)
+    return value
+
+
 class ReportedExtent(BaseModel):
     """Where a reported entry lies in the reporting source's world (ADR-0117 §2).
 
@@ -1768,6 +1950,42 @@ class MemoryBase(BaseModel):
     field of a source that names whom an entry is about — and never by inferring a
     person from content. The field widens no producer's warrant, and its existence
     may not be cited as though it did.
+
+    **``topics`` is the *about what* axis beside it** (ADR-0213 §2), placed on the
+    envelope by the same ADR-0100 §2 test and landing here for the same reason:
+    the two together are the *about* half of the envelope's question, one asking
+    *whom* and the other *what*. ADR-0100 §6 reserved this ground by name — "The
+    axis is *whom*, not *what*. A belief about a company, a project, a device or a
+    topic states no subject" — so the field occupies ground the corpus explicitly
+    left empty. **The two are never read for each other**, no validator ties them,
+    and a record may carry both, either or neither (ADR-0213 §14). Four rules
+    govern it:
+
+    * **Proposed once, at write, by the record's own producer** (§4). No consumer,
+      surface, store, retrieval path, scheduler job, migration or later ADR derives
+      a record's topics at read time, and none derives them from ``content``, from
+      a rendered facet, from a composed reply or from any other span of content
+      after the write. Exactly two producers propose any:
+      ``ModelBackedObserver`` and ``ConsolidationStage`` (§6). Every other writes
+      the empty tuple, and no producer labels a record another producer wrote.
+    * **Empty means "no topic was recorded"** (§7). Not "about nothing" and not
+      "about everything". No consumer reads an empty tuple as matching a
+      topic-scoped query, and none reads it as excluded from a query naming no
+      topic: an act reaches a record if and only if the record carries the label
+      the act names. A surface performing such an act owes the owner the
+      disclosure that unlabelled records were not reached, and that the act's reach
+      is the labels recorded rather than the subject they have in mind.
+    * **Set once, revised by two routes** (§8). A fold takes the **union** of both
+      sides — a label the target carried is never dropped, which is ADR-0106 §4's
+      ratchet in this currency — and the owner's own act (§9) writes at the
+      record's id. A ``SUPERSEDE`` carries nothing across. Nothing else revises
+      them: no re-observation, retrieval, re-embedding, reconciliation, scheduler
+      job, migration or backfill.
+    * **Not a retrieval axis, not a tier, not a sensitivity, not a subject and not
+      an identifier** (§14). A label carries no posture, no permission, no band and
+      no disclosure consequence, and no read here filters on it. Each is stated as
+      a prohibition rather than left as an omission because each is a plausible next
+      step a lane could take without noticing it was a decision.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1801,6 +2019,18 @@ class MemoryBase(BaseModel):
             "Whom this belief is about, when that is someone other than the owner "
             "(ADR-0100 §2). None means no subject is stated, which is read as the "
             "owner's. A label as given, resolving to nothing (§6)."
+        ),
+    )
+    topics: Annotated[tuple[TopicLabel, ...], AfterValidator(_strictly_increasing_topics)] = Field(
+        default=(),
+        description=(
+            "What this record is about, as canonical labels proposed at write "
+            "(ADR-0213 §4). Empty means no topic was recorded, which is neither "
+            "'no topic' nor 'every topic' (§7). Strictly increasing by code point "
+            "(§1). No record this system installs carries more than "
+            "MAX_TOPICS_PER_RECORD labels; the bound is enforced at the "
+            "MemoryWriter seam and not here, so a longer tuple is admissible and "
+            "a record stored with one stays readable (§1)."
         ),
     )
 
@@ -2047,7 +2277,7 @@ class DataTier(StrEnum):
 #: including any of them would make a question's identity change without the
 #: question changing. ``provenance.last_updated`` is the third and is removed one
 #: level in, inside the nested projection.
-_FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score"})
+_FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score", "topics"})
 
 
 def _canonical_members(values: Sequence[str]) -> list[str]:
@@ -2175,10 +2405,11 @@ class MemoryUpdateProposal(BaseModel):
         recomputes at answer time, so a digest that can come apart from itself
         refuses every honest answer.
 
-        **The projection is the whole record minus the three fields that are
+        **The projection is the whole record minus the fields that are
         bookkeeping about the record rather than the belief it states**, and the
         criterion decides the next one rather than an inventory having to be
-        extended by whoever adds it:
+        extended by whoever adds it — ``topics`` is the field it has since decided
+        (ADR-0213 §10), which is the clause working rather than being amended:
 
         * ``id`` — identity, minted per proposal, so including it makes the key
           match nothing at all.
@@ -2188,6 +2419,17 @@ class MemoryUpdateProposal(BaseModel):
           the record was written, not what it says. Two identical observations a
           minute apart would otherwise be two questions, and the user would be
           nagged by the mechanism whose job is to stop that.
+        * ``topics`` — how the record is **filed**, not what is believed
+          (ADR-0213 §10). The owner asked to accept "you dislike early meetings" is
+          being asked about the proposition, and whether the proposer filed it
+          under ``"work"`` or ``"routine"`` is not part of the offer. The
+          operational reason is ``last_updated``'s: a model-proposed label is not a
+          deterministic function of the material, so re-observing it can yield
+          ``("health",)`` on one pass and ``("health", "sleep")`` on the next, and
+          including the field would mint a fresh question for a proposal the user
+          has already answered, on a difference they were never shown. Excluding it
+          is also what makes ADR-0213 §8's union reachable: if two labellings of one
+          belief were two questions they would rarely reach a fold at all.
 
         Everything else stays in, including ``validity`` (a belief expiring
         tomorrow and an open-ended one are different things to be asked to accept),
