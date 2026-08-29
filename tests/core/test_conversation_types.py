@@ -174,3 +174,52 @@ def test_an_export_of_an_empty_conversation_is_well_formed() -> None:
 
     assert exported.turns == ()
     assert exported.schema_version == 2
+
+
+def test_a_fresh_conversation_has_no_observation_watermark() -> None:
+    """ADR-0212 §4: ``None`` is the only spelling of "no pass has recorded one".
+
+    Additive, so every ``Conversation`` a build before ADR-0212 could construct is
+    still constructible and reads as a walk that has not started (§7).
+    """
+    assert _conversation().observed_through is None
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_a_watermark_below_the_first_turn_names_no_position(bad: int) -> None:
+    """§8: bounded ``ge=FIRST_TURN_ORDINAL``, so 0 is not a sentinel for "none".
+
+    A zero-valued watermark would be a second spelling of the absence §4 rules is
+    spelled ``None`` — and one that reads as a *recorded* position, so a pass would
+    walk forward from turn 1 where §4 says it reads the tail.
+    """
+    with pytest.raises(ValidationError):
+        _conversation(observed_through=bad)
+
+
+def test_the_watermark_is_carried_through_the_export() -> None:
+    """§7: the member is on ``Conversation``, so the document ``export`` builds has it.
+
+    Which is why ``schema_version`` moves: the shape of the portable document
+    changed, and that is exactly what the version exists to announce (ADR-0039 §10,
+    ADR-0014 §5).
+    """
+    exported = ConversationExport(
+        exported_at=_NOW, conversations=(_conversation(observed_through=3),)
+    )
+
+    assert exported.conversations[0].observed_through == 3
+    assert exported.schema_version == 2
+
+
+def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries() -> None:
+    """Pinned rather than defaulted, so the label is a fact about the document.
+
+    "An export outlives the code that wrote it … a reader must be able to tell which
+    shape it is holding" (ADR-0014 §5), and a producer's unchecked claim is not that.
+    A document labelled **1** separates itself from a 2 and does *not* separate the
+    pre-``delivery`` shape from the post-``delivery`` one, which is issue #1793 and
+    is why no reader may take a 1 as evidence of either.
+    """
+    with pytest.raises(ValidationError):
+        ConversationExport.model_validate({"schema_version": 1, "exported_at": _NOW})

@@ -18,12 +18,14 @@ landed.
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.errors import (
+    ConversationStoreError,
     MemoryStoreConflictError,
     MemoryStoreError,
     ModelError,
@@ -60,10 +62,10 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryWriter, Observer
-    from ai_assistant.core.types import MemoryIngestResult, SourceReading
+    from ai_assistant.core.types import Conversation, MemoryIngestResult, SourceReading
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
@@ -155,20 +157,112 @@ class _FailingObserver:
         raise ModelError(msg)
 
 
+class _WatchedConversations(FakeConversationStore):
+    """The canonical store fake, with every advance it is asked for recorded.
+
+    A thin subclass rather than a delegating wrapper, so what is under test is the
+    canonical fake's own behaviour. It exists because ADR-0212 §8 asks for cases
+    asserted **on the store** and not only on the reported result — "a pass with no
+    candidate at all, and a pass over an explicitly named conversation with nothing
+    above its watermark, each make no ``record_observed`` call whatever" — and
+    ``ConversationStore`` exposes no call log, deliberately.
+
+    :attr:`hold_advance` is the second lever, and it is what lets two passes over one
+    conversation be interleaved deterministically: an advance whose 1-based index is
+    in that set announces its arrival on :attr:`reached` and suspends until
+    :attr:`release` for the same index is set.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime], new_id: Callable[[], str] | None) -> None:
+        """Wrap the canonical fake, adding the call log and the advance gate."""
+        if new_id is None:
+            super().__init__(now=now)
+        else:
+            super().__init__(now=now, new_id=new_id)
+        #: Every ``record_observed`` this store was asked for, in call order.
+        self.advances: list[tuple[str, int]] = []
+        #: 1-based indexes of advances to hold at the gate.
+        self.hold_advance: set[int] = set()
+        self.reached: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+        self.release: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+        #: When set, the advance refuses instead of writing — a store fault at the
+        #: one call ADR-0212 §6 rules on, scripted because no fake can be asked to
+        #: produce one and the disposition is the whole subject of that section.
+        self.advance_raises = False
+        #: When set, the advance commits and the awaiting task is then cancelled
+        #: before the call returns — §6's commit-ambiguous half, in the half that is
+        #: assertable. ADR-0054's shield makes this the real shape rather than a
+        #: contrivance: a store whose write runs in a worker thread can commit and
+        #: then have the awaiting task cancelled.
+        self.cancel_after_advance = False
+        #: When set, the conversation is stamped deleted immediately before the
+        #: advance — §6's deletion race, which no fake produces on its own.
+        self.stamp_before_advance = False
+
+    def plant_watermark(self, conversation_id: str, ordinal: int) -> None:
+        """Write a watermark the contract itself has no way to write (ADR-0212 §7).
+
+        ``record_observed`` refuses an ordinal above the conversation's highest, so a
+        watermark this store must *discard* is unreachable through the seam — which
+        is the whole point of §7's clause and the reason it has to be planted here.
+        Only that limb is expressible against a dict-backed store: a value that is
+        not an integer, or one below the first ordinal, cannot be held by a frozen
+        pydantic model at all, and the ``sqlite3`` store's own cases carry the limbs
+        a *file* can hold.
+        """
+        stored = self._conversations[conversation_id]
+        self._conversations[conversation_id] = stored.model_copy(
+            update={"observed_through": ordinal}
+        )
+
+    def raw_watermark(self, conversation_id: str) -> int | None:
+        """The watermark as stored, readable even once the conversation is stamped.
+
+        Every presenting read hides a stamped conversation (ADR-0074 §9), so this is
+        the only way to assert §6's "the watermark is untouched" for the one case in
+        which the conversation is gone by the time the pass ends.
+        """
+        return self._conversations[conversation_id].observed_through
+
+    async def record_observed(
+        self, conversation_id: str, *, through_ordinal: int
+    ) -> Conversation | None:
+        """Record the advance asked for, hold it if the case wants to, then perform it."""
+        self.advances.append((conversation_id, through_ordinal))
+        index = len(self.advances)
+        if index in self.hold_advance:
+            self.reached[index].set()
+            async with asyncio.timeout(5.0):
+                await self.release[index].wait()
+        if self.advance_raises:
+            msg = "the conversation index could not be written"
+            raise ConversationStoreError(msg)
+        if self.stamp_before_advance:
+            await super().stamp_deleted(conversation_id)
+        stamped = await super().record_observed(conversation_id, through_ordinal=through_ordinal)
+        if self.cancel_after_advance:
+            raise asyncio.CancelledError
+        return stamped
+
+
 class Harness:
     """A wired :class:`ObservationStage` and the fakes behind it, for assertions."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per injected collaborator the stage takes
         self,
         *,
         observer: Observer | None = None,
         writer: MemoryWriter | None = None,
         policy: FakeMemoryPolicy | None = None,
         batch_size: int = BATCH,
+        now: Callable[[], datetime] | None = None,
+        new_id: Callable[[], str] | None = None,
     ) -> None:
         self._tick = 0
         self.memory = FakeMemoryStore(now=lambda: AT)
-        self.conversations = FakeConversationStore(now=self._advancing)
+        self.conversations = _WatchedConversations(
+            now=self._advancing if now is None else now, new_id=new_id
+        )
         self.policy = policy if policy is not None else FakeMemoryPolicy()
         self.real_writer = FakeMemoryWriter(store=self.memory, policy=self.policy, now=lambda: AT)
         self.writer: MemoryWriter = writer if writer is not None else self.real_writer
@@ -221,6 +315,23 @@ class Harness:
         self._tick += 1
         return AT + timedelta(seconds=self._tick)
 
+    def stage_over(self, observer: Observer) -> ObservationStage:
+        """A second stage over the *same* stores, for interleaving two passes.
+
+        Two passes over one conversation may overlap and nothing serialises them
+        (ADR-0212 §5), so a case about that overlap needs two callers rather than one
+        called twice — and each needs its own observer, because the gate that holds a
+        pass mid-flight lives on the observer.
+        """
+        return ObservationStage(
+            observer=observer,
+            conversations=self.conversations,
+            memory=self.memory,
+            writes=self.writes,
+            batch_size=BATCH,
+            route=ROUTE,
+        )
+
     async def conversation_with(self, turns: int, *, captured: int | None = None) -> str:
         """Start a conversation with ``turns`` turns, ``captured`` of them recorded.
 
@@ -236,6 +347,39 @@ class Harness:
             if ordinal >= turns - recorded:
                 await self.memory.add(_episode(turn.episode_id))
         return conversation.id
+
+    async def conversation_of(self, ordinals_with_episodes: Sequence[int], *, turns: int) -> str:
+        """Start a conversation of ``turns`` turns, landing only the named ordinals.
+
+        The general form of :meth:`conversation_with`, for the cases where *which*
+        turns resolve is the point — a gap at the end of a page, a gap in its middle,
+        or a page that resolves to nothing at all (ADR-0212 §5).
+        """
+        conversation = await self.conversations.start()
+        for _ in range(turns):
+            turn = await self.conversations.append(conversation.id, occurred_at=AT)
+            if turn.ordinal in ordinals_with_episodes:
+                await self.memory.add(_episode(turn.episode_id))
+        return conversation.id
+
+    async def append_turns(
+        self, conversation_id: str, count: int, *, captured: bool = True
+    ) -> None:
+        """Record ``count`` further turns on an existing conversation."""
+        for _ in range(count):
+            turn = await self.conversations.append(conversation_id, occurred_at=AT)
+            if captured:
+                await self.memory.add(_episode(turn.episode_id))
+
+    async def land(self, conversation_id: str, ordinal: int) -> None:
+        """Write the episode a recorded turn names, as a late capture would."""
+        await self.memory.add(_episode(f"conv:{conversation_id}:{ordinal}"))
+
+    async def watermark(self, conversation_id: str) -> int | None:
+        """Where the observation walk stands in this conversation, as the store reads it."""
+        conversation = await self.conversations.get(conversation_id)
+        assert conversation is not None
+        return conversation.observed_through
 
 
 def _episode(episode_id: str) -> EpisodicMemory:
@@ -260,16 +404,23 @@ async def test_no_conversation_at_all_observes_nothing_and_names_no_route() -> N
     assert harness.fake.call_count == 0
 
 
-async def test_an_unscoped_run_observes_the_most_recently_active_conversation() -> None:
-    """With no id, the selector is ``recent``'s first row (§8)."""
+async def test_an_unscoped_run_observes_the_least_recently_active_candidate() -> None:
+    """With no id, the selector is the candidate listing's head (ADR-0212 §3).
+
+    The direction is the point, and it is the half of ADR-0077 §8 this ADR replaces:
+    ``recent``'s first row is the conversation the user is *using*, so taking it
+    would re-select that one on every pass and never reach an idle one — ADR-0077
+    §8's first named gap arriving through the cursor. Ascending activity reaches the
+    idle one first, and serves the material nearest its retention horizon.
+    """
     harness = Harness()
     older = await harness.conversation_with(2)
     newer = await harness.conversation_with(2)
 
     report = await harness.stage.observe()
 
-    assert report.conversation_id == newer
-    assert report.conversation_id != older
+    assert report.conversation_id == older
+    assert report.conversation_id != newer
     assert report.episodes_read == 2
 
 
@@ -293,50 +444,46 @@ async def test_naming_the_other_conversation_reaches_the_episodes_outside_that_b
     }
 
 
-async def test_two_unscoped_runs_select_the_same_conversation() -> None:
-    """By design: there is no cursor and no rotation (§8).
+async def test_two_unscoped_runs_walk_on_rather_than_re_reading_one_conversation() -> None:
+    """ADR-0212 §3, replacing ADR-0077 §8's "no cursor and no rotation".
 
-    Asserted rather than left implicit, because a test demanding otherwise would be
-    demanding the durable state ADR-0077 §8 declines.
+    This case used to assert the opposite — that two unscoped runs reselect the same
+    conversation and hand the observer the *same* batch twice — and it was right to,
+    because ADR-0077 §8 declined the durable state that would make anything else
+    possible. §10(a) records the replacement: the first run's advance takes that
+    conversation out of the candidate set, so the second reaches the one behind it,
+    and the two batches are different.
 
-    **The second run completes again**, and getting there took two corrections a
-    reader should see rather than infer. This case originally read the second run's
-    ``conversation_id`` off a completed report on the premise that "re-observation
-    is safe … the gate folding a repeat into a ``REINFORCE``". That premise was
-    false: ``_detect_conflicts`` filters the proposal's *own* id (#110), so a repeat
-    was never in its own conflict set — the old rule folded onto a merely **similar**
-    sibling instead, destroying a distinct fact, and where no sibling existed the
-    second observation replaced the first's records through ``add``'s upsert. The
-    case was then narrowed to pin ADR-0108 §1's refusal, which is what this fake's
-    *derived* ids produced once that upsert became an insert.
-
-    Both are now gone, and neither by this stage changing. ``FakeObserver`` **mints**
-    like the producer it doubles (#736, ADR-0026 §7), so a repeat proposes identical
-    content at a fresh id; ADR-0121 §1's predicate labels that ``RESTATES`` and
-    ADR-0159 §4(a) folds it onto the first run's record at *that* record's id. Which
-    is what "re-observation is safe" always meant and never was.
-
-    ADR-0108 §2's own-id refusal keeps a test of its own below, built by scripting
-    the collision rather than by relying on a fake to derive one.
+    **What is not replaced is why a repeat would have been safe anyway.** ADR-0077
+    §8's fold is what makes re-observation safe and the watermark only makes it rare
+    (ADR-0212 §1, §6), so the surviving half of the old case is asserted below: the
+    second run replaces nothing the first wrote.
     """
     harness = Harness()
-    await harness.conversation_with(2)
-    newest = await harness.conversation_with(2)
+    older = await harness.conversation_with(2)
+    newer = await harness.conversation_with(2)
 
     first = await harness.stage.observe()
     after_one = {record.id for record in await harness.memory.export()}
     second = await harness.stage.observe()
+    third = await harness.stage.observe()
 
-    assert first.conversation_id == newest
-    assert second.conversation_id == newest
-    # The second run reselected the same conversation: it read the same episodes in
-    # the same order, which is what "no cursor and no rotation" means.
+    assert first.conversation_id == older
+    assert second.conversation_id == newer
     assert len(harness.fake.batches) == 2
-    assert harness.fake.batches[-1] == harness.fake.batches[-2]
-    # And nothing the first run wrote was replaced. That is the defect this case
-    # was narrowed to catch, stated over what survives rather than over a refusal:
-    # the second run's proposals carry minted ids, so they can neither collide with
-    # the first run's records nor overwrite them. Whether they then *fold* is the
+    assert harness.fake.batches[-1] != harness.fake.batches[-2], (
+        "the second run walks on to the conversation behind the first, so the two "
+        "passes read different episodes (ADR-0212 §3)"
+    )
+    # And with both conversations observed through their last turn there is no
+    # candidate left: the third run reads nothing, asks no model, and reports the
+    # zero report — which is what makes a timer safe to set (ADR-0212, Consequences).
+    assert third == ObservationReport()
+    assert harness.fake.call_count == 2
+    # Nothing the first run wrote was replaced. That is the defect the old case was
+    # narrowed to catch, stated over what survives rather than over a refusal: the
+    # later runs' proposals carry minted ids, so they can neither collide with the
+    # first run's records nor overwrite them. Whether they then *fold* is the
     # injected policy's business and not this stage's — this harness wires
     # `FakeMemoryPolicy`, which accepts by rule, and ADR-0159 §4(a)'s fold is pinned
     # against `DefaultMemoryPolicy` in `tests/memory/test_policy.py`.
@@ -364,6 +511,11 @@ async def test_a_producer_re_proposing_a_stored_id_is_refused() -> None:
     conversation = await harness.conversation_with(2)
 
     await harness.stage.observe(conversation)
+
+    # Fresh turns, because the first pass advanced the watermark past the two it read
+    # and a second pass over nothing reaches no producer at all (ADR-0212 §3, §5).
+    # What is under test is the *refusal*, so the pass has to get as far as proposing.
+    await harness.append_turns(conversation, 2)
 
     with pytest.raises(MemoryStoreConflictError):
         await harness.stage.observe(conversation)
@@ -643,31 +795,48 @@ async def test_a_refusal_naming_no_ids_at_all_propagates() -> None:
 # --- re-observation is safe without a cursor (ADR-0077 §8) --------------
 
 
-async def test_observing_the_same_batch_twice_reinforces_rather_than_duplicating() -> None:
-    """The second run folds into the existing record and does not raise its confidence.
+async def test_a_second_pass_over_the_same_page_reinforces_rather_than_duplicating() -> None:
+    """ADR-0077 §8's fold, end to end, over the page a failed advance left behind.
 
-    Scripted, because the property under test is the *fold*, not the model: an
-    observer free to answer differently would make the assertion about the provider.
+    Two things at once, and they belong together. **ADR-0212 §6**: a pass that raises
+    before its advance attempt moves the watermark by nothing, so the whole page is
+    re-read by the next pass — never narrowed to "the turns whose proposals were not
+    ruled". And **ADR-0077 §8**: that repetition is safe by the *fold* and not by the
+    watermark, which only makes it rare. An implementation that leaned on the cursor
+    for correctness would pass every other case here and fail this one.
+
+    Scripted, because the property under test is the fold, not the model: an observer
+    free to answer differently would make the assertion about the provider.
     """
     belief = "the user prefers metric units"
+    # One observer across both passes, minting a fresh id each time exactly as a real
+    # producer does (#736, ADR-0047 §2). Re-using the first id would make the second
+    # write an upsert and hide whether the *fold* happened at all.
+    minted = iter(["rec-1", "rec-2"])
     harness = Harness(
-        observer=FakeObserver([ObservedBelief(content=belief, record_id="rec-1")]),
+        observer=FakeObserver([ObservedBelief(content=belief)], id_factory=lambda: next(minted)),
         policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
     )
     conversation = await harness.conversation_with(2)
+    harness.conversations.advance_raises = True
 
-    first = await harness.stage.observe(conversation)
+    with pytest.raises(ConversationStoreError):
+        await harness.stage.observe(conversation)
+
     stored = await harness.memory.get("rec-1")
     assert stored is not None
     before = stored.provenance.confidence
+    assert await harness.watermark(conversation) is None, (
+        "a pass whose advance did not commit leaves the watermark exactly as it was"
+    )
 
-    # A second pass mints a fresh id for the same belief, as a real producer does
-    # (ADR-0047 §2: the ids are the producer's). Re-using the first id would make
-    # the write an upsert and hide whether the *fold* happened at all.
-    harness.stage._observer = FakeObserver([ObservedBelief(content=belief, record_id="rec-2")])
+    harness.conversations.advance_raises = False
     second = await harness.stage.observe(conversation)
 
-    assert len(second.proposals) == len(first.proposals) == 1
+    assert harness.fake.batches[-1] == harness.fake.batches[-2], (
+        "the whole page is re-read, not the turns whose proposals were not ruled"
+    )
+    assert len(second.proposals) == 1
     assert second.proposals[0].decision is LearnDecision.REINFORCED
     # Folded into the existing record rather than written as a second one.
     assert second.proposals[0].record_id == "rec-1"
@@ -675,6 +844,420 @@ async def test_observing_the_same_batch_twice_reinforces_rather_than_duplicating
     after = await harness.memory.get("rec-1")
     assert after is not None
     assert after.provenance.confidence == before  # the same evidence scores the same
+    assert await harness.watermark(conversation) == 2
+
+
+# --- the observation watermark: selection, advance, failure (ADR-0212) ------
+
+
+def _ordinals(batch: Sequence[EpisodicMemory]) -> list[int]:
+    """The turn ordinals a batch of episodes came from.
+
+    The episode id is derived from the conversation and the ordinal (ADR-0074 §3),
+    so the batch says which *turns* the pass read — which is what every case below
+    is actually about, and what an assertion on opaque ids would not show.
+    """
+    return [int(episode.id.rsplit(":", 1)[1]) for episode in batch]
+
+
+async def test_a_first_pass_reads_the_tail_and_records_its_highest_ordinal() -> None:
+    """§4: a conversation with no watermark starts at its tail, not at its first turn.
+
+    And §4's cost is pinned beside the rule rather than left to be discovered: the
+    turns below that first window stay below the first watermark recorded and are
+    never selected again, however long the prefix is. The watermark asserts nothing
+    about them (§1's second clause), which is why this is a pinned behaviour and not
+    a defect.
+    """
+    harness = Harness(batch_size=2)
+    conversation = await harness.conversation_with(5)
+
+    report = await harness.stage.observe(conversation)
+
+    assert _ordinals(harness.fake.batches[-1]) == [4, 5]
+    assert report.episodes_read == 2
+    assert harness.conversations.advances == [(conversation, 5)]
+    assert await harness.watermark(conversation) == 5
+
+    assert (await harness.stage.observe(conversation)).episodes_read == 0
+    assert harness.fake.call_count == 1, "turns 1-3 are below the window and stay there"
+
+
+async def test_a_named_conversation_with_nothing_above_its_watermark_makes_no_advance() -> None:
+    """§5: a pass that read no turns makes **no** attempt and writes nothing.
+
+    Asserted on the **store** and not only on the report, which is what §8 asks for:
+    there is no ordinal for such a pass to name, ``None`` is not one, and
+    ``record_observed`` refuses anything below the first ordinal before any I/O — so
+    an implementation that "advanced to where it already was" would be making a call
+    the contract has nothing for it to pass.
+
+    This is also the named consequence of the whole decision on the CLI path:
+    ``assistant observe <id>`` run twice does something the first time and nothing
+    the second (§3). A deliberate re-observation is issue #1789 and is not this.
+    """
+    harness = Harness()
+    conversation = await harness.conversation_with(2)
+    await harness.stage.observe(conversation)
+    harness.conversations.advances.clear()
+
+    report = await harness.stage.observe(conversation)
+
+    assert report == ObservationReport(conversation_id=conversation)
+    assert harness.conversations.advances == []
+    assert harness.fake.call_count == 1
+
+
+async def test_a_pass_with_no_candidate_at_all_makes_no_advance() -> None:
+    """§3, §5: no candidate means no turns read, no model called, nothing written."""
+    harness = Harness()
+    conversation = await harness.conversation_with(2)
+    await harness.conversations.start()  # a conversation with no turns is no candidate
+    await harness.stage.observe(conversation)
+    harness.conversations.advances.clear()
+
+    report = await harness.stage.observe()
+
+    assert report == ObservationReport()
+    assert report.conversation_id is None
+    assert harness.conversations.advances == []
+    assert harness.fake.call_count == 1
+
+
+async def test_a_page_that_resolves_to_nothing_advances_past_it_in_one_pass() -> None:
+    """§5's second branch, and the stall it exists to prevent.
+
+    #1737 item 3 words the rule as "the cursor advances to the last turn *handed
+    over*", and a page that hands nothing over would then never move it: the next
+    pass reads the same dead page and does not move it either. A conversation whose
+    unobserved turns have all expired — the ordinary state of one reached after a
+    long idle period — would be a permanent candidate re-reading one dead page for
+    as long as it lives.
+
+    **In one pass, not one turn at a time**, which is what the single advance to the
+    page's highest ordinal pins. It costs nothing: the page reached no observer at
+    all, so passing over it passes over nothing that was ever readable.
+    """
+    harness = Harness(batch_size=3)
+    conversation = await harness.conversation_of([], turns=3)
+
+    report = await harness.stage.observe(conversation)
+
+    assert harness.fake.call_count == 0
+    assert report == ObservationReport(conversation_id=conversation)
+    assert harness.conversations.advances == [(conversation, 3)]
+    assert await harness.watermark(conversation) == 3
+
+
+async def test_a_page_whose_last_turn_is_unresolvable_advances_to_the_highest_below_it() -> None:
+    """§5: the position is the highest turn the pass actually handed over.
+
+    A trailing gap gets a second reading, and the reason is that it is the one gap
+    that is ordinarily still **in flight**: where captures of one conversation are
+    sequential, an in-flight turn is always the newest, because a later append
+    happens after the earlier capture returned. So the common case is covered by the
+    rule itself rather than by a special case for it.
+    """
+    harness = Harness(batch_size=3)
+    conversation = await harness.conversation_of([1, 2], turns=3)
+
+    await harness.stage.observe(conversation)
+
+    assert _ordinals(harness.fake.batches[-1]) == [1, 2]
+    assert await harness.watermark(conversation) == 2
+
+    # The next pass reads that turn alone. Its episode still has not landed, so the
+    # page resolves to nothing and the second branch advances past it.
+    second = await harness.stage.observe(conversation)
+
+    assert second.episodes_read == 0
+    assert harness.fake.call_count == 1
+    assert await harness.watermark(conversation) == 3
+
+
+async def test_an_episode_landing_between_two_passes_is_observed_on_the_second() -> None:
+    """The other half of the trailing gap: the late capture is not lost (§5).
+
+    The pair matters. Advancing past an unresolved trailing turn unconditionally
+    would lose a turn whose episode was merely slow; stopping below it for ever would
+    be the stall the case above pins. The rule reads it once more, and *then* moves
+    on.
+    """
+    harness = Harness(batch_size=3)
+    conversation = await harness.conversation_of([1, 2], turns=3)
+    await harness.stage.observe(conversation)
+
+    await harness.land(conversation, 3)
+    second = await harness.stage.observe(conversation)
+
+    assert _ordinals(harness.fake.batches[-1]) == [3]
+    assert second.episodes_read == 1
+    assert await harness.watermark(conversation) == 3
+
+
+async def test_an_unresolvable_turn_in_the_middle_of_a_page_is_passed_over() -> None:
+    """§5's accepted residual, pinned as a decision rather than found as a defect.
+
+    An interior gap is **not** given a second reading. A rule that gave every gap one
+    would have to stop the watermark below the lowest unresolved turn, which re-reads
+    that page's resolved turns above the gap on every following pass until the gap
+    clears, and needs a further fallback for a page whose lowest turn is the gap — and
+    another again for a page carrying two. The coverage that buys is the interior
+    in-flight turn alone, which takes two overlapping captures of one conversation.
+
+    So a later lane that wants the other rule has to change this test deliberately.
+    The loss is one turn's *distillation*: the episode itself is unaffected, stays
+    readable by retrieval, and expires on its own horizon.
+    """
+    harness = Harness(batch_size=3)
+    conversation = await harness.conversation_of([1, 3], turns=3)
+
+    await harness.stage.observe(conversation)
+
+    assert _ordinals(harness.fake.batches[-1]) == [1, 3]
+    assert await harness.watermark(conversation) == 3
+
+    # Even once turn 2's episode lands, it is behind the watermark and is not read.
+    await harness.land(conversation, 2)
+    assert (await harness.stage.observe(conversation)).episodes_read == 0
+    assert harness.fake.call_count == 1
+
+
+async def test_a_full_page_behaves_exactly_as_a_short_one_does() -> None:
+    """§5: no rule depends on the page's length, only on its ordinals.
+
+    The position is "the highest ordinal in the page whose episode resolved", and an
+    implementation computing it from ``len(page)`` — or treating a full page as
+    "there is more, so stop short" — passes every case above and fails this one.
+    """
+    exact = Harness(batch_size=2)
+    full = await exact.conversation_with(2)
+    short = Harness(batch_size=2)
+    partial = await short.conversation_with(1)
+
+    await exact.stage.observe(full)
+    await short.stage.observe(partial)
+
+    assert exact.conversations.advances == [(full, 2)]
+    assert short.conversations.advances == [(partial, 1)]
+    assert await exact.watermark(full) == 2
+    assert await short.watermark(partial) == 1
+
+
+@pytest.mark.parametrize("earlier_stamps_first", [True, False])
+async def test_two_overlapping_passes_leave_the_higher_position_standing(
+    *, earlier_stamps_first: bool
+) -> None:
+    """§5: overlap safety rests on ``record_observed``'s monotonicity and nothing else.
+
+    Two passes over one conversation may overlap and neither the store nor the
+    decision serialises them. Each computes its position from **its own** page and
+    its own resolution of that page's episodes, and the two may legitimately differ —
+    here because turn 3's episode lands between the two page reads. Whichever order
+    the stamps arrive in, the higher position stands and the lower performs nothing.
+
+    Written end to end over two interleaved passes rather than as two store calls in
+    a row, because what is under test is the stage and the store composing: a stage
+    that read the watermark back to "confirm" its own advance, or retried it, would
+    satisfy a store-level case and fail here.
+    """
+    belief = "the user is training for a marathon"
+    minted = iter(["rec-1", "rec-2"])
+    earlier_gate, later_gate = ObservationGate(), ObservationGate()
+    harness = Harness(
+        observer=FakeObserver(
+            [ObservedBelief(content=belief)], id_factory=lambda: next(minted), gate=earlier_gate
+        ),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
+    )
+    conversation = await harness.conversation_of([1, 2], turns=3)
+    later = harness.stage_over(
+        FakeObserver(
+            [ObservedBelief(content=belief)], id_factory=lambda: next(minted), gate=later_gate
+        )
+    )
+
+    # The earlier pass reads the page while turn 3 is still in flight, and is held
+    # before it can advance; the later one reads the same page once it has landed.
+    earlier_pass = asyncio.create_task(harness.stage.observe(conversation))
+    await earlier_gate.reached()
+    await harness.land(conversation, 3)
+    later_pass = asyncio.create_task(later.observe(conversation))
+    await later_gate.reached()
+
+    if earlier_stamps_first:
+        earlier_gate.release()
+        await earlier_pass
+        later_gate.release()
+        await later_pass
+    else:
+        later_gate.release()
+        await later_pass
+        earlier_gate.release()
+        await earlier_pass
+
+    assert sorted(harness.conversations.advances) == [(conversation, 2), (conversation, 3)], (
+        "each pass names the position **it** read, and neither is recomputed"
+    )
+    assert await harness.watermark(conversation) == 3, (
+        "the higher of the two positions stands whichever order the stamps arrived in"
+    )
+    landed = {record.id for record in await harness.memory.export()} & {"rec-1", "rec-2"}
+    assert len(landed) == 1, (
+        "the duplicate proposals fold rather than writing a second record (ADR-0077 §8)"
+    )
+
+
+async def test_a_pass_cancelled_after_its_advance_commits_leaves_the_stamped_watermark() -> None:
+    """§6: the commit-ambiguous case, in the half that is assertable.
+
+    ADR-0060's cancellation clause and ADR-0054's shield make this the real shape
+    rather than a contrivance: a store whose write runs in a worker thread can commit
+    and then have the awaiting task cancelled before the call returns. **Both
+    outcomes are safe and neither is a defect** — if the stamp landed, every proposal
+    of that pass had already been ruled, so the position records work that was done.
+
+    What §6 forbids is the machinery that cannot tell the two apart anyway: no
+    compensating write, no re-read of the watermark to "confirm" it, and no retry of
+    the attempt inside the same pass. Each would be a second write to the watermark,
+    which §5 forbids — so the assertion is that **exactly one** advance was ever
+    asked for.
+    """
+    harness = Harness()
+    conversation = await harness.conversation_with(2)
+    harness.conversations.cancel_after_advance = True
+
+    outcome = await asyncio.gather(harness.stage.observe(conversation), return_exceptions=True)
+
+    assert isinstance(outcome[0], asyncio.CancelledError)
+    assert harness.conversations.advances == [(conversation, 2)], "no compensating write"
+    assert await harness.watermark(conversation) == 2
+
+    harness.conversations.cancel_after_advance = False
+    assert (await harness.stage.observe(conversation)).episodes_read == 0
+    await harness.append_turns(conversation, 1)
+    resumed = await harness.stage.observe(conversation)
+
+    assert _ordinals(harness.fake.batches[-1]) == [3], (
+        "the next pass resumes above the stamped position rather than re-reading the page"
+    )
+    assert resumed.episodes_read == 1
+
+
+async def test_a_pass_that_raises_in_the_write_path_advances_nothing() -> None:
+    """§6: a pass that raises **before** its attempt moves the watermark by nothing.
+
+    There is no partial advance within a pass, and the re-read is never narrowed to
+    "the turns whose proposals were not ruled" — which is what #1737 item 4 asks for
+    and §6 refuses, because a proposal may cite several turns and a turn may be cited
+    by none, so that set does not name a *position* in the ordinal order at all.
+    """
+    # A minting observer, as the producer it doubles is (#736): the re-read pass
+    # proposes the same content at fresh ids, which is the production shape. Scripted
+    # ids on both passes would make the second one collide with the first's record
+    # and fail on ADR-0108 §2's own-id refusal, which is a different rule.
+    minted = iter(["rec-1", "rec-2", "rec-3", "rec-4"])
+    harness = Harness(
+        observer=FakeObserver(
+            [ObservedBelief(content="first"), ObservedBelief(content="second")],
+            id_factory=lambda: next(minted),
+        )
+    )
+    harness.swap_writer(_FailingWriter(harness.real_writer, fail_on=2))
+    conversation = await harness.conversation_with(2)
+
+    with pytest.raises(MemoryStoreError):
+        await harness.stage.observe(conversation)
+
+    assert await harness.memory.get("rec-1") is not None, "the first proposal was ruled"
+    assert harness.conversations.advances == [], "and the watermark moved by nothing"
+    assert await harness.watermark(conversation) is None
+
+    harness.swap_writer(harness.real_writer)
+    await harness.stage.observe(conversation)
+
+    assert harness.fake.batches[-1] == harness.fake.batches[-2], "the whole page is re-read"
+
+
+async def test_a_conversation_deleted_between_the_page_read_and_the_advance() -> None:
+    """§6: the deletion race is the one page never re-read, and none is owed.
+
+    ADR-0074 §8 working rather than a page lost. The pass reads its page, the user
+    deletes the conversation, and ``record_observed`` then refuses — a refusal and
+    not a commit, so the watermark is untouched; and by then the conversation has
+    left the candidate listing, so no later pass can re-read what the failed one
+    read. A belief the aborted pass would have proposed from those turns is precisely
+    what a deletion is for.
+
+    The exception leaves **this pass**. What a multi-pass *run* does with it is
+    ADR-0218 §9's — it catches it, drops that candidate and carries on — and that is
+    the trigger lane's, not this one's.
+    """
+    harness = Harness()
+    conversation = await harness.conversation_with(2)
+    harness.conversations.stamp_before_advance = True
+
+    with pytest.raises(UnknownConversationError):
+        await harness.stage.observe(conversation)
+
+    assert harness.conversations.advances == [(conversation, 2)]
+    assert harness.conversations.raw_watermark(conversation) is None
+    assert await harness.conversations.get(conversation) is None
+    assert await harness.conversations.conversations_with_unobserved_turns() == []
+
+
+async def test_under_a_stopped_clock_a_busy_candidate_stays_first() -> None:
+    """§3's accepted behaviour, pinned so a later lane changes the order deliberately.
+
+    The candidate order starves nothing **where the clock advances monotonically**,
+    and this project never promises that it does (``core/clock.py``). A stopped or
+    stepped-back clock can leave a busy conversation's ``last_active_at`` at or below
+    an idle one's, and where the tie is broken by an ``id`` that also sorts first the
+    busy one is served ahead of the idle one indefinitely.
+
+    That is **accepted and named**, not closed: closing it would take a durable
+    service-order position — a second cursor with its own upgrade discipline and its
+    own ``core`` surface — bought against a clock adjustment rather than against
+    anything the walk does.
+    """
+    ids = iter(["busy", "idle"])
+    harness = Harness(now=lambda: AT, new_id=lambda: next(ids))
+    busy = await harness.conversation_with(2)
+    idle = await harness.conversation_with(2)
+
+    first = await harness.stage.observe()
+    await harness.append_turns(busy, 2)
+    await harness.conversations.mark_active(busy)
+    second = await harness.stage.observe()
+
+    assert (busy, idle) == ("busy", "idle")
+    assert first.conversation_id == busy
+    assert second.conversation_id == busy
+    assert await harness.watermark(idle) is None, "the idle conversation is not reached"
+
+
+async def test_a_watermark_the_store_discards_is_recovered_by_the_next_pass() -> None:
+    """§7 end to end: a discarded watermark is read as absent, and §4 then governs.
+
+    Written as one scenario rather than as two, because the failure it guards against
+    is an implementation that coerces the value on one read and filters it wrongly on
+    another — which would leave the conversation permanently unreachable: absent from
+    the candidate listing because its stored watermark is above every turn, and
+    unstampable because nothing selects it. The recovery is a *tail* read and not a
+    walk from the first turn, since a discarded watermark is an absent one (§4).
+    """
+    harness = Harness(batch_size=2)
+    conversation = await harness.conversation_with(3)
+    harness.conversations.plant_watermark(conversation, 99)
+
+    candidates = await harness.conversations.conversations_with_unobserved_turns()
+    report = await harness.stage.observe(conversation)
+
+    assert [one.id for one in candidates] == [conversation]
+    assert [one.observed_through for one in candidates] == [None]
+    assert _ordinals(harness.fake.batches[-1]) == [2, 3]
+    assert report.episodes_read == 2
+    assert await harness.watermark(conversation) == 3
 
 
 # --- construction guards -------------------------------------------------

@@ -9098,12 +9098,21 @@ class AssistantEngine(Protocol):
         batch nor rules on its own output.
 
         ``conversation_id`` is a **selector rather than a subject**, which is why it
-        is keyword-only like :meth:`converse`'s: "this conversation, or the most
-        recently active" (ADR-0085 §2).
+        is keyword-only like :meth:`converse`'s: "this conversation, or the one the
+        selector picks" (ADR-0085 §2). What it picks is the first conversation
+        holding a turn above its observation watermark, least recently active first
+        (ADR-0212 §3) — it was "the most recently active conversation" until that
+        decision replaced ADR-0077 §8's selection sentence.
+
+        **A pass reads only what has not been observed**, so naming a conversation
+        twice in succession does something the first time and nothing the second,
+        reporting a pass that read no episodes. That is the honest answer to "what
+        has already been looked at"; a deliberate re-observation that ignores the
+        watermark is not offered here (ADR-0212 §9, issue #1789).
 
         Args:
             conversation_id: The conversation to read, or ``None`` to select the
-                most recently active one.
+                first one with unobserved turns.
 
         Returns:
             What the pass did — the proposals with their rulings, the counts kept

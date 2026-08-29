@@ -216,3 +216,40 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
 
     with pytest.raises(ConversationStoreError):
         await store.start()
+
+
+async def test_the_fake_discards_a_watermark_its_own_turns_do_not_reach() -> None:
+    """ADR-0212 §7's discard is the *store's*, so this fake owes it too.
+
+    Only one of §7's three limbs is expressible against a dict-backed store — a
+    value that is not an integer, or one below ``FIRST_TURN_ORDINAL``, cannot be
+    held by a frozen pydantic model at all — and the ``sqlite3`` store's own cases
+    carry the limbs a file can hold. This is the limb that is: a perfectly good
+    watermark whose turns went away underneath it, which a ``forget`` that took a
+    turn row or a partial recovery produces.
+
+    A fake that skipped the coercion would certify a consumer against behaviour the
+    real store does not have (ADR-0026 §7): the conversation reads back stamped,
+    stays out of the candidate listing, and its remaining turns are never observed.
+    """
+    store = FakeConversationStore(now=_fixed_now)
+    conversation = await store.start()
+    await store.append(conversation.id, occurred_at=datetime(2026, 6, 1, tzinfo=UTC))
+    await store.append(conversation.id, occurred_at=datetime(2026, 6, 1, tzinfo=UTC))
+    assert await store.record_observed(conversation.id, through_ordinal=2) is not None
+
+    # The turn the watermark names goes away, as a partial recovery leaves it.
+    store._turns[conversation.id] = store._turns[conversation.id][:1]
+
+    read = await store.get(conversation.id)
+
+    assert read is not None
+    assert read.observed_through is None
+    assert [one.observed_through for one in await store.recent()] == [None]
+    assert [one.observed_through for one in (await store.export()).conversations] == [None]
+    assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+        conversation.id
+    ]
+    stamped = await store.record_observed(conversation.id, through_ordinal=1)
+    assert stamped is not None
+    assert stamped.observed_through == 1

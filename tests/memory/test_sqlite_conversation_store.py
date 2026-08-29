@@ -1663,3 +1663,260 @@ async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error() -> 
 
     with pytest.raises(ConversationStoreError, match="failed to start a conversation"):
         await store.start()
+
+
+# --- the observation watermark's column and its discards (ADR-0212 §7) ------
+
+
+def _drop_the_watermark_column(database: Path) -> None:
+    """Rewrite ``conversations`` back to the shape a pre-ADR-0212 store wrote.
+
+    The file is produced by the *current* store and then walked backwards, rather
+    than assembled from a hand-written legacy schema — :func:`_strip_the_foreign_key`'s
+    approach and for its reason: everything but the one column under test is then
+    authentic, and a legacy database in the wild is exactly this file.
+    """
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        raw.execute(
+            "CREATE TABLE conversations_legacy(id TEXT PRIMARY KEY, "
+            "started_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL, "
+            "last_turn_at INTEGER, deleted_at INTEGER)"
+        )
+        raw.execute(
+            "INSERT INTO conversations_legacy(id, started_at, last_active_at, last_turn_at, "
+            "deleted_at) SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
+            "FROM conversations"
+        )
+        raw.execute("DROP TABLE conversations")
+        raw.execute("ALTER TABLE conversations_legacy RENAME TO conversations")
+    finally:
+        raw.close()
+
+
+def _write_watermark(database: Path, conversation_id: str, value: object) -> None:
+    """Put an arbitrary value in the watermark column, through a raw connection.
+
+    The only writer that can: ``record_observed`` refuses everything outside
+    ``[FIRST_TURN_ORDINAL, 2**63)`` before any I/O and everything above the
+    conversation's highest ordinal under its exclusion, so a value the store has to
+    *discard* is unreachable through the seam. That is the point of ADR-0212 §7 —
+    what it governs is a store state reached from an operator's hand edit, a partial
+    recovery, a migration, or a downgrade that dropped rows.
+    """
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        raw.execute(
+            "UPDATE conversations SET observed_through = ? WHERE id = ?", (value, conversation_id)
+        )
+    finally:
+        raw.close()
+
+
+async def test_a_database_written_before_the_watermark_column_opens_and_serves(
+    tmp_path: Path,
+) -> None:
+    """§7: the migration is what makes "ignores it" true of a *file* and not only a build.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file that already holds
+    ``conversations``, so without the ``ALTER TABLE`` a store opened over a database
+    written by an earlier build would fail its first read on a column that is not
+    there — a resident process that will not start, found after a downgrade rather
+    than in review.
+    """
+    path = tmp_path / "conversations.db"
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await first.start()
+        await first.append(conversation.id, occurred_at=_NOW)
+    finally:
+        first.close()
+    _drop_the_watermark_column(path)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        read = await reopened.get(conversation.id)
+
+        assert read is not None
+        assert read.observed_through is None, "a conversation written before the column has none"
+        assert [one.id for one in await reopened.conversations_with_unobserved_turns()] == [
+            conversation.id
+        ]
+        assert await reopened.record_observed(conversation.id, through_ordinal=1) is not None
+    finally:
+        reopened.close()
+
+
+async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: Path) -> None:
+    """§7 pinned against the **schema** rather than assumed from the code.
+
+    A build written before this member names only the columns it knows in its
+    ``INSERT INTO conversations(...)``, so a ``NOT NULL`` column with no default
+    would make that build's ``start`` fail against an upgraded database — a refusal
+    to serve over a watermark, arriving through the schema instead of through a read.
+    The insert below *is* that build's statement, and the conversation it writes then
+    reads back with no watermark and enters the candidate listing at its tail.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
+                "deleted_at) VALUES ('older-build', 0, 0, NULL, NULL)"
+            )
+        finally:
+            raw.close()
+        await store.append("older-build", occurred_at=_NOW)
+
+        read = await store.get("older-build")
+
+        assert read is not None
+        assert read.observed_through is None
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            "older-build"
+        ]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("not-an-ordinal", "not an integer"),
+        (2.5, "not an integer"),
+        (0, "below the first ordinal"),
+        (-1, "below the first ordinal"),
+        (99, "above the conversation's highest ordinal"),
+    ],
+)
+async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
+    tmp_path: Path, value: object, why: str
+) -> None:
+    """§7: discarded, never levelled, and never this seam's error.
+
+    ADR-0111 §7's argument transfers word for word — "a cursor holds no evidence and
+    answers no query", so discarding one "returns nothing wrong to any client". The
+    store-side half is what stops one bad integer becoming a
+    ``ConversationStoreError`` on ``get``, ``recent``, ``turns`` and ``export`` for
+    that conversation: a conversation the user can no longer read because a
+    bookkeeping column is wrong, which is the outcome §7 forbids arriving through a
+    different door.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW)
+        await store.append(conversation.id, occurred_at=_NOW)
+        _write_watermark(path, conversation.id, value)
+
+        read = await store.get(conversation.id)
+
+        assert read is not None, why
+        assert read.observed_through is None
+        assert [one.observed_through for one in await store.recent()] == [None]
+        assert [one.observed_through for one in (await store.export()).conversations] == [None]
+        assert len(await store.turns(conversation.id)) == 2
+        assert len(await store.turns_after(conversation.id)) == 2
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("value", ["not-an-ordinal", 2.5, 0, -1, 99])
+async def test_a_conversation_carrying_an_unusable_watermark_is_recovered(
+    tmp_path: Path, value: object
+) -> None:
+    """§7 end to end, so a coerced read and a wrongly-filtered listing cannot disagree.
+
+    An implementation that coerced the value on one read and filtered it wrongly on
+    another would leave the conversation **permanently unreachable**: absent from the
+    candidate listing, and so never stamped afresh. The listing's own predicate is
+    where that goes wrong most easily — SQLite sorts every integer below every
+    string, so ``t.ordinal > c.observed_through`` alone excludes a text watermark for
+    good and a real-valued one excludes exactly the turns beneath it.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW)
+        await store.append(conversation.id, occurred_at=_NOW)
+        _write_watermark(path, conversation.id, value)
+
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            conversation.id
+        ]
+        stamped = await store.record_observed(conversation.id, through_ordinal=2)
+
+        assert stamped is not None
+        assert stamped.observed_through == 2
+        assert await store.conversations_with_unobserved_turns() == []
+    finally:
+        store.close()
+
+
+async def test_a_watermark_naming_an_ordinal_the_turns_do_not_reach_is_re_observed(
+    tmp_path: Path,
+) -> None:
+    """§7's disagreement case, exercised by writing the **row** rather than a document.
+
+    ADR-0111 §7's second clause — "a store whose recorded cursor and recorded
+    progress disagree is treated as damaged in the same way" — reaches this contract
+    as a *store* state and not as a restore: ``ConversationStore`` offers ``export``
+    and no import, so nothing here reads such a document back. What produces it is a
+    ``forget`` that took a turn row, a partial recovery, a migration, or a downgrade
+    that dropped rows — modelled here by deleting the turns underneath a watermark
+    that was perfectly good when it was written.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW)
+        await store.append(conversation.id, occurred_at=_NOW)
+        assert await store.record_observed(conversation.id, through_ordinal=2) is not None
+
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "DELETE FROM turns WHERE ordinal = 2 AND conversation_id = ?", (conversation.id,)
+            )
+        finally:
+            raw.close()
+
+        read = await store.get(conversation.id)
+
+        assert read is not None
+        assert read.observed_through is None, "the recorded position leads the turns that remain"
+        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
+            conversation.id
+        ]
+    finally:
+        store.close()
+
+
+async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
+    """It is durable state, which is the whole reason it is a column at all."""
+    path = tmp_path / "conversations.db"
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await first.start()
+        await first.append(conversation.id, occurred_at=_NOW)
+        await first.append(conversation.id, occurred_at=_NOW)
+        assert await first.record_observed(conversation.id, through_ordinal=1) is not None
+    finally:
+        first.close()
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        read = await reopened.get(conversation.id)
+
+        assert read is not None
+        assert read.observed_through == 1
+        assert [
+            turn.ordinal for turn in await reopened.turns_after(conversation.id, after_ordinal=1)
+        ] == [2]
+    finally:
+        reopened.close()
