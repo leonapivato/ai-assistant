@@ -422,10 +422,37 @@ only subtract.
 > `OWNER_ACT` or `DERIVED`, and never runs on a record already in the store". A fold is
 > where a proposal made on a *fresh* record — which is exactly where §4 permits one —
 > would otherwise land on a stored placement that carries one of those setters. So: **a
-> placement whose setter is `PROPOSED` is not a side of a meet against a placement whose
-> setter is `OWNER_ACT` or `DERIVED`.** It is discarded before the arithmetic runs, not
-> weighed in it, and the meet is then taken over the eligible sides alone. Nothing else
-> is ever discarded: an act and a derivation are both sides of every meet they are in.
+> placement whose setter is `PROPOSED` is not a side of a meet between two placements of
+> the same belief against a placement whose setter is `OWNER_ACT` or `DERIVED`.** It is
+> discarded before the arithmetic runs, not weighed in it, and the meet is then taken
+> over the eligible sides alone. Nothing else is ever discarded: an act and a derivation
+> are both sides of every meet they are in.
+
+> **Normative.** **That rule is bounded to the fold, and a derivation meets every
+> placement it was supplied, `PROPOSED` included.** The clause above is about two
+> placements **of one belief**, and what it protects is an act **on that belief**: §4's
+> "never overwrites a setter of `OWNER_ACT`" is exactly on point there, because weighing
+> the proposal would let a model undo that act by duplication. A **derivation** is not
+> that case. Its placements belong to **different records**; the derived record carries
+> no act of the owner's for a proposal to override, so discarding an input protects
+> nothing — and an `OWNER` input discarded is an `OWNER` input **laundered**, which is
+> the whole of what ADR-0204 §5's all-inputs rule, quoted above, exists to stop. So a
+> producer deriving a record from records of this store takes the narrowest reach over
+> **every** record it was supplied, whatever each one's setter, and **no supplied
+> placement is discarded on this path**. A consolidation supplied a record placed reach
+> `ANYONE` setter `OWNER_ACT` **and** a record placed reach `OWNER` setter `PROPOSED`
+> therefore derives reach `OWNER`, not `ANYONE`.
+
+> **Normative.** **The derived record's setter follows this section's order over the
+> supplied placements that carry the surviving reach**, exactly as the fold's setter
+> follows it over the eligible sides, and its `set_at` is that placement's on the same
+> rule the fold's instant follows. So a narrowing that **only** a `PROPOSED` placement
+> supplied is recorded `PROPOSED`, and the owner still lifts in one act what a model
+> proposed; the propagation clause below — no `DERIVED` over a reach no derivation
+> supplied — is thereby satisfied rather than breached. Where ADR-0204 §2's own
+> evaluation is `True` of **this** record's production, the record is reach `OWNER`
+> setter `DERIVED` on that ground alone, whatever its inputs carried; that clause is
+> stated below and is untouched by this one.
 
 > **Normative.** **The meet over the eligible sides is the meet as stated, with no
 > exception in it.** The survivor's reach is the **narrower** of the eligible sides'.
@@ -1328,6 +1355,17 @@ ADR-0201 closed.
 > beside the stamp in the first two arms because the stamp is only observable to the
 > owner through what they may then do, and an implementation that returned the right
 > reach with the wrong setter would pass every other arm in this section.
+
+> **Normative.** The lane pins **the multi-record derivation over mixed placements, on
+> the consolidation path in `orchestration/consolidation.py`** — every fold arm above is
+> a two-placement merge of one belief and none of them reaches this path. A consolidation
+> supplied a record placed reach `ANYONE` setter `OWNER_ACT` **and** a record placed
+> reach `OWNER` setter `PROPOSED` writes the derived record reach `OWNER`, setter
+> `PROPOSED`, carrying that input's instant, and a later `unguard` on the derived record
+> **succeeds**. The arm is owed because §3's eligibility clause is bounded to the fold:
+> an implementation reading it as general would pass every arm above while deriving reach
+> `ANYONE` here, laundering an `OWNER`-placed input through a consolidation — which is
+> the failure ADR-0204 §5's narrowest-over-every-record-supplied rule exists to prevent.
 
 > **Normative.** The lane pins **the instant tie-break**, which every arm above leaves
 > open because none of them puts two *like* placements together: folding two eligible
