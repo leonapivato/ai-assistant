@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,8 @@ import structlog.testing
 
 from ai_assistant.core.errors import MemoryStoreError, SelfConsumingWriteError
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    MAX_TOPICS_PER_RECORD,
     Attestation,
     BeliefBand,
     MemoryDecisionKind,
@@ -166,6 +169,7 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
     supplied_withheld: bool = False,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
+    topics: tuple[str, ...] = (),
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
@@ -174,6 +178,7 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
         provenance=_provenance(source=source, tainted=tainted, supplied_withheld=supplied_withheld),
         expires_at=expires_at,
         validity=validity or Validity(),
+        topics=topics,
     )
 
 
@@ -1540,3 +1545,354 @@ async def test_a_chunk_holding_nothing_stamped_leaves_the_proposal_unstamped() -
 
     assert len(writes.proposals) == 1
     assert writes.proposals[0].proposed.provenance.supplied_withheld_content is False
+
+
+# --- ADR-0213 §5: the run-scoped vocabulary, and §4's topics entry ----------
+# §12's tests 8-14, 23, 24 and 31. The vocabulary is read off the prompts the run
+# actually composed, because that is the only place the clause has an effect: it
+# is a hint to a model and nothing downstream reads it.
+
+#: Enough distinct labels to run the accumulator past its cap. Zero-padded so code
+#: point order and numeric order agree, which lets a case name the label it expects
+#: rather than computing one.
+_TOPIC = [f"topic {index:02d}" for index in range(64)]
+
+#: A reply proposing nothing, for the cases about the *prompt*: a run that wrote
+#: records would put them above the cursor and change what a later chunk walks.
+_NO_BELIEFS = '{"beliefs": []}'
+
+#: The line :func:`_render` appends when the accumulator holds anything.
+_VOCABULARY_PREFIX = "Filing words already in use: "
+
+
+def _vocabularies(provider: FakeModelProvider) -> list[list[str]]:
+    """The vocabulary supplied in each prompt of a run, in order.
+
+    An empty list for a prompt that carried no line at all, which is what the
+    renderer emits when the accumulator holds nothing — so a case can tell "supplied
+    nothing" from "supplied the empty list" without either being spelled twice.
+    """
+    supplied: list[list[str]] = []
+    for call in provider.calls:
+        body = call.messages[-1].content
+        if _VOCABULARY_PREFIX not in body:
+            supplied.append([])
+            continue
+        line = body.split(_VOCABULARY_PREFIX, 1)[1].splitlines()[0]
+        supplied.append(json.loads(line))
+    return supplied
+
+
+def _vocabulary_stage(
+    store: MemoryStore,
+    writes: object,
+    *,
+    reply: str = _NO_BELIEFS,
+    chunk_size: int = 2,
+) -> tuple[ConsolidationStage, FakeModelProvider]:
+    """The stage under test, and the provider whose prompts a case reads back."""
+    provider = FakeModelProvider(reply)
+    counter = iter(f"consolidated-{index}" for index in range(1, 100))
+    stage = ConsolidationStage(
+        memory=store,
+        writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
+        model=provider,
+        chunk_size=chunk_size,
+        run_budget=timedelta(minutes=5),
+        now=_now,
+        id_factory=lambda: next(counter),
+    )
+    return stage, provider
+
+
+async def test_the_chunk_being_prompted_is_in_its_own_vocabulary() -> None:
+    """§12.8, and it is the assertion that separates §5 from the reading it rejects.
+
+    An implementation supplying only the chunks it has already *finished* sends
+    nothing in the first prompt and passes every other case here. §5 takes the
+    labels of the records the prompt itself carries, which makes the supplied set a
+    projection of that prompt's own content — the same data, restated as labels —
+    so ADR-0004 §7's minimisation test is met by construction rather than by
+    argument, and the first chunk is not left as a wart.
+    """
+    store = await _seeded(
+        [
+            _record("r1", topics=("health",)),
+            _record("r2", topics=("health",)),
+            _record("r3", topics=("sleep",)),
+            _record("r4", topics=("sleep",)),
+        ]
+    )
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes)
+
+    await stage.run()
+
+    assert _vocabularies(provider) == [["health"], ["health", "sleep"]]
+
+
+async def test_a_one_chunk_run_is_supplied_its_own_chunks_labels() -> None:
+    """§12.23: the configuration under which the rejected reading is not merely weak.
+
+    ``scheduler_run_budget`` admits any finite positive duration and is checked only
+    at a chunk boundary, so a deployment whose single model call spends the budget
+    processes exactly one chunk per run. Under the rejected reading such a deployment
+    would send an empty vocabulary in **every** prompt it ever composed, and §5's
+    claim would be false for it rather than weak.
+    """
+    store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("sleep",))])
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
+
+    with _loop_time_after_one_chunk():
+        report = await stage.run()
+
+    assert report.chunks == 1
+    assert _vocabularies(provider) == [["health", "sleep"]]
+
+
+async def test_the_vocabulary_is_ordered_and_the_accumulator_itself_is_capped() -> None:
+    """§12.9, whole: the order, the cap on the *state*, and that it never evicts.
+
+    The assertion that separates this from a cap on the output alone is that the
+    state selected *from* never exceeds ``DEFAULT_PAGE_SIZE`` entries, however many
+    chunks the run has done — so a label first met in a later chunk reaches no
+    prompt at all, while a further occurrence of a label already held still moves
+    that label's count and therefore its position.
+
+    Bounding the accumulator rather than its output is what makes ADR-0111 §4's
+    arithmetic computable: the ordering term is over at most that many entries at
+    every chunk of every run, rather than over everything the run has read.
+    """
+    store = await _seeded(
+        [
+            _record("r1", topics=tuple(_TOPIC[0:16])),
+            _record("r2", topics=tuple(_TOPIC[16:32])),
+            _record("r3", topics=tuple(_TOPIC[32:48])),
+            # Re-offers `topic 00`, which the accumulator already holds, and four
+            # new labels of which exactly two fit before it is full.
+            _record("r4", topics=(_TOPIC[0], _TOPIC[48], _TOPIC[49], _TOPIC[50], _TOPIC[51])),
+            _record("r5", topics=("zzz met after the cap",)),
+        ]
+    )
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes)
+
+    await stage.run()
+
+    first, second, third = _vocabularies(provider)
+    assert first == _TOPIC[0:32], "commonest first, ties broken by label ascending"
+    assert len(second) == DEFAULT_PAGE_SIZE, "the accumulator is full and holds exactly the cap"
+    assert second[0] == _TOPIC[0], "a further occurrence still increments a held label's count"
+    assert second[1:] == sorted(_TOPIC[1:50])
+    assert _TOPIC[50] not in second, "a label met after the cap is admitted nowhere"
+    assert _TOPIC[51] not in second
+    assert third == second, "a full accumulator never evicts, and admits nothing new"
+    assert "zzz met after the cap" not in third
+
+
+async def test_two_consecutive_runs_over_disjoint_chunks_supply_disjoint_vocabularies() -> None:
+    """§12.10: the count is over what **this** run read and nothing else.
+
+    Nothing carries a vocabulary from one run to the next. What an earlier run
+    *wrote* can steer a later one — a committed consolidation is a new record above
+    the cursor, which a later walk reaches in the ordinary way — but what an earlier
+    run merely *read* cannot, because ``walk_records`` is a high-water mark and never
+    a re-read.
+    """
+    store = await _seeded(
+        [
+            _record("r1", topics=("health",)),
+            _record("r2", topics=("health",)),
+            _record("r3", topics=("sleep",)),
+            _record("r4", topics=("sleep",)),
+        ]
+    )
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes)
+
+    with _loop_time_after_one_chunk():
+        await stage.run()
+    with _loop_time_after_one_chunk():
+        await stage.run()
+
+    assert _vocabularies(provider) == [["health"], ["sleep"]]
+
+
+async def test_the_accumulation_leaves_nothing_durable_behind() -> None:
+    """§12.11: no new table, column, row or cursor, and nothing a second reader sees.
+
+    Asserted as §12.11 words it — against a run of the same chunks with the field
+    absent — because the claim is not that *some* state is missing but that the
+    accumulation adds **none**. A second process reading the store concurrently sees
+    no vocabulary state for the same reason there is nothing to see: the walk is
+    still the only thing recorded, and every record still exports exactly as it was
+    stored.
+    """
+    labelled = [_record("r1", topics=("health",)), _record("r2", topics=("sleep",))]
+    plain = [_record("r1"), _record("r2")]
+    outcomes = []
+    for records in (labelled, plain):
+        store = await _seeded(records)
+        writes, _ = _gated(store)
+        stage, _provider = _vocabulary_stage(store, writes)
+        await stage.run()
+        exported = sorted(
+            (record.model_dump(mode="json") for record in await store.export()),
+            key=lambda dumped: str(dumped["id"]),
+        )
+        for dumped in exported:
+            dumped.pop("topics")
+        # The store's own durable state, read the only way a second process could:
+        # what a fresh run over it walks. A vocabulary that had left a cursor, a row
+        # or a count behind would show up as a different second run.
+        second = await stage.run()
+        outcomes.append((exported, second.examined, second.exhausted, second.chunks))
+
+    assert outcomes[0] == outcomes[1]
+
+
+async def test_a_record_that_left_the_live_set_leaves_the_vocabulary_with_it() -> None:
+    """§12.13: driven over the walk rather than asserted as a rule about a cache.
+
+    There is no cache. A run reads only what the store returns, and the store has
+    already applied its own liveness predicate — which is the whole reason §5 reads
+    the walk rather than a maintained vocabulary count: a maintained count and
+    ``MemoryStore.get`` would disagree about a record that left the live set with no
+    write to maintain anything.
+    """
+    store = await _seeded(
+        [
+            _record("live", topics=("health",)),
+            _record(
+                "retired",
+                topics=("retired subject",),
+                validity=Validity(valid_until=_AT - timedelta(days=1)),
+            ),
+            _record("expired", topics=("expired subject",), expires_at=_AT - timedelta(days=1)),
+        ]
+    )
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
+
+    await stage.run()
+
+    assert _vocabularies(provider) == [["health"]]
+
+
+async def test_a_record_over_the_bound_does_not_unbound_the_chunk() -> None:
+    """§12.24: at most ``MAX_TOPICS_PER_RECORD`` labels of any one record are read.
+
+    Without that clause the per-record factor of ADR-0111 §4's arithmetic is the
+    length of a tuple nothing limits, and the product that section asks for cannot
+    be computed at all. Such a record is reachable only by import or under a bound a
+    later ADR raised, and the run has to complete over it rather than refusing it.
+    """
+    over_bound = tuple(_TOPIC[: MAX_TOPICS_PER_RECORD + 1])
+    store = await _seeded([_record("imported", topics=over_bound)])
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
+
+    report = await stage.run()
+
+    assert _vocabularies(provider) == [list(over_bound[:MAX_TOPICS_PER_RECORD])]
+    assert _TOPIC[MAX_TOPICS_PER_RECORD] not in _vocabularies(provider)[0]
+    assert report.chunks == 1, "the run completes and records its chunk as done"
+    assert report.exhausted is True
+    # The cursor advanced: a second run over the same store walks past the record
+    # rather than meeting it again, which is what "records its chunk as done" means
+    # from the outside.
+    assert (await stage.run()).examined == 0
+
+
+async def test_the_consolidation_prompt_states_the_form_and_carries_the_vocabulary() -> None:
+    """§12.12's first half, plus the form the producer applies before construction.
+
+    The vocabulary line is useless to a model that has not been told what it is, so
+    the system prompt's gloss and the line are one fact in two places — the same
+    coupling the origin-marking cases above assert for their own term.
+    """
+    store = await _seeded([_record("r1", topics=("health",))])
+    writes, _ = _gated(store)
+    stage, provider = _vocabulary_stage(store, writes, chunk_size=50)
+
+    await stage.run()
+
+    system = provider.calls[-1].messages[0].content
+    assert "at most FOUR short filing words" in system
+    assert "Filing words already in use:" in system
+    assert "a suggestion and never a menu" in system
+    assert _VOCABULARY_PREFIX in provider.calls[-1].messages[-1].content
+
+
+async def test_a_supplied_label_is_a_hint_and_not_a_constraint() -> None:
+    """§12.14, both directions: an unoffered label is accepted, and none is not forced.
+
+    A producer obliged to choose from the supplied set would file a genuinely new
+    subject under the nearest old label, and the first hundred records would fix the
+    vocabulary of the store forever. Nothing is the instrument for recovering a
+    distinction that was never recorded.
+    """
+    reply = """
+    {"beliefs": [{"kind": "semantic", "step": "observed",
+      "content": "the user works late on Thursdays",
+      "evidence": ["R1", "R2"], "topics": ["brand new subject"],
+      "rationale": "both records show it"}]}
+    """
+    store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
+    writes, _ = _gated(store)
+    stage, _provider = _vocabulary_stage(store, writes, reply=reply, chunk_size=50)
+
+    await stage.run()
+
+    assert [proposal.proposed.topics for proposal in writes.proposals] == [("brand new subject",)]
+
+
+async def test_a_producer_that_proposes_no_topics_is_not_made_to() -> None:
+    """§12.14's second direction, without which the case above passes a rule that invents."""
+    store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
+    writes, _ = _gated(store)
+    stage, _provider = _vocabulary_stage(store, writes, reply=_ONE_BELIEF, chunk_size=50)
+
+    await stage.run()
+
+    assert [proposal.proposed.topics for proposal in writes.proposals] == [()]
+
+
+@pytest.mark.parametrize(
+    "topics",
+    [
+        pytest.param('"topics": ["Health"],', id="not-casefolded"),
+        pytest.param('"topics": ["a", "b", "c", "d", "e"],', id="five-labels"),
+        pytest.param('"topics": "health",', id="a-bare-string"),
+        pytest.param('"topics": null,', id="null"),
+        pytest.param("", id="absent"),
+    ],
+)
+async def test_consolidations_own_bad_topics_entry_is_ignored_rather_than_counted(
+    topics: str,
+) -> None:
+    """§12.31, asserted on ``ConsolidationReport`` because this producer has its own counters.
+
+    The failure this pins is the plausible implementation: a bad label reaches
+    ``MemoryBase`` construction, raises a ``ValidationError``, the parser treats it
+    as unusable output, and the whole belief is discarded and counted — which trades
+    a belief for a filing word, exactly as §4 forbids, on the producer whose
+    counters the observer's cases do not reach.
+    """
+    reply = f"""
+    {{"beliefs": [{{"kind": "semantic", "step": "observed",
+      "content": "the user works late on Thursdays",
+      "evidence": ["R1", "R2"], {topics}
+      "rationale": "both records show it"}}]}}
+    """
+    store = await _seeded([_record("r1", topics=("health",)), _record("r2", topics=("health",))])
+    writes, _ = _gated(store)
+    stage, _provider = _vocabulary_stage(store, writes, reply=reply, chunk_size=50)
+
+    report = await stage.run()
+
+    assert report.proposed == 1
+    assert report.discarded_unusable == 0
+    assert report.discarded_over_limit == 0
+    assert [proposal.proposed.topics for proposal in writes.proposals] == [()]

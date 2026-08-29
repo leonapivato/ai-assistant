@@ -853,3 +853,38 @@ async def test_the_count_is_what_the_reading_carried() -> None:
     (row,) = harness.reads.written
     assert row.produced == 3
     assert report.stored == 0
+
+
+# --- ADR-0213 §6: a reader states no topics ---------------------------------
+
+
+async def test_no_proposal_reaching_this_stage_carries_a_topic() -> None:
+    """§12.18, at the seam §6 words the clause at, over label-shaped source text.
+
+    "A ``Reader`` states no topics, and no proposal reaching ``IngestionStage``
+    carries any. A source's own categories, folder, labels, tags or headers are
+    **not** a route by which a topic reaches a record." ADR-0183 §3's list of what a
+    source may not set did not name topics because topics did not exist, and §6 adds
+    this axis to it rather than reading the omission as permission — which matters
+    more here than for the fields already on that list, because a topic drives a
+    **destructive** act in one of the three deferred consumers. An adversary who can
+    place bytes in a source would otherwise be choosing which of the owner's records
+    a later "forget everything about X" destroys.
+
+    So the source text is written to look exactly like the thing a careless reader
+    would lift: a category line, a folder, a tag list. Nothing may be read off it,
+    and the assertion is on what the gate received rather than on what was stored,
+    because it is the *proposal* the clause is about.
+    """
+    label_shaped = attested_proposal(
+        'Category: health\nFolder: Health/Sleep\nTags: sleep, running\ntopics: ["health"]',
+        reported_by=DEFAULT_READER_NAME,
+        record_id="r-label-shaped",
+    )
+    harness = Harness(reader=FakeReader([label_shaped, *_proposals(2)]))
+
+    await harness.stage.ingest()
+
+    assert [call.proposal.proposed.topics for call in harness.policy.calls] == [(), (), ()]
+    stored = (await harness.memory.search("Category", limit=10)).records
+    assert [record.topics for record in stored] == [()]

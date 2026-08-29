@@ -26,7 +26,13 @@ from observer_contract import (
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.core.types import EpisodicMemory, MemoryKind, Message, Role
+from ai_assistant.core.types import (
+    EpisodicMemory,
+    MemoryKind,
+    Message,
+    ObservationOutcome,
+    Role,
+)
 from ai_assistant.learning import DEFAULT_OBSERVATION_MAX_PROPOSALS, ModelBackedObserver
 from ai_assistant.testing import FakeModelProvider, ObservationGate
 from ai_assistant.testing.observation import (
@@ -1477,3 +1483,162 @@ async def test_the_prompt_asks_for_no_particular_the_evidence_does_not_give(
     assert system.index("Add nothing the evidence does not give") < system.index(
         "a generalisation from a single episode will be discarded"
     )
+
+
+# --- ADR-0213 §4: the topics entry the envelope carries ---------------------
+# §12's tests 5-7, 12 and 14 on the observer's side. Every one names an input and
+# the outcome it fixes: a topics entry the producer cannot use is **ignored**, the
+# proposal it rode on is unaffected, and no counter moves for it.
+
+
+def _topics_of(outcome: object) -> list[tuple[str, ...]]:
+    """The topics of each proposal an outcome carries, in order."""
+    assert isinstance(outcome, ObservationOutcome)
+    return [proposal.proposed.topics for proposal in outcome.proposals]
+
+
+async def test_a_usable_topics_entry_reaches_the_proposed_record() -> None:
+    """The ordinary case, without which every refusal below passes a producer that
+    ignores the entry unconditionally."""
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], topics=["health", "sleep"])))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _topics_of(outcome) == [("health", "sleep")]
+
+
+async def test_a_topics_entry_is_stored_in_canonical_order() -> None:
+    """§1's order is the *tuple's*, and applying it changes no label (§3).
+
+    A model emits a list; the field is a set with one spelling. Sorting is therefore
+    required rather than optional, and it is not the normalisation §3 forbids —
+    nothing here case-folds, strips or aliases a label, and a non-canonical one is
+    still refused whole below.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], topics=["sleep", "health"])))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _topics_of(outcome) == [("health", "sleep")]
+
+
+@pytest.mark.parametrize(
+    "topics",
+    [
+        pytest.param(["a", "b", "c", "d", "e"], id="five-labels"),
+        pytest.param(["Health"], id="not-casefolded"),
+        pytest.param([" health"], id="a-leading-space"),
+        pytest.param(["health\tcare"], id="a-tab"),
+        pytest.param(["health\u00a0care"], id="a-no-break-space"),
+        pytest.param([""], id="empty-label"),
+        pytest.param(["x" * 65], id="past-the-length-bound"),
+        pytest.param(["health", "health"], id="a-repeated-label"),
+        pytest.param(["health", 3], id="a-non-string-member"),
+        pytest.param("health", id="a-bare-string-rather-than-a-list"),
+        pytest.param({"health": True}, id="an-object"),
+        pytest.param(None, id="null"),
+        pytest.param([], id="an-empty-list"),
+    ],
+)
+async def test_a_topics_entry_it_cannot_use_yields_no_topics_and_keeps_the_belief(
+    topics: object,
+) -> None:
+    """§12.5 and §12.6, over every shape §4 names and the two the JSON allows.
+
+    The entry is ignored — never repaired, never truncated to the bound, never
+    re-prompted for and never inferred locally — and the record itself is
+    unaffected. A rule that discarded the proposal over a bad label would trade a
+    belief for a filing word, which §4 forbids in as many words.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], topics=topics)))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _topics_of(outcome) == [()]
+    assert len(outcome.proposals) == 1
+
+
+async def test_an_absent_topics_key_yields_no_topics() -> None:
+    """The pre-field envelope, which a model may still emit (§7's empty tuple)."""
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"])))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _topics_of(outcome) == [()]
+
+
+async def test_a_bad_topics_entry_moves_no_counter_and_keeps_the_invariant() -> None:
+    """§12.6's second half: ``ObservationOutcome``'s invariant is untouched (§4).
+
+    The two counts are "exhaustive and disjoint over what the model emitted", so
+    counting a usable entry whose topics were bad would report one proposal *and*
+    one discard for one entry — a producer misreporting the model's output in the
+    one direction anything checks.
+    """
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"], topics=["Health"]),
+            _belief(evidence=["E2"], content="the user runs", topics=["running"]),
+            {"kind": "nonsense"},
+        )
+    )
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert outcome.discarded_unusable == 1
+    assert outcome.discarded_over_limit == 0
+    assert len(outcome.proposals) + outcome.discarded_unusable + outcome.discarded_over_limit == 3
+    assert _topics_of(outcome) == [(), ("running",)]
+
+
+async def test_a_provider_failure_yields_no_topics_and_no_proposal() -> None:
+    """§12.7: the pass raises rather than degrading into unlabelled beliefs.
+
+    ADR-0130 §11's third ground, answered: a provider outage produces *no topics*
+    and never a wrong one — and here no record either, because a ``ModelError`` ends
+    the pass (ADR-0077 §3) rather than writing beliefs the model never saw.
+    """
+
+    def _fail(_messages: Sequence[Message]) -> str:
+        raise ModelError("the provider is unreachable")
+
+    observer, _ = _observer(_fail)
+
+    with pytest.raises(ModelError):
+        await observer.observe(batch_of(1))
+
+
+async def test_the_prompt_asks_for_topics_and_states_the_form() -> None:
+    """The producer applies §3's form, so the prompt has to state it (§13.3).
+
+    The bound and the canonical form are both asked for, because a model that is
+    told neither emits `"Health"` and five labels and has every entry ignored — a
+    silent, total loss of the axis that no counter would report (§4).
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "at most FOUR short filing words" in system
+    assert "lower case" in system
+    assert '"topics": ["<filing word>", ...]' in system
+
+
+async def test_the_observation_prompt_carries_nothing_derived_from_a_belief() -> None:
+    """§12.12's second half, and it is what keeps ADR-0077 §3 true (§5).
+
+    No vocabulary is supplied to the ``Observer`` on this ADR's authority: a
+    vocabulary derived from the user's beliefs is the second class of Tier 1 data
+    ADR-0077 §3 refuses, arriving for exactly the reason it refuses it. A reader
+    holding only ADR-0077 sends the same payload after this decision as before, so
+    the assertion is over the whole prompt rather than over one phrase.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(2))
+
+    system, batch = _prompt_of(provider)
+    assert "already in use" not in system
+    assert "already in use" not in batch
+    assert "Filing words" not in batch
