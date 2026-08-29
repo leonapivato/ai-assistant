@@ -792,7 +792,7 @@ def test_the_two_assemblers_escape_a_span_with_the_same_transform(span: str) -> 
     record = _record("r", span)
 
     reconciler_prompt = _render(record, [record])
-    consolidation_prompt = consolidation_render([record])
+    consolidation_prompt = consolidation_render([record], ())
 
     escaped = json.dumps(span)
     assert _quoted_span(span) == escaped

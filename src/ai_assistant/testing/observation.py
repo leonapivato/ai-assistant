@@ -36,9 +36,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, final
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    MAX_TOPICS_PER_PROPOSAL,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -53,6 +54,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import EpisodicMemory, MemoryRecord
+
+
+#: The field's own annotation, borrowed so this fake checks a template against the
+#: one implementation of ADR-0213 §§1 and 3 rather than a second statement of them.
+_TOPICS: Final[TypeAdapter[tuple[str, ...]]] = TypeAdapter(
+    SemanticMemory.model_fields["topics"].rebuild_annotation()
+)
 
 
 def _uuid() -> str:
@@ -154,6 +162,17 @@ class ObservedBelief:
             template naming one is **discarded and counted**, never proposed
             (ADR-0100 §5). ``None``, the default, is the ordinary case and the
             only one that yields a proposal.
+        topics: What the belief is about, as canonical labels (ADR-0213 §4). An
+            observer *is* a producer that proposes topics (§6), so this one is
+            **honoured** rather than refused — unlike ``about_person``. A template
+            the real producer could only ignore is refused at construction: more
+            than :data:`~ai_assistant.core.types.MAX_TOPICS_PER_PROPOSAL` labels, a
+            label §3's canonical form refuses, or a tuple that is not strictly
+            increasing. Refused rather than silently emptied because "the entry was
+            ignored" is not an observable outcome — §4 rules that no counter moves
+            for it — so a fake that ignored a bad template would hide the mistake in
+            the one place nothing can see it. The default is the empty tuple, which
+            is what every producer but two writes (§6).
     """
 
     content: str
@@ -165,6 +184,7 @@ class ObservedBelief:
     rationale: str = "fake observer: the batch supports this"
     steps: tuple[str, ...] = field(default=())
     about_person: str | None = None
+    topics: tuple[str, ...] = field(default=())
 
     def __post_init__(self) -> None:
         """Refuse a template the fake could only honour by breaking its contract.
@@ -197,6 +217,16 @@ class ObservedBelief:
         if self.start < 0:
             msg = f"start must not be negative, got {self.start}"
             raise ValueError(msg)
+        if len(self.topics) > MAX_TOPICS_PER_PROPOSAL:
+            msg = (
+                f"a producer proposes at most {MAX_TOPICS_PER_PROPOSAL} topics "
+                f"(ADR-0213 §4), got {len(self.topics)}"
+            )
+            raise ValueError(msg)
+        # Through the field's own annotation, so this fake and `core` cannot drift
+        # about what a canonical label and a canonical order are — the two clauses
+        # of ADR-0213 §§1 and 3, checked by the one implementation of them.
+        _TOPICS.validate_python(self.topics)
 
 
 @final
@@ -541,6 +571,7 @@ def _record(template: ObservedBelief, provenance: Provenance, record_id: str) ->
                 content=template.content,
                 provenance=provenance,
                 preference=template.content,
+                topics=template.topics,
             )
         case MemoryKind.PROCEDURAL:
             return ProceduralMemory(
@@ -549,6 +580,7 @@ def _record(template: ObservedBelief, provenance: Provenance, record_id: str) ->
                 provenance=provenance,
                 situation=template.content,
                 steps=template.steps,
+                topics=template.topics,
             )
         case _:
             return SemanticMemory(
@@ -556,6 +588,7 @@ def _record(template: ObservedBelief, provenance: Provenance, record_id: str) ->
                 content=template.content,
                 provenance=provenance,
                 fact=template.content,
+                topics=template.topics,
             )
 
 

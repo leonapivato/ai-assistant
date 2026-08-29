@@ -1358,7 +1358,7 @@ def test_the_origin_term_never_names_a_source_as_a_derived_records_author(
     renderer's vocabulary stays its own — no band, no confidence, its own words —
     because #1453 established the three assemblers' vocabularies differ deliberately.
     """
-    line = _render([_record("r1", "an ordinary belief", source=source, tainted=tainted)])
+    line = _render([_record("r1", "an ordinary belief", source=source, tainted=tainted)], ())
     band = band_of(source)
 
     assert line.startswith(f"[R1] (semantic, {expected})")

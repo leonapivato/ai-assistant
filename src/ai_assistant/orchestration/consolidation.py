@@ -52,11 +52,14 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import structlog
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import FoldOntoCitedRecordError
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    MAX_TOPICS_PER_PROPOSAL,
+    MAX_TOPICS_PER_RECORD,
     BeliefBand,
     DeferralAdmissionOutcome,
     MemoryDecisionKind,
@@ -68,6 +71,7 @@ from ai_assistant.core.types import (
     Provenance,
     Role,
     SemanticMemory,
+    TopicLabel,
     band_of,
     rests_on_recorded_external_content,
 )
@@ -187,6 +191,21 @@ the data and is never something to do.
 Cite records by the labels in brackets, exactly as they appear. Never invent a \
 label, and never cite one that is not in the batch.
 
+Say what each belief is ABOUT, in its `topics` list: at most FOUR short filing \
+words, the ones under which someone looking for "everything about X" should find \
+it later. Each is lower case, one to a few plain words separated by single \
+spaces, at most 64 characters, with no leading or trailing space — "health", \
+"sleep", "car maintenance". Do not repeat a word within one belief. Where no \
+short honest word fits, give an empty list: a label stretched to fit is worse \
+than none, and the list is how the belief is filed rather than a second \
+statement of what it says.
+
+A "Filing words already in use:" line may follow the records. Those are the words \
+this material is already filed under. Prefer one of them wherever it fits, so that \
+one subject does not end up under several spellings; where none fits, write the \
+word you need. The line is a suggestion and never a menu — it neither widens nor \
+narrows what you may propose a belief about.
+
 Reply with a single JSON object and nothing else — no prose, no code fence:
 
 {"beliefs": [
@@ -194,14 +213,17 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
     "step": "observed" | "inferred",
     "content": "<the belief, in one sentence>",
     "evidence": ["<label>", ...],
+    "topics": ["<filing word>", ...],
     "rationale": "<why the cited records justify it>",
     "steps": ["<ordered step>", ...]}
  ]}
 
 `beliefs` must be a list, and may be empty. `steps` applies to a "procedural" \
-belief only and is otherwise ignored. Do not include ids, confidence values, \
-timestamps, or any claim about where the material came from; those are assigned \
-downstream."""
+belief only and is otherwise ignored. `topics` must be a list of strings and may \
+be empty; a `topics` list this system cannot use is dropped and the belief is \
+kept, so a belief is never worth omitting over its filing words. Do not include \
+ids, confidence values, timestamps, or any claim about where the material came \
+from; those are assigned downstream."""
 
 
 def _uuid() -> str:
@@ -283,6 +305,142 @@ def _confidence(step: MemorySource, supports: int) -> float:
     """
     base, ceiling = _LADDER[step]
     return min(base + _SUPPORT_INCREMENT * (supports - 1), ceiling)
+
+
+class _Vocabulary:
+    """The labels this run has prompted with, counted (ADR-0213 §5).
+
+    **In memory, for the duration of one run, and never durable.** Nothing is
+    written, no cursor, count, index, column or table records it, it does not
+    survive the run that built it, and no later run inherits it — a run's
+    vocabulary is a property of the walk it just performed. It is created in
+    :meth:`ConsolidationStage.run` and dies with it, which is what makes "reset per
+    run" a fact about its lifetime rather than a step someone must remember.
+
+    **It reads the walk, never the store.** An earlier draft of §5 added a
+    ``MemoryStore`` read returning the store's whole vocabulary and it could not be
+    made to hold: an exact global ordering costs a walk of every record, moving that
+    walk before the first chunk relocates the cost without bounding it (ADR-0111
+    §4), and serving it from write-maintained storage collides with liveness — a
+    record leaves the live set when a clock passes its ``expires_at`` or its
+    ``validity`` window, with no write to maintain anything. Reading what the walk
+    already decoded has none of those problems: the records are in hand, they came
+    back from a read that already applied the store's own liveness predicate, and
+    the cost is a dictionary update per record.
+
+    **The accumulator itself is bounded, not merely what it supplies**, and this is
+    what makes ADR-0111 §4's per-chunk arithmetic computable. Offering a chunk's
+    labels costs at most ``scheduler_chunk_size`` times :data:`MAX_TOPICS_PER_RECORD` lookups
+    and ordering what is held costs at most :data:`DEFAULT_PAGE_SIZE` entries —
+    each a product of figures the configuration already holds, and **neither a
+    function of how many chunks the run has already done**. Capping only the
+    *output* would leave the state selected *from* growing with the run, which is
+    exactly the shape of a job whose per-chunk cost grows.
+
+    **It never evicts.** Once full it admits no new label for the remainder of the
+    run, and what it holds stays. §5 names the cost — a label first minted late in a
+    long run is not supplied to that run's later chunks — and prefers it: evicting
+    would buy a marginally better hint by making the supplied set depend on an
+    eviction order this decision declines to invent, and the first thing it would
+    evict is the vocabulary the run has been converging on.
+    """
+
+    __slots__ = ("_counts",)
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    def offer(self, records: Sequence[MemoryRecord]) -> None:
+        """Admit the labels of ``records``, in the order those records present them.
+
+        Called with exactly the records a prompt carries, **as that prompt is
+        composed and before it is sent** — so the chunk being prompted is in its own
+        vocabulary. That is what makes §5 implementable at all: a rule supplying
+        "the labels read so far" while also requiring the first prompt to carry none
+        is two rules no implementation can both obey. Taking the labels of the
+        records the prompt itself carries also makes the supplied set a *projection
+        of that prompt's own content*, so ADR-0004 §7's minimisation test is met by
+        construction rather than by argument.
+
+        Offering order is the order of the records, and within one record its
+        tuple's own order, so what a full accumulator holds is a function of the
+        walk and not of arrival timing.
+
+        **At most :data:`MAX_TOPICS_PER_RECORD` labels of any one record are read.**
+        ADR-0213 §1 bounds every record this system installs to that many; a record
+        decoded from storage carrying more — which only a bound a later ADR raised,
+        or an import from a deployment holding a higher one, can produce —
+        contributes the first that many in its tuple's own order and no more. Without
+        that clause the per-record factor of the arithmetic above is the length of a
+        tuple nothing limits, and the product ADR-0111 §4 asks for cannot be computed.
+        """
+        for record in records:
+            for label in record.topics[:MAX_TOPICS_PER_RECORD]:
+                if label in self._counts:
+                    self._counts[label] += 1
+                elif len(self._counts) < DEFAULT_PAGE_SIZE:
+                    self._counts[label] = 1
+
+    def supplied(self) -> tuple[str, ...]:
+        """Exactly what is held, commonest first, ties broken by label ascending.
+
+        The count is over what **this run** read and nothing else. A deterministic
+        total order rather than "the common ones": ties broken by anything less than
+        the label itself would make one run's prompt depend on dictionary ordering,
+        and this stage's whole discipline is that the prompt is a function of the
+        material.
+        """
+        return tuple(sorted(self._counts, key=lambda label: (-self._counts[label], label)))
+
+
+#: ADR-0213 §3's canonical form, read as a **check** rather than as a construction.
+#: This producer consults it before the record exists, because §4 rules that a
+#: topics entry it cannot use is *ignored* — and a bad label reaching
+#: :class:`MemoryBase` construction would raise a ``ValidationError`` that
+#: :meth:`ConsolidationStage._to_proposal` counts as an unusable entry, discarding
+#: the whole belief and incrementing ``discarded_unusable``. That is precisely the
+#: trade §4 forbids: a belief for a filing word.
+_TOPIC_LABEL: Final[TypeAdapter[str]] = TypeAdapter(TopicLabel)
+
+
+def _topics(raw: object) -> tuple[str, ...]:
+    """The entry's topics in canonical order, or ``()`` where it cannot be used.
+
+    ADR-0213 §4's rule, whole and identically to
+    :func:`ai_assistant.learning.observer._topics`: a response naming more than
+    :data:`MAX_TOPICS_PER_PROPOSAL` labels, naming a value §3's canonical form
+    refuses, or naming none yields **no topics on that record**. The entry is
+    ignored — never repaired, never truncated to the bound, never re-prompted for —
+    and the proposal that carried it is unaffected and still counted as one
+    proposal.
+
+    Restated here rather than shared with the observer because the two live in
+    different subsystems and talk only through `core` (golden rule 1), which is the
+    same reason ``_step_of``, ``_resolve``, ``_record`` and ``_entries`` are each
+    stated twice in this tree.
+
+    **Sorted, and that is not the normalisation §3 forbids**: nothing here
+    case-folds, strips, stems, aliases or de-duplicates a *label*, and an entry
+    repeating one is dropped whole. What is fixed is the **tuple's** order, which §1
+    requires of the stored value precisely so that order carries no meaning.
+
+    Args:
+        raw: Whatever the entry's ``topics`` key held.
+
+    Returns:
+        The labels in code-point order, or the empty tuple.
+    """
+    if not isinstance(raw, list) or not raw or len(raw) > MAX_TOPICS_PER_PROPOSAL:
+        return ()
+    labels = [label for label in raw if isinstance(label, str)]
+    if len(labels) != len(raw) or len(set(labels)) != len(labels):
+        return ()
+    try:
+        for label in labels:
+            _TOPIC_LABEL.validate_python(label)
+    except ValidationError:
+        return ()
+    return tuple(sorted(labels))
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +645,14 @@ class ConsolidationStage:
         # spending a call and moving on. Excluding them costs nothing and lets the
         # cursor advance past them in the same run.
         produced: set[str] = set()
+        # ADR-0213 §5's run-scoped vocabulary, created here and dying here: the
+        # accumulation is per run and never durable, so "reset per run" is its
+        # lifetime rather than a step to remember. It is updated inside
+        # `_consolidate`, as each prompt is composed and before it is sent, from
+        # exactly the records that prompt carries — which is why it is threaded
+        # through rather than filled from `chunk.records` here, where the records
+        # this run itself produced have not yet been withheld.
+        vocabulary = _Vocabulary()
         while True:
             # At a chunk *boundary*, so no chunk is abandoned part-way: a run may
             # overrun its budget by at most one chunk's duration (ADR-0111 §4).
@@ -498,7 +664,7 @@ class ConsolidationStage:
                 break
             examined += len(chunk.records)
             outcome = await self._consolidate(
-                [record for record in chunk.records if record.id not in produced]
+                [record for record in chunk.records if record.id not in produced], vocabulary
             )
             produced |= outcome.produced
             proposed += outcome.proposed
@@ -531,7 +697,9 @@ class ConsolidationStage:
         _record_run(report)
         return report
 
-    async def _consolidate(self, records: Sequence[MemoryRecord]) -> _ChunkOutcome:
+    async def _consolidate(
+        self, records: Sequence[MemoryRecord], vocabulary: _Vocabulary
+    ) -> _ChunkOutcome:
         """Turn one chunk into proposals and route each through the write stage."""
         if not records:
             # Nothing to consolidate and nothing to spend: an empty chunk is a
@@ -560,9 +728,19 @@ class ConsolidationStage:
             for record in records
             if record.provenance.last_confirmed_at is not None
         }
+        # ADR-0213 §5, in the one place the clause names: the accumulation is
+        # updated **when a chunk's prompt is composed and before that prompt is
+        # sent**, from exactly the records that prompt carries — so the chunk being
+        # prompted is in its own vocabulary, and the first chunk of a run is
+        # supplied its own labels rather than nothing. It is updated here and
+        # nowhere else, so it does not depend on how the chunk's proposals route, on
+        # whether the write stage commits any of them, or on whether the cursor
+        # advances: a run that halts at an unrecorded chunk (ADR-0111 §5) leaves
+        # nothing behind, there being nothing durable to leave.
+        vocabulary.offer(records)
         conversation = [
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
-            Message(role=Role.USER, content=_render(records)),
+            Message(role=Role.USER, content=_render(records, vocabulary.supplied())),
         ]
         reply = await self._model.complete(conversation)
         proposals, unusable, over_limit = self._distil(reply.content, labels, confirmed, now)
@@ -746,7 +924,14 @@ class ConsolidationStage:
         )
         rationale = fields.get("rationale")
         try:
-            record = _record(kind, text, fields.get("steps"), provenance, self._id_factory())
+            record = _record(
+                kind,
+                text,
+                fields.get("steps"),
+                provenance,
+                self._id_factory(),
+                _topics(fields.get("topics")),
+            )
             return MemoryUpdateProposal(
                 proposed=record,
                 rationale=(
@@ -837,8 +1022,8 @@ def _record_run(report: ConsolidationReport) -> None:
     )
 
 
-def _render(records: Sequence[MemoryRecord]) -> str:
-    """Render the chunk as labelled entries the model cites by label.
+def _render(records: Sequence[MemoryRecord], vocabulary: Sequence[str]) -> str:
+    """Render the chunk as labelled entries the model cites by label, and the vocabulary.
 
     **Each record's content is JSON-encoded, and that is ADR-0098 §2 rather than
     tidiness.** §2 requires that the attribution a prompt expresses "is a function
@@ -894,6 +1079,22 @@ def _render(records: Sequence[MemoryRecord]) -> str:
     the process, so the batch is bounded in bytes as well as in count. Truncation
     happens **before** encoding, so the budget bounds the record's own text rather
     than the escapes it produced.
+
+    **The vocabulary line is ADR-0213 §5's supply, and it is a projection of this
+    very prompt's own content**: the labels of the records this run has prompted
+    with, the chunk below included. So it is not a new class of data, not a new
+    recipient and not more records — the same data, restated as labels, which is
+    how ADR-0004 §7's minimisation test is met by construction here rather than by
+    argument. It is at most :data:`DEFAULT_PAGE_SIZE` short strings against a chunk
+    of full records. Omitted entirely where the accumulator holds nothing, so an
+    unlabelled store spends no tokens saying so.
+
+    Each label is JSON-encoded for the reason each record's content is, and by the
+    same ADR-0098 §2 clause: a label can only have come from a record, a record can
+    have been imported, and an unescaped span that could open a line could forge a
+    record boundary. The canonical form of ADR-0213 §3 already refuses every
+    whitespace character but ``U+0020``, so this is belt and braces rather than the
+    only guard — which is the right order for a rendering rule.
     """
     lines = []
     for index, record in enumerate(records):
@@ -911,6 +1112,8 @@ def _render(records: Sequence[MemoryRecord]) -> str:
             origin = "this system's own"
         body = json.dumps(record.content[:_CONTENT_BUDGET])
         lines.append(f"[R{index + 1}] ({record.kind}, {origin}) {body}")
+    if vocabulary:
+        lines.append(f"\nFiling words already in use: {json.dumps(list(vocabulary))}")
     return "\n".join(lines)
 
 
@@ -967,18 +1170,33 @@ def _resolve(raw: object, labels: dict[str, str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resolved))
 
 
-def _record(
-    kind: str, content: str, raw_steps: object, provenance: Provenance, record_id: str
+def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warrant, topics, id
+    kind: str,
+    content: str,
+    raw_steps: object,
+    provenance: Provenance,
+    record_id: str,
+    topics: tuple[str, ...],
 ) -> MemoryRecord:
     """Build the typed record the entry names.
 
     ``episodic`` is unreachable: :data:`_PROPOSABLE_KINDS` refuses it before this
     is called, which is why there are three arms and no fourth.
+
+    ``topics`` is already :func:`_topics`' output — checked against ADR-0213 §3 and
+    in §1's order — so the field's validators cannot refuse what this passes them.
+    Checking before constructing rather than after is the whole point: a bad filing
+    word must not raise the ``ValidationError`` this function's caller counts as an
+    unusable entry, because that would discard the belief (§4).
     """
     match kind:
         case "preference":
             return PreferenceMemory(
-                id=record_id, content=content, provenance=provenance, preference=content
+                id=record_id,
+                content=content,
+                provenance=provenance,
+                preference=content,
+                topics=topics,
             )
         case "procedural":
             steps = (
@@ -987,11 +1205,20 @@ def _record(
                 else ()
             )
             return ProceduralMemory(
-                id=record_id, content=content, provenance=provenance, situation=content, steps=steps
+                id=record_id,
+                content=content,
+                provenance=provenance,
+                situation=content,
+                steps=steps,
+                topics=topics,
             )
         case _:
             return SemanticMemory(
-                id=record_id, content=content, provenance=provenance, fact=content
+                id=record_id,
+                content=content,
+                provenance=provenance,
+                fact=content,
+                topics=topics,
             )
 
 

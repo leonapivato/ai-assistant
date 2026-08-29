@@ -45,11 +45,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
+    MAX_TOPICS_PER_PROPOSAL,
     MemorySource,
     MemoryUpdateProposal,
     Message,
@@ -59,6 +60,7 @@ from ai_assistant.core.types import (
     Provenance,
     Role,
     SemanticMemory,
+    TopicLabel,
 )
 
 if TYPE_CHECKING:
@@ -321,7 +323,17 @@ Each belief takes one of two epistemic steps:
 different episodes; a generalisation from a single episode will be discarded.
 
 Cite episodes by the labels in brackets, exactly as they appear. Never invent a \
-label, and never cite one that is not in the batch."""
+label, and never cite one that is not in the batch.
+
+Say what each belief is ABOUT, in its `topics` list: at most FOUR short filing \
+words, the ones under which someone looking for "everything about X" should find \
+it later. Each is lower case, one to a few plain words separated by single \
+spaces, at most 64 characters, with no leading or trailing space — "health", \
+"sleep", "car maintenance". Use the SAME word for the same subject across every \
+belief in this reply, and do not repeat a word within one belief. Where no short \
+honest word fits, give an empty list: a label stretched to fit is worse than \
+none, and the list is how the belief is filed rather than a second statement of \
+what it says."""
 
 #: What a producer holding the zone says about time (ADR-0156 §2, §3). Four things,
 #: in the order they bite: what the rendered instant *is*, when a belief states a
@@ -409,14 +421,18 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
     "step": "observed" | "inferred",
     "content": "<the belief, in one sentence>",
     "evidence": ["<label>", ...],
+    "topics": ["<filing word>", ...],
     "rationale": "<why the cited episodes justify it>",
     "steps": ["<ordered step>", ...]}
  ]}
 
 `beliefs` must be a list, and may be empty. `steps` applies to a "procedural" \
-belief only and is otherwise ignored. Do not include ids, confidence values, or \
-any timestamp field of your own; those are assigned downstream. A date you are \
-entitled to state belongs in the belief's `content` sentence and nowhere else."""
+belief only and is otherwise ignored. `topics` must be a list of strings and may \
+be empty; a `topics` list this system cannot use is dropped and the belief is \
+kept, so a belief is never worth omitting over its filing words. Do not include \
+ids, confidence values, or any timestamp field of your own; those are assigned \
+downstream. A date you are entitled to state belongs in the belief's `content` \
+sentence and nowhere else."""
 
 
 def _uuid() -> str:
@@ -677,7 +693,12 @@ class ModelBackedObserver:
         )
         try:
             record = _record(
-                str(kind), text.strip(), entry.get("steps"), provenance, self._id_factory()
+                str(kind),
+                text.strip(),
+                entry.get("steps"),
+                provenance,
+                self._id_factory(),
+                _topics(entry.get("topics")),
             )
         except ValidationError:
             # A `core` invariant the entry's own text broke. Counted like any
@@ -891,6 +912,60 @@ def _resolve(raw: object, labels: dict[str, str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(resolved))
 
 
+#: ADR-0213 §3's canonical form, read as a **check** rather than as a
+#: construction. The producer consults it before the record exists, because §4
+#: rules that a topics entry it cannot use is *ignored* — and a bad label reaching
+#: :class:`MemoryBase` construction would raise a ``ValidationError`` that
+#: :meth:`ModelBackedObserver._to_proposal` counts as an unusable entry, trading a
+#: belief for a filing word. Checking here is what keeps the two apart.
+_TOPIC_LABEL: Final[TypeAdapter[str]] = TypeAdapter(TopicLabel)
+
+
+def _topics(raw: object) -> tuple[str, ...]:
+    """The entry's topics in canonical order, or ``()`` where it cannot be used.
+
+    ADR-0213 §4's rule, whole: a response naming more than
+    :data:`MAX_TOPICS_PER_PROPOSAL` labels, naming a value §3's canonical form
+    refuses, or naming none yields **no topics on that record**. The entry is
+    **ignored** — never repaired, never truncated to the bound, never re-prompted
+    for and never inferred locally — and the proposal that carried it is unaffected.
+
+    **Ignored rather than counted**, which is where this takes half of ADR-0077 §4
+    and deliberately leaves the other. The *not repaired, not re-prompted* half
+    transfers whole; the *counted* half must not, because
+    :class:`~ai_assistant.core.types.ObservationOutcome`'s two counts are exhaustive
+    and disjoint over what the model emitted, so counting a usable entry whose
+    topics were bad would report one proposal and one discard for one entry.
+
+    **Sorted, and that is not the normalisation §3 forbids.** Nothing here
+    case-folds, strips, stems, aliases or de-duplicates a *label*: a value that is
+    not already canonical is refused and the whole entry is dropped, including one
+    that merely repeats a label. What is fixed is the **tuple's** order, which §1
+    requires of the stored value precisely so that order carries no meaning — and
+    §8 keeps admission order and storage order as two different things for the same
+    reason. A model emits a list; putting that list in the order the field is stored
+    in changes no label.
+
+    Args:
+        raw: Whatever the entry's ``topics`` key held — absent, null, not a list, a
+            list of the wrong things, or a usable list of labels.
+
+    Returns:
+        The labels in code-point order, or the empty tuple.
+    """
+    if not isinstance(raw, list) or not raw or len(raw) > MAX_TOPICS_PER_PROPOSAL:
+        return ()
+    labels = [label for label in raw if isinstance(label, str)]
+    if len(labels) != len(raw) or len(set(labels)) != len(labels):
+        return ()
+    try:
+        for label in labels:
+            _TOPIC_LABEL.validate_python(label)
+    except ValidationError:
+        return ()
+    return tuple(sorted(labels))
+
+
 def _latest_occurred(cited: Sequence[str], occurred: Mapping[str, datetime]) -> datetime | None:
     """A ``DERIVED`` belief's confirming instant (ADR-0103 §9, ADR-0109 §4).
 
@@ -908,22 +983,32 @@ def _latest_occurred(cited: Sequence[str], occurred: Mapping[str, datetime]) -> 
     return max((occurred[episode_id] for episode_id in cited), default=None)
 
 
-def _record(
+def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warrant, topics, id
     kind: str,
     content: str,
     raw_steps: object,
     provenance: Provenance,
     record_id: str,
+    topics: tuple[str, ...],
 ) -> MemoryRecord:
     """Build the typed record the entry names.
 
     ``episodic`` is unreachable: :data:`_PROPOSABLE_KINDS` refuses it before this
     is called, which is why there are three arms and no fourth.
+
+    ``topics`` is already :func:`_topics`' output — checked against ADR-0213 §3 and
+    in §1's order — so the field's validators cannot refuse what this passes them.
+    That is the point of checking before constructing rather than after: §4 forbids
+    a bad filing word discarding the belief that carried it.
     """
     match kind:
         case "preference":
             return PreferenceMemory(
-                id=record_id, content=content, provenance=provenance, preference=content
+                id=record_id,
+                content=content,
+                provenance=provenance,
+                preference=content,
+                topics=topics,
             )
         case "procedural":
             steps = (
@@ -937,10 +1022,15 @@ def _record(
                 provenance=provenance,
                 situation=content,
                 steps=steps,
+                topics=topics,
             )
         case _:
             return SemanticMemory(
-                id=record_id, content=content, provenance=provenance, fact=content
+                id=record_id,
+                content=content,
+                provenance=provenance,
+                fact=content,
+                topics=topics,
             )
 
 
