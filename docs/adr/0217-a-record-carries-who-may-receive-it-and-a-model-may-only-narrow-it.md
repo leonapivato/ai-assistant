@@ -408,61 +408,65 @@ only subtract.
 
 > **Normative.** **ADR-0204 §5's ratchet binds over this field, generalised from a
 > disjunction to a meet.** Where two records are folded the survivor's reach is the
-> **narrower** of the two sides', save in the one case the clause below carves out; a
-> producer deriving a record from records of this store writes the **narrowest** reach
-> over every record it was supplied, never over the subset it cited, selected, ranked or
-> judged relevant; and no implementation writes a wider reach over a narrower one on any
-> of those paths. On the two-member
-> reach of §1 the meet **is** ADR-0204 §5's disjunction, member for member, so no
-> producer's arithmetic changes.
+> **narrower** of the two sides'; a producer deriving a record from records of this
+> store writes the **narrowest** reach over every record it was supplied, never over the
+> subset it cited, selected, ranked or judged relevant; and no implementation writes a
+> wider reach over a narrower one on any of those paths. On the two-member reach of §1
+> the meet **is** ADR-0204 §5's disjunction, member for member, so no producer's
+> arithmetic changes. What the clauses below add is not an exception to that meet: they
+> say which placements are **sides of it**, and which instant a tie carries.
 
-> **Normative.** **A propagation resolves the setter first and the reach second, and
-> that order is what keeps §3's two finality rules true of a fold as well as in place.**
-> Where two placements meet — the fold's survivor, or a record a producer derives from
-> records of this store — the survivor is decided in one pass over the sides:
->
-> 1. **A side whose setter is `DERIVED` governs**, and the survivor carries that side's
->    reach, setter and instant. Where more than one does, the **narrower** reach stands.
->    Nothing an act or a proposal supplies moves it, which is §3's closing prohibition
->    holding across a fold exactly as it holds in place.
-> 2. **Otherwise a side whose setter is `OWNER_ACT` governs**, on the same terms, and
->    where two acts meet the **narrower** stands. This is the one case in which a
->    survivor may be **wider** than a side, and it is the same finality §3 states in
->    place, read across the fold: a model's proposal does not narrow by duplication what
->    the owner's act widened, and an owner is not made to repeat an act because a
->    duplicate arrived.
-> 3. **Otherwise the meet is arithmetic**: the survivor's reach is the narrower of the
->    sides', its setter and instant are those of the side that supplied that reach —
->    `PROPOSED` where a proposal supplied it — and both are absent where neither side
->    narrowed.
+> **Normative.** **Eligibility is decided before the meet, and it is §4's own rule
+> applied at the one place a proposal could otherwise reach a record that carries an act
+> or a derivation.** §4 already says a proposal "never overwrites a setter of
+> `OWNER_ACT` or `DERIVED`, and never runs on a record already in the store". A fold is
+> where a proposal made on a *fresh* record — which is exactly where §4 permits one —
+> would otherwise land on a stored placement that carries one of those setters. So: **a
+> placement whose setter is `PROPOSED` is not a side of a meet against a placement whose
+> setter is `OWNER_ACT` or `DERIVED`.** It is discarded before the arithmetic runs, not
+> weighed in it, and the meet is then taken over the eligible sides alone. Nothing else
+> is ever discarded: an act and a derivation are both sides of every meet they are in.
 
-> **Normative.** **Step 2 is the whole of the exception, and it is bounded in both
-> directions.** `OWNER_ACT` governs only where no side carries `DERIVED`; a proposal
-> never governs over an act, at any pair of reaches; and no setter but `OWNER_ACT` ever
-> produces a survivor wider than a side. The case the reviewer of a fold must be able to
-> check is the one this clause exists for: a record the owner has **unguarded** — reach
-> `ANYONE`, setter `OWNER_ACT` — folded with a freshly proposed reach `OWNER` setter
-> `PROPOSED` survives as reach `ANYONE`, setter `OWNER_ACT`. Under step 3's arithmetic
-> alone it would survive as `OWNER`/`PROPOSED`, and a model would have undone the
-> owner's act without ever writing to the owner's record. §4's own guard does not reach
-> that path — the proposal was made on a fresh record, which is where §4 permits it —
-> so the rule is stated here, at the merge, where the two placements actually meet.
+> **Normative.** **The meet over the eligible sides is the meet as stated, with no
+> exception in it.** The survivor's reach is the **narrower** of the eligible sides'.
+> Its setter is the strongest, in this section's total order, among the eligible sides
+> that carry that reach; a side whose reach is wider supplies no setter, having supplied
+> none of the narrowing. So a `DERIVED` narrowing survives a fold as `DERIVED`; an
+> `OWNER_ACT` narrowing against a `PROPOSED` one at the same reach survives as
+> `OWNER_ACT`; and a narrowing that **only** a `PROPOSED` placement supplied survives as
+> `PROPOSED`, so the owner still lifts in one act exactly what a model proposed.
 
-> **Normative.** The instant follows its setter: the survivor's `set_at` is that of the
-> side the steps above selected, never the instant of the fold, because the stamp names
-> when the placement was set and not when a duplicate was merged — **including where
-> that side has none**, which is §9's decoded legacy placement and the one case where
-> the winning instant is unknown. A propagation carries the unknown forward rather than
-> closing it: it makes no new narrowing, so it has no instant of its own to record, and
-> §1 states the diagnostic over the origin for exactly this reason.
+> **Normative.** **What eligibility buys is the case a reviewer of a fold must be able
+> to check.** A record the owner has **unguarded** — reach `ANYONE`, setter `OWNER_ACT`
+> — folded with a freshly proposed reach `OWNER` setter `PROPOSED` survives as reach
+> `ANYONE`, setter `OWNER_ACT`: the proposed side is not eligible, so there is one side
+> and the meet is trivial. Weighed as a side it would have carried the survivor to
+> `OWNER`/`PROPOSED`, and a model would have undone an owner's act without ever writing
+> to the owner's record — §3's finality defeated by duplication. The derivation is
+> **not** filtered the same way, because §3 states the opposite of it: the same stored
+> side folded with an incoming reach `OWNER` setter `DERIVED` survives as reach `OWNER`,
+> setter `DERIVED`, since an act does not lift a derivation.
 
-> **Normative.** **ADR-0204 §5's ratchet is not breached by step 2, and could not have
-> stated it.** That ratchet governs a field with exactly one setter — the derivation —
-> so a fold of two of its values has no owner's act to lose and no case in which its
-> arithmetic comes out wrong. Every sentence of §5 stays true of the thing it ruled on,
-> which is why §13 records the supersession as one of the instrument and not of the
-> rule. This field has three setters, and the case §5 never had is the case this clause
-> decides.
+> **Normative.** **The instant follows the setter, and ties are broken on it
+> deterministically.** The survivor's `set_at` is that of the eligible side the meet
+> selected, never the instant of the fold, because the stamp names when the placement
+> was set and not when a duplicate was merged. Where two eligible sides carry the same
+> reach **and** the same setter, the survivor carries the **earlier** instant, and where
+> either of them carries **none** the survivor carries none. That rule is total,
+> commutative and associative — an absent instant absorbs, a known one takes the
+> minimum — so a fold's result does not depend on which side an implementation calls the
+> stored one, nor on the order in which three duplicates are merged. An absent instant
+> is §9's decoded legacy placement: it is **unknown**, so a tie against it is resolved
+> by keeping it unknown rather than by adopting a known instant that would assert a
+> first narrowing this system cannot vouch for (§1).
+
+> **Normative.** **ADR-0204 §5's ratchet is untouched, and the reason is that
+> eligibility is not arithmetic.** §5 governs a field with exactly one setter — the
+> derivation — so every value of it is eligible against every other and the meet is the
+> whole of the rule. Every sentence of §5 stays true of the thing it ruled on, which is
+> why §13 records the supersession as one of the instrument and not of the rule. This
+> field has three setters, and the question §5 never had to answer is not *what the meet
+> computes* but *which placements it is computed over*.
 
 > **Normative.** **No propagation writes `DERIVED` over a reach no derivation
 > supplied**, which is why step 1 is read of a side that *carries* `DERIVED` and never
@@ -1303,13 +1307,15 @@ ADR-0201 closed.
 > yields `OWNER_ACT`; a stored `DERIVED` folded with an incoming `OWNER_ACT` at the same
 > reach yields `DERIVED`; and the survivor's `set_at` is the winning side's, not the
 > instant of the fold. **Three arms take differing reaches**, which the same-reach arms
-> above cannot reach and which step 2 exists for: a stored reach `ANYONE` setter
+> above cannot reach and which §3's eligibility clause exists for: a stored reach
+> `ANYONE` setter
 > `OWNER_ACT` — a record the owner has unguarded — folded with an incoming reach
 > `OWNER` setter `PROPOSED` yields reach `ANYONE` setter `OWNER_ACT`, and the survivor
 > is still supplied to a channel of unbounded audience, so a model cannot undo an
 > unguard by duplication; the same stored side folded with an incoming reach `OWNER`
-> setter `DERIVED` yields reach `OWNER` setter `DERIVED`, because step 1 governs and an
-> act does not lift a derivation; and a stored reach `OWNER` setter `OWNER_ACT` folded
+> setter `DERIVED` yields reach `OWNER` setter `DERIVED`, because a derivation is
+> eligible against an act and §3 says an act does not lift one; and a stored reach
+> `OWNER` setter `OWNER_ACT` folded
 > with a default-placed record yields reach `OWNER` setter `OWNER_ACT`, so a duplicate
 > does not dilute a guard either. One further arm takes the legacy winner explicitly:
 > a record
@@ -1322,6 +1328,16 @@ ADR-0201 closed.
 > beside the stamp in the first two arms because the stamp is only observable to the
 > owner through what they may then do, and an implementation that returned the right
 > reach with the wrong setter would pass every other arm in this section.
+
+> **Normative.** The lane pins **the instant tie-break**, which every arm above leaves
+> open because none of them puts two *like* placements together: folding two eligible
+> sides of the same reach and the same setter carrying distinct instants yields the
+> **earlier** instant — taken once for `DERIVED`, once for `OWNER_ACT` and once for
+> `PROPOSED` — and folding two such sides where one carries **no** instant yields
+> **none**. Both arms are taken with the sides supplied in **either order**, and one
+> over three duplicates merged in more than one order, because what makes the rule
+> usable is that the answer does not depend on which side an implementation calls the
+> stored one.
 
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
@@ -1490,6 +1506,17 @@ ADR-0201 closed.
 > `Observer.observe`'s signature is the seam, and widening it is a Protocol change
 > golden rule 5 puts behind its own ADR. Until then a proposal is made without one, and
 > the corrective loop closes through the owner's per-record act.
+
+> **Normative.** **An inspectable rationale or confidence beside a `PROPOSED`
+> placement** — #1828. `VISION.md` asks that an inference carry evidence, confidence,
+> scope and a correction path; §1 gives this one a setter and an instant, which is the
+> correction path and the actor, and no more. The gap is recorded rather than closed
+> because closing it is a **shape** change to `Placement` — a `core` type — which §9
+> forbids this ADR and its implementing lane and which golden rule 5 puts behind an ADR
+> of its own; a trace row under ADR-0120's seam is the cheaper shape and is that ADR's
+> to choose. Fires with a decision that gives a proposal a surface to be explained on.
+> Until then the owner reads the setter, the instant and the belief itself, and lifts
+> the placement in one act (§7).
 
 > **Normative.** **The shape of the store's conditional write** (§7). Deferred as a
 > *design*, not as an obligation: #248 owns it — "a `MemoryRecord` concurrency token
