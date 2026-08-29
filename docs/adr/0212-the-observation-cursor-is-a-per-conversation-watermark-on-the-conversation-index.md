@@ -111,8 +111,9 @@ That is §7 of this ADR's whole subject.
 ### What ADR-0111 already decides, and is not re-decided here
 
 ADR-0111 is the cursor ADR. This decision **inherits** it rather than minting a
-second cursor theory, and the places it departs are §4 and nowhere else. What is
-inherited, by clause:
+second cursor theory, and the one place it departs is where a walk begins when it has
+no usable position — §4 of this ADR, recorded as a partial supersession in §10(c) and
+nowhere else. What is inherited, by clause:
 
 - **§1** — a cursor lives in the store whose progress it records, reached only
   through the same public `Engine` operation the scheduler already calls; "a
@@ -126,7 +127,7 @@ inherited, by clause:
   the cursor advances where they live in different stores, and "no clause of this
   ADR may be implemented in a way that turns that repetition into a skip".
 - **§4** — a run is bounded by a deadline and a chunk by a count, both
-  configuration.
+  configuration; §3 records which of those counts reach this job and which does not.
 - **§5** — "When a chunk cannot be recorded as done, the run stops immediately,
   leaves the cursor at the last chunk that was recorded, and returns without
   processing any later chunk."
@@ -167,10 +168,10 @@ about.
 
 > **Normative.** The watermark's meaning is exactly this and nothing wider: **the
 > observation walk over that conversation has advanced past that ordinal, and no
-> later pass selects a turn at or below it.** It is a **position in the walk, not a
-> certificate of coverage**: it does not record that every turn below it was read, that
-> a belief was proposed, that a proposal was ruled, that an episode resolved, or that a
-> model was called.
+> later pass of a build that reads the watermark selects a turn at or below it.** It
+> is a **position in the walk, not a certificate of coverage**: it does not record
+> that every turn below it was read, that a belief was proposed, that a proposal was
+> ruled, that an episode resolved, or that a model was called.
 
 > **Normative.** Two named cases leave turns below a watermark that no pass read, and
 > they are stated here rather than left to be discovered. A conversation whose **first**
@@ -180,6 +181,20 @@ about.
 > about them. What a reader may conclude from a watermark of *n* is that the turns
 > above *n* are the walk's remaining work — and nothing whatever about the turns
 > below it.
+
+**The non-selection half is scoped to watermark-aware passes because §7 obliges the
+other kind to exist.** §7 requires that "A build that does not read the watermark
+**ignores it and must not refuse to start over it**", and the selector such a build
+runs is today's — `ConversationStore.turns` with the batch size as its limit, the
+*tail* read (Context, "Today's selector"). So after a build carrying this contract
+records 100, a downgraded build's pass selects turns at or below 100, and a guarantee
+written over *every* pass would be false the first time anyone downgrades. Scoping it
+is not conceding a hole: §7 rules that case safe end to end, and both halves of the
+reason are already there. An older build never writes the member, so it can neither
+lower the watermark nor advance it past what it read; and the turns it re-reads fold
+to `REINFORCE` under ADR-0077 §8, which is the repetition ADR-0111 §3 requires be kept
+rather than "turned into a skip". What the clause guarantees is what a reader can act
+on: every pass of every build that reads the watermark begins strictly above it.
 
 **The placement is ADR-0111 §1's, applied.** Its first clause puts a job's
 resumption position in "the subsystem whose store the job walks", and its decisive
@@ -287,6 +302,69 @@ of that which is reachable.
 > conversation performs more than one pass; no pass mixes two conversations' turns
 > into one batch.
 
+> **Normative.** Three counts could be read as bounding this job, and each bounds
+> exactly one thing. **`observation_batch_size` bounds the page one pass reads** — the
+> clause above — and it is the only count that bounds it. **`scheduler_run_budget`
+> bounds the run**, in ADR-0111 §4's terms and unchanged by this ADR.
+> **`scheduler_chunk_size` does not reach this job**: it bounds neither the page a
+> pass reads nor the number of passes a run performs, and an implementation that hands
+> it to `turns_after` or to `conversations_with_unobserved_turns` is not implementing
+> this ADR. How many passes one scheduled run performs is not decided here — ADR-0111
+> §4's run clause governs it and the trigger ADR arms it (§9).
+
+**Why `scheduler_chunk_size` does not reach this job, and why no record is owed on
+ADR-0111 §4.** ADR-0111 is a marked ADR, and ADR-0089 §3 rules what that costs a
+reader: "In a marked ADR the marked clauses are the whole of what it obligates.
+Unmarked text is read to determine what a marked clause *means*; it never supplies an
+obligation. An obligation not stated in a marked clause does not bind." ADR-0111 §4
+carries exactly three marked clauses — a run commits chunks until its work is
+exhausted or its budget is spent, with the budget checked at a chunk boundary; a job
+may be chunked only if every operation inside one chunk is bounded by a deadline; and
+`Settings` gains the two fields with their load-time refusals. **None of the three says
+which count bounds a particular job's paged read.** The sentence the contrary reading
+rests on — "A chunk size is what a walking job hands a paged read as its limit" — is
+unmarked prose in the paragraph arguing that field's `[1, 2**63)` range, and the
+paragraph beside it names `observation_batch_size` as "the neighbouring precedent",
+which is to say a job that already carries a page bound of its own. §4's count is the
+page bound for a walk with no such bound; this walk has one, and ADR-0077 §1 sized it
+for exactly this read — "this one is also a *prompt* and an *egress*: an unbounded
+batch is a prompt nobody sized and a payload nobody measured" — a property
+`scheduler_chunk_size` was never sized against, its range being
+`MemoryStore.walk_records`' own (`core/config.py`) and its landed reader the
+consolidation walk. Two counts over one prompt would let the smaller win silently and
+leave `observation_batch_size` bounding nothing, which is #785's third question
+answered backwards.
+
+**What ADR-0111 §4 does oblige, this job takes unchanged.** The run budget bounds the
+run and is checked at a pass boundary, so a run overruns by at most one pass — which
+is what makes a pass the chunk in §4's sense. §4's admissibility condition binds here
+too: "a job whose chunk reaches an operation with no deadline is not a job that may be
+chunked under this ADR, and its lane owes that operation a deadline before it may be
+scheduled". Discharging it is the trigger lane's, not this one's, because this ADR
+schedules nothing — `observation_interval` stays `None` and the job ships disabled
+(§9) — and what that lane will be checking is named here so it is not rediscovered: a
+pass spends one model call, bounded by `model_timeout_seconds` exactly as
+consolidation's chunk is (`core/config.py`), and the rest of a pass is store reads and
+one store write, whose deadlines are that lane's to check rather than assume.
+
+**So no fourth record is owed on ADR-0111, and none is made.** ADR-0070 §1's test is
+"anything a reader would act on differently". A reader holding ADR-0111 alone, and
+reading it as ADR-0089 §3 requires, is obliged by §4 to bound the run, to check the
+budget at a chunk boundary, to give every in-chunk operation a deadline, and to load
+the two fields with those refusals; this ADR changes none of it. So §10(c)'s two
+scopes stay the whole of what this ADR takes from ADR-0111, and §4 stays among the
+clauses recorded there as binding this cursor unchanged. The reading that would have
+made a difference — mapping `scheduler_chunk_size` to *passes per run* — is not taken,
+and not because it is unattractive: it decides the scheduled run's loop, which §9
+defers to the trigger ADR by name.
+
+**The candidate listing's bounded default is not this count under another name.**
+`conversations_with_unobserved_turns` is bounded by default at 50 (§8), which is
+`ConversationStore.recent`'s figure under ADR-0074 §9's bounded-default rule, and
+`scheduler_chunk_size` defaults to 50 for ADR-0111 §4's own reasons. The two are equal
+by coincidence of two independently argued defaults, and lowering the chunk size does
+not narrow the listing.
+
 **What changes from ADR-0077 §8, precisely.** Its sentence — "The operation takes an
 optional conversation id: it observes **that conversation's most recent
 `observation_batch_size` turns**, or, given none, the same window over the **most
@@ -354,7 +432,8 @@ the selection is a walk rather than a tail read". It bounds the page a pass read
 and a pass is a chunk in ADR-0111 §4's sense: "A chunked job's single run commits
 chunks until either its work is exhausted or its run budget is spent". How many
 chunks one scheduled run performs is ADR-0111 §4's and the trigger's (§9), not this
-section's.
+section's. Being a chunk in that sense does not make a pass sized by §4's chunk
+*count*, and the clause above says which count bounds what.
 
 **A hand-run `observe` reads the same watermark.** There is one selector, so the CLI
 and the scheduler cannot disagree about what has already been looked at — which is
@@ -1256,6 +1335,12 @@ Rejected in §3: permitted by ADR-0077 §1's source-agnostic batch, but it makes
 prompt two transcripts and makes `observation_batch_size` mean two things. A run that
 wants several conversations performs several passes, which is ADR-0111 §4's chunk
 model unchanged.
+
+**Sizing the pass's page by `scheduler_chunk_size`, or mapping that field to passes
+per run.** Rejected in §3: ADR-0111 §4 states neither obligation in a marked clause,
+and ADR-0089 §3 rules that unmarked text supplies none; this read already carries the
+bound ADR-0077 §1 sized for it as a prompt and an egress; and the passes-per-run
+reading decides the scheduled run's loop, which §9 defers to the trigger ADR.
 
 **Keeping "the most recently active conversation" as the target and only walking it
 forward.** This would need no candidate read and no new listing, and would leave
