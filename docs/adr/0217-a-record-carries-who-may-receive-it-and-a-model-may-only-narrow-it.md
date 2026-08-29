@@ -215,10 +215,14 @@ mechanics of withholding at supply.
 > value**. `Placement` carries `reach`, `set_by` and `set_at` and nothing else; a
 > decode of a pre-field record and a fresh derivation are indistinguishable to it.
 > The obligation that closes the residue is therefore a **producer** obligation and is
-> stated as one: **every derivation this system performs writes the instant**, so a
-> `DERIVED` placement with no `set_at` is, in a store this decision's implementation
-> has written, a pre-field record and nothing else. §10 pins that obligation at the
-> producer, where it is visible, rather than at the type, where it is not.
+> stated as one: **every derivation this system performs writes the instant of the
+> narrowing it makes**, so a `DERIVED` placement with no `set_at` is, in a store this
+> decision's implementation has written, a placement that **descends from** a pre-field
+> record and nothing else. It descends rather than simply *is* because §3's propagation
+> may carry an unknown instant forward onto a survivor — a fold writes no new narrowing
+> and so mints no instant — and the diagnostic is stated over the origin for that
+> reason. §10 pins the obligation at the producer, where it is visible, rather than at
+> the type, where it is not.
 
 > **Normative.** Of the five, the two that matter most are the two that are otherwise
 > **silent**. `Placement(reach=ANYONE, set_by=DERIVED)` would be a record the
@@ -232,8 +236,12 @@ mechanics of withholding at supply.
 
 > **Normative.** A `set_at` of `None` beside a setter — which by the table above is a
 > `DERIVED` setter and no other — is **unknown, never unrecorded-therefore-recent**,
-> and it arises on exactly one path: §9's decode of a record written before this field
-> existed, which carries no instant for an act nobody timed. No lane, implementation or later ADR reads such a `None` as evidence about
+> and it **originates** on exactly one path: §9's decode of a record written before this
+> field existed, which carries no instant for an act nobody timed. It reaches a second
+> record only by §3's propagation carrying it forward, which mints no instant and makes
+> no second narrowing — so the origin is still the decode, and an implementation that
+> stamped the fold's own instant there would be asserting a time for an act nobody
+> performed. No lane, implementation or later ADR reads such a `None` as evidence about
 > when the narrowing was made, and no surface renders it as one. This is ADR-0109's
 > reading of `last_confirmed_at` and ADR-0204 §1's fourth clause, applied to the one
 > place this type inherits the same gap.
@@ -414,7 +422,11 @@ only subtract.
 > setters of the sides that in fact carry the reach being written**; a side whose reach
 > is wider supplies no setter, having supplied none of the narrowing. The instant
 > written is that side's `set_at` and not the instant of the fold, because the stamp
-> names when the placement was set and not when a duplicate was merged. So a `DERIVED`
+> names when the placement was set and not when a duplicate was merged — **including
+> where that side has none**, which is §9's decoded legacy placement and the one case
+> where the winning instant is unknown. A propagation carries the unknown forward rather
+> than closing it: it makes no new narrowing, so it has no instant of its own to record,
+> and §1 states the diagnostic over the origin for exactly this reason. So a `DERIVED`
 > narrowing survives a fold as `DERIVED`; an `OWNER_ACT` narrowing folded against a
 > `PROPOSED` one at the same reach survives as `OWNER_ACT`; and a narrowing that
 > **only** a `PROPOSED` placement supplied survives as `PROPOSED`, so the owner still
@@ -1162,10 +1174,11 @@ ADR-0201 closed.
 
 > **Normative.** The lane pins **§1's producer obligation at the producer**, because
 > the type cannot carry it: every placement this system's own code writes with setter
-> `DERIVED` carries a `set_at`. The arm is taken over the fold in `memory/ingest.py`
-> and every other derivation site §11's inventory names, and it is what makes an
-> untimed `DERIVED` placement in a store diagnostic of §9's decode rather than of a
-> producer that forgot.
+> `DERIVED` **for a narrowing it made** carries a `set_at`. The arm is taken over every
+> derivation site §11's inventory names, and it is what makes an untimed `DERIVED`
+> placement in a store diagnostic of §9's decode rather than of a producer that forgot.
+> It is **not** taken over a propagation, which mints no instant: the arm below pins
+> that case instead, and the two together are what make the diagnostic exhaustive.
 
 > **Normative.** The lane pins **the decode**: a stored record carrying
 > `supplied_withheld_content: true` and no placement decodes to reach `OWNER`, setter
@@ -1256,10 +1269,16 @@ ADR-0201 closed.
 > nothing; a stored `OWNER_ACT` folded with an incoming `PROPOSED` at the same reach
 > yields `OWNER_ACT`; a stored `DERIVED` folded with an incoming `OWNER_ACT` at the same
 > reach yields `DERIVED`; and the survivor's `set_at` is the winning side's, not the
-> instant of the fold. The `unguard` outcome is pinned beside the stamp in the first two
-> arms because the stamp is only observable to the owner through what they may then do,
-> and an implementation that returned the right reach with the wrong setter would pass
-> every other arm in this section.
+> instant of the fold. One further arm takes the legacy winner explicitly: a record
+> whose placement §9's decode produced — reach `OWNER`, setter `DERIVED`, **no
+> `set_at`** — folded with a default-placed record yields reach `OWNER`, setter
+> `DERIVED` and **no `set_at`** on the survivor, and the producer arm above does not
+> fire on it. Without that arm an implementation could satisfy every other arm here by
+> stamping the fold's own instant, which would assert a time for a narrowing nobody
+> timed and turn §1's unknown into a false measurement. The `unguard` outcome is pinned
+> beside the stamp in the first two arms because the stamp is only observable to the
+> owner through what they may then do, and an implementation that returned the right
+> reach with the wrong setter would pass every other arm in this section.
 
 > **Normative.** The lane pins **the negative arm**, without which the rest can pass
 > vacuously: a store of records all carrying the default placement answers a spoken
@@ -1310,20 +1329,36 @@ ADR-0201 closed.
 > by a member two decisions now describe differently.
 
 > **Normative.** **The wire client's two forwarding methods are inside that change, and
-> naming them is not in tension with the CLI route being outside the write-time one.**
-> The test is ADR-0137 §2's and it is about what a split *breaks*, never about how thin
-> a layer is: `TestHubEngineClientContract` binds `HubEngineClient` to the shared
-> `AssistantEngineContract` today, so a tree carrying the new suite arms without the
-> client's methods fails that suite on an implementation the arms are written for, and
-> no split of it passes. That is the same reason §11's first clause gives for the field
-> move's width. `assistant learn --guarded` is the opposite case in every respect:
-> `FeedbackEvent.guarded` carries a default, no existing suite or implementation fails
-> in its absence, and the route only adds a way to set a member that already works — so
-> ADR-0137 §4 sequences it and §2's exception does not reach it. Stated as one rule:
-> **a consumer that breaks on the contract change rides with it; a consumer that merely
-> gains from it is briefed after it merges.** The hub's own dispatch needs nothing
-> beyond this — `wire/server.py` resolves an operation by name on the engine — and no
-> gateway route, no rendering and no further client are admitted by this clause.
+> this ADR mints no rule to put them there.** `HubEngineClient` **implements**
+> `AssistantEngine`; it does not consume it. The tree says so in its own words —
+> `wire/client.py` describes the clause "`AssistantEngineContract` holds all three
+> implementations to", and `TestHubEngineClientContract` is one of the concrete
+> subclasses that runs the shared suite. ADR-0137 §4 sequences "every **consumer** of
+> the contract other than the primary implementation"; an implementation of the contract
+> is not one of those, and reading it as one would put a Protocol's own implementations
+> outside the change that extends their obligations. What governs instead is
+> `CONTRIBUTING.md` → "Adding a Protocol", in terms: "The triad is what a Protocol
+> *change* is measured against too — extend the suite in the same change, so the new
+> obligation is enforced rather than assumed." An arm extended in one change and an
+> implementation it binds landed in another is that obligation assumed rather than
+> enforced, and the tree is red in between.
+
+> **Normative.** **Nor is width a question here.** Two forwarding methods on a class
+> that already carries the rest of the promoted surface are ADR-0137 §1's **adaptation**
+> — its own enumeration names "a method added to a class that already had the rest of
+> them, an implementation of a Protocol method a subsystem already almost satisfied" —
+> and that section rules that "Adaptation does not count against the bound … A lane may
+> carry adaptation across any number of subsystems". So the acts change carries them
+> without reaching §2's exception at all.
+
+> **Normative.** **`assistant learn --guarded` is not the same case, and the difference
+> is not thinness.** `interfaces/` calls the engine; it implements no Protocol of this
+> decision and is bound by no conformance suite of one. It is a consumer in §4's own
+> sense, `FeedbackEvent.guarded` carries a default so no existing suite or
+> implementation fails in its absence, and nothing is red in between. That is why §7
+> defers it and why nothing here is read as reopening that. The hub's own dispatch needs
+> nothing either — `wire/server.py` resolves an operation by name on the engine — and no
+> gateway route, no rendering and no further consumer is admitted by these clauses.
 
 > **Normative.** The **second change** is §7's write-time act, entire and atomic —
 > independent of the acts' gate, because a producer writing a fresh record reads nothing
@@ -1475,6 +1510,15 @@ version ruling stays true of the change it ruled on — a defaulted addition to
 sentence of ADR-0213 becomes false or over-wide. Its `topics` field and this ADR's
 `placement` are two additive members on one envelope, deciding different questions and
 read at different sites; neither ADR constrains the other's.
+
+**Against ADR-0137 no record is owed**, and §11 records an application of it rather than
+an amendment to it. Every sentence of ADR-0137 stays true and none becomes over-wide: §4
+is applied to `interfaces/` on its own word, "consumer", and is not applied to
+`wire/client.py` because an implementation of a Protocol is not a consumer of it — which
+is a reading of §4's scope, not a change to its rule. §1's adaptation clause is used as
+written, §2's exception is not invoked for the client at all, and §3's prohibition on
+splitting a triad is untouched. A reader holding only ADR-0137 reaches the same
+disposition unaided, which is ADR-0070 §1's test coming out the other way.
 
 **Against ADR-0218 no record is owed**, on ADR-0070 §1's test applied to its text.
 ADR-0218 arms a scheduled run of ADR-0212 passes and adds `Engine.observe_due`; §4 above
