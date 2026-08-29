@@ -15,8 +15,8 @@
   implements against it, and it owes **both** lenses — adversarial and
   architecture (ADR-0015 §1). It adds **no new Protocol**, no member to any
   Protocol, no `Settings` field, no `RoutableOperation` member, no member of the
-  promoted `AssistantEngine` surface, and — §6 — it does **not** move
-  `PROTOCOL_VERSION`.
+  promoted `AssistantEngine` surface. It **does** move `PROTOCOL_VERSION` — §6, and for the
+  new error's code rather than for the field.
 - **This ADR supersedes nothing and amends nothing.** §9 applies ADR-0070 §1's
   test to ADR-0046, ADR-0045, ADR-0108, ADR-0028 and ADR-0217 clause by clause and
   finds every sentence of each still true, so no header-only record is owed on any
@@ -453,7 +453,7 @@ write inside a transaction that excludes the other process's writer. **#248 clos
 when that change lands, not when this ADR merges** — this ADR decides the mechanism,
 and §10 orders the changes.
 
-### 6. Scope: the `core` surface, and `PROTOCOL_VERSION` does not move
+### 6. Scope: the `core` surface, and `PROTOCOL_VERSION` moves for the error and not for the field
 
 > **Normative.** The `core` change is exactly: `MemoryBase` gains `revision`;
 > `MemoryWrite` gains `expected_revision`; `MemoryWriteMode` gains `IF_UNCHANGED`;
@@ -464,7 +464,18 @@ and §10 orders the changes.
 > `ContextFacet`, no `RoutableOperation` member and no member of the promoted
 > `AssistantEngine` surface.
 
-> **Normative.** `PROTOCOL_VERSION` does not move for this change.
+> **Normative.** **`PROTOCOL_VERSION` moves**, and it moves for exactly one
+> reason: `MemoryStoreStaleError` is a failure a promoted-surface method can emit,
+> and the wire carries an error's **concrete class name** as its code. The
+> obligation falls on the change that adds the error — §10's first — in that change,
+> with its own entry in `wire/envelope.py`'s log naming this ground.
+
+> **Normative.** **`MemoryBase.revision` is not a ground and is not cited as one.**
+> The field is additive and defaulted on a type that does not set `extra="forbid"`,
+> and ADR-0213 §11's ruling on the same envelope governs it: it would move nothing
+> on its own. No lane reads this section as authority for bumping on a defaulted
+> addition to a wire-carried `core` type, and none reads the bump above as having
+> been earned by the field.
 
 > **Normative.** The revision is **store-authored and hub-local**: no client, spoke
 > or gateway sets one, and no component reads a revision off a wire-received record
@@ -472,13 +483,32 @@ and §10 orders the changes.
 > rule keyed on a revision **as received over the wire** owes ADR-0124 §9's test
 > afresh in its own text and may not cite this section as having answered it.
 
-**ADR-0124 §9's test is applied rather than asserted past**, in the form ADR-0213
-§11 applied it to the same envelope. §9's rule is that "`PROTOCOL_VERSION` is bumped
-by any change after which a frame a conforming peer at the new version may send
-would be refused by a conforming peer at the old version, or would be accepted by it
-with a different meaning."
+**ADR-0124 §9's test is applied rather than asserted past**, and it is applied to
+the two additions separately because they come out differently. §9's rule is that
+"`PROTOCOL_VERSION` is bumped by any change after which a frame a conforming peer at
+the new version may send would be refused by a conforming peer at the old version,
+or would be accepted by it with a different meaning."
 
-`MemoryRecord` **is** wire-carried: `TurnResult.memories` is
+**The error is the ground, on §9's first limb.** `AssistantEngine.learn` declares
+`MemoryStoreError: If reading or writing memory failed.`, and §5 has the ingestor's
+exhausted retry propagate as the `MemoryStoreError` it is — so a
+`MemoryStoreStaleError` reaches that method. `wire/errors.py` renders an error's
+`code` as `type(exc).__name__`, and its own docstring rules out the escape a
+translation would be: the code is "**the exception type's own class name**", "one
+code per *concrete* type, never flattened to a declared base, because encoding a
+``ModelRateLimitError`` as ``"ModelError"`` would hand a client "a classification the
+server did not make" (ADR-0077 §3)". The decode side resolves that code with
+``getattr(core_errors, code, None)`` and, failing, raises `ProtocolError` on the
+ground that "the two halves are meant to ship together, so this is a protocol
+fault". So a hub at the new version emits a frame a peer at the old version
+refuses, which is §9's first limb exactly. Reducing the subclass at the boundary was
+considered and is barred by the same sentence: ADR-0077 §3 is the ruling that a
+server may not hand a client a classification it did not make, and hiding the
+distinction from a remote caller would buy a version and cost the branch §3 exists
+to give.
+
+**The field is not a ground**, and the test is run on it here so the two are not
+confused. `MemoryRecord` **is** wire-carried: `TurnResult.memories` is
 `tuple[MemoryRecord, ...]`, inside `TurnOutcome`. Both directions are checked.
 
 - **A new hub to an old peer.** `MemoryBase` carries
@@ -496,7 +526,10 @@ with a different meaning."
   `MemoryStore` operation, `MemoryStore` is not the promoted surface, and no client
   holds a store. The clause above keeps it that way rather than assuming it.
 
-**This is the addition case and not ADR-0217 §9's.** That section bumps because a
+So on the field alone the answer is no bump, and the ground above is what carries
+this change — one sufficient ground, spent by one change, named in one log entry.
+
+**On the field, this is the addition case and not ADR-0217 §9's.** That section bumps because a
 member is *removed* from a wire-carried type and "its default is *read*" with a
 disclosure consequence; it says in terms that "no lane cites this section as
 authority for bumping on an addition alone". Nothing is removed here, no field
@@ -697,8 +730,9 @@ different questions and read at different sites.
 > **Normative.** The `core` change and every implementation of it land in **one**
 > change: `core/types.py`'s three additions, `core/errors.py`'s error,
 > `write_atomic`'s docstring in `core/protocols.py`, `SqliteMemoryStore`,
-> `InMemoryMemoryStore`, `FakeMemoryStore`, and §7's conformance arms with the
-> `SqliteMemoryStore` cross-process test. A tree that accepts an `IF_UNCHANGED`
+> `InMemoryMemoryStore`, `FakeMemoryStore`, `memory/reembed.py`, the
+> `PROTOCOL_VERSION` bump with its log entry, and §7's conformance arms with the
+> `SqliteMemoryStore` cross-process, reopen and migration tests. A tree that accepts an `IF_UNCHANGED`
 > element some implementation silently applies unconditionally is a fail-open window
 > on the mode this ADR exists to add, which is why the mode and its honouring are
 > atomic in the sense ADR-0217 §7 uses the word.
@@ -728,6 +762,22 @@ different questions and read at different sites.
 > the backfilled stamps and the persisted issuer commit together or not at all. A
 > half-backfilled column would leave some rows at the reserved `0`, which is the
 > state §1 forbids.
+
+> **Normative.** **The re-embedding build-and-swap carries the stamps and the
+> issuer through**, in the same change. `memory/reembed.py` copies an explicit
+> column list — `_SOURCE_COLUMNS` is `"rowid, id, kind, data"` — and re-derives the
+> derived columns from each decoded record, so a column it is not told about is
+> dropped at the swap and the swapped store starts with a fresh issuer. That would
+> reissue every stamp the old store had issued, reopening §1's hole through an
+> ordinary operational migration rather than through any write. The lane carries each
+> row's stamp verbatim through the work store and the swap, carries the issuer with
+> it, and pins it: re-embed a store holding a rewritten record, and assert both that
+> the record's stamp is unchanged across the swap and that the next write after the
+> swap takes a stamp the old store never issued.
+
+> **Normative.** **The bump is made in this change** (§6): `PROTOCOL_VERSION` moves
+> and `wire/envelope.py`'s log gains an entry naming the new error code as its
+> ground. The later ingestor change makes no second bump — one ground, spent once.
 
 > **Normative.** The ingestor change (§5) is a **second change**, after the first,
 > and it is what closes #248. It carries the two call sites, the bounded re-run, and
