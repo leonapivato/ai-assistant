@@ -155,6 +155,15 @@ def _by_last_activity(conversations: list[Conversation]) -> list[Conversation]:
     return sorted(by_id, key=lambda one: one.last_active_at, reverse=True)
 
 
+def _by_least_activity(conversations: list[Conversation]) -> list[Conversation]:
+    """ADR-0212 §3's candidate order: ``last_active_at`` **ascending**, ``id`` ascending.
+
+    The one conversation listing on this contract that runs the other way, and the
+    only place a composite key works: both halves ascend, so one sort does it.
+    """
+    return sorted(conversations, key=lambda one: (one.last_active_at, one.id))
+
+
 class FakeConversationStore:
     """A non-persistent ``ConversationStore`` test double backed by dicts.
 
@@ -354,6 +363,34 @@ class FakeConversationStore:
         """
         return f"{_EPISODE_NAMESPACE}:{conversation_id}:{ordinal}"
 
+    def _highest_ordinal(self, conversation_id: str) -> int | None:
+        """The conversation's highest turn ordinal, or ``None`` where it holds none.
+
+        Ordinals are dense and monotonic, so the last row's is the highest and no
+        scan is owed.
+        """
+        rows = self._turns.get(conversation_id, [])
+        return rows[-1].ordinal if rows else None
+
+    def _presented(self, conversation: Conversation) -> Conversation:
+        """Discard a watermark this store's own turns do not reach (ADR-0212 §7).
+
+        The discard is the store's, made where the record is built, and it is never
+        a fault: such a conversation reads as one with no watermark and re-enters the
+        candidate listing at its tail. Only the "above the highest ordinal" limb of
+        §7 is reachable here — a value that is not an integer or is below
+        :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL` cannot be *held* by a
+        frozen pydantic model, so a dict-backed store has nowhere to keep one. That
+        is a property of this double rather than a narrowing of the rule, and the
+        ``sqlite3`` store's own cases cover the limbs a file can carry.
+        """
+        if conversation.observed_through is None:
+            return conversation
+        highest = self._highest_ordinal(conversation.id)
+        if highest is None or conversation.observed_through > highest:
+            return conversation.model_copy(update={"observed_through": None})
+        return conversation
+
     def _visible_turn(self, turn: ConversationTurn | None) -> ConversationTurn | None:
         """Hide a turn whose conversation is stamped (ADR-0074 §9).
 
@@ -418,9 +455,9 @@ class FakeConversationStore:
         """
         async with self._resource.held():
             conversation = self._conversations.get(conversation_id)
-        if conversation is None or conversation.deleted_at is not None:
-            return None
-        return conversation
+            if conversation is None or conversation.deleted_at is not None:
+                return None
+            return self._presented(conversation)
 
     async def mark_active(self, conversation_id: str) -> Conversation:
         """Record that a turn has begun, leaving ``last_turn_at`` alone.
@@ -433,7 +470,7 @@ class FakeConversationStore:
             conversation = self._live(conversation_id)
             marked = conversation.model_copy(update={"last_active_at": self._now()})
             self._conversations[conversation_id] = marked
-            return marked
+            return self._presented(marked)
 
     async def append(
         self,
@@ -533,6 +570,96 @@ class FakeConversationStore:
             if stamped.parked is not None:
                 self._by_binding[stamped.parked] = stamped
             return stamped
+
+    async def record_observed(
+        self, conversation_id: str, *, through_ordinal: int
+    ) -> Conversation | None:
+        """Advance the watermark if it moves forward without leading the turns.
+
+        **Both conditions are read and the row written inside the one exclusion**
+        (ADR-0212 §8), which is what the suite's two-advances-racing case is
+        asserting against: the exclusion hands the loop back before this reads
+        anything, so a second advance really has to queue and really does find the
+        position the first left. The recorded value it compares against is the
+        *usable* one, so a discarded watermark (§7) is stampable again rather than
+        leaving the conversation stuck behind a value nothing can read.
+
+        The range refusal is before the exclusion is taken and before anything is
+        read, which is "locally, before any I/O".
+
+        Raises:
+            ValueError: If ``through_ordinal`` is outside
+                ``[FIRST_TURN_ORDINAL, 2**63)``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        _check_page_bound("through_ordinal", through_ordinal, floor=FIRST_TURN_ORDINAL)
+        async with self._exclusive(conversation_id):
+            conversation = self._live(conversation_id)
+            highest = self._highest_ordinal(conversation_id)
+            recorded = self._presented(conversation).observed_through
+            if highest is None or through_ordinal > highest:
+                # It would lead the conversation's own turns: nothing is written and
+                # nothing is raised, which is `record_delivery`'s shape.
+                return None
+            if recorded is not None and through_ordinal <= recorded:
+                # An attempt that loses is an attempt whose position already stands.
+                return None
+            stamped = conversation.model_copy(update={"observed_through": through_ordinal})
+            self._conversations[conversation_id] = stamped
+            return stamped
+
+    async def turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after_ordinal: int | None = None,
+        limit: int | None = None,
+    ) -> list[ConversationTurn]:
+        """Return the lowest page of turns above ``after_ordinal``, ordinal ascending.
+
+        Raises:
+            ValueError: If ``limit`` or ``after_ordinal`` is out of range.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        page = self._tail_limit if limit is None else limit
+        _check_page_bound("limit", page)
+        if after_ordinal is not None:
+            _check_page_bound("after_ordinal", after_ordinal, floor=FIRST_TURN_ORDINAL)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            self._live(conversation_id)
+            rows = self._turns[conversation_id]
+            if after_ordinal is not None:
+                rows = [turn for turn in rows if turn.ordinal > after_ordinal]
+            # The *head* of what is above the floor, where `turns` takes the tail of
+            # what is below the ceiling. Both hand the page back oldest-first.
+            return list(rows[:page]) if page else []
+
+    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
+        """List candidates for observation, least recently active first (ADR-0212 §3).
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+        """
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return []
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            candidates = []
+            for one in self._conversations.values():
+                if one.deleted_at is not None:
+                    continue
+                highest = self._highest_ordinal(one.id)
+                if highest is None:
+                    # A conversation with no turn is never a candidate: there is
+                    # nothing above any watermark it could hold.
+                    continue
+                presented = self._presented(one)
+                watermark = presented.observed_through
+                if watermark is None or highest > watermark:
+                    candidates.append(presented)
+        return _by_least_activity(candidates)[:limit]
 
     async def turns(
         self,
@@ -634,7 +761,11 @@ class FakeConversationStore:
         if limit == 0:
             return []
         async with self._resource.held():  # a locked read on the durable store (#492)
-            live = [one for one in self._conversations.values() if one.deleted_at is None]
+            live = [
+                self._presented(one)
+                for one in self._conversations.values()
+                if one.deleted_at is None
+            ]
         return _by_last_activity(live)[offset : offset + limit]
 
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
@@ -704,7 +835,11 @@ class FakeConversationStore:
         """
         async with self._resource.held():  # a locked read on the durable store (#492)
             live = _by_last_activity(
-                [one for one in self._conversations.values() if one.deleted_at is None]
+                [
+                    self._presented(one)
+                    for one in self._conversations.values()
+                    if one.deleted_at is None
+                ]
             )
             turns = [
                 turn

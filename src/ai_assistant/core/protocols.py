@@ -5855,8 +5855,8 @@ class ConversationStore(Protocol):
 
     **The mutation exclusion, which is this seam's obligation and not a
     caller's.** Per conversation, an :meth:`append`, a :meth:`mark_active`, a
-    :meth:`record_delivery`, a :meth:`stamp_deleted` and a
-    :meth:`drop_if_eligible` **never interleave**;
+    :meth:`record_delivery`, a :meth:`record_observed`, a :meth:`stamp_deleted`
+    and a :meth:`drop_if_eligible` **never interleave**;
     each observes the conversation, decides, and writes as one indivisible step.
     An ``asyncio.Lock`` inside one engine would not discharge this — the engine
     already contemplates "another engine over the same durable stores", so two
@@ -5893,7 +5893,8 @@ class ConversationStore(Protocol):
       it to the ``MemoryStore``.
 
     **A conversation stamped deleted is absent from every read that presents
-    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`turns`, and both
+    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`turns`,
+    :meth:`turns_after`, :meth:`conversations_with_unobserved_turns`, and both
     reverse lookups — while :meth:`episodes_to_purge` still yields the episode
     ids the sweeps must destroy. That distinction is what keeps a tombstone from
     being a readable record of a deleted conversation while the deletion can
@@ -5912,6 +5913,39 @@ class ConversationStore(Protocol):
     descending with ``id`` ascending as the tie-break. Paging arguments carry
     ADR-0073 §2's range posture unchanged — out of range is a ``ValueError``, not
     a clamp — inherited rather than restated.
+    **:meth:`conversations_with_unobserved_turns` is the one exception to the
+    direction and to nothing else** (ADR-0212 §3, §10(b)): it orders
+    ``last_active_at`` **ascending**, with the same ``id`` tie-break, because a
+    descending listing would re-select the busiest conversation on every
+    observation pass and never reach an idle one. Its default bound is 50 and its
+    refusals are ADR-0073 §2's, both unchanged.
+
+    **The observation watermark is store-written state on the conversation, and
+    exactly one consumer acts on it** (ADR-0212 §1, §7).
+    :attr:`~ai_assistant.core.types.Conversation.observed_through` is the position
+    the observation walk has reached in that conversation's ordinals — a position,
+    never a certificate that the turns below it were read. It is **additive**: no
+    read selects a different set of rows, orders them differently, refuses where it
+    would have answered, or returns a different value in any other member because a
+    watermark is present, absent, high or low — the candidate listing above being
+    the operation whose whole subject it is. A build that does not read it ignores
+    it and **must not refuse to start over it**; where a store persists
+    conversations in a table the column is nullable, carries no default, is added
+    to an existing table without rewriting a row, and changes no existing column,
+    so a build written before this member goes on inserting the columns it knows.
+
+    **A watermark this store cannot use is discarded, and the discard is the
+    store's** (ADR-0212 §7). A stored value that is not an integer, is below
+    :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL`, or is above the highest
+    ordinal the conversation holds, yields a record whose ``observed_through`` is
+    **absent** — not a ``ConversationStoreError``, not an
+    ``IncompatibleStateError``, and never a refusal to open or to serve. It is
+    never levelled and never advanced past a value that could not be read. Made an
+    obligation of the store rather than left to taste, because letting one bad
+    bookkeeping integer reach ``Conversation``'s own validation would turn it into
+    a store fault on :meth:`get`, :meth:`recent`, :meth:`turns` and :meth:`export`
+    for that conversation — a conversation the user can no longer read because a
+    column the user never sees is wrong.
 
     **Every read returns a detached snapshot.** The four exchanged types are
     frozen pydantic models, so this costs nothing; it is stated so an
@@ -6141,6 +6175,81 @@ class ConversationStore(Protocol):
         """
         ...
 
+    async def record_observed(
+        self, conversation_id: str, *, through_ordinal: int
+    ) -> Conversation | None:
+        """Advance this conversation's observation watermark (ADR-0212 §8).
+
+        The second operation on this contract that writes a fact arriving **after**
+        the rows it is about were recorded — :meth:`record_delivery` one table down
+        — and the store side of ADR-0111's cursor placement: the walking job
+        computes the position, and the store whose ordinals it names makes it
+        durable, under the same per-conversation exclusion its other mutations run
+        under (ADR-0111 §1).
+
+        **It stamps if and only if two conditions hold together**: ``through_ordinal``
+        is **strictly above** the recorded watermark, and it is **at or below** the
+        highest ordinal this conversation holds. Where either fails the operation
+        **performs nothing, returns ``None``, and raises nothing** —
+        :meth:`record_delivery`'s shape and its reason, "no row is written, and no
+        error is raised". A watermark is therefore never lowered, and a request to
+        record a value at or below the recorded one is a no-op rather than an error.
+
+        **Reading the two conditions and writing the row are one indivisible step**,
+        so two concurrent advances leave the **higher** value recorded and neither
+        leaves the walk positioned above what one of the two passes actually read.
+        That is what makes two overlapping observation passes safe with no
+        serialisation anywhere else: whichever order the calls arrive in, the higher
+        position stands and the lower performs nothing (ADR-0212 §5).
+
+        **A watermark this store discarded reads as absent here too.** The recorded
+        value the first condition compares against is the *usable* one — a stored
+        value the store cannot use is treated as no watermark at all (see the class
+        docstring), so the conversation is stampable again from its tail rather than
+        permanently unreachable.
+
+        **The second condition is the store holding ADR-0111 §3's "never lead"
+        direction rather than trusting a caller's discipline.** It is unreachable
+        through the observation stage, which only ever names an ordinal it read from
+        this store; it is a property of the seam because this is a cross-subsystem
+        contract and a consumer that is not the engine may hold it.
+
+        **This bounds the position and does not certify it.** The store refuses an
+        ordinal that would lead the conversation's own turns and one that would lower
+        the recorded value, and asserts nothing about what the caller read to compute
+        it. A caller that stamps an ordinal it never read has mis-positioned its own
+        walk; the row makes no claim that could be false. Vouching for the page a
+        reader was served would mean per-reader durable state growing with readers
+        and pages, which is ADR-0111 §2's excluded shape, and folding selection,
+        observation and advance into one operation would put a model call inside this
+        store (golden rule 1).
+
+        Args:
+            conversation_id: The conversation whose watermark to advance.
+            through_ordinal: The position to record. The observation stage computes
+                it as the highest ordinal in the page whose episode resolved, or the
+                page's highest ordinal where none did (ADR-0212 §5); this store takes
+                it as given, within the two conditions above.
+
+        Returns:
+            The conversation as stamped, or ``None`` where it stamped nothing.
+
+        Raises:
+            ValueError: If ``through_ordinal`` is outside
+                ``[FIRST_TURN_ORDINAL, 2**63)`` — refused locally, before any I/O,
+                on ADR-0085 §3's convention. ``None`` is not a position and 0 names
+                none, so neither is a spelling of "no pass has recorded one": that
+                is the absence of a watermark, which no caller writes.
+            UnknownConversationError: If ``conversation_id`` names nothing or names
+                a conversation stamped deleted — the same refusal :meth:`append` and
+                :meth:`record_delivery` carry. A pass whose conversation is deleted
+                between its page read and its advance meets this, and ADR-0212 §6
+                rules it: the watermark is untouched, the page is never re-read, and
+                none is owed.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
     async def turns(
         self,
         conversation_id: str,
@@ -6186,6 +6295,55 @@ class ConversationStore(Protocol):
                 names a conversation stamped deleted. ``turns`` is an ordinary
                 presenting read, so it refuses a tombstone exactly as :meth:`get`
                 hides one; the sweeps use :meth:`episodes_to_purge` instead.
+            ConversationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after_ordinal: int | None = None,
+        limit: int | None = None,
+    ) -> list[ConversationTurn]:
+        """Read the **lowest** page of turns above ``after_ordinal`` (ADR-0212 §8).
+
+        :meth:`turns`' mirror image, and the read a forward walk needs: that one
+        traverses backwards from the tail, this one forwards from a position. The
+        page is the *lowest* ``limit`` turns whose ordinal is **strictly above**
+        ``after_ordinal``, ordinal ascending — never the tail. Walk the whole
+        conversation by calling again with ``after_ordinal`` set to the highest
+        ordinal just returned, until a page comes back empty; that terminates and
+        visits every turn exactly once, because ordinals are dense.
+
+        The observation walk is its consumer (ADR-0212 §3), reading the turns above
+        a conversation's watermark. It is an ordinary read for all that: it takes no
+        watermark, writes none, and answers the same page for any caller that names
+        the same position.
+
+        **A short page means there is nothing above it** — a fact about the read,
+        and not a discriminator any advance rule may use: ADR-0212 §5 computes a
+        position from the page's ordinals and never from its length.
+
+        Args:
+            conversation_id: The conversation to read.
+            after_ordinal: Exclusive **lower** bound on the ordinal. ``None`` reads
+                from the conversation's first turn.
+            limit: Page size. ``None`` asks for the store's **configured replay
+                window**, exactly as :meth:`turns` does. ``0`` returns an empty page.
+
+        Returns:
+            The page, ordinal ascending; empty for a conversation with no turns
+            above the bound.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)`` or ``after_ordinal``
+                is outside ``[FIRST_TURN_ORDINAL, 2**63)``. Refused rather than
+                clamped, the same posture and the same two refusals :meth:`turns`
+                carries for ``before_ordinal`` and ``limit`` (ADR-0073 §2).
+            UnknownConversationError: If ``conversation_id`` names nothing or names
+                a conversation stamped deleted. This is a presenting read, so it
+                refuses a tombstone exactly as :meth:`turns` does.
             ConversationStoreError: If the store cannot be read.
         """
         ...
@@ -6361,6 +6519,59 @@ class ConversationStore(Protocol):
 
         Raises:
             ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
+        """List the conversations an observation pass still has work in (ADR-0212 §3).
+
+        Every conversation that is **not** stamped deleted and holds at least one
+        turn whose ordinal is strictly above its
+        :attr:`~ai_assistant.core.types.Conversation.observed_through` — or any turn
+        at all, where that is absent, which includes a watermark this store
+        discarded (see the class docstring). A conversation with no turns is never
+        a candidate, and one leaves the set only once its watermark reaches its
+        highest turn: a conversation with more unobserved turns than one page
+        **stays** in it after a pass.
+
+        **Ordered by ``last_active_at`` ascending, ties broken by ``id``
+        ascending**, which is the one operation on this contract that does not
+        order conversations by activity descending (ADR-0212 §10(b) records the
+        replacement). Descending cannot be the candidate order: a conversation
+        that keeps receiving turns would be selected on every pass and one the user
+        has stopped using would never be reached. Ascending excludes no candidate,
+        serves the material nearest its retention horizon first, and — where the
+        clock advances monotonically — reaches every candidate in a bounded number
+        of passes. The clock is not promised monotonic
+        (:mod:`ai_assistant.core.clock`), so a stopped or stepped-back one can leave
+        a busy conversation ahead of an idle one indefinitely; that is **accepted
+        and named** rather than closed, since closing it would take a second durable
+        cursor bought against a clock adjustment.
+
+        **It takes no cursor and no offset**, because no consumer pages it: an
+        observation pass serves one conversation, so the stage takes the head of a
+        freshly-read listing each time and never asks for a second page. An offset
+        would offer a position over a set whose membership *and* whose ordering key
+        both move between passes — a row leaves once its watermark reaches its
+        highest turn, and ``last_active_at`` moves under every turn — which is the
+        hazard :meth:`recent` already names for offset paging and
+        :meth:`stamped_conversation_ids` already refuses for a walk whose rows leave
+        under it.
+
+        Args:
+            limit: Page size, bounded by default at 50 — :meth:`recent`'s figure and
+                ADR-0073 §2's argument, unchanged. ``0`` returns an empty page. It
+                is emphatically **not** ``scheduler_chunk_size`` under another name:
+                that field bounds neither this listing nor an observation pass's
+                page, and the two defaults being equal is a coincidence of two
+                independently argued figures (ADR-0212 §3).
+
+        Returns:
+            The page, ``last_active_at`` ascending with ``id`` ascending.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
             ConversationStoreError: If the store cannot be read.
         """
         ...

@@ -169,6 +169,36 @@ _TURN_SELECT = (
     "t.delivery_state, t.delivery_played, t.delivery_rendered"
 )
 
+#: ADR-0212 §1's watermark, one nullable column with no default on the *conversation*
+#: — the row whose progress it records, and the store that allocated the ordinal it
+#: names. Held apart from the fresh-database ``CREATE TABLE`` for
+#: :meth:`SqliteConversationStore._migrate_observed` to add to a file written before
+#: it, exactly as :data:`_DELIVERY_COLUMNS` is one table down.
+#:
+#: **Nullable and defaultless is a contract obligation, not a convenience**
+#: (ADR-0212 §7): SQLite adds such a column in constant time without rewriting a row,
+#: every existing conversation comes back carrying no watermark, and a build written
+#: before this member — which names only the columns it knows in its
+#: ``INSERT INTO conversations(...)`` — goes on inserting against the upgraded file. A
+#: ``NOT NULL`` column with no default would make that build's ``start`` fail, which
+#: is a refusal to serve over a watermark arriving through the schema.
+_OBSERVED_COLUMN: Final = "observed_through INTEGER"
+
+#: **The seven columns every conversation read selects**, written out at each of the
+#: five reads that needs them rather than held in a name here — :data:`_TURN_SELECT`'s
+#: reason one table down, that ruff's ``S608`` reads a query assembled from a name as a
+#: possible injection vector whatever the name holds, and a literal at the call site is
+#: the cheaper answer than a suppression on each of them. The seven are the five stored
+#: columns, ``observed_through``, and the conversation's **highest turn ordinal**
+#: derived beside them as
+#: ``(SELECT MAX(t.ordinal) FROM turns t WHERE t.conversation_id = c.id)``.
+#:
+#: The derived column is not decoration. ADR-0212 §7 discards a watermark "above the
+#: highest ordinal the conversation holds", and that judgement is **the store's**, made
+#: where the record is built — so every read that builds a :class:`Conversation` has to
+#: have the figure in hand or it cannot make it. What keeps the five in step is
+#: :meth:`SqliteConversationStore._decode_conversation`, which every one of them feeds.
+
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
@@ -447,6 +477,41 @@ def _ordinal_of(value: object) -> int:
     return value
 
 
+def _usable_watermark(stored: object, highest: object) -> int | None:
+    """Read a stored observation watermark, discarding one this build cannot use.
+
+    ADR-0212 §7's disposition, and the one place it is decided: a value that is
+    **not an integer**, is **below** :data:`FIRST_TURN_ORDINAL`, or is **above the
+    highest ordinal the conversation holds** is discarded, and the conversation is
+    read as one with no watermark at all. It is never levelled, never advanced past
+    a value that could not be read, and — the part that matters most — **never an
+    error**. :func:`_ordinal_of`'s posture is deliberately not taken here: a
+    watermark is bookkeeping that holds no evidence and answers no query, so letting
+    a bad one raise would make a conversation unreadable through ``get``, ``recent``,
+    ``turns`` and ``export`` because a column the user never sees is wrong, which is
+    exactly the outcome ADR-0111 §7 forbids arriving through a different door.
+
+    ``highest`` is the conversation's highest turn ordinal, or ``None`` where it
+    holds no turn — in which case **no** watermark is supported and every value is
+    discarded. A ``highest`` that is not itself a usable integer is treated the same
+    way rather than raised on, which is the conservative direction: a corrupt
+    *ordinal* surfaces as this seam's error where a turn is decoded, and there is
+    nothing to be gained by having a conversation refuse to be read as well.
+
+    Args:
+        stored: The raw ``observed_through`` column value.
+        highest: The raw ``MAX(ordinal)`` of the conversation's turns.
+
+    Returns:
+        The watermark, or ``None`` where there is none this build can use.
+    """
+    if type(stored) is not int or not FIRST_TURN_ORDINAL <= stored < _PAGE_BOUND:
+        return None
+    if type(highest) is not int or not FIRST_TURN_ORDINAL <= highest < _PAGE_BOUND:
+        return None
+    return stored if stored <= highest else None
+
+
 def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
     """Refuse a paging argument that is not an exact ``int`` in ``[floor, 2**63)``.
 
@@ -563,8 +628,16 @@ class SqliteConversationStore:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS conversations("
                 "id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, "
-                "last_active_at INTEGER NOT NULL, last_turn_at INTEGER, deleted_at INTEGER)"
+                "last_active_at INTEGER NOT NULL, last_turn_at INTEGER, deleted_at INTEGER, "
+                + _OBSERVED_COLUMN
+                + ")"
             )
+            # Straight after the table it belongs to, and for the same reason
+            # `_migrate_delivery` runs one table down: `CREATE TABLE IF NOT EXISTS`
+            # is a no-op against a file that already holds `conversations`, so a
+            # database written before ADR-0212 would otherwise fail its first read
+            # on a column that is not there.
+            self._migrate_observed(conn)
             conn.execute("CREATE TABLE IF NOT EXISTS turns(" + _TURNS_COLUMNS + ")")
             # Before the indexes, because the rebuild drops the table and takes
             # them with it. It switches enforcement off for itself, because a
@@ -768,6 +841,26 @@ class SqliteConversationStore:
             if column.split(" ")[0] not in present:
                 conn.execute("ALTER TABLE turns ADD COLUMN " + column)
 
+    @staticmethod
+    def _migrate_observed(conn: sqlite3.Connection) -> None:
+        """Add ADR-0212 §7's watermark column to a ``conversations`` table without it.
+
+        :meth:`_migrate_delivery`'s shape one table up, and the ADR names that
+        migration as the precedent to apply: the column is nullable with no default,
+        so SQLite adds it in constant time **without rewriting a row**, every
+        conversation written before it comes back carrying no watermark — which §4
+        reads as a walk that has not started — and no existing column changes.
+
+        An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
+        :meth:`_migrate_turns` performs, because that is the whole of what is owed.
+        ``PRAGMA table_info`` is read rather than the stored DDL text, for
+        :meth:`_turns_reference_conversations`' reason: what decides is the shape the
+        table actually has.
+        """
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
+        if _OBSERVED_COLUMN.split(" ")[0] not in present:
+            conn.execute("ALTER TABLE conversations ADD COLUMN " + _OBSERVED_COLUMN)
+
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
 
@@ -863,6 +956,15 @@ class SqliteConversationStore:
     def _decode_conversation(row: Sequence[Any]) -> Conversation:
         """Rebuild a :class:`Conversation` from its row, surfacing corruption.
 
+        The row is the seven columns :data:`_CONVERSATION_SELECT` names — the five
+        stored ones, the raw watermark, and the conversation's highest turn ordinal
+        — because ADR-0212 §7 makes discarding an unusable watermark **the store's**
+        act, made where the record is built, and the judgement needs the last of the
+        seven. The discard itself is :func:`_usable_watermark`'s and is deliberately
+        not a fault: a watermark this build cannot use comes back absent rather than
+        raising, so one wrong bookkeeping integer cannot make a conversation
+        unreadable.
+
         Raises:
             ConversationStoreError: If the stored row does not validate.
         """
@@ -875,6 +977,7 @@ class SqliteConversationStore:
                     None if row[3] is None else _instant_from(row[3], what="last_turn_at")
                 ),
                 deleted_at=None if row[4] is None else _instant_from(row[4], what="deleted_at"),
+                observed_through=_usable_watermark(row[5], row[6]),
             )
         except (ValidationError, TypeError, OverflowError) as exc:
             msg = f"a stored conversation could not be decoded: {exc}"
@@ -952,8 +1055,10 @@ class SqliteConversationStore:
         rows = cls._fetch(
             conn,
             "read a conversation",
-            "SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
-            "FROM conversations WHERE id = ?",
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.observed_through, (SELECT MAX(t.ordinal) FROM turns t "
+            "WHERE t.conversation_id = c.id) "
+            "FROM conversations c WHERE c.id = ?",
             (conversation_id,),
         )
         return rows[0] if rows else None
@@ -1090,8 +1195,10 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "read a conversation",
-            "SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
-            "FROM conversations WHERE id = ? AND deleted_at IS NULL",
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.observed_through, (SELECT MAX(t.ordinal) FROM turns t "
+            "WHERE t.conversation_id = c.id) "
+            "FROM conversations c WHERE c.id = ? AND c.deleted_at IS NULL",
             (conversation_id,),
         )
 
@@ -1310,6 +1417,64 @@ class SqliteConversationStore:
             written_row: Sequence[Any] = stamped[0]
             return written_row
 
+    async def record_observed(
+        self, conversation_id: str, *, through_ordinal: int
+    ) -> Conversation | None:
+        """Advance the watermark if it moves it forward without leading the turns.
+
+        The read of the two conditions and the write are one ``IMMEDIATE``
+        transaction, so two concurrent advances cannot both write from the same
+        reading: the second observes the position the first left and performs
+        nothing, which is ADR-0212 §5's monotonicity held **across processes** and
+        not only across coroutines on one loop. That is the whole of what makes two
+        overlapping observation passes safe.
+
+        The range refusal is **before the lock and before any I/O**, on ADR-0085
+        §3's convention.
+
+        Raises:
+            ValueError: If ``through_ordinal`` is outside
+                ``[FIRST_TURN_ORDINAL, 2**63)``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        _check_page_bound("through_ordinal", through_ordinal, floor=FIRST_TURN_ORDINAL)
+        async with self._lock:
+            row = await _run_to_completion(
+                self._record_observed_sync, conversation_id, through_ordinal
+            )
+        return None if row is None else self._decode_conversation(row)
+
+    def _record_observed_sync(
+        self, conversation_id: str, through_ordinal: int
+    ) -> Sequence[Any] | None:
+        with self._transaction("record an observation watermark") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            # Both of ADR-0212 §8's conditions, read under the write lock. The
+            # recorded value is the *usable* one, so a watermark this build
+            # discarded (§7) is stampable again from the tail rather than leaving
+            # the conversation permanently stuck behind a value nobody can read.
+            recorded = _usable_watermark(row[5], row[6])
+            highest = row[6]
+            leads = type(highest) is not int or through_ordinal > highest
+            lowers = recorded is not None and through_ordinal <= recorded
+            if leads or lowers:
+                # `record_delivery`'s shape and its reason: no row is written, and
+                # no error is raised. An attempt that loses is an attempt whose
+                # position already stands.
+                return None
+            conn.execute(
+                "UPDATE conversations SET observed_through = ? WHERE id = ?",
+                (through_ordinal, conversation_id),
+            )
+            stamped = self._row_of(conn, conversation_id)
+            if stamped is None:  # pragma: no cover — the row was just updated here
+                raise self._unknown(conversation_id)
+            return stamped
+
     async def turns(
         self,
         conversation_id: str,
@@ -1365,6 +1530,64 @@ class SqliteConversationStore:
                     (conversation_id, before_ordinal, page),
                 )
             return list(reversed(rows))
+
+    async def turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after_ordinal: int | None = None,
+        limit: int | None = None,
+    ) -> list[ConversationTurn]:
+        """Return the lowest page of turns above ``after_ordinal``, ordinal ascending.
+
+        Raises:
+            ValueError: If ``limit`` or ``after_ordinal`` is out of range.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be read.
+        """
+        page = self._tail_limit if limit is None else limit
+        _check_page_bound("limit", page)
+        if after_ordinal is not None:
+            _check_page_bound("after_ordinal", after_ordinal, floor=FIRST_TURN_ORDINAL)
+        async with self._lock:
+            rows = await _run_to_completion(
+                self._turns_after_sync, conversation_id, page, after_ordinal
+            )
+        return [self._decode_turn(row) for row in rows]
+
+    def _turns_after_sync(
+        self, conversation_id: str, page: int, after_ordinal: int | None
+    ) -> list[Any]:
+        with self._transaction("read a conversation's turns", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            if page == 0:
+                return []
+            # `ORDER BY ordinal ASC` and no reversal afterwards: this read takes the
+            # *lowest* rows above the floor rather than the newest below a ceiling,
+            # which is the whole difference between it and `turns`. Both hand the
+            # page back oldest-first, so the two are interchangeable to a consumer
+            # that only replays what it is given.
+            head = (
+                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
+                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "FROM turns WHERE conversation_id = ?"
+            )
+            if after_ordinal is None:
+                return self._fetch(
+                    conn,
+                    "read a conversation's turns",
+                    head + " ORDER BY ordinal ASC LIMIT ?",
+                    (conversation_id, page),
+                )
+            return self._fetch(
+                conn,
+                "read a conversation's turns",
+                head + " AND ordinal > ? ORDER BY ordinal ASC LIMIT ?",
+                (conversation_id, after_ordinal, page),
+            )
 
     async def episodes_to_purge(
         self,
@@ -1491,10 +1714,55 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "list recent conversations",
-            "SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
-            "FROM conversations WHERE deleted_at IS NULL "
-            "ORDER BY last_active_at DESC, id ASC LIMIT ? OFFSET ?",
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.observed_through, (SELECT MAX(t.ordinal) FROM turns t "
+            "WHERE t.conversation_id = c.id) "
+            "FROM conversations c WHERE c.deleted_at IS NULL "
+            "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
             (limit, offset),
+        )
+
+    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
+        """List candidates for observation, least recently active first.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read.
+        """
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return []
+        async with self._lock:
+            rows = await _run_to_completion(self._unobserved_sync, limit)
+        return [self._decode_conversation(row) for row in rows]
+
+    def _unobserved_sync(self, limit: int) -> list[Any]:
+        # Candidacy in four disjuncts over one subquery, which is ADR-0212 §3's rule
+        # composed with §7's discard rather than either taken alone. A conversation
+        # with no turn is never a candidate (`highest IS NOT NULL`); one whose stored
+        # watermark this build cannot use is a candidate on its own terms, because a
+        # discarded watermark reads as absent — and *that* is why the first three
+        # disjuncts exist. Filtering on `t.ordinal > c.observed_through` alone would
+        # get them all wrong in the same silent direction: SQLite sorts every
+        # integer below every string, so a text watermark excludes the conversation
+        # for good, and a REAL one excludes exactly the turns beneath it.
+        return self._fetch(
+            self._conn,
+            "list conversations with unobserved turns",
+            "SELECT id, started_at, last_active_at, last_turn_at, deleted_at, "
+            "observed_through, highest FROM ("
+            "SELECT c.id AS id, c.started_at AS started_at, "
+            "c.last_active_at AS last_active_at, c.last_turn_at AS last_turn_at, "
+            "c.deleted_at AS deleted_at, c.observed_through AS observed_through, "
+            "(SELECT MAX(t.ordinal) FROM turns t WHERE t.conversation_id = c.id) AS highest "
+            "FROM conversations c WHERE c.deleted_at IS NULL) "
+            "WHERE highest IS NOT NULL AND ("
+            "typeof(observed_through) <> 'integer' "
+            "OR observed_through < ? "
+            "OR observed_through > highest "
+            "OR highest > observed_through) "
+            "ORDER BY last_active_at ASC, id ASC LIMIT ?",
+            (FIRST_TURN_ORDINAL, limit),
         )
 
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
@@ -1666,9 +1934,11 @@ class SqliteConversationStore:
             conversations = self._fetch(
                 conn,
                 "export conversations",
-                "SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
-                "FROM conversations WHERE deleted_at IS NULL "
-                "ORDER BY last_active_at DESC, id ASC",
+                "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+                "c.observed_through, (SELECT MAX(t.ordinal) FROM turns t "
+                "WHERE t.conversation_id = c.id) "
+                "FROM conversations c WHERE c.deleted_at IS NULL "
+                "ORDER BY c.last_active_at DESC, c.id ASC",
             )
             turns = self._fetch(
                 conn,

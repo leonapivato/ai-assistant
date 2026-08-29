@@ -173,4 +173,4 @@ def test_an_export_of_an_empty_conversation_is_well_formed() -> None:
     exported = ConversationExport(exported_at=_NOW, conversations=(_conversation(),))
 
     assert exported.turns == ()
-    assert exported.schema_version == 1
+    assert exported.schema_version == 2
