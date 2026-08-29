@@ -132,6 +132,36 @@ def _first_row(drive: Drive) -> Locator:
     return drive.page.locator("#conversation-list .conversation-row").first
 
 
+async def test_the_row_the_owner_taps_names_the_conversation_it_will_continue(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The tap is a choice, and a choice needs the thing being chosen on screen.
+
+    A text assertion can say the row *renders* the id; what it cannot say is that the
+    id it renders is the one the indicator names afterwards. That is the property
+    worth having — the two are written by different functions from different
+    responses, and a listing keyed by activity and an indicator keyed by a tap are
+    exactly the pair that can disagree.
+
+    It is also laid out so an id cannot push the row off a phone: the name has the
+    whole width of the row, and the page scrolls no further sideways than it did.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        _seed(drive, "c-1", turns=3)
+        _seed(drive, "c-2", turns=1)
+        await drive.page.set_viewport_size({"width": 390, "height": 844})
+        await _open_listing(drive)
+        named = await _first_row(drive).locator(".conversation-name").inner_text()
+        assert named in {"Conversation c-1", "Conversation c-2"}
+        await _first_row(drive).get_by_role("button", name="Continue").click()
+        await drive.page.wait_for_selector("#resumed:not([hidden])")
+        said = await drive.page.inner_text("#conversation")
+        assert said == f"{named}. Your next question continues it."
+        assert await drive.page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+
+
 async def test_tapping_continue_moves_the_indicator_to_that_conversation(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

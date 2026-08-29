@@ -5438,6 +5438,17 @@ async function listConversations() {
 function renderConversation(list, summary) {
   const item = document.createElement("div");
   item.className = "conversation-row";
+  // **Which conversation this row is** (#1371's first clause, found by driving the
+  // page rather than by reading it). Every other line about a conversation on this
+  // page names it — the indicator, the destroy ceremony, the outcome of a forget —
+  // and the listing they all send the owner to named none of them: three rows of two
+  // timestamps, and the sentence that appears after a tap names an id that was never
+  // on screen before the tap. Choosing which thread to continue was the one act this
+  // surface offered and the one it gave nothing to choose on.
+  //
+  // Its own line rather than a clause of the next one, because the id is what the
+  // eye is looking for and a phone puts it behind two long instants otherwise.
+  line(item, `Conversation ${summary.id}`, "conversation-name");
   const when = summary.last_turn_at || summary.last_active_at;
   // Both instants cross and they are different facts (ADR-0074 §2): activity is
   // when someone was last here and orders the list, and `last_turn_at` is when a

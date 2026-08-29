@@ -449,6 +449,24 @@ code {
 }
 
 /*
+ * Which conversation the row is (#1371). `flex-basis: 100%` gives it the whole
+ * width of a wrapping row, which puts it on its own line above the instants and the
+ * two controls at every viewport rather than only at a narrow one — the id is what
+ * the eye is looking for, and it is a hub value of no bounded length, so competing
+ * for horizontal space with two timestamps is the one arrangement that cannot work.
+ *
+ * `overflow-wrap` because an id has no spaces to break at: without it a long one
+ * pushes the row past the viewport, which is the class of defect a hand drive of
+ * this page has already found once (#1385's "Remo ve").
+ */
+.conversation-name {
+  flex: 1 1 100%;
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/*
  * The control surface (ADR-0177). Each row is one subject — a source, a standing
  * grant, a history record, a belief, a question — stacked rather than laid out in
  * a flex line, because these rows carry several sentences each and a person reads
