@@ -527,9 +527,15 @@ The simpler rule pays for that one turn instead.
 > to the watermark, which §5 forbids, and none of them can distinguish the two states
 > anyway.
 
-> **Normative.** The whole page a failed pass read is re-read by the next pass, and
-> the repetition is safe rather than merely tolerated. No implementation may narrow
-> a re-read to "the turns whose proposals were not ruled".
+> **Normative.** Where a failed pass's advance attempt did **not** commit — every
+> failure before the attempt, and the half of the ambiguous case above in which the
+> stamp did not land — the whole page that pass read is re-read by the next pass, and
+> the repetition is safe rather than merely tolerated. Where the stamp **did** commit,
+> the whole page is not re-read and does not need to be: the next pass resumes above
+> the recorded position under §3's ordinary candidacy rule, and §5 lets a pass name
+> that position only after every proposal it produced has been ruled, so the position
+> records work that was done. In neither case may an implementation narrow a re-read to
+> "the turns whose proposals were not ruled".
 
 **This is ADR-0111 §5, inherited whole.** "When a chunk cannot be recorded as done,
 the run stops immediately, leaves the cursor at the last chunk that was recorded,
@@ -779,8 +785,10 @@ in**, written as an end-to-end test over two interleaved passes rather than as t
 store calls in a row, with the duplicate proposals folding to `REINFORCE` and no
 duplicate record; **a pass cancelled after its `record_observed` commits but before the
 await returns leaves the stamped watermark and adds no compensating write**, injected
-deterministically; a pass that raises inside the write path after one proposal was
-ruled advances nothing and the next pass re-reads the whole page; a second pass over the same page produces `REINFORCE` and no duplicate record,
+deterministically, **and the next pass over that conversation resumes above the
+stamped position rather than re-reading the page**; a pass that raises inside the write
+path after one proposal was ruled advances nothing and the next pass re-reads the whole
+page; a second pass over the same page produces `REINFORCE` and no duplicate record,
 pinned end to end and not only at the gate; `record_observed` never lowers a
 watermark and returns `None` when asked to; `record_observed` refuses an ordinal
 above the conversation's highest and stamps nothing; two concurrent `record_observed`
