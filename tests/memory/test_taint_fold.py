@@ -20,11 +20,14 @@ implementation that simply copies that side: a fold written in the majority styl
 first clean reinforcement, which is exactly the laundering ADR-0106 §4 exists to
 stop, and it passes a tainted-incoming case with full marks.
 
-**Both fold arms too**, because ADR-0103 §6's corroboration arm builds its
-survivor from the *target's* provenance and is therefore the arm where a
-copy-one-side implementation looks right for the other reason. ADR-0106 §4 states
-its clause over the fold rather than over either record, so both arms owe the
-disjunction.
+**All three fold arms too**, because a corroboration arm builds its survivor from
+the *target's* provenance and is therefore where a copy-one-side implementation
+looks right for the other reason. ADR-0106 §4 states its clause over the fold
+rather than over either record, so every arm owes the disjunction — ADR-0103 §6's
+``ATTESTED`` pairing, ADR-0214 §4's ``USER_ASSERTED`` one, and the ordinary arm
+(:data:`_ARM_TARGET`). ADR-0214 §7 records why its clause is not disturbed by the
+widening: "a rule stated over the fold does not narrow when the fold's population
+grows", which is a claim this file is where anyone would check.
 
 **Every case carries a ``UserConfirmation``**, and it is what makes the two
 positions one code path rather than two. Since ADR-0106 §6 ``DefaultMemoryPolicy``
@@ -71,6 +74,33 @@ _CONTENT: Final = "prefers concise emails"
 #: ingestor to accept it at all (ADR-0077 §5).
 _EPISODE: Final = "episode-1"
 
+#: The three arms :func:`_merge` selects between, named by the **target** each fold
+#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
+#: wearing the target's id. The other two are corroboration arms, where the survivor
+#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
+#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
+#: **total** over the incoming record's.
+#:
+#: **The asserted arm is reached through clause 1's agreeing-fold exception**
+#: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
+#: content the target already carries: an ``OBSERVED`` proposal that did not agree
+#: would be refused at the writer rather than folded, and the case would measure the
+#: refusal instead of the fold.
+_ORDINARY: Final = "ordinary"
+_ATTESTED: Final = "attested"
+_ASSERTED: Final = "asserted"
+
+#: The source each arm's target carries — and, since every proposal below is
+#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
+#: discriminator: on the ordinary arm the survivor takes the incoming record's
+#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
+#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
+_ARM_TARGET: Final = {
+    _ORDINARY: MemorySource.OBSERVED,
+    _ATTESTED: MemorySource.EXTERNAL,
+    _ASSERTED: MemorySource.USER_ASSERTED,
+}
+
 WriterFactory = Callable[["MemoryStore", "MemoryPolicy", "Clock"], "MemoryWriter"]
 
 
@@ -93,26 +123,26 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-def _target(*, tainted: bool, corroborating: bool) -> MemoryRecord:
+def _target(*, tainted: bool, arm: str) -> MemoryRecord:
     """The stored record the ruling folds into, on whichever arm the case wants.
 
-    ``corroborating`` selects ADR-0103 §6's pairing — an ``ATTESTED`` target under
-    a ``DERIVED`` proposal — where the survivor is the *target* wearing a new
-    provenance. Anything else is the ordinary arm, where the survivor is the
-    incoming record wearing the target's id.
+    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
+    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
+    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
+    arm where the survivor is the incoming record wearing the target's id.
     """
-    source = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
+    source = _ARM_TARGET[arm]
     return PreferenceMemory(
         id="target",
         content=_CONTENT,
         preference=_CONTENT,
         provenance=Provenance(
             source=source,
-            confidence=0.6,
+            confidence=1.0 if arm == _ASSERTED else 0.6,
             last_updated=_WHEN,
             attestation=(
                 Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if corroborating
+                if arm == _ATTESTED
                 else None
             ),
             derived_from_external=tainted,
@@ -179,7 +209,7 @@ async def _fold(
     *,
     tainted_target: bool,
     tainted_incoming: bool,
-    corroborating: bool,
+    arm: str,
 ) -> MemoryRecord:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
@@ -196,7 +226,7 @@ async def _fold(
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
         )
     )
-    await store.add(_target(tainted=tainted_target, corroborating=corroborating))
+    await store.add(_target(tainted=tainted_target, arm=arm))
 
     writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(_confirmed_proposal(_incoming(tainted=tainted_incoming)))
@@ -204,17 +234,19 @@ async def _fold(
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
     assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: both arms leave a
-    # record at the target's id, so a `corroboration-arm` case that silently ran
-    # the ordinary one would pass every assertion below while checking half of
-    # what ADR-0106 §4 rules. `source` is the discriminator (ADR-0103 §6).
-    expected_source = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
-    assert survivor.provenance.source is expected_source
+    # The arm actually taken, asserted rather than assumed: every arm leaves a
+    # record at the target's id, so a corroboration case that silently ran the
+    # ordinary one would pass every assertion below while checking half of what
+    # ADR-0106 §4 rules. `source` is the discriminator (ADR-0103 §6, ADR-0214 §4),
+    # and on the asserted arm it is also the demotion ADR-0038 §2a names.
+    assert survivor.provenance.source is _ARM_TARGET[arm]
     return survivor
 
 
 _ARMS: Final = pytest.mark.parametrize(
-    "corroborating", [False, True], ids=["ordinary-arm", "corroboration-arm"]
+    "arm",
+    [_ORDINARY, _ATTESTED, _ASSERTED],
+    ids=["ordinary-arm", "attested-corroboration-arm", "asserted-corroboration-arm"],
 )
 
 
@@ -229,9 +261,9 @@ async def test_a_fold_combining_a_tainted_side_is_tainted(
     *,
     tainted_target: bool,
     tainted_incoming: bool,
-    corroborating: bool,
+    arm: str,
 ) -> None:
-    """ADR-0106 §4, in both positions and on both arms.
+    """ADR-0106 §4, in both positions and on every arm.
 
     The direction that has to be exercised is the **tainted target reinforced by
     an untainted incoming**: the opposite direction passes an implementation that
@@ -244,7 +276,7 @@ async def test_a_fold_combining_a_tainted_side_is_tainted(
         make_writer,
         tainted_target=tainted_target,
         tainted_incoming=tainted_incoming,
-        corroborating=corroborating,
+        arm=arm,
     )
 
     assert survivor.provenance.derived_from_external is True
@@ -252,7 +284,7 @@ async def test_a_fold_combining_a_tainted_side_is_tainted(
 
 @_ARMS
 async def test_a_fold_of_two_untainted_records_stays_untainted(
-    make_writer: WriterFactory, *, corroborating: bool
+    make_writer: WriterFactory, *, arm: str
 ) -> None:
     """The negative control, without which the cases above pass a hardcoded ``True``.
 
@@ -265,7 +297,7 @@ async def test_a_fold_of_two_untainted_records_stays_untainted(
         make_writer,
         tainted_target=False,
         tainted_incoming=False,
-        corroborating=corroborating,
+        arm=arm,
     )
 
     assert survivor.provenance.derived_from_external is False

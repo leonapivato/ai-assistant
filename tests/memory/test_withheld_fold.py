@@ -16,7 +16,8 @@ launder — it builds its survivor's ``Provenance`` field by field, exactly as
 is production's laundering path performed by the object a consumer reaches for
 instead of `memory`'s internals.
 
-**Both positions and both arms**, for ADR-0106 §10's reason transferred whole:
+**Both positions and every arm** (:data:`_ARM_TARGET`), for ADR-0106 §10's reason
+transferred whole:
 ``_merge`` reads most of its provenance from one side, so a case in either
 position alone passes an implementation that simply copies that side. The
 direction that has to be exercised is a **stamped target reinforced by an
@@ -63,6 +64,33 @@ _EPISODE: Final = "episode-1"
 #: both records rather than discovering one (ADR-0045 §4's "freshly-minted id").
 _CORRECTION: Final = "corrected"
 
+#: The three arms :func:`_merge` selects between, named by the **target** each fold
+#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
+#: wearing the target's id. The other two are corroboration arms, where the survivor
+#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
+#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
+#: **total** over the incoming record's.
+#:
+#: **The asserted arm is reached through clause 1's agreeing-fold exception**
+#: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
+#: content the target already carries: an ``OBSERVED`` proposal that did not agree
+#: would be refused at the writer rather than folded, and the case would measure the
+#: refusal instead of the fold.
+_ORDINARY: Final = "ordinary"
+_ATTESTED: Final = "attested"
+_ASSERTED: Final = "asserted"
+
+#: The source each arm's target carries — and, since every proposal below is
+#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
+#: discriminator: on the ordinary arm the survivor takes the incoming record's
+#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
+#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
+_ARM_TARGET: Final = {
+    _ORDINARY: MemorySource.OBSERVED,
+    _ATTESTED: MemorySource.EXTERNAL,
+    _ASSERTED: MemorySource.USER_ASSERTED,
+}
+
 WriterFactory = Callable[
     ["MemoryStore", "MemoryPolicy", "Clock", Callable[[], str]], "MemoryWriter"
 ]
@@ -93,26 +121,26 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-def _target(*, stamped: bool, corroborating: bool, content: str = _CONTENT) -> MemoryRecord:
+def _target(*, stamped: bool, arm: str, content: str = _CONTENT) -> MemoryRecord:
     """The stored record the ruling folds into, on whichever arm the case wants.
 
-    ``corroborating`` selects ADR-0103 §6's pairing — an ``ATTESTED`` target under
-    a ``DERIVED`` proposal — where the survivor is the *target* wearing a new
-    provenance. Anything else is the ordinary arm, where the survivor is the
-    incoming record wearing the target's id.
+    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
+    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
+    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
+    arm where the survivor is the incoming record wearing the target's id.
     """
-    source = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
+    source = _ARM_TARGET[arm]
     return PreferenceMemory(
         id="target",
         content=content,
         preference=content,
         provenance=Provenance(
             source=source,
-            confidence=0.6,
+            confidence=1.0 if arm == _ASSERTED else 0.6,
             last_updated=_WHEN,
             attestation=(
                 Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if corroborating
+                if arm == _ATTESTED
                 else None
             ),
             supplied_withheld_content=stamped,
@@ -164,7 +192,7 @@ async def _fold(
     *,
     stamped_target: bool,
     stamped_incoming: bool,
-    corroborating: bool,
+    arm: str,
 ) -> MemoryRecord:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
@@ -172,7 +200,7 @@ async def _fold(
     *stored*, and a unit call on either private function would have to be written
     twice — which is the drift running both writers exists to catch.
     """
-    store = await _seeded(_target(stamped=stamped_target, corroborating=corroborating))
+    store = await _seeded(_target(stamped=stamped_target, arm=arm))
     writer = make_writer(
         store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), _fixed_now, lambda: _CORRECTION
     )
@@ -184,17 +212,18 @@ async def _fold(
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
     assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: both arms leave a record
-    # at the target's id, so a `corroboration-arm` case that silently ran the
-    # ordinary one would check half of what §5's first clause rules. `source` is the
-    # discriminator (ADR-0103 §6).
-    expected = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
-    assert survivor.provenance.source is expected
+    # The arm actually taken, asserted rather than assumed: every arm leaves a record
+    # at the target's id, so a corroboration case that silently ran the ordinary one
+    # would check half of what §5's first clause rules. `source` is the discriminator
+    # (ADR-0103 §6, ADR-0214 §4).
+    assert survivor.provenance.source is _ARM_TARGET[arm]
     return survivor
 
 
 _ARMS: Final = pytest.mark.parametrize(
-    "corroborating", [False, True], ids=["ordinary-arm", "corroboration-arm"]
+    "arm",
+    [_ORDINARY, _ATTESTED, _ASSERTED],
+    ids=["ordinary-arm", "attested-corroboration-arm", "asserted-corroboration-arm"],
 )
 
 
@@ -209,7 +238,7 @@ async def test_a_fold_combining_a_stamped_side_is_stamped(
     *,
     stamped_target: bool,
     stamped_incoming: bool,
-    corroborating: bool,
+    arm: str,
 ) -> None:
     """§8 case 7: the survivor's value is the disjunction, in both argument orders.
 
@@ -223,7 +252,7 @@ async def test_a_fold_combining_a_stamped_side_is_stamped(
         make_writer,
         stamped_target=stamped_target,
         stamped_incoming=stamped_incoming,
-        corroborating=corroborating,
+        arm=arm,
     )
 
     assert survivor.provenance.supplied_withheld_content is True
@@ -231,7 +260,7 @@ async def test_a_fold_combining_a_stamped_side_is_stamped(
 
 @_ARMS
 async def test_a_fold_of_two_unstamped_records_stays_unstamped(
-    make_writer: WriterFactory, *, corroborating: bool
+    make_writer: WriterFactory, *, arm: str
 ) -> None:
     """The negative control, without which the cases above pass a hardcoded ``True``.
 
@@ -241,9 +270,7 @@ async def test_a_fold_of_two_unstamped_records_stays_unstamped(
     from the spoken channel, which is milestone 19's exit test failing by a second
     route (§1's third clause).
     """
-    survivor = await _fold(
-        make_writer, stamped_target=False, stamped_incoming=False, corroborating=corroborating
-    )
+    survivor = await _fold(make_writer, stamped_target=False, stamped_incoming=False, arm=arm)
 
     assert survivor.provenance.supplied_withheld_content is False
 
@@ -273,7 +300,7 @@ async def test_a_supersession_writes_the_proposals_value_beside_a_retained_targe
     store = await _seeded(
         _target(
             stamped=stamped_target,
-            corroborating=False,
+            arm=_ORDINARY,
             content="prefers concise emails, an older note",
         )
     )
