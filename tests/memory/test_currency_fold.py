@@ -82,6 +82,33 @@ _EPISODE: Final = "episode-1"
 #: Builds a writer over a store, a policy and a clock. The clock is a parameter
 #: rather than a constant because ADR-0109 §5's usability test *is* a clock read:
 #: the case that moves it is what proves the earlier cases turned on it.
+#: The three arms :func:`_merge` selects between, named by the **target** each fold
+#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
+#: wearing the target's id. The other two are corroboration arms, where the survivor
+#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
+#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
+#: **total** over the incoming record's.
+#:
+#: **The asserted arm is reached through clause 1's agreeing-fold exception**
+#: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
+#: content the target already carries: an ``OBSERVED`` proposal that did not agree
+#: would be refused at the writer rather than folded, and the case would measure the
+#: refusal instead of the fold.
+_ORDINARY: Final = "ordinary"
+_ATTESTED: Final = "attested"
+_ASSERTED: Final = "asserted"
+
+#: The source each arm's target carries — and, since every proposal below is
+#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
+#: discriminator: on the ordinary arm the survivor takes the incoming record's
+#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
+#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
+_ARM_TARGET: Final = {
+    _ORDINARY: MemorySource.OBSERVED,
+    _ATTESTED: MemorySource.EXTERNAL,
+    _ASSERTED: MemorySource.USER_ASSERTED,
+}
+
 WriterFactory = Callable[["MemoryStore", "MemoryPolicy", "Clock"], "MemoryWriter"]
 
 
@@ -123,29 +150,30 @@ def _episode(episode_id: str, occurred_at: datetime) -> EpisodicMemory:
 def _target(
     *,
     last_confirmed_at: datetime | None,
-    corroborating: bool,
+    arm: str,
     record_id: str = "target",
 ) -> MemoryRecord:
     """The stored record the ruling folds into, on whichever arm the case wants.
 
-    ``corroborating`` selects ADR-0103 §6's pairing — an ``ATTESTED`` target under
-    a ``DERIVED`` proposal — where the survivor is the *target* wearing a new
-    provenance. Anything else is the ordinary arm, where the survivor is the
-    incoming record wearing the target's id. ADR-0109 §6 rules the instant
-    identically on both, which is what running every case over the pair checks.
+    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
+    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
+    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
+    arm where the survivor is the incoming record wearing the target's id. ADR-0109
+    §6 rules the instant identically on all three, which is what running every case
+    over them checks.
     """
-    source = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
+    source = _ARM_TARGET[arm]
     return PreferenceMemory(
         id=record_id,
         content=_CONTENT,
         preference=_CONTENT,
         provenance=Provenance(
             source=source,
-            confidence=0.6,
+            confidence=1.0 if arm == _ASSERTED else 0.6,
             last_updated=_TARGET_UPDATED,
             attestation=(
                 Attestation(reported_by="calendar:work", reported_at=_REPORTED_AT)
-                if corroborating
+                if arm == _ATTESTED
                 else None
             ),
             last_confirmed_at=last_confirmed_at,
@@ -222,7 +250,7 @@ async def _fold(
     *,
     target_at: datetime | None,
     incoming_at: datetime | None,
-    corroborating: bool,
+    arm: str,
 ) -> MemoryRecord:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
@@ -233,7 +261,7 @@ async def _fold(
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
-    await store.add(_target(last_confirmed_at=target_at, corroborating=corroborating))
+    await store.add(_target(last_confirmed_at=target_at, arm=arm))
 
     writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(_proposal(_incoming(last_confirmed_at=incoming_at)))
@@ -241,19 +269,20 @@ async def _fold(
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
     assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: both arms leave a
-    # record at the target's id, so a `corroboration-arm` case that silently ran
-    # the ordinary one would pass every currency assertion below while checking
-    # half of what ADR-0109 §6 rules. `source` is the discriminator, because the
-    # corroboration arm keeps the target's and the ordinary arm takes the
-    # incoming record's (ADR-0103 §6).
-    expected_source = MemorySource.EXTERNAL if corroborating else MemorySource.OBSERVED
-    assert survivor.provenance.source is expected_source
+    # The arm actually taken, asserted rather than assumed: every arm leaves a
+    # record at the target's id, so a corroboration case that silently ran the
+    # ordinary one would pass every currency assertion below while checking half of
+    # what ADR-0109 §6 rules. `source` is the discriminator, because a corroboration
+    # arm keeps the target's and the ordinary arm takes the incoming record's
+    # (ADR-0103 §6, ADR-0214 §4).
+    assert survivor.provenance.source is _ARM_TARGET[arm]
     return survivor
 
 
 _ARMS: Final = pytest.mark.parametrize(
-    "corroborating", [False, True], ids=["ordinary-arm", "corroboration-arm"]
+    "arm",
+    [_ORDINARY, _ATTESTED, _ASSERTED],
+    ids=["ordinary-arm", "attested-corroboration-arm", "asserted-corroboration-arm"],
 )
 
 
@@ -280,7 +309,7 @@ _ARMS: Final = pytest.mark.parametrize(
 async def test_the_fold_takes_the_later_usable_confirming_instant(
     make_writer: WriterFactory,
     *,
-    corroborating: bool,
+    arm: str,
     target_at: datetime | None,
     incoming_at: datetime | None,
     expected: datetime,
@@ -303,16 +332,19 @@ async def test_the_fold_takes_the_later_usable_confirming_instant(
     perfectly good confirmation in hand — the manufactured staleness ADR-0103 §6
     and ADR-0103 §9 both refuse, which is the whole reason this fold takes a clock.
 
-    Run on both arms because ADR-0109 §6 reads ADR-0103 §9's fourth clause
+    Run on every arm because ADR-0109 §6 reads ADR-0103 §9's fourth clause
     generally: "whatever band that record came from" is vacuous under ADR-0103 §6's
     pairing alone, and a same-band rule that withheld currency would age a belief
-    re-observed every week exactly as fast as one nobody has seen since.
+    re-observed every week exactly as fast as one nobody has seen since. Since
+    ADR-0214 §4 the asserted arm is where that matters most: watching the user live
+    out what they told us is now the second thing that can refresh an assertion's
+    currency, and before it the only one was their saying it again.
     """
     survivor = await _fold(
         make_writer,
         target_at=target_at,
         incoming_at=incoming_at,
-        corroborating=corroborating,
+        arm=arm,
     )
 
     assert survivor.provenance.last_confirmed_at == expected
@@ -336,7 +368,7 @@ async def test_the_fold_takes_the_later_usable_confirming_instant(
 async def test_the_fold_yields_unknown_where_neither_instant_is_usable(
     make_writer: WriterFactory,
     *,
-    corroborating: bool,
+    arm: str,
     target_at: datetime | None,
     incoming_at: datetime | None,
 ) -> None:
@@ -359,7 +391,7 @@ async def test_the_fold_yields_unknown_where_neither_instant_is_usable(
         make_writer,
         target_at=target_at,
         incoming_at=incoming_at,
-        corroborating=corroborating,
+        arm=arm,
     )
 
     assert survivor.provenance.last_confirmed_at is None
@@ -367,7 +399,7 @@ async def test_the_fold_yields_unknown_where_neither_instant_is_usable(
 
 @_ARMS
 async def test_a_future_instant_is_not_promoted_when_the_clock_passes_it(
-    make_writer: WriterFactory, *, corroborating: bool
+    make_writer: WriterFactory, *, arm: str
 ) -> None:
     """The selection is made once, at the fold (ADR-0109 §5).
 
@@ -380,7 +412,7 @@ async def test_a_future_instant_is_not_promoted_when_the_clock_passes_it(
     later = _FUTURE.replace(year=_FUTURE.year + 1)
     store = InMemoryMemoryStore(now=lambda: later)
     await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
-    await store.add(_target(last_confirmed_at=_FUTURE, corroborating=corroborating))
+    await store.add(_target(last_confirmed_at=_FUTURE, arm=arm))
 
     writer = make_writer(store, _folding_policy(), lambda: later)
     result = await writer.ingest(_proposal(_incoming(last_confirmed_at=_JANUARY)))
@@ -424,7 +456,7 @@ async def test_the_citation_bound_displaces_citations_and_not_the_instant(
     ]
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, *episodes)
-    await store.add(_target(last_confirmed_at=None, corroborating=False))
+    await store.add(_target(last_confirmed_at=None, arm=_ORDINARY))
 
     writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(
