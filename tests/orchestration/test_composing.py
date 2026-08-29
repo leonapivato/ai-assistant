@@ -651,8 +651,42 @@ async def test_a_plan_with_no_step_is_rendered_as_a_decision_not_a_gap() -> None
     )
 
     prompt = _prompt(model)
-    assert "the planner produced no steps for this turn" in prompt
+    assert "the planner named no capability for this turn" in prompt
     assert "No step was driven, because the plan had none." in prompt
+
+
+async def test_the_no_step_line_makes_no_claim_about_what_was_needed() -> None:
+    """ADR-0211 §9 item 7: the branch defers to the rationale and asserts neither ground.
+
+    The sentence used to close on "so no action was taken and none was needed",
+    which is false on the second of ADR-0211 §4's two decline grounds — a goal that
+    *did* require an act, which nothing advertised could carry. Telling the
+    composing model that none was needed while the rationale beside it says the
+    assistant could not do what was asked is the contradiction ADR-0170 §5 exists to
+    stop: a stage narrating something it was not told, against something it was.
+
+    **Asserted on the assembler's own line and nothing wider.** The two grounds are
+    deliberately indistinguishable to this function — ADR-0211 §5 keeps them out of
+    the envelope's structure, so the rationale is the only place the difference is
+    stated — which means what can be checked here is that the line claims nothing
+    about necessity, and that the planner's own words follow it. A search of the
+    whole prompt would be a search of the planning model's rationale too, and would
+    fail on a decline that legitimately says a capability was needed.
+    """
+    model = FakeModelProvider("answer")
+    reason = "I would have had to look at your calendar, and I cannot do that."
+
+    await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
+        turn=_turn(plan=_plan(rationale=reason)), step=None, undriven=()
+    )
+
+    lines = _prompt(model).splitlines()
+    decision = lines[lines.index("What the assistant decided to do:") + 1]
+    assert "needed" not in decision, "the assembler claims nothing about necessity"
+    assert (
+        json.loads(lines[lines.index("What the assistant decided to do:") + 2].split(": ", 1)[1])
+        == reason
+    )
 
 
 async def test_a_declines_rationale_reaches_the_stage_as_the_planners_own_words() -> None:
@@ -660,9 +694,9 @@ async def test_a_declines_rationale_reaches_the_stage_as_the_planners_own_words(
 
     ADR-0176 §3 requires a decline envelope to carry a non-blank ``rationale``
     because with no steps it is "the only thing the persisted ``ActionPlan``
-    says" — the sole record of why no capability was named. A stage handed
-    "none was needed" with the reason stripped out is left to infer what it was
-    not told, which is the shape ADR-0170 §5 exists to close.
+    says" — the sole record of why no capability was named. A stage handed the
+    "Nothing" line with its reason stripped out is left to infer what it was not
+    told, which is the shape ADR-0170 §5 exists to close.
 
     It is attributed to the planner rather than merged into the assembler's own
     "Nothing" sentence: ADR-0098 §2 wants this system's own instruction and
@@ -682,8 +716,9 @@ async def test_a_declines_rationale_reaches_the_stage_as_the_planners_own_words(
     # The reason follows, on its own line, the "Nothing" line it explains — which
     # the assembler still writes verbatim, unchanged by the rationale beside it.
     assert lines[heading + 1] == (
-        "  Nothing: the planner produced no steps for this turn, so no action was "
-        "taken and none was needed."
+        "  Nothing: the planner named no capability for this turn, so no action was "
+        "taken. Only the planner's own rationale says why — do not supply a reason "
+        "it did not state."
     )
     label, _, span = lines[heading + 2].partition(": ")
     assert label == "  the planner's stated rationale"

@@ -91,6 +91,7 @@ from ai_assistant.testing import (
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
+    FakeToolRegistry,
     StreamAttempt,
 )
 
@@ -645,6 +646,7 @@ class _EchoingPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Record what this turn was supplied, and plan over exactly that."""
         supplied = tuple(memories)
@@ -1624,6 +1626,7 @@ def _spoken_loop(memory: FakeMemoryStore) -> LearningLoop:
         feedback=FakeFeedbackProcessor(),
         now=lambda: _AT,
         id_factory=lambda: "goal-1",
+        registry=FakeToolRegistry(),
     )
 
 

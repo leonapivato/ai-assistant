@@ -1,9 +1,10 @@
 """The closed learning loop: respond, observe a correction, reuse it (ADR-0022).
 
 :class:`LearningLoop` is the first working slice of the request pipeline. It
-wires four injected contracts — :class:`~ai_assistant.core.protocols.ContextProvider`,
+wires five injected contracts — :class:`~ai_assistant.core.protocols.ContextProvider`,
 :class:`~ai_assistant.core.protocols.MemoryStore`,
-:class:`~ai_assistant.core.protocols.Planner` and
+:class:`~ai_assistant.core.protocols.Planner`,
+:class:`~ai_assistant.core.protocols.ToolRegistry` and
 :class:`~ai_assistant.core.protocols.FeedbackProcessor`, plus the
 :class:`~ai_assistant.core.protocols.MemoryWriter` that owns the write path —
 into the roadmap's first vertical:
@@ -18,7 +19,10 @@ into the roadmap's first vertical:
       → use that preference successfully next time
 
 Tool selection, permission checking and execution are still **not** part of this
-object. All three now exist —
+object. The registry it holds is read for one thing and one thing only — the
+capability vocabulary the planner is told about (ADR-0211 §3) — and this object
+neither finds a tool, nor sees a ``ToolDefinition``, nor invokes anything. All
+three now exist —
 :class:`~ai_assistant.orchestration.runner.StepRunner` disposes of a single
 :class:`~ai_assistant.core.types.PlanStep` through them (ADR-0037) — but nothing
 drives them from a :class:`~ai_assistant.core.types.ActionPlan` yet: ordering,
@@ -62,6 +66,7 @@ if TYPE_CHECKING:
         FeedbackProcessor,
         MemoryStore,
         Planner,
+        ToolRegistry,
     )
     from ai_assistant.core.types import (
         CurrentContext,
@@ -337,6 +342,7 @@ class LearningLoop:
         memory: MemoryStore,
         writes: MemoryWriteStage,
         planner: Planner,
+        registry: ToolRegistry,
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
@@ -366,6 +372,22 @@ class LearningLoop:
                 ratified policy and applier and silently lose the queue, which is
                 exactly the drop ADR-0078 ends.
             planner: Turns the turn's goal into an ``ActionPlan``.
+            registry: The tool registry this turn's capability vocabulary is read
+                from, once, immediately before the planner call (ADR-0211 §3).
+                **It must be the same object the tool-selection stage resolves the
+                resulting steps against** — a composition-root obligation of
+                exactly the shape the writer's above is, and unstatable in the type
+                system for the same reason. Wired to a second registry, or to a
+                second snapshot of one, a step could be planned against a
+                capability the selecting registry never advertised: the
+                ``NO_CAPABLE_TOOL`` narration #1772 records, reintroduced by wiring
+                rather than by prompting, and invisible to every test that stubs one
+                side. It is **required and undefaulted**, for the reason ADR-0211 §1
+                makes the planner's own parameter required: an empty default would
+                make every goal requiring an act decline, silently, and
+                indistinguishably from a deployment that advertises nothing. Only
+                ``capabilities()`` is called on it, and what it answers is passed to
+                the planner unchanged.
             feedback: Turns a ``FeedbackEvent`` into memory-update proposals.
                 **The processor wired here must mint every kind in**
                 :data:`RESOLUTION_KINDS` (ADR-0122 §3). Nothing in the type system
@@ -420,6 +442,7 @@ class LearningLoop:
         self._memory = memory
         self._writes = writes
         self._planner = planner
+        self._registry = registry
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
@@ -496,6 +519,17 @@ class LearningLoop:
         the tail's position alone, and only the read's own answer records that a
         relevance read chose it.
 
+        **The planner is also told what this deployment can actually do**
+        (ADR-0211 §§1, 3). The turn reads ``capabilities()`` from the injected
+        registry — the same object the tool-selection stage resolves the resulting
+        steps against — and passes it, so the plan is judged against the vocabulary
+        as it stood at that read. `planning` performs no read of its own: the
+        vocabulary is pushed in exactly as ``context`` and ``memories`` are, and for
+        the same reason (ADR-0014 §6). The read sits **after** ``narrow``: nothing
+        is withheld from it, because a registry holds configuration rather than
+        personal data (ADR-0016 §6), so it is the same on a spoken turn as on a
+        typed one.
+
         ``memory_degraded`` is deliberately **upstream** of it —
         it reports whether the history read and the retrieval succeeded, which is a
         fact about this method's I/O and not about what a caller then chose to be
@@ -561,7 +595,18 @@ class LearningLoop:
         # method's own return value included, runs over what it returned.
         if narrow is not None:
             context, memories = narrow(context, memories, retrieved_ids)
-        plan = await self._planner.plan(goal, context=context, memories=memories)
+        # ADR-0211 §3: read within the turn, from the registry selection resolves
+        # against, and immediately before the call — so the plan is judged against
+        # the vocabulary as it stood at this read. Nothing is withheld from it and
+        # nothing needs to be: the registry "holds configuration, not personal
+        # data" (ADR-0016 §6), so there is no record to place, no provenance to
+        # read and no class to withhold, and the vocabulary is the same on a spoken
+        # turn as on a typed one. That is why this sits *after* `narrow` rather
+        # than inside it.
+        capabilities = await self._registry.capabilities()
+        plan = await self._planner.plan(
+            goal, context=context, memories=memories, capabilities=capabilities
+        )
         return TurnResult(
             goal=goal,
             context=context,

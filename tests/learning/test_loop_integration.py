@@ -41,6 +41,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeDeferralStore,
     FakePlanner,
+    FakeToolRegistry,
     FakeTraceSink,
 )
 
@@ -99,6 +100,7 @@ class _Composed:
             planner=FakePlanner(now=_clock),
             feedback=RuleBasedFeedbackProcessor(now=_clock, id_factory=lambda: "corrected-1"),
             now=_clock,
+            registry=FakeToolRegistry(),
         )
         self.questions = QuestionStage(
             writer=self.ingestor,

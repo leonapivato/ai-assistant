@@ -72,6 +72,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -197,6 +198,7 @@ class _OneStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
@@ -241,6 +243,7 @@ def _make_engine(
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=lambda: "g-1",
+        registry=FakeToolRegistry(),
     )
     # ``egress`` wires the binding seam and the schema that reaches it, so the
     # recorded CONFIRM carries an ``egress_binding`` (ADR-0152 §1). Off by default:

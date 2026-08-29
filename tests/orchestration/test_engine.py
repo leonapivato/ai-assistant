@@ -141,6 +141,7 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     ObservationGate,
@@ -354,6 +355,7 @@ class OneStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1",
@@ -373,6 +375,7 @@ class NoStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
 
@@ -630,6 +633,7 @@ class Harness:
             feedback=self.feedback,  # type: ignore[arg-type]
             now=lambda: AT,
             id_factory=loop_id_factory if loop_id_factory is not None else lambda: "g-1",
+            registry=FakeToolRegistry(),
         )
         runner = StepRunner(
             plans=self.plans,
@@ -750,6 +754,7 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
             return ActionPlan(
@@ -2057,6 +2062,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2096,6 +2102,7 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2137,6 +2144,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2188,6 +2196,7 @@ class _NeverFinishing:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         self.entered.set()
         try:
@@ -2265,6 +2274,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             try:
                 await asyncio.Event().wait()
@@ -2312,6 +2322,7 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             await release.wait()
             finished.set()
@@ -3042,6 +3053,7 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -3132,6 +3144,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
             *,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
+            capabilities: Sequence[str],
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -4025,9 +4038,12 @@ class RecordingPlanner(OneStepPlanner):
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         self.seen.append(tuple(memories))
-        return await super().plan(goal, context=context, memories=memories)
+        return await super().plan(
+            goal, context=context, memories=memories, capabilities=capabilities
+        )
 
 
 class RecordingSearchStore(FakeMemoryStore):

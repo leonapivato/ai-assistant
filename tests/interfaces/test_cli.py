@@ -137,6 +137,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
+    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     StreamAttempt,
@@ -270,6 +271,7 @@ class _OneStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
@@ -333,6 +335,7 @@ def _engine(
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=lambda: "g-1",
+        registry=FakeToolRegistry(),
     )
     ids = iter(f"d-{n}" for n in range(1, 50))
     runner = StepRunner(
@@ -2558,6 +2561,7 @@ def _conversation_engine(
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=lambda: next(goals),
+        registry=FakeToolRegistry(),
     )
     runner = StepRunner(
         plans=plans,
@@ -2609,6 +2613,7 @@ class _NoStepPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
 

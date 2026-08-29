@@ -1388,6 +1388,20 @@ def _render_plan(
     in wording or in provenance marking. Its placement differs by design: on a
     decline it follows the "Nothing" line, because there it is the reason for that
     line rather than a preamble to steps that follow.
+
+    **The empty branch no longer says that no capability was needed** (ADR-0211 §9
+    item 7). It used to close on "so no action was taken and none was needed", and
+    those last four words are false on the second of ADR-0211 §4's two decline
+    grounds — a goal that *did* require an act, which nothing advertised could
+    carry. Telling the composing model that none was needed while the rationale
+    below it says the assistant could not do what was asked is precisely the
+    contradiction ADR-0170 §5 exists to stop: a stage narrating something it was
+    not told, against something it was. The sentence now states what is true of
+    both grounds — no capability was named, so nothing ran — and defers to the
+    rationale for which one applies, asserting neither. The two grounds are
+    deliberately indistinguishable here: ADR-0211 §5 keeps them out of the
+    envelope's structure, so the rationale is the only place the difference is
+    stated and this function has nothing else to read.
     """
     rationale = (
         []
@@ -1397,8 +1411,9 @@ def _render_plan(
     if not plan.steps:
         return [
             "What the assistant decided to do:",
-            "  Nothing: the planner produced no steps for this turn, so no action was "
-            "taken and none was needed.",
+            "  Nothing: the planner named no capability for this turn, so no action "
+            "was taken. Only the planner's own rationale says why — do not supply a "
+            "reason it did not state.",
             *rationale,
         ]
     never_driven = {one.id for one in undriven}

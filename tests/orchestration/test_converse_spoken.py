@@ -1106,9 +1106,10 @@ class _RaisingPlanner:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
     ) -> ActionPlan:
         """Raise ``PlanningError``, which is one of ``converse``'s declared failures."""
-        del goal, context, memories
+        del goal, context, memories, capabilities
         msg = "the request could not be planned"
         raise PlanningError(msg)
 
