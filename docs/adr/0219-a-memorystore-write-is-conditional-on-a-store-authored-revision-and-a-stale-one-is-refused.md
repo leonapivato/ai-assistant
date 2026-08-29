@@ -1,6 +1,6 @@
 # 219. A `MemoryStore` write is made conditional on a store-authored revision, and a stale one is refused
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-29
 - **This is a contract change on `MemoryStore`.** It adds one field to
   `MemoryBase` and one to `MemoryWrite` in `core/types.py`, one member to
@@ -28,6 +28,15 @@
   below is of its `Accepted` text on `main` at that base — re-verified against it
   sentence by sentence, with no quoted sentence changed and no cited section moved.
   This is ADR-0143's clause, taken for its reason.
+- **Ratification route.** Drafted, reviewed and revised while `Proposed`, and the
+  status flipped only once **both** required lenses — adversarial and architecture —
+  returned clean on one tree, through `just adr-ratify`'s one-line flip. A finding
+  that arrived on a later round returned this ADR to `Proposed` and re-entered at
+  step 1, so it is ratified on its **second** flip. That is `CONTRIBUTING.md` →
+  "Finishing an ADR PR: `Proposed` through the reviews, `Accepted` on the way out",
+  pointed at rather than re-argued — ADR-0130 §12 and ADR-0136 §7 are the worked
+  precedents. Nothing implements against this ADR until it merges (ADR-0015 §5,
+  golden rule 5).
 
 ## Context
 
@@ -571,6 +580,16 @@ extra="forbid"` — neither of which is true of this one.
 > stored again at the same id through `add`, through `UPSERT`, and through
 > `IF_UNCHANGED`, reads back with a different revision after each — the inequality
 > §1 promises, asserted on each of the three doors rather than on one.
+
+> **Normative.** **Two stored rows never carry one revision.** Store two records at
+> two ids, read both, and their revisions differ; then submit an `IF_UNCHANGED`
+> element naming the second and carrying the **first's** revision, and it is
+> refused. The arm is owed because every other arm here is taken at a single id, so
+> a store issuing from a per-id counter — the shape §1's assignment rule refuses in
+> terms, "whatever id it is stored at" and "it is not a per-id count" — passes all
+> of them while holding two rows at one stamp, and §1's operative property, that
+> "two records carry equal revisions only where they are the same stored row", would
+> then hold only within an id rather than within the store.
 
 > **Normative.** **Every record-returning read carries the same revision**, asserted
 > over each read by name rather than over an unspecified one: a record stored and
