@@ -221,6 +221,48 @@ def bash() -> str:
     return resolved
 
 
+#: How much of each captured stream a failure message carries. The script's own
+#: diagnosis is a handful of lines on stderr, so the tail is where it is; a cap
+#: keeps a runaway stream from burying it in a pytest report.
+_TAIL_CHARS = 4000
+
+
+def _tail(stream: str | None, label: str) -> str:
+    """The last ``_TAIL_CHARS`` of ``stream``, labelled and indented."""
+    if not stream:
+        return f"--- {label}: empty ---"
+    clipped = stream[-_TAIL_CHARS:]
+    elided = "" if len(clipped) == len(stream) else f" (last {_TAIL_CHARS} chars)"
+    body = "\n".join(f"  | {line}" for line in clipped.splitlines())
+    return f"--- {label}{elided} ---\n{body}"
+
+
+class ReviewFailed(subprocess.CalledProcessError):
+    """A non-zero ``codex-review.sh``, carrying what the script actually said.
+
+    ``subprocess.run(check=True)`` raises a plain ``CalledProcessError`` whose
+    ``str()`` is the command line and the exit status — the captured streams sit
+    on the exception and are never rendered. Under a flake that is the whole
+    diagnosis lost: four occurrences of issue #1792 were reported with no message
+    attached, because the sentence the script printed saying *why* it refused was
+    on ``e.stderr`` and pytest prints only ``str(e)``.
+
+    Subclasses rather than replaces ``CalledProcessError`` so ``returncode``,
+    ``stdout`` and ``stderr`` stay where a caller expects them, and any
+    ``except subprocess.CalledProcessError`` still catches it.
+    """
+
+    def __str__(self) -> str:
+        """The usual one-liner, followed by both captured streams."""
+        return "\n".join(
+            [
+                super().__str__(),
+                _tail(self.stderr, "stderr (the script's own diagnosis)"),
+                _tail(self.stdout, "stdout"),
+            ]
+        )
+
+
 def run_review(  # noqa: PLR0913  # a test driver forwarding the script's knobs
     repo: Path,
     tmp_path: Path,
@@ -236,15 +278,28 @@ def run_review(  # noqa: PLR0913  # a test driver forwarding the script's knobs
     ``base=None`` omits the base argument, so the script's own default-base
     resolution runs. Environment can be steered with ``FAKE_CODEX_*`` keyword
     overrides, or with an ``env`` dict when the keys are computed.
+
+    Raises:
+        ReviewFailed: When ``check`` and the script exits non-zero. The captured
+            stderr and stdout are in the message, so a failure diagnoses itself
+            in the pytest report rather than costing someone a reproduction.
     """
     install_fake_codex(tmp_path / "bin")
     args = [persona] if base is None else [persona, base]
     merged = {**(env or {}), **env_overrides}
-    return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test env
+    completed = subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test env
         [bash(), str(SCRIPT), *args],
         cwd=repo,
-        check=check,
+        check=False,
         capture_output=True,
         text=True,
         env=review_env(tmp_path, **merged),
     )
+    if check and completed.returncode != 0:
+        raise ReviewFailed(
+            completed.returncode,
+            completed.args,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return completed
