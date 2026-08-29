@@ -14146,9 +14146,9 @@ class NotificationCondition(StrEnum):
 
 #: The four conditions §5 evaluates first, **in this order**, each yielding
 #: ``DROP`` naming itself as the reason. The order is normative: a candidate that
-#: has perished and also duplicates an actionable record is dropped as expired,
-#: and a conformance suite can only check "the ordering selects the reason it
-#: names" against a stated sequence.
+#: has perished and also duplicates a record still speaking for its key
+#: (ADR-0215 §§1-2) is dropped as expired, and a conformance suite can only check
+#: "the ordering selects the reason it names" against a stated sequence.
 DROP_CONDITIONS: Final[tuple[NotificationCondition, ...]] = (
     NotificationCondition.EXPIRED,
     NotificationCondition.REACH_OFF,
@@ -14760,9 +14760,21 @@ class HeldNotification(BaseModel):
     expired, nor ruled ``DROP`` by a reconsideration; it is *retained* until
     retention removes it. Expiry ends interruptibility and actionability and
     **deletes nothing** — an expired record stays enumerable and renders as
-    expired. The cap counts the actionable set and §8's duplicate rule reads the
-    same population, so a fact that recurs after its notification expired or was
-    dismissed is a new candidate and not a duplicate.
+    expired. The cap counts the actionable set and no other (ADR-0215 §3), so
+    dismissing frees capacity at once and an expired record holds none.
+
+    **Suppressing is a third state, and it is the one §8's duplicate rule reads**
+    (ADR-0215 §§1-2, replacing ADR-0130 §7's "the same population"). A record
+    *speaks for its key* while it is actionable, **and** on past a dismissal — no
+    reconsideration ``DROP`` having reached it — until the expiry its own
+    candidate declared. So a fact that recurs after its notification **expired**
+    is a new candidate and not a duplicate, exactly as before; a fact that recurs
+    after its notification was **dismissed** is still a duplicate until it
+    perishes. That asymmetry is the decision in one line: expiry is the fact
+    perishing, and a dismissal is not — it is a statement about the record, and
+    #1372 is what tying the fact's lifetime to it cost. :meth:`is_actionable_at`
+    and :meth:`speaks_for_its_key_at` are therefore two predicates and two reads,
+    and an implementation may not compute one population and use it for both.
 
     **Retention runs from the instant the record ceased to be actionable, not
     from admission** (§7), and that is a correction to the obvious form. Measured
@@ -14770,7 +14782,8 @@ class HeldNotification(BaseModel):
     still actionable — at which point its key suppresses nothing, a cursorless
     producer re-notices the same fact, and the same observation interrupts again
     on a schedule set by the retention figure. §8's guarantee is stated
-    unconditionally, so retention is the clause that yields.
+    unconditionally, so retention is the clause that yields — and ADR-0215 §4
+    makes it yield again, to the *suppressing* set this time.
 
     **The duration rides on the record and is never consulted from the setting
     afterwards** (§7), which is :class:`DeferredProposal`'s arrangement and for
@@ -14920,6 +14933,67 @@ class HeldNotification(BaseModel):
         ceased = self.ceased_at()
         return ceased is None or moment < ceased
 
+    def speaks_for_its_key_at(self, moment: datetime) -> bool:
+        """Report whether this record suppresses its key at an instant (ADR-0215 §1).
+
+        The population §8's duplicate lookup reads, which is **not** the
+        actionable one: a record speaks for its key while it is actionable, or
+        while it carries a dismissal, carries no reconsideration ``DROP``, and its
+        candidate declares an expiry later than ``moment``. The horizon is that
+        declared expiry and nothing else — no instant is stored for it, no
+        duration is configured, and a candidate declaring **no** expiry yields a
+        record whose speech ends exactly where its actionability does.
+
+        **A dismissal is a statement about the record and never about the fact.**
+        It ends actionability, frees a slot under the cap at once and takes the
+        record off the list a person reads (§7, §9) — and ADR-0131 §3b reuses it
+        for "the outbox is done with these bytes". None of those three is a reason
+        for the same fact to be proposed afresh on the next tick, which is what
+        #1372 measured: one event, three interruptions, and a day's budget spent.
+        The lifetime that governs suppression is the fact's own, and the corpus
+        already carries it as the candidate's declared expiry.
+
+        **Where a record carries both stamps the ``DROP`` decides**, and it speaks
+        for nothing after it ceased. The pair is unreachable through a conforming
+        store — ``dismiss`` refuses a record that is not actionable and a
+        reconsideration never reaches a dismissed one — but this record's
+        validator does not forbid it, so the precedence is stated rather than
+        assumed. It is deliberate as well as defensive: a ``DROP`` comes from an
+        expiry or from a class lowered to ``off`` (§5), suppression while a class
+        is ``off`` buys nothing — the reach condition is evaluated first and every
+        offer of the key is dropped naming it — and it would cost the case that
+        matters, an owner turning the class back up inside the candidate's
+        lifetime and needing to be reachable.
+
+        **Speech is monotone**: a record that does not speak at some instant
+        speaks at no later one. Each disjunct is an upper bound on the instant —
+        :meth:`ceased_at` takes the *earliest* cessation, so a stamp added later
+        never moves the first bound outward, and the candidate is frozen, so the
+        second cannot move at all — and a ``DROP`` removes the second disjunct
+        rather than extending it.
+
+        **It is the same predicate as**
+        :meth:`DeferredProposal.speaks_for_its_key_at`, and takes its name for
+        that reason: a ``REJECTED`` deferral goes on refusing a re-ask for the
+        whole of its retention on exactly this reasoning, ADR-0130 §8 borrowed the
+        deduplication from it and left that half behind, and two names for one
+        predicate is how the two stores would drift.
+
+        Args:
+            moment: The instant to judge at, tz-aware.
+
+        Returns:
+            Whether a candidate carrying this record's key, offered at ``moment``,
+            would be ruled ``DROP`` as a duplicate of it.
+        """
+        expires_at = self.candidate.expires_at
+        return self.is_actionable_at(moment) or (
+            self.dismissed_at is not None
+            and self.dropped_at is None
+            and expires_at is not None
+            and moment < expires_at
+        )
+
     def is_due_at(self, moment: datetime) -> bool:
         """Report whether this record falls due for reconsideration (§5).
 
@@ -14949,20 +15023,42 @@ class HeldNotification(BaseModel):
         )
 
     def is_purgeable_at(self, moment: datetime) -> bool:
-        """Report whether retention has removed this record (§7).
+        """Report whether retention has removed this record (§7, ADR-0215 §4).
 
-        **No record is purged while it is still actionable, whatever its
+        **No record is purged while it still speaks for its key, whatever its
         retention**, so a record's key suppresses duplicates for the whole time
-        §8 says it does. ``retention is None`` is a complete answer rather than
-        an undefined expression: such a record is never purged.
+        §8 says it does. That is §7's own guard with §7's own reason, reading
+        :meth:`speaks_for_its_key_at` where it read :meth:`is_actionable_at`: the
+        new population *subsumes* the old one — every actionable record speaks —
+        so the condition joins by replacing the first rather than standing beside
+        it, and without the move a short retention would reproduce #1372 on a
+        slower schedule. ``retention is None`` is a complete answer rather than an
+        undefined expression: such a record is never purged.
+
+        **Both conditions are answered here and nowhere else** (ADR-0215 §4). A
+        store asks the record whether it is purgeable and purges what says yes; a
+        backend composing the speaking test around this predicate would be exactly
+        the drift putting it on the type prevents, and would satisfy every
+        store-level conformance case while breaking the rule.
+
+        **Neither boundary direction moves, and this lengthens nothing that was
+        already there.** For a record dismissed at ``D``, not reached by a
+        ``DROP``, with retention ``R`` and a candidate expiring at ``E``: where
+        ``E`` is later than ``D + R`` it is not purgeable before ``E`` and is
+        purgeable **at** it, speech ending there while retention elapsed strictly
+        earlier; where ``E`` is not later than ``D + R`` it is purgeable exactly
+        where §7 already put it, strictly after ``D + R``. A record a ``DROP`` did
+        reach is in the second case whatever its expiry says, and one that simply
+        expired, or whose candidate declared no expiry, likewise: this clause
+        reaches them not at all.
 
         Args:
             moment: The instant to judge at, tz-aware.
 
         Returns:
-            Whether the record has ceased to be actionable and its retention has
-            elapsed **strictly** — at the horizon it is still held, and past it
-            it is not, which is the boundary §9's conformance clause states.
+            Whether the record has stopped speaking for its key and its retention
+            has elapsed **strictly** — at the horizon it is still held, and past
+            it it is not, which is the boundary §9's conformance clause states.
 
         **The elapsed time is measured against the span, rather than the horizon
         being materialized as an instant**, and that is what makes the far edge of
@@ -14992,7 +15088,7 @@ class HeldNotification(BaseModel):
         has elapsed". #974 holds the general question.
         """
         ceased = self.ceased_at()
-        if self.retention is None or ceased is None or self.is_actionable_at(moment):
+        if self.retention is None or ceased is None or self.speaks_for_its_key_at(moment):
             return False
         return moment - ceased > self.retention
 

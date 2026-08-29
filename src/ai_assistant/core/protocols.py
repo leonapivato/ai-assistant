@@ -7207,7 +7207,8 @@ class NotificationPolicy(Protocol):
         :data:`~ai_assistant.core.types.DROP_CONDITIONS` states them, and each
         yields ``DROP`` naming itself as the reason**: the candidate declares an
         expiry not later than ``now``; the reach level for its class is ``off``;
-        it duplicates an actionable record; the store is at its cap. A candidate
+        it duplicates a record still **speaking for its key** (ADR-0215 §2, which
+        replaces §5's third condition); the store is at its cap. A candidate
         that passes all four is ruled ``INTERRUPT`` when **every** condition of
         :data:`~ai_assistant.core.types.INTERRUPT_CONDITIONS` holds, and ``HOLD``
         otherwise — naming the first unsatisfied one, which for a candidate
@@ -7249,9 +7250,13 @@ class NotificationPolicy(Protocol):
                 against this one value rather than against a clock this
                 implementation reads, which is half of what makes the ruling
                 reproducible.
-            duplicate: Whether an **actionable** record already carries this
-                candidate's key (§8). A reconsideration passes ``False``: it is
-                not an offer and never matches itself (§5).
+            duplicate: Whether a record that still **speaks for** this
+                candidate's key at ``now`` already exists (§8 as ADR-0215 §2
+                replaces it) — actionable, or dismissed and inside the expiry its
+                own candidate declared. **Not** the actionable population, and
+                not derivable from ``at_cap``'s: tying the two is what #1372
+                measured. A reconsideration passes ``False``: it is not an offer
+                and never matches itself (§5).
             at_cap: Whether the store holds its cap of **actionable** records
                 (§7). A reconsideration passes ``False``: the record already
                 occupies its slot, so the cap is not a condition of re-ruling it.
@@ -7314,8 +7319,10 @@ class NotificationWriter(Protocol):
         the ruling of §5 and the writing of any record are one atomic act in the
         store** (§3). Two offers made concurrently may not both proceed on the
         strength of the same last remaining unit of budget, the same last free
-        slot under the cap, or the same absence of an actionable record for one
-        key. Without that, all three of those guarantees are advisory — a
+        slot under the cap, or the same absence of a record **speaking for** one
+        key (ADR-0215 §2, which binds §3's clause to the suppressing set where it
+        named the actionable one). Without that, all three of those guarantees are
+        advisory — a
         ``HOLD`` racing another ``HOLD`` breaks duplicate suppression and the cap
         exactly as a raced ``INTERRUPT`` breaks the budget.
 
@@ -7468,14 +7475,25 @@ class NotificationStore(Protocol):
     validation, so no conforming store can hold one however it is called, in any
     disposition and under any setting (§2).
 
-    **Actionable is the population every rule here reads.** The cap counts
-    actionable records and no others, so dismissing frees capacity at once and an
-    expired record holds none; §8's duplicate rule reads the same population, so
-    a fact that recurs after its notification expired or was dismissed is a new
-    candidate and not a duplicate. Retention then runs from the instant a record
-    **ceased** to be actionable, and no record is purged while it is still
-    actionable, whatever its retention — which is what makes §8's suppression
-    guarantee unconditional (§7).
+    **Two populations, and the rules here read one each** (ADR-0215 §§1-4,
+    replacing ADR-0130 §7's single one). The cap counts **actionable** records and
+    no others, exactly as ratified, so dismissing frees capacity at once and an
+    expired record holds none (ADR-0215 §3). §8's duplicate rule reads the
+    **suppressing** set instead: a record speaks for its key while it is
+    actionable, and on past a dismissal — no reconsideration ``DROP`` having
+    reached it — until the expiry its candidate declared. So a fact recurring
+    after its notification **expired** is a new candidate and not a duplicate, as
+    before; one recurring after its notification was **dismissed** is still a
+    duplicate until it perishes. Retention then runs from the instant a record
+    ceased to be **actionable**, unchanged, and no record is purged while it still
+    **speaks** for its key, whatever its retention — which is what makes §8's
+    suppression guarantee unconditional (§7, ADR-0215 §4).
+
+    **The two reads stay two reads.** An implementation computing one population
+    and using it for both would re-introduce, in the other direction, exactly the
+    coupling ADR-0215 removes: capacity is about the list a person reads and
+    suppression is about repeat contact over one fact, and #1372 is the bill for
+    answering them from one query.
 
     **The cap refuses; it never evicts** (§7, §11). At the cap a new candidate is
     ruled ``DROP`` naming the cap and no existing record is displaced. §11 makes
@@ -7557,8 +7575,23 @@ class NotificationStore(Protocol):
         of §8, the cap check of §7, the budget read of §6, the ruling of §5 and
         the writing of any record. Two calls made concurrently may not both
         proceed on the strength of the same last remaining unit of budget, the
-        same last free slot under the cap, or the same absence of an actionable
-        record for one key.
+        same last free slot under the cap, or the same absence of a record
+        **speaking for** one key (ADR-0215 §2). The three limbs read the three
+        populations they name: the budget window, the actionable set, and the
+        suppressing set.
+
+        **The duplicate lookup reads every record retained under the offered
+        key** and rules ``DROP`` where any one of them speaks at the ruling
+        instant (ADR-0215 §2). No implementation may narrow that to a single
+        record — the most recently admitted or any other. From this decision
+        onward at most one record per key speaks at any instant, a suppressing
+        record making every offer of its key a ``DROP`` and a ``DROP`` writing
+        nothing; but a store that ran under ADR-0130 §8 admitted a second record
+        the moment the first was dismissed, and where that first declared the
+        later expiry both speak until the earlier horizon passes. Such a pair
+        needs no migration and no sweep — it suppresses the key until the later
+        horizon and then stops, which is the rule — and no store can tell the two
+        vintages apart.
 
         **The policy is an argument rather than a collaborator this store
         holds**, and that is what makes the atomicity above expressible: the
@@ -7703,12 +7736,22 @@ class NotificationStore(Protocol):
 
         **A dismissal is not a deletion.** The record stays enumerable and stays
         in :meth:`export`; what ends is its actionability, which frees a slot
-        under the cap **at once** and stops its key suppressing duplicates. That
-        last part is deliberate: a fact that recurs after its notification was
-        dismissed is a new candidate, because the user has already disposed of
-        the old one.
+        under the cap **at once**.
 
-        Retention runs from this instant, not from admission (§7).
+        **It does not free the record's key** (ADR-0215 §§1-2, replacing the rule
+        §7 stated here). The record goes on suppressing candidates carrying that
+        key until the expiry its own candidate declared — or, where the candidate
+        declared none, no further than its actionability reached. A dismissal is a
+        statement about the record, and ADR-0131 §3b's reuse of it makes it a
+        statement about bytes as well; neither is a statement about the *fact*,
+        and a fact does not stop being the same fact because a record about it
+        came off a list or a device confirmed some bytes. A fact that recurs after
+        its notification **expired** is still a new candidate, because there the
+        fact itself perished.
+
+        Retention runs from this instant, not from admission (§7) — though a
+        record that still speaks for its key is not purged at that horizon
+        (:meth:`purge`).
 
         Dismissing a record that is already not actionable changes nothing and
         reports ``False``: the cessation instant a retention horizon is measured
@@ -7867,14 +7910,25 @@ class NotificationStore(Protocol):
         Called by the retention purge job ADR-0083 §7 already runs, in the shape
         it already calls ``MemoryStore.purge_expired`` and ``DeferralStore.purge``.
 
-        A record is purgeable only once it is **no longer actionable** and its
-        stamped retention has elapsed past the horizon — never at it
+        A record is purgeable only once it **no longer speaks for its key**
+        (ADR-0215 §§1, 4, replacing §7's actionability test) and its stamped
+        retention has elapsed past the horizon — never at it
         (:meth:`~ai_assistant.core.types.HeldNotification.is_purgeable_at`). Both
         halves are load-bearing: **no record is purged while it is still
-        actionable, whatever its retention**, so a record's key suppresses
-        duplicates for the whole time §8 says it does; and ``retention is None``
-        is a complete answer rather than an undefined expression — such a record
-        is never purged.
+        speaking, whatever its retention**, so a record's key suppresses
+        duplicates for the whole time §8 says it does — which is §7's own stated
+        reason applied to the population §8 now reads, and without it a deployment
+        with a short retention reproduces #1372 on a slower schedule; and
+        ``retention is None`` is a complete answer rather than an undefined
+        expression — such a record is never purged.
+
+        **Both conditions are the record's own to answer**, and a store may not
+        compose the speaking test around ``is_purgeable_at`` in a backend or a
+        helper (ADR-0215 §4): a store asks the record whether it is purgeable and
+        purges what says yes. Two conforming stores must not be able to disagree
+        about the instant a record becomes purgeable, and a backend that composed
+        it would pass every store-level conformance case while the *next* backend
+        written against the type purged a record that still speaks.
 
         **The retention read is the record's, never the live setting's** (§7), so
         a configuration change never reaches back and shortens the horizon of a
@@ -9029,9 +9083,11 @@ class AssistantEngine(Protocol):
 
         **A dismissal is not a deletion.** The record stays readable and stays in
         the user's export; what ends is its actionability, which frees a slot
-        under the cap at once and stops its key suppressing duplicates — so a
-        fact that recurs after the user dismissed its notification is a new
-        candidate rather than a duplicate (§7, §8).
+        under the cap at once. It does **not** free the notification's key: the
+        record goes on suppressing the same fact until the expiry its candidate
+        declared, so dismissing does not invite that fact back on the next tick
+        (§7, §8 as ADR-0215 §§1-2 replace them). A fact that recurs after its
+        notification *expired* is a new candidate, as before.
 
         Args:
             notification_id: The notification to dismiss.

@@ -152,7 +152,8 @@ class DefaultNotificationPolicy:
             now: The ruling instant, tz-aware. Every comparison is made against
                 this one value rather than a clock this object reads, which is
                 half of what makes the ruling reproducible.
-            duplicate: Whether an actionable record carries this key (§8).
+            duplicate: Whether a record still **speaking for** this key
+                carries it (§8 as ADR-0215 §2 replaces it).
             at_cap: Whether the store is at its cap of actionable records (§7).
             budget_spent: ``INTERRUPT`` rulings inside the budget window (§6).
             budget_frees_at: When that window next frees a unit, or ``None``.
