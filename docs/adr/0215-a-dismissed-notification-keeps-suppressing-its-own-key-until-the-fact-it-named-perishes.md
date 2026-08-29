@@ -176,6 +176,27 @@ but actionable records (ADR-0130 §7, no — and §3 below keeps it).
 > suppression ends exactly where its actionability ends. No implementation may
 > supply a default horizon for it.
 
+> **Normative.** Speech is **monotone**: a record that does not speak for its key
+> at some instant speaks for it at no later one. Each disjunct above is an upper
+> bound on the instant — the first ends at the record's cessation, the second at
+> the candidate's declared expiry — the candidate is immutable, and no
+> implementation may unstamp a dismissal or a `DROP`, or move either instant once
+> it is written. So every stamp an implementation adds can only bring the
+> cessation earlier or remove the second disjunct outright, and the set of
+> instants at which a record speaks only ever shrinks.
+
+**Monotonicity is ADR-0130 §7's existing discipline, read onto the new
+predicate.** `HeldNotification.ceased_at` takes the *earliest* of the three
+cessations, so a stamp added later never moves the first bound outward; the
+declared expiry lives on a frozen candidate, so the second bound cannot move at
+all; and a `DROP` removes the second disjunct rather than extending it. The
+tree already refuses the two writes that would break it: `dismiss` reports
+`False` on a record that is not actionable, "the cessation instant a retention
+horizon is measured from may not be moved by a second call", and a
+reconsideration never reaches a record already dropped,
+`HeldNotification.is_due_at` requiring `dropped_at is None`. §2 draws the
+consequence the implementing lane uses.
+
 **The horizon this adds is not a new one — it is the horizon the record already
 had.** An undismissed record whose candidate expires at `E` is actionable until
 `E` and suppresses until `E` today. What changes is only that **dismissing no
@@ -252,6 +273,24 @@ that key can be admitted while the first suppresses. That is what keeps the look
 single-valued and what keeps ADR-0131 §3b's record resolution — which matches an
 outbox entry's key to *the* actionable record carrying it — unambiguous, since a
 suppressing record that is no longer actionable is not a candidate for that match.
+
+> **Normative.** Of the records a store retains under one key, only the **most
+> recently admitted** speaks at any instant at or after its admission, and an
+> offer ruled at such an instant is decided by that record alone. No
+> implementation is obliged to decode or evaluate any record for that key
+> admitted earlier, and one that does reaches the same ruling.
+
+**Why exactly one record decides, and why it is the last admitted.** A record is
+admitted under a key only where no record carrying that key speaks at the ruling
+instant — the clause above, together with the atomicity limb that forbids two
+concurrent rulings proceeding on one absence. By §1's monotonicity, a record
+silent at that instant is silent at every later one. So every record admitted
+before the latest admission under a key is silent from that admission onward, and
+only the latest can speak. Where two records carry one key and one admission
+instant, those same two clauses let at most one of them speak, so the narrowing
+stays well defined whichever the store's own record ordering names first —
+`SqliteNotificationStore` orders by `admitted_at` and then by id. §7 says what
+this buys the implementing lane.
 
 **The expired half of ADR-0130 §7's sentence survives and is not superseded.** "A
 fact that recurs after its notification **expired** is a new candidate and not a
@@ -424,9 +463,11 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > two rules in the same change: `NotificationStore`'s class docstring, which states
 > the cap-and-duplicate population and the purge guard verbatim from ADR-0130 §7,
 > and the members that restate them — `admit`, `purge` and the atomicity paragraph
-> §3 puts on the seam. Leaving those standing would put two contradictory
-> statements of one contract in the tree, which is the failure the shared
-> conformance suite cannot catch.
+> §3 puts on the seam — together with `dismiss`, which states the reversed rule in
+> as many words: that a dismissal "stops its key suppressing duplicates" and that
+> "a fact that recurs after its notification was dismissed is a new candidate".
+> Leaving those standing would put two contradictory statements of one contract in
+> the tree, which is the failure the shared conformance suite cannot catch.
 
 > **Normative.** The implementing lane changes the duplicate lookup and the purge
 > of **every** `NotificationStore` implementation together with the shared
@@ -446,9 +487,18 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > predecessor declared **no** expiry is admitted after a dismissal, exactly as
 > before; that a record dropped by a reconsideration speaks for nothing after the
 > drop, including one carrying a dismissal stamp beside the drop; that a dismissal
-> frees the cap at once even while its key still speaks; that a dismissed record
-> whose candidate's expiry falls **later** than its retention horizon is not purged
-> before that expiry and is purged at it, while one whose expiry falls at or before
+> frees the cap at once even while its key still speaks; that a record which has
+> stopped speaking never speaks again — a dismissal offered to a record after its
+> candidate's expiry changes nothing, and its key stays free at that instant and
+> at every later one; that where several retained records carry one key the offer
+> is ruled against the most recently admitted of them alone, observed under
+> `retention = None` where nothing is purged — a key freed by its first record's
+> expiry is admitted afresh, an offer of that key is then ruled `DROP` while the
+> second record stands dismissed and inside its own expiry, and at that expiry a
+> candidate carrying the same key with a live expiry is admitted again, the two
+> retained predecessors notwithstanding; that a dismissed record whose candidate's
+> expiry falls **later** than its retention horizon is not purged before that
+> expiry and is purged at it, while one whose expiry falls at or before
 > that horizon is purged exactly where ADR-0130 §7 already put it; and that a record
 > carrying **both** a dismissal and a reconsideration `DROP` is purged strictly
 > after its retention horizon however far in the future its candidate's expiry
@@ -495,9 +545,23 @@ is where the second condition joins. The canonical fake's counterparts are in
 `tests/core/notification_contract.py`. `SqliteNotificationOutbox` needs no change
 at all: every site it reads actionability at still means actionability.
 
-**No new index and no new column.** The lookup already selects by
-`candidate_key`; what changes is which of the selected rows count. The rows for
-one key are bounded by the same argument ADR-0130 §7 makes for its expired tail.
+**No new index and no new column, and the work per offer falls rather than
+rises.** The lookup already selects by `candidate_key`; what changes is which of
+the selected rows count. **The rows retained under one key are not bounded**, and
+nothing here claims they are: ADR-0130 §7 grants `retention = None`, under which
+no record is ever purged, and a cursorless producer re-offers the same key after
+each candidate perishes, so that tail grows with the deployment's lifetime. What
+§2's narrowing bounds is the **work** — the offer is decided by the most recently
+admitted record for the key, so one record is decoded per offer whatever the tail
+has accumulated. The ordering that names it is the one the store already keeps,
+`admitted_at` then id, and the index it already carries on `candidate_key`
+selects the rows. That is never more work than the ratified lookup, which decodes
+every uncased row under the key — in the growing-tail case, every row it has,
+each of those predecessors having expired rather than been dismissed — and it is
+less wherever more than one survives. The *storage* that tail occupies is
+ADR-0130 §7's own question and carries §7's own answer: it is "bounded by
+retention and emptied by §9's delete surface", the user's own choice and the
+user's own remedy.
 
 ### 8. Explicitly declined
 
