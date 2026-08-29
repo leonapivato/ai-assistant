@@ -1,6 +1,6 @@
 # 216. The page is executed in the gate by a browser `pytest` drives, and the text layer stays
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 
 ## Context
