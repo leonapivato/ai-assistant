@@ -194,98 +194,168 @@ non-quiet head, which §2's rule already performs. This is the same limit ADR-02
 not promise more than the clock gives it") and it is inherited rather than
 re-argued.
 
-### 2. The backstop is the age of the material, and due is quiet **or** backstopped
+### 2. Due is quiet, aged, or a full page — and only the last of the three rests on no clock
+
+> **Normative.** A candidate's **unobserved page** is the result of
+> `ConversationStore.turns_after` for that conversation with `after_ordinal` set to
+> its `observed_through` and `limit` set to `observation_batch_size` — the lowest
+> such turns, ordinal ascending. A candidate holds at least one turn above its
+> watermark by ADR-0212 §3's definition of candidacy, so the page is never empty.
 
 > **Normative.** A candidate's **unobserved span** begins at the `occurred_at` of
-> the single turn returned by `ConversationStore.turns_after` for that
-> conversation with `after_ordinal` set to its `observed_through` and `limit` 1 —
-> the lowest turn above its watermark, or its first turn where no watermark is
-> recorded.
+> that page's **first** turn. A candidate is **aged** when the run's clock instant
+> minus that instant is at least `observation_max_unobserved_age` (§7).
 
-> **Normative.** A candidate is **backstopped** when the run's clock instant minus
-> the start of its unobserved span is at least `observation_max_unobserved_age`
-> (§7).
+> **Normative.** A candidate is **full** when its unobserved page holds exactly
+> `observation_batch_size` turns — that is, when a whole page is available to read.
 
-> **Normative.** A candidate is **due** when it is quiet **or** backstopped. A
-> scheduled pass is performed only against a due candidate, and a run that finds
+> **Normative.** A candidate is **due** when it is quiet, **or** aged, **or** full.
+> A scheduled pass is performed only against a due candidate, and a run that finds
 > no due candidate reads no turns, calls no model and writes nothing.
 
-> **Normative.** The backstop is evaluated by walking the candidate listing in
+> **Normative.** The due test is evaluated by walking the candidate listing in
 > ADR-0212 §3's order and taking the **first** candidate that is due. The listing
 > is not re-sorted, and a run never selects a later due candidate over an earlier
-> one on the ground that its span is older.
+> one on the ground that its span is older or its page fuller.
 
-**The interval cannot play this role, and that is the substantive answer to
-#1737's item 2.** The issue leaves open whether "the existing interval setting can
+> **Normative.** Where the selected candidate **has** a recorded watermark, the page
+> read to decide is the page the pass reads: no turn is read twice to decide whether
+> to read it.
+
+> **Normative.** Where the selected candidate has **no** recorded watermark, ADR-0212
+> §4 governs what the pass reads — "that conversation's most recent
+> `observation_batch_size` turns" — which is a different page from the forward one
+> the due test read. That is the one case in which a run reads two pages of one
+> conversation, it happens on that conversation's first pass and never again, and
+> nothing here changes where §4 begins.
+
+**The interval cannot play the backstop's role, and that is the substantive answer
+to #1737's item 2.** The issue leaves open whether "the existing interval setting can
 play this role, or a second duration". It cannot, and the reason is that the two
 figures bound different things. `observation_interval` is ADR-0083 §7's fixed delay
 after completion — *how often the question is asked*. A backstop is a bound on *how
-old unobserved material may get* — a property of the material, not of the loop.
+long unobserved material may wait* — a property of the material, not of the loop.
 A conversation in continuous use answers "not quiet" at every tick however
 frequent, so no value of the interval reaches it; shortening the interval only asks
-the same question more often and gets the same answer. Two figures, two fields.
+the same question more often and gets the same answer. So a second duration, named
+in §7.
 
-**What the backstop actually closes.** ADR-0077 §8 names two accepted gaps, of
-which the first is "a conversation the user never observes". ADR-0212 §3 closed that
-one for the *idle* case by making every candidate reachable in the order. The quiet
-trigger reopens a narrower version of it — a conversation that never goes quiet is
-never due — and the backstop is what closes that. Without it, a single long working
-session accumulates unobserved turns until it ends, and its earliest turns can reach
-`episode_retention`'s horizon (30 days by default) and expire undistilled while the
-conversation is still live. The backstop bounds that wait at one figure an operator
-can read.
+**Why the backstop has two arms and not one, and the second is the load-bearing
+half.** #1737's item 2 asks for a max age, and §7 supplies it. An age alone is not
+enough, because the instant it is measured on is **the caller's**:
+`ConversationStore.append` takes `occurred_at` "from the caller's injected clock",
+refusing only a value that is not a timezone-aware instant, and this project "never
+promises [the clock] is monotonic". A turn stamped *ahead* of the store's clock —
+a stepped clock, a spoke corrected backwards afterwards — has an unobserved span
+whose age is negative and stays negative until the store's clock catches up. For a
+conversation that also never goes quiet, the age arm is then the only arm and it
+never fires, so the bound the backstop exists to give would be no bound at all.
+**The full-page arm rests on no instant whatever.** Ordinals are the store's own —
+"dense from `FIRST_TURN_ORDINAL`, unique, and monotonic", allocated inside the same
+indivisible step that writes the row — so "does a whole page exist to read" is
+decided by counting rows and by nothing a caller supplies. That is the same reason
+ADR-0212 §2 made the *cursor* an ordinal rather than an instant, applied to the
+trigger so that the two do not rest on different kinds of thing.
+
+**The arithmetic that makes the bound unconditional, stated because it is the
+guarantee.** A conversation that is never quiet is, by §1's definition, one whose
+`last_active_at` — the **store's** clock, set by `mark_active`, never a caller's —
+moves at least once every `observation_quiet_window`. Every such move is a turn
+beginning, and a turn that completes is a row above the watermark. So a candidate
+that is never quiet accumulates a full page within at most
+`observation_batch_size` quiet windows and is due on the full arm — 200 minutes at
+the shipped figures — **whatever any caller stamped on any turn**. The age arm then
+does what #1737 asked of it and fires *earlier* than that for a conversation
+trickling slowly enough (§7 sets its default so that it does), and it can only ever
+make a candidate due sooner, never later.
+
+**What the backstop closes, at its true size.** ADR-0077 §8 names two accepted gaps,
+of which the first is "a conversation the user never observes". ADR-0212 §3 closed
+that one for the *idle* case by making every candidate reachable in the order. The
+quiet trigger reopens a narrower version of it — a conversation that never goes
+quiet is never due — and these two arms close that. What they bound is **when a
+conversation is next read**, and through it the material above a **recorded**
+watermark: once a watermark exists, `turns_after` reads forward from it, so the
+oldest unobserved turn is the first turn of the page and nothing above the watermark
+is passed over by being late.
+
+**They do not recover a prefix below a first pass's tail, and §7's figures are not
+a claim that they do.** For a conversation with **no** watermark, ADR-0212 §4 rules
+that the pass reads "that conversation's most recent `observation_batch_size` turns"
+and "does not read forward from the conversation's first turn", and §5 then advances
+past everything below that window: "A tail start passes over **every** turn below
+the window it reads, and that prefix is as long as the conversation is". Being due
+does not change where a first pass begins, and nothing in this ADR amends §4. What
+arming the job does — and it is what §4 said it would do — is make the first pass
+happen *sooner*, so less accumulates below it: "it shrinks toward zero once
+observation runs on a cadence, which is #1737's second ADR (§9) and the reason this
+one lands first." The full arm sharpens that from a tendency to a figure: a
+conversation created after the job is armed becomes due the moment it holds one
+page, so the prefix its first pass passes over is only what arrived between the page
+filling and the next tick, rather than a history of arbitrary length. **A conversation
+that already existed when the job was armed still loses its prefix**, exactly as §4
+prices it, and that is what these arms leave where §4 put it.
 
 **Why the span's start and not the conversation's last activity.** The question the
-backstop asks is "has material been waiting too long", and the material is the turns
+age arm asks is "has material been waiting too long", and the material is the turns
 above the watermark. Measuring on `last_active_at` would make an actively-used
-conversation permanently *not* backstopped, which is the case the backstop exists
-for. Measuring on the *newest* unobserved turn would do the same thing one turn
-later. The oldest is the only one of the three that ages.
-
-**One divergence between the due test and the pass is deliberate, and it is named
-rather than left to be found.** For a conversation with **no** watermark the clause
-above reads its *first* turn, while ADR-0212 §4 rules that the pass which follows
-reads "that conversation's most recent `observation_batch_size` turns" and "does not
-read forward from the conversation's first turn". Those are answers to two different
-questions — how long has unobserved material been waiting, and where does a first
-pass begin — and §4 has already priced the prefix its answer passes over ("A tail
-start passes over **every** turn below the window it reads"). Making the due test
-read the tail window instead would cost a `observation_batch_size`-wide read per
-probed candidate to reach a figure that changes no pass's behaviour. It is not
-bought.
+conversation permanently *not* aged, which is the case the arm exists for. Measuring
+on the *newest* unobserved turn would do the same thing one turn later. The oldest is
+the only one of the three that ages.
 
 **`occurred_at` is the caller's instant, and using it here is not ADR-0111 §2's
 excluded shape.** §2 excludes a wall-clock instant as a **cursor** — "a row written
 with an earlier instant after the cursor passed […] sits permanently behind the
 position and is never reached". Nothing here is a position: the walk's position is
-ADR-0212's ordinal watermark and this instant decides only *whether to walk now*. A
+ADR-0212's ordinal watermark, and this instant decides only *whether to walk now*. A
 skewed `occurred_at` therefore costs timing and never coverage — too old fires the
-backstop early, which merely observes sooner; too new delays it, and the quiet arm
-still reaches the conversation the moment it stops receiving turns. This is
-ADR-0093 §5's posture, where a read is bounded "by the clock, its configuration and
-the source's own content", applied to a trigger rather than to a read.
+age arm early, which merely observes sooner; too new defers it, and the full arm and
+the quiet arm both still reach the conversation on figures no caller supplies. This
+is ADR-0093 §5's posture, where a read is bounded "by the clock, its configuration
+and the source's own content", applied to a trigger rather than to a read.
 
-**What a run pays for the scan, stated as a bound.** Testing quietness costs
-nothing beyond the listing, which one call already returns. Testing the backstop
-costs one `turns_after` call with `limit` 1 per candidate examined, and a pass
-examines at most one listing — `conversations_with_unobserved_turns` "bounded by
-default at **50**" (ADR-0212 §8). So a pass performs at most 50 single-row index
-reads before it selects, no model call among them, and in the ordinary case it
-performs **zero**: §1's prefix property makes a quiet head the common answer, and a
-quiet head is due without any probe. The probes are paid only on a tick where
+**What a run pays to decide, stated as a bound.** Testing quietness costs nothing
+beyond the listing, which one call already returns. Testing the other two arms costs
+one `turns_after` call per candidate examined, each bounded at
+`observation_batch_size` rows, and a pass examines at most one listing —
+`conversations_with_unobserved_turns` "bounded by default at **50**" (ADR-0212 §8).
+So a pass performs at most 50 bounded index reads before it selects, no model call
+and no embedding among them, and — for a candidate carrying a watermark — the read
+for the one it selects is the page the pass then reads rather than a second read of
+the same rows. In the ordinary case
+it performs **zero**: §1's prefix property makes a quiet head the common answer, and
+a quiet head is due without any probe. The probes are paid only on a tick where
 nothing is quiet, which is exactly the state the backstop exists to resolve.
 
-**A deployment may set the backstop below the quiet window, and that is coherent
+**The listing's bound can hide a due candidate, and the state that takes is
+derivable rather than asserted.** ADR-0212 §8 gives
+`conversations_with_unobserved_turns` "**no cursor and no offset**", on the stated
+ground that "the stage takes the head of a freshly-read listing on each pass and
+never asks for a second page" — which was true when every head was served. Under
+this ADR a head may be skipped, so a due candidate can sit beyond the bound. **That
+requires more than the bound's worth of conversations to have had a turn begin
+inside one quiet window**, and the derivation is §1's monotonicity read backwards:
+if the head is not quiet then *no* candidate anywhere is quiet, so every candidate's
+`last_active_at` is inside the window; for a due candidate to be hidden, fifty
+others must be too. It is **accepted and named**, on the same footing ADR-0212 §3
+accepted its own order's clock hazard — "That is **accepted and named**, not closed:
+closing it would take a durable service-order position, which is a second cursor
+with its own upgrade discipline and its own `core` surface" — and closing this one
+would take a paged or configurable candidate listing, which is `ConversationStore`
+surface and therefore a contract ADR rather than a paragraph here. The Consequences
+name the condition that fires it.
+
+**A deployment may set the max age below the quiet window, and that is coherent
 rather than refused.** The two fields are independent durations and no cross-field
 validation is added: with a max age at or below the quiet window every candidate is
-backstopped before it is quiet, and the job degrades to a pure age trigger that
-reads mid-conversation pages. That is a policy an operator can state and this ADR
-does not need to forbid; refusing it at load would refuse a well-defined
-configuration to protect a default nobody is obliged to keep. What is *not*
-coherent is a backstop above `episode_retention`, since the material can then
-expire before the backstop fires — named in the Consequences, not refused, because
-`episode_retention` is nullable ("keep forever") and a cross-field rule over a
-nullable horizon has a branch that means nothing.
+aged before it is quiet, and the job degrades to an age trigger that reads
+mid-conversation pages. That is a policy an operator can state and this ADR does not
+need to forbid; refusing it at load would refuse a well-defined configuration to
+protect a default nobody is obliged to keep. What is *not* coherent is a max age
+above `episode_retention`, since the material can then expire before that arm fires
+— named in the Consequences, not refused, because `episode_retention` is nullable
+("keep forever") and a cross-field rule over a nullable horizon has a branch that
+means nothing.
 
 ### 3. The run: one new `Engine` operation, passes over conversations it names, bounded by the run budget
 
@@ -309,9 +379,10 @@ nullable horizon has a branch that means nothing.
 
 > **Normative.** The listing one pass considers is a single call to
 > `ConversationStore.conversations_with_unobserved_turns` at the bound ADR-0212 §8
-> gives it. A run performs no offset, no continuation and no widened listing, and
-> a candidate beyond that bound is reached on a later pass or a later run and
-> never by paging.
+> gives it. A run performs no offset, no continuation and no widened listing. A
+> candidate beyond that bound is reached when the listing next holds it and not by
+> paging, and §2 states what a run does not promise about one that is due and
+> beyond it.
 
 > **Normative.** Every pass a run performs happens inside the **run's own**
 > `Engine._tracked` scope. A pass is never a nested call to `Engine.observe`, so
@@ -558,7 +629,12 @@ measure. Both are filed together, and §10 names the issue.
 > requires of every duration on this loop. It is **not** nullable.
 
 > **Normative.** `Settings` gains `observation_max_unobserved_age`, a `timedelta`
-> defaulting to **6 hours**, under the same refusal and likewise **not** nullable.
+> defaulting to **2 hours**, under the same refusal and likewise **not** nullable.
+
+> **Normative.** §2's full-page arm gets **no field of its own**. Its threshold is
+> `observation_batch_size`, because the condition it tests is exactly "a whole page
+> is available to read", and a second count would let the two disagree about what a
+> page is.
 
 > **Normative.** `observation_interval`'s default becomes **15 minutes**. Its type,
 > its `gt=timedelta(0)` refusal and its `None`-means-disabled spelling are
@@ -581,16 +657,19 @@ to fetch a coffee does not end the exchange, short enough that a conversation
 finished before lunch is a belief by lunch. It is the figure most likely to be tuned
 by a deployment, which is why it is a field.
 
-**Six hours for the backstop.** It is chosen against the two figures it sits
-between, not in isolation. It must be comfortably above the quiet window, so that a
-conversation with any ordinary pause is served by the quiet arm and the backstop
-stays the exception it is meant to be — thirty-six times above, at the defaults. And
-it must be far below `episode_retention`'s 30 days, so that a continuously-active
-conversation's oldest unobserved turns are distilled two orders of magnitude before
-they can expire. Six hours is also about the length of the longest working session a
-single user plausibly holds in one conversation, which makes the backstop's ordinary
-firing rate roughly "once per long day of continuous use" rather than "several times
-an hour".
+**Two hours for the max age, and the figure is chosen so that both backstop arms
+are live.** Three constraints fix it, none of them arbitrary. It must be well above
+the quiet window, so a conversation with any ordinary pause is served by the quiet
+arm and the backstop stays the exception — twelve times above, at the defaults. It
+must be far below `episode_retention`'s 30 days, so a continuously-active
+conversation's oldest unobserved turns are distilled long before they can expire.
+And it must be **below the full-page arm's own worst case**, which §2's arithmetic
+puts at `observation_batch_size` quiet windows — 200 minutes at the shipped figures.
+A max age above that would fire only after the full arm already had, which is a
+field that never binds: a figure an operator can set, a paragraph arguing it, and no
+behaviour behind it. Two hours sits under 200 minutes with room, so the age arm is
+what ordinarily serves a conversation trickling slowly enough never to go quiet, and
+the full arm is the floor beneath it that no clock can defer.
 
 **Fifteen minutes for the interval, and the figure is bought against the loop rather
 than against cost.** The tick decides latency, not spend: with the cursor, a tick
@@ -610,13 +689,15 @@ separates these fields from the interval beside them. `observation_interval` is
 nullable because "the job is off" is a deployment; a quiet window of `None` would
 have to mean "observe mid-conversation", which is a *policy* this ADR ruled against
 in §1 and not a way of turning anything off, and a max age of `None` would mean "no
-backstop", reinstating the gap §2 exists to close. Off is spelled once, on the
+age arm", leaving the full-page arm alone to bound a trickling conversation, which
+it does not: a conversation receiving one turn an hour is never quiet and takes
+twenty hours to fill a page. Off is spelled once, on the
 interval, which is also what keeps ADR-0083 §7's "'Disabled' is `None`, never `0`"
 readable: one field means off, and a reader does not have to work out which of three
 nulls disabled the job.
 
 **No cross-field refusal, and the reason is that both orderings are meaningful.**
-§2 already names what a backstop below the quiet window does — it makes the job a
+§2 already names what a max age below the quiet window does — it makes the job a
 pure age trigger — and a load-time refusal would reject a configuration that
 behaves exactly as its author asked. A refusal against `episode_retention` is worse:
 that field is nullable and `None` means keep forever, so the comparison has a branch
@@ -641,12 +722,16 @@ that may be chunked under this ADR, and its lane owes that operation a deadline
 before it may be scheduled". Checked, in the order a pass performs them:
 
 - **The listing and the probes** — `conversations_with_unobserved_turns`, and one
-  `turns_after` with `limit` 1 per candidate examined — are bounded local index
-  reads of the same class every other job on the loop already performs, and each is
-  bounded in *size* by ADR-0212 §8's own limits.
-- **The page** — `turns_after` at `observation_batch_size`, then one `MemoryStore.get`
-  per turn — is the read ADR-0077 §1 sized deliberately, "a handful of exchanges, not
-  a month of transcript".
+  `turns_after` at `observation_batch_size` per candidate examined — are bounded
+  local index reads of the same class every other job on the loop already performs,
+  and each is bounded in *size* by ADR-0212 §8's own limits. For a candidate that
+  carries a watermark, the probe for the one a pass selects **is** that pass's page
+  (§2), so the reads do not compound; for one that does not, the pass reads ADR-0212
+  §4's tail as well, which is one extra bounded page on a conversation's first pass
+  and never after it.
+- **The page** — the probe above, then one `MemoryStore.get` per turn in it — is the
+  read ADR-0077 §1 sized deliberately, "a handful of exchanges, not a month of
+  transcript".
 - **The model call** — at most one per pass (ADR-0212 §3) — is bounded by
   `model_timeout_seconds`, "the 'Deadline for a single model attempt, in seconds'"
   ADR-0111 §4 itself names, and it does not fall back (ADR-0077 §3), so the true
@@ -754,11 +839,18 @@ would have nothing to call.
   member on `ObservationReport`.
 
 **What the tests owe, beyond the ordinary:** that the quiet arm is decided on
-`last_active_at` and the backstop on the span's start; that a run selects the first
-**due** candidate and not merely the first candidate; that the budget is checked at a
-pass boundary and not inside one; that a deleted conversation drops rather than
-halting; that a run's writes carry the run's seam and not `observe`'s; and that the
-shipped default arms the job, pinned as a value rather than asserted in prose.
+`last_active_at` and not on `last_turn_at`; that the age arm is decided on the
+unobserved page's first turn; that the **full** arm fires on a page of exactly
+`observation_batch_size` turns; that a candidate whose earliest unobserved turn
+carries an `occurred_at` **ahead of the run's clock** is still reached — by the full
+arm, deterministically, with the age arm never firing — which is the case §2's
+second arm exists for and the one a reader would otherwise assume unreachable; that
+a run selects the first **due** candidate and not merely the first candidate; that
+the page read to decide is the page the pass reads, so no turn is read twice; that
+the budget is checked at a pass boundary and not inside one; that a deleted
+conversation drops rather than halting; that a run's writes carry the run's seam and
+not `observe`'s; and that the shipped default arms the job, pinned as a value rather
+than asserted in prose.
 
 **Filed rather than absorbed: #1815.** ADR-0120 §6's exclusion of the `observe`
 reinforcement share rests on an overlap ADR-0212 removed, and §6's population and
@@ -927,9 +1019,15 @@ and #1815 holds them.
 ## Consequences
 
 **A fact told in chat becomes a belief without anybody running a command**, which is
-#1737's title and the point of the pair. At the shipped figures the wait is bounded
-by the quiet window plus one interval — twenty-five minutes from the end of a
-conversation — and by six hours for one that never ends.
+#1737's title and the point of the pair. At the shipped figures a conversation that
+ends is a belief within the quiet window plus one interval — twenty-five minutes —
+and one that never ends is read within two hours of its oldest unobserved turn, or,
+where a caller's clock has stamped that turn ahead of the store's, within
+`observation_batch_size` quiet windows of the page filling: 200 minutes, on ordinals
+alone and on no clock a caller supplies (§2). **What none of the three arms recovers
+is the prefix below a first pass's tail**, which stays exactly where ADR-0212 §4
+priced it; what arming the job does is make that first pass early enough that little
+accumulates below it.
 
 **The first tick after an upgrade does real work, and it is bounded work.** ADR-0212
 §4 starts every pre-existing conversation at its tail, so each costs exactly one pass
@@ -951,11 +1049,13 @@ silently: §6 puts scheduled writes on their own seam, ADR-0120 §8 partitions t
 window at the configuration diff, and #1815 holds the question of what the measures
 should do about it.
 
-**A deployment can still mis-set the pair.** A backstop above `episode_retention`
-lets a continuously-active conversation's oldest unobserved turns expire before the
-backstop fires; a backstop at or below the quiet window makes the quiet arm inert and
-the job an age trigger. Both are coherent configurations, neither is refused at load
-(§7), and both are named here so that an operator meeting one recognises it.
+**A deployment can still mis-set the pair.** A max age above `episode_retention`
+lets a continuously-active conversation's oldest unobserved turns expire before that
+arm fires; a max age at or below the quiet window makes the quiet arm inert and the
+job an age trigger; a max age above `observation_batch_size` quiet windows makes the
+age arm itself inert, since the full arm would always have fired first. All three
+are coherent configurations, none is refused at load (§7), and all three are named
+here so that an operator meeting one recognises it.
 
 **What would trigger revisiting this decision.** A conversation that stays a
 candidate across many runs without its watermark moving — which §3's termination
@@ -963,9 +1063,14 @@ argument says cannot happen and which would mean ADR-0212 §5's invariant is not
 holding in practice. A run that regularly spends its whole budget on one
 conversation, which would mean the per-pass bound is too small for the volume rather
 than that the order is wrong. A deployment reporting the *spend* rather than the
-latency as the thing it needs to bound, which is §10's last deferral. Or a second
-principal (`track:identity`), where "quiet" stops being a property of one user's
-attention and the window has to be argued again.
+latency as the thing it needs to bound, which is §10's last deferral. **A deployment
+that can have more than the candidate listing's bound of conversations active inside
+one quiet window**, which is the one state in which §2's due test leaves a due
+candidate unreached — the answer then is a paged or `Settings`-bounded candidate
+listing, which is `ConversationStore` surface and so a contract ADR of its own. Or a
+second principal (`track:identity`), which is both the shape that reaches that state
+and the one where "quiet" stops being a property of one user's attention and the
+window has to be argued again.
 
 ## Alternatives considered
 
@@ -1007,6 +1112,24 @@ choice is what remains.
 work nobody is waiting for. "After the answer is sent" is the same thing with a
 longer name — the process is resident, so the work still lands inside the turn's
 operation, and the quiet window is the honest way to say "when the exchange is over".
+
+**The max-age arm alone, without the full-page floor.** This is #1737's item 2 taken
+literally and it was the shape this ADR carried into its first review. Rejected in
+§2: the instant it measures is `append`'s caller-supplied `occurred_at`, so a turn
+stamped ahead of the store's clock has a span whose age never reaches the threshold,
+and for a conversation that also never goes quiet the age arm is the only arm. The
+full-page arm costs one field-free condition on a page the run reads anyway and makes
+the bound rest on store-allocated ordinals instead — the same reason ADR-0212 §2 gave
+for making the cursor an ordinal rather than an instant.
+
+**A paged or `Settings`-bounded candidate listing.** It would close the one residual
+§2 names, where a due candidate sits beyond an unpaged bound. Rejected here because
+it is `ConversationStore` surface — a `limit` an operator sets, or an offset ADR-0212
+§8 expressly refused for a listing "whose membership and whose ordering key both
+move between passes" — and golden rule 5 puts that in its own contract ADR rather
+than in a trigger's. The state it would close needs more than fifty conversations
+active inside one quiet window, and the Consequences name it as the revisit
+condition.
 
 **A durable "last observed at" instant on the conversation index.** It would make the
 backstop a single field comparison with no probe read at all. Rejected because it is
