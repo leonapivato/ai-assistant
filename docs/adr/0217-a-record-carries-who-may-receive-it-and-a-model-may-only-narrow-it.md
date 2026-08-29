@@ -693,13 +693,34 @@ would fail that test on the first turn.
 > record that event produces is written with reach `OWNER` and setter `OWNER_ACT`.
 > It is a narrowing only, and `False` is not an act of any kind.
 
-> **Normative.** It **ships with its route**, `assistant learn --guarded`, on
+> **Normative.** It **owes its route**, `assistant learn --guarded`, on
 > `about_person`'s own precedent in the same class: ADR-0100 §4's member ships with
 > `assistant learn --about-person` because "a field with no route would leave every
 > third-party belief constructing `about_person=None`". A `guarded` nobody can set is
-> the same defect. **"Ships with" is an ordering claim and not only a design one**:
-> §11 puts the route inside the same change as the member, so no released version
-> carries one without the other.
+> the same defect, so the route is **owed and not optional**: no lane closes this
+> decision without it, and §10 names the arm it owes.
+
+> **Normative.** **The route is a follow-on consumer lane, and this ADR does not order
+> it into the change that adds the member.** `interfaces/` constructs the changed
+> `FeedbackEvent`, which makes it a consumer of the changed contract and not the
+> primary implementation of it, and ADR-0137 §4 governs every such consumer in terms:
+> "Every consumer of the contract other than the primary implementation is briefed only
+> after the paired lane has merged, and the merged contract text is that brief's
+> authority." That is a ratified sequencing rule, and this decision's preference for one
+> release does not outrank it. The adapter's thinness does not reach the question
+> either: §4 sequences consumers and says nothing about their size, so "the adapter is
+> thin" is an answer to a question §4 does not ask. §11 places the lane immediately
+> after the write-time change and briefs it against the merged contract.
+
+> **Normative.** **The gap that ordering leaves is one lane wide, and it is stated
+> rather than denied.** Between the two changes `guarded` is settable over the wire —
+> `HubClient.learn` carries a whole `FeedbackEvent`, so any client of the promoted
+> surface may set it — and not settable by the flag. What the gap is **not** is
+> fail-open: the atomicity clause below puts the member and its honouring in one change,
+> so wherever `guarded=True` is set it is acted on, and no tree accepts the member
+> without honouring it. ADR-0100 §4's defect is a field **no** path can set; this is a
+> field one path can set and a second path cannot set yet, for exactly one lane, by a
+> ratified sequencing rule.
 
 > **Normative.** The member is on `FeedbackEvent` and **not** encoded by an adapter,
 > because deciding a record's placement is not adapter work: golden rule 3 keeps
@@ -1144,7 +1165,19 @@ ADR-0201 closed.
 > are bound by it and not one of them: a `FeedbackEvent` carrying `guarded=True`
 > produces records placed reach `OWNER` with setter `OWNER_ACT`, and one carrying the
 > default produces records placed by §6's default. The arm is taken at that seam and
-> not through the CLI, because the flag reaches the processor unread by any adapter.
+> not through the CLI, because the flag reaches the processor unread by any adapter —
+> which is why the route owes an arm of its own, below.
+
+> **Normative.** The lane that carries `assistant learn --guarded` pins **the CLI seam
+> itself**: the command invoked with the flag reaches the engine as a `FeedbackEvent`
+> carrying `guarded=True`, and the same command without it as one carrying the default.
+> The arm is owed because every other arm in this section starts from a
+> **preconstructed** event, so an adapter that accepts `--guarded` and then omits it
+> when building the event passes all of them while writing the default placement over
+> an explicit owner act — a control silently doing nothing, which is the one failure
+> the route exists to prevent. It is pinned in the follow-on consumer lane §11 names
+> and not in the write-time change, because the seam it pins does not exist until that
+> lane builds it; that lane does not close without it.
 
 > **Normative.** The lane pins **§7's read discipline**: each act decides over the
 > stored record as read in the call that writes it, so an act performed after a render
@@ -1224,23 +1257,35 @@ ADR-0201 closed.
 > back and races nobody:
 > `FeedbackEvent.guarded` in `core/types.py`, the `FeedbackProcessor` implementations
 > in `learning/` that honour it, the guarded-event arm on `FeedbackProcessorContract`,
-> `FakeFeedbackProcessor` in `ai_assistant.testing`, its own `PROTOCOL_VERSION` bump
-> with its `wire/envelope.py` entry, **and `assistant learn --guarded` in
-> `interfaces/`**. It spans `core`, `learning`, `testing` and `interfaces` on
+> `FakeFeedbackProcessor` in `ai_assistant.testing`, and its own `PROTOCOL_VERSION`
+> bump with its `wire/envelope.py` entry. It spans `core`, `learning` and `testing` on
 > `CLAUDE.md`'s contract-seam exception (ADR-0137 §2) — a contract member, the
 > conformance suite that binds it, the canonical fake and the primary implementation
-> are one unit of work — and §7's last clause is why no split of it is admissible.
+> are one unit of work — and §7's atomicity clause is why no split of it is admissible.
 
-> **Normative.** **The route is inside that change and not after it**, because §7 says
-> the member "ships with its route" and the two cannot both be honoured by an ordering
-> that releases the member first. A released version carrying a client-settable
-> `guarded` with no way for the owner to set it is the defect ADR-0100 §4 named — "a
-> field with no route would leave every third-party belief constructing
-> `about_person=None`" — arriving one release early, and the `PROTOCOL_VERSION` bump in
-> this same change is what makes that release reachable by a client. The adapter half
-> is admitted into the change on its own thinness and on nothing else: it sets
-> `FeedbackEvent.guarded` from a flag and decides nothing (golden rule 3), so it adds a
-> subsystem to the change without adding a decision to it.
+> **Normative.** **`assistant learn --guarded` is not inside that change. It is the
+> follow-on consumer lane, it is owed, and it lands immediately after.** `interfaces/`
+> constructs the changed `FeedbackEvent`, so it is a consumer of the changed contract
+> and not the primary implementation of it, and ADR-0137 §4 admits no other ordering:
+> every such consumer "is briefed only after the paired lane has merged, and the merged
+> contract text is that brief's authority". A ratified sequencing rule outranks this
+> decision's preference, and the adapter's thinness is not an exemption from it —
+> §4 sequences consumers and says nothing about their size. The lane is **one** consumer
+> group under §4's grouping clause: one adapter, one flag, adaptation in a single
+> subsystem and new machinery in none. It carries `assistant learn --guarded` in
+> `interfaces/` and its tests, including §10's CLI-seam arm, and nothing else; it bumps
+> no `PROTOCOL_VERSION`, because it changes no wire-carried definition. §7 states the
+> one-lane gap this ordering leaves and why it is not a fail-open one.
+
+> **Normative.** **The field move's own width is not a counter-example to that**, and
+> the difference is stated so no lane reads the two clauses as one rule applied
+> inconsistently. The sites this section's first clause names hold a member the field
+> move **removes**: no split of that change compiles, so they are not consumers that
+> could be sequenced after it at all, and `CLAUDE.md`'s contract-seam exception
+> (ADR-0137 §2) is what admits them. The route holds nothing. It is a purely additive
+> consumer of a member that exists only once the write-time change has merged, which is
+> the case ADR-0137 §4 sequences and the case in which a brief written earlier would be
+> written "against a draft in its author's head".
 
 > **Normative.** §4's model proposal is a **further change**, in `learning/observer.py`
 > and its tests alone. It changes no `core` definition and no Protocol. It lands
@@ -1251,15 +1296,17 @@ ADR-0201 closed.
 
 > **Normative.** **Any rendering of a placement** is a **further change**, in
 > `interfaces/` and its tests alone (`CLAUDE.md`, "Interface adapters are thin"), and
-> it is optional in the sense §7's last clause gives it: nothing here obliges a surface
-> to render a placement, so no lane is blocked by its absence and no ordering depends
-> on it.
+> it is optional in the sense §7's closing clause gives it — "nothing here obliges a
+> surface to render one" — so no lane is blocked by its absence and no ordering depends
+> on it. It is a consumer lane too, and ADR-0137 §4 sequences it the same way: it is
+> briefed against the merged contract, never ahead of it.
 
 > **Normative.** No lane reads the ordering above as licence to widen any of them.
 > Anything not named in one of them is a change of its own. The order is: the field
-> move; §7's write-time act **with its route**; #248's conditional write, in its own
-> ADR; §7's two acts; and §4's proposal. Any rendering of a placement is unordered
-> against all of them.
+> move; §7's write-time act; `assistant learn --guarded`, the follow-on consumer lane
+> ADR-0137 §4 places immediately after it; #248's conditional write, in its own ADR;
+> §7's two acts; and §4's proposal. Any rendering of a placement is unordered against
+> all of them.
 
 > **Normative.** The records this decision owes on ADR-0204, ADR-0199 and ADR-0210 are
 > made in **this ADR's own PR** (ADR-0082 §1, ADR-0070 §1), and are header-only.
