@@ -135,11 +135,12 @@ happens to it under a fold, and what may never be done with it.
 
 ## Decision
 
-### 1. One additive field on `MemoryBase`, and the three names beside it
+### 1. One additive field on `MemoryBase`, the four names beside it, and the bound on a record's set
 
 > **Normative.** `core/types.py` gains `TopicLabel`, an annotated refinement of
-> `EncodableText` admitting exactly the canonical form §3 fixes, and the two
-> constants `MAX_TOPIC_LABEL_LENGTH` and `MAX_TOPICS_PER_PROPOSAL`.
+> `EncodableText` admitting exactly the canonical form §3 fixes, and the three
+> constants `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL` and
+> `MAX_TOPICS_PER_RECORD`.
 
 > **Normative.** `MemoryBase` gains exactly one field, `topics`, of type
 > `tuple[TopicLabel, ...]`, defaulting to the empty tuple. It records what the
@@ -153,7 +154,11 @@ topics: tuple[TopicLabel, ...] = Field(
     description=(
         "What this record is about, as canonical labels proposed at write "
         "(ADR-0213 §4). Empty means no topic was recorded, which is neither "
-        "'no topic' nor 'every topic' (§7). Strictly increasing (§3)."
+        "'no topic' nor 'every topic' (§7). Strictly increasing by code point "
+        "(§1). No record this system installs carries more than "
+        "MAX_TOPICS_PER_RECORD labels; the bound is enforced at the "
+        "MemoryWriter seam and not here, so a longer tuple is admissible and "
+        "a record stored with one stays readable (§1)."
     ),
 )
 ```
@@ -165,44 +170,124 @@ topics: tuple[TopicLabel, ...] = Field(
 > follow from it, and none of them survives a field where `("health", "sleep")`
 > and `("sleep", "health")` are different bytes.
 
-> **Normative.** The field carries **no cardinality bound on the type**.
-> `MAX_TOPICS_PER_PROPOSAL` bounds what a *producer* may propose (§4) and binds
-> nowhere else; no validator on `MemoryBase`, no `MemoryWriter` check and no store
-> refuses a record for carrying more labels than it.
+> **Normative.** `MAX_TOPICS_PER_RECORD` is **16**, a fixed constant of
+> `core/types.py`. **No `MemoryWriter` *installs* a record whose `topics` carries
+> more labels than it.** Where the record it would install does, it installs the
+> retained subset §8 specifies. "Install" is ADR-0081 §1's sense, which is the scope
+> ADR-0086 §2 states its own bound with: a write that merely *retires* an existing
+> record — storing it back with only its validity window narrowed (ADR-0080 §1) —
+> asserts nothing new about what the record is about, changes no label, and carries
+> the tuple as it stands.
 
-**ADR-0086 §2's test does not decide this, and its own answer does not transfer.**
-The test — "does it refuse something that already worked" — is answered *no* for a
-brand-new field: nothing in any store carries topics, so a `max_length` here would
-refuse nothing that exists today. So the type-level bound is available, and it is
-declined on other grounds. ADR-0086's own answer to the case that matters —
-`MAX_EVIDENCE_CITATIONS` at the `MemoryWriter` seam on installs (§2), with a fold's
-overflow displacing the oldest of the union (§3) and the loss recorded as
-`Provenance.evidence_elided` (§4) — is the obvious thing to copy, and three
-differences stop it.
+> **Normative.** The bound is a **writer obligation and not a validator on the
+> type**. `MemoryBase` admits a longer tuple, and a record decoded from storage
+> carrying one is read rather than refused. `MAX_TOPICS_PER_PROPOSAL` bounds
+> separately and earlier what a *producer* may propose (§4). The two are one rule at
+> two seams over two different objects — a proposal's suggestion and an installed
+> record — and neither is a second enforcement point for the other.
 
-- **There is no age to displace by.** ADR-0086 §3 selects "the most recently
-  accumulated" because that section could ratify the tuple's order as accumulation
-  order: "§3's rule reads position as age and a rule that reads a property nobody
-  guaranteed is not a rule." §1's order here is by code point, chosen *because* order
-  carries no meaning, so there is no principled member to drop — displacement would
-  discard `"sleep"` before `"work"` on an alphabetical accident.
-- **The loss is a different kind of loss.** An elided citation weakens how a warrant
-  is *presented*, and ADR-0086 §4 can say so honestly — the belief stays exactly as
-  reachable as it was. A dropped label makes the record unreachable by a topic-scoped
-  act, which changes what a later destructive or protective act touches, with nothing
-  a count can restore. That is nearer ADR-0106 §4's laundering than ADR-0086 §4's
-  elision, and §8 rules the union non-lossy for that reason.
-- **The cost the bound exists to stop is absent.** ADR-0086 bounds `evidence` because
-  citations are resolved — a Context section of it is headed "The read amplification
-  is contract-mandated, not an implementation choice", and §6 lands `get_many` to
-  serve it. A label resolves to nothing (§3) and costs one short string; there is no
-  amplification here to bound.
+**This is ADR-0086's shape, taken because its reasoning holds here and not because
+the fields rhyme.** That ADR bounds `Provenance.evidence` with a fixed `core`
+constant (§1), enforces it at the `MemoryWriter` seam on installs (§2), gives the
+fold an overflow rule (§3) and records the loss on the record (§4). The first three
+are taken; the fourth is declined below, with its own argument. Two questions decide
+the placement, and ADR-0086 answers both in its own currency.
 
-So the bound sits on the proposer, where it shapes what is written without being able
-to refuse a fold the policy has already ruled, and the growth §8's union leaves is
-stated as residue in §15 rather than closed by a mechanism that would cost more than
-it buys. `Provenance.evidence` is the corpus's own precedent for a `core` collection
-whose type carries no length bound.
+- **ADR-0086 §2's test is answered *no* here, so the type-level bound is available —
+  and is still the wrong seam.** The test is "does it refuse something that already
+  worked", and a `max_length` on a brand-new field refuses nothing that exists today
+  (§3 says the same thing about the canonical form). What rules it out is the
+  direction the field will be changed in. §11 lets an older peer decode a newer hub's
+  record because the member has a default and `MemoryBase` does not set
+  `extra="forbid"`; a `max_length` would take that back for the one change a later
+  ADR is most likely to make — raising this constant — by making a record written at
+  the new bound unreadable to a peer at the old one. ADR-0086 §1's third bullet
+  refuses a *configurable* bound for exactly that reason ("A record exported from a
+  deployment at 512 and imported into one at 64 would be a record the receiving
+  system's own contract refuses, for a reason the user cannot see and did not
+  cause"), and a fixed constant that a later ADR raises reaches the same place one
+  ratification later. The writer seam has no such edge: it decides what this
+  deployment *writes*, never what it may *read*.
+- **A type-level bound would be enforced at the fold anyway, and then enforced
+  twice.** §8's union is a ratchet, and a fold whose union exceeds the bound is a
+  legitimate `REINFORCE` whose result must be a *bounded record* rather than a raised
+  write. The only place that can be arranged is the seam that computes the union —
+  which is the `MemoryWriter` seam, where the bound already is. A `max_length` above
+  it enforces nothing that seam does not, and adds a way for the two to disagree: one
+  rule in two places to drift, the defect ADR-0086 §1 names when it declines a second
+  enforcement point at the feedback boundary. And where they *did* disagree — a caller
+  constructing a proposal the writer would have bounded — the type would raise on the
+  ingest path in place of the bounded record §8 requires, which is ADR-0086 §2's own
+  objection in this field's currency: it refuses "a rule that can only be obeyed by
+  breaking the rule above it", and the retire exemption above exists for the same
+  reason its does.
+
+**Why 16.** ADR-0086 §1 is right that "a bound with no number is not a bound", and
+the number is chosen the way it chose 64:
+
+- It is four times `MAX_TOPICS_PER_PROPOSAL`, so a record accumulates through
+  several disjoint folds before the bound can bite at all — the shape ADR-0086 §1
+  used to set 64 "comfortably above `observation_batch_size`'s default of 20". A
+  bound at or near the per-proposal cap would make ordinary reinforcement displace,
+  which is the churn that section refuses.
+- It is small enough that a record's topic set stays readable at a glance, which §4
+  gives as the axis's whole value, and small enough that a topic-scoped act over such
+  a record still means something.
+- It is far past the record §4 describes as "genuinely about five things", which
+  that section already calls a record about one thing the vocabulary has not learned
+  to name. Sixteen is a ceiling nobody should reach, not a quota to fill.
+
+**A fixed constant and not a `Settings` field**, on §4's own reason for the sibling
+two and ADR-0086 §1's for its own: a bound a deployment can raise is not a bound, and
+this one crosses deployments in `export`. Nothing here is a knob.
+
+**What this closes is ADR-0111 §4's admissibility condition, stated rather than
+implied.** That section admits chunking only where "every operation it performs
+inside one chunk is itself bounded", and warns that "a job whose chunk reaches an
+operation with no deadline is not a job that may be chunked under this ADR". §5's
+accumulation is such an operation, and with this bound its cost is a product of
+figures the configuration already holds: a chunk of at most `scheduler_chunk_size`
+records contributes at most `scheduler_chunk_size × MAX_TOPICS_PER_RECORD` labels, of
+at most `MAX_TOPIC_LABEL_LENGTH` characters each, and the selection §5 specifies is
+over at most that many distinct values.
+
+**What §4 asks of a local operation is a bound and not a timer, and reading it the
+other way makes it unsatisfiable.** The accumulation calls no provider, waits on no
+I/O and scales with nothing outside the chunk; a reading under which it owes a
+*deadline* would equally oblige every chunked job to put one on its own JSON decode,
+its digest computation and its list comprehension, which nothing in the corpus does and
+which §4's own arithmetic presupposes is unnecessary — it computes "a chunk's true
+bound" as "``max_attempts * timeout + total backoff``, multiplied by the chunk's
+records", a per-record cost times a record count, and names the hazard it is written
+against as "a provider call that never returns". A per-record cost that the
+configuration and this ADR's constants determine is exactly what that arithmetic
+consumes. The finding this answers was right that the *earlier* draft failed the test:
+with no bound anywhere, the per-record cost was a function of a tuple nothing limited,
+and the product was not computable at all. §5 restates the arithmetic where the
+accumulation is defined, and §12 pins the input that would otherwise have broken it.
+
+**What is deliberately *not* copied is ADR-0086 §4's recorded count**, and the
+asymmetry is in what the two tuples claim.
+
+- **`evidence` claims a count and `topics` claims nothing.** ADR-0086 §4 records
+  `evidence_elided` because ADR-0073 §4 obliges the surface to convey "how many
+  citations stand behind it" and forbids a citation being "silently dropped" — the
+  tuple stands for a warrant whose size is itself an answer. §7 rules the opposite
+  for this field before any bound existed: an empty tuple is "no topic recorded", the
+  set is never a claim to completeness, and every surface performing a topic-scoped
+  act already owes the owner the disclosure "that the reach of the act is the labels
+  that were recorded rather than the subject the owner has in mind". A count of
+  labels not carried answers a question no surface asks and no clause obliges.
+- **Nothing the record already carried is lost.** §8's overflow admits the
+  *incoming* record's labels and never displaces the survivor's own, so a record filed
+  under `"health"` cannot stop being reachable by a health-scoped act through a fold —
+  which is the laundering ADR-0106 §4 closes and which §8 takes the union for. What
+  the bound declines is a *proposal's* suggestion that did not fit, and §4 already
+  rules that class: a topics entry a producer offers and the system cannot use is
+  **ignored**, with no counter moving and no `core` type gaining a member to count it.
+  A second treatment for the same class of non-event would contradict it.
+- §15 names the condition that would fire a recorded count anyway, so this is a
+  decision with a stated expiry rather than an omission.
 
 ### 2. Placement: the envelope, on ADR-0100 §2's own test
 
@@ -404,15 +489,31 @@ knobs for the opposite one — they bound a *run*, not the shape of what is stor
 
 > **Normative.** `ConsolidationStage` (`orchestration/consolidation.py`) accumulates,
 > **in memory and for the duration of one run**, the distinct topic labels carried by
-> the records that run has already read, and puts them in the prompt it already sends.
-> It proposes against them: it uses an existing label where one fits and mints a new
-> one only where none does.
+> the records this run has put in a prompt — **the chunk being prompted included** —
+> and puts them in the prompt it already sends. It proposes against them: it uses an
+> existing label where one fits and mints a new one only where none does.
 
-> **Normative.** The supplied set is the labels the run has read so far, bounded to at
-> most `DEFAULT_PAGE_SIZE` of them and selected by the number of read records carrying
-> each, descending, ties broken by label ascending. The count is over what this run
-> read and nothing else. The first chunk of a run is supplied nothing, because nothing
-> has been read yet.
+> **Normative.** The accumulation is updated **when a chunk's prompt is composed and
+> before that prompt is sent**, from exactly the records that prompt carries: the
+> chunk the walk returned, less the records this run itself produced, which
+> `ConsolidationStage.run` already withholds. It is updated there and nowhere else. It
+> does not depend on how the chunk's proposals route, on whether the write stage
+> commits any of them, or on whether the cursor advances — so a run that halts at an
+> unrecorded chunk (ADR-0111 §5) leaves nothing behind, there being nothing durable to
+> leave.
+
+> **Normative.** The supplied set is the distinct labels of those records, bounded to
+> at most `DEFAULT_PAGE_SIZE` of them and selected by the number of read records
+> carrying each, descending, ties broken by label ascending. The count is over what
+> this run read and nothing else. **The first chunk of a run is supplied its own
+> chunk's labels**, which is the empty set exactly when that chunk carries none.
+
+> **Normative.** The accumulation reads at most `MAX_TOPICS_PER_RECORD` labels of any
+> one record. §1 bounds every record this system installs to that many; where a record
+> decoded from storage carries more — which only a bound a later ADR raised, or a
+> record imported from a deployment holding a higher one, can produce — the first
+> `MAX_TOPICS_PER_RECORD` labels in the tuple's own order are read and the rest are
+> not.
 
 > **Normative.** The accumulation is **per run and never durable**. Nothing is
 > written, no cursor, count, index, column or table records it, it does not survive the
@@ -461,6 +562,30 @@ recipient. ADR-0004 §7's minimisation test is met on its own terms rather than 
 no new class of data, no new recipient, and at most `DEFAULT_PAGE_SIZE` short strings
 against a chunk of full records.
 
+**Including the chunk being prompted is what makes the clause implementable, and it is
+also the stronger position.** `ConsolidationStage.run` obtains a chunk from
+`walk_records` and hands it to `_consolidate`, which composes the prompt — so by the
+time a prompt exists, that chunk's records have been read. A rule supplying "the labels
+read so far" while also requiring the first prompt to carry none is two rules an
+implementation cannot both obey, and the choice between them is not a wash. Taking the
+labels of the records the prompt itself carries makes the supplied set a *projection of
+that prompt's own content*: not merely the same class of data from the same records for
+the same recipient, but the same data, restated as labels. ADR-0004 §7's test is then
+met by construction rather than by argument. It also deletes the wart the other reading
+needs — a first chunk supplied nothing, which is the chunk most in need of a vocabulary
+in the one configuration where it is the only chunk.
+
+**And the work it adds has a bound the configuration can compute**, which is what
+ADR-0111 §4 asks of an operation inside a chunk. §1 bounds an installed record to
+`MAX_TOPICS_PER_RECORD` labels and the fourth clause above bounds the *read* of any
+record to that many whatever the store holds, so one chunk contributes at most
+`scheduler_chunk_size × MAX_TOPICS_PER_RECORD` labels of at most
+`MAX_TOPIC_LABEL_LENGTH` characters, and the ordering is over at most that many distinct
+values. Nothing in it calls a provider, waits on I/O, or scales with anything outside
+the chunk. That is the "dictionary update per record" the Consequences claim, now true
+of every admissible input rather than of the expected one — and §12 pins the input that
+would otherwise have broken it.
+
 **Reading the walk rather than the store is what makes this free, and three rounds of
 review are why it is stated that way.** An earlier draft added a `MemoryStore` read
 returning the store's whole vocabulary, and it could not be made to hold: an
@@ -474,11 +599,33 @@ Reading what the walk already decoded has none of those problems: the records ar
 hand, they were returned by a read that already applied the store's own liveness
 predicate, and the cost is a dictionary update per record.
 
-**What it buys, and what it does not.** Within a run, every chunk after the first is
-supplied the labels the earlier chunks carried, so a run converges on itself rather
-than minting a synonym per chunk. Across runs, ADR-0111's cursor walks the whole store,
-so a later run reads records earlier runs labelled and is steered by them. What it does
-**not** buy is a store-wide vocabulary at the first prompt of a run, and it buys the
+**What it buys, and what it does not — stated as narrowly as a forward-only walk
+allows.** Within a run, every prompt is supplied the labels of every record the run has
+prompted with, its own chunk included, so a run converges on itself rather than minting
+a synonym per chunk.
+
+**Across runs it buys strictly less, and the limit is the walk's own shape.**
+`MemoryStore.walk_records` reads "beginning strictly after the position recorded for
+`walk`", and "a record whose eligibility changes *below* the cursor is not revisited" —
+a high-water mark, never a re-read. So a later run is **not** steered by what an earlier
+run *read*; it is steered only by what an earlier run *wrote*, because a committed
+consolidation is a new record above the cursor that a later run's walk reaches in the
+ordinary way. That is a real channel and a slow one, and it is the whole of the
+cross-run effect. Nothing carries a vocabulary from one run to the next, by §5's third
+clause, and nothing is meant to.
+
+**The one-chunk run is the case that shows the difference, and it is a permitted
+configuration.** `scheduler_run_budget` admits any finite, strictly positive duration,
+and the budget is checked only at a chunk boundary, so a deployment whose single model
+call spends the budget processes exactly one chunk per run. Under the earlier reading of
+this section — a first chunk supplied nothing — such a deployment would send an empty
+vocabulary in *every* prompt it ever composed, and this section's claim would be false
+for it rather than merely weak. Under the clause above it is supplied its own chunk's
+labels, which is the same supply every other run's first chunk gets; what it loses,
+honestly, is the within-run accumulation, because it has one chunk to accumulate over.
+§12 pins that configuration.
+
+What this does **not** buy is a store-wide vocabulary at any prompt, and it buys the
 observer nothing at all — so an unmerged store will carry `"health"` and `"wellbeing"`
 side by side until consolidation or the owner brings them together. Both residues are
 named in §15 with the instrument that would close each.
@@ -601,8 +748,22 @@ saying how it is read.
 > **Normative.** **The fold's union.** Where two records are folded — a `REINFORCE`
 > on either arm — the survivor's topics are the **union** of both sides' labels, in
 > §1's canonical order. No fold, record merge, reinforcement or consolidation drops a
-> label the target or the incoming record carried, and no implementation writes one
-> side's tuple over the other's.
+> label **the target** carried, and no implementation writes one side's tuple over the
+> other's.
+
+> **Normative.** **The union's overflow, where §1's bound would be exceeded.** The
+> survivor keeps **all** of the target's own labels, and admits the incoming record's
+> labels the target does not already carry, **in the incoming tuple's existing
+> code-point order**, until `MAX_TOPICS_PER_RECORD` is reached. Labels beyond it are
+> not carried, nothing is counted, and no other field moves. Admission order decides
+> *which* labels survive; §1's canonical order decides how the survivor's tuple is
+> **stored**, and the stored tuple is strictly increasing whatever order they were
+> admitted in.
+
+> **Normative.** A fold of two records both written under this decision cannot reach
+> the bound: `MAX_TOPICS_PER_PROPOSAL` is 4, so an unfolded record carries at most 4
+> labels and their union at most 8. Overflow requires a target that has already
+> accumulated through repeated folds, which is the case §1's constant is sized for.
 
 > **Normative.** The clause above is about **two records becoming one**. The owner's
 > **label** merge of §9 is a different act on a different object — it renames one
@@ -632,6 +793,32 @@ proposal reinforces it, and nothing about the survivor looks wrong afterwards.
 neither can drift; the union joins them in that minority rather than the majority
 that takes the incoming record's value.
 
+**The admission order is what keeps that ratchet whole under §1's bound, and it is
+the honest order for a second reason.** The failure the union exists to stop is a
+record quietly leaving the reach of an act it was already inside; keeping the target's
+labels first makes that failure *unreachable by construction*, because no label a
+stored record carried can be displaced by a fold at any cardinality. What the bound
+declines is always a label of the *incoming* record — a proposal about the target, made
+by a producer that has just read a batch, which no act had previously reached and which
+nothing downstream has yet relied on. That is the asymmetry: the target's labels have
+already been ruled onto a live record, by an earlier install, an earlier fold or the
+owner's own act; the incoming record's are a suggestion of the same standing as any
+other topics entry, and §4 already rules that such an entry may be ignored in whole
+without anything being counted.
+
+**Code-point order is the only order available among the incoming labels, and that is
+a fact about this field rather than a preference.** ADR-0086 §3 selects "the most
+recently accumulated" because it could first ratify `Provenance.evidence`'s order as
+accumulation order, observing that "§3's rule reads position as age and a rule that
+reads a property nobody guaranteed is not a rule". §1 fixes this tuple's order by code
+point precisely so that order carries *no* meaning, so position here is not age and
+cannot be read as any other property either. Applying ADR-0086 §3's own method — ask
+which criteria the data actually supports — gives a different answer for a differently
+ordered tuple, and the criterion left standing is the one §1's storage order already
+fixes: deterministic, implementation-independent, and identical on every store. It is
+not a *good* order among peers, and it does not need to be: by the paragraph above,
+every label it ranks is one the surviving record was never previously filed under.
+
 **A `SUPERSEDE` is not an operation on this field at all**, for the reason
 ADR-0204 §5 gives: ADR-0040 §5a "carries nothing of the target onto the surviving
 record", the correction's topics are a member of the correction's own statement of
@@ -655,6 +842,18 @@ preference §9 captures, not a second belief id.
 > record's `topics` with a set they state. The act writes the record's topics at its
 > own id, changes no other field of it, and is final for that record until the owner
 > acts again.
+
+> **Normative.** A relabel is an *install* and §1's bound applies to it. A relabel
+> naming more than `MAX_TOPICS_PER_RECORD` labels is **refused, and the owner is told
+> what the bound is** — not silently truncated to it. The owner is present, so there is
+> someone to tell; that is the whole of the difference from §8's fold, which has no
+> addressee and therefore elides. Refusing here is §3's rule about values that are
+> "nearly right" applied to a set: a relabel that quietly kept twelve of the sixteen
+> words the owner typed is harder to notice than one that did not happen.
+
+> **Normative.** A **merge** cannot exceed the bound and needs no rule of its own. It
+> replaces label A with label B on each record it reaches, so a record's label count
+> either stays the same or — where the record already carried B — falls by one.
 
 > **Normative.** The owner may **merge** two labels: every **live** record carrying
 > label A carries label B instead, and no live record carries A afterwards. The merge
@@ -682,7 +881,8 @@ preference §9 captures, not a second belief id.
 > and no clause here guarantees that it reaches one. §5's supply is
 > `Sequence[TopicLabel]` and carries labels alone — no preference text and no
 > rejected-to-corrected mapping — and no implementation may read a preference into it,
-> because the labels it carries are the store's distinct labels and nothing else. What
+> because the labels it carries are the labels of the records the run has prompted with
+> and nothing else. What
 > steers the next proposal is the **merge act above**: after it, the abandoned label
 > is on no live record, so no later run reads it and no later prompt is supplied it,
 > and the corrected one takes its place. A run already under way keeps the vocabulary
@@ -787,9 +987,11 @@ about a case that does not arise.
 
 ### 11. Scope: one `core` file, no Protocol, and no `PROTOCOL_VERSION` bump
 
-> **Normative.** This ADR adds one field to one `core` type and three names to
-> `core/types.py` (`TopicLabel`, `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL`),
-> and changes nothing else in `core`. **`core/protocols.py` is untouched**: no new
+> **Normative.** This ADR adds one field to one `core` type and four names to
+> `core/types.py` (`TopicLabel`, `MAX_TOPIC_LABEL_LENGTH`, `MAX_TOPICS_PER_PROPOSAL`,
+> `MAX_TOPICS_PER_RECORD`), and changes nothing else in `core`. The bound of §1 is
+> applied at the `MemoryWriter` seam, which is `memory/ingest.py` and not a `core`
+> file. **`core/protocols.py` is untouched**: no new
 > Protocol, no new member on one, no changed signature. It adds no `Settings` field, no
 > member of the promoted `AssistantEngine` surface, no wire operation, no tool and no
 > `RoutableOperation` member.
@@ -868,16 +1070,20 @@ layout. Each names an input and the outcome it fixes.
    number of entries the model emitted.
 7. **A provider failure yields no topics and no record.** The observation pass
    raises and writes nothing, rather than writing unlabelled beliefs.
-8. **The vocabulary is accumulated across a run's chunks.** A consolidation run whose
-   first chunk carries records labelled `("health",)` sends no vocabulary in that
-   chunk's prompt and sends `["health"]` in the next chunk's.
+8. **The chunk being prompted is in its own vocabulary.** A consolidation run whose
+   first chunk carries records labelled `("health",)` sends `["health"]` in **that**
+   chunk's prompt, and a second chunk carrying `("sleep",)` is prompted with both. The
+   first prompt is the assertion that separates this from the rejected reading: an
+   implementation supplying only the chunks it has already finished sends nothing there
+   and does not pass.
 9. **The vocabulary is ordered and bounded.** With three labels across the records a
    run has read, they are supplied commonest first, ties broken by label ascending; a
    run that has read more than `DEFAULT_PAGE_SIZE` distinct labels supplies exactly
    `DEFAULT_PAGE_SIZE` of them from the head of that order.
 10. **The vocabulary counts only what this run read.** Two consecutive runs over
-    disjoint chunks supply disjoint vocabularies; the second run's first prompt carries
-    nothing, whatever the first run read.
+    disjoint chunks supply disjoint vocabularies: the second run's first prompt carries
+    its own chunk's labels and carries no label that appeared only among the records
+    the first run read.
 11. **Nothing durable records it.** A run leaves the store byte-identical to a run of
     the same chunks with the field absent, apart from the records it wrote: no new
     table, column, row or cursor, and a second process reading the store concurrently
@@ -914,15 +1120,45 @@ layout. Each names an input and the outcome it fixes.
 22. **A merge leaves a retired record alone.** A target retired with a closed validity
     window that carries the merged-away label still carries it afterwards, and the
     merge reports having reached only the live records.
+23. **A one-chunk run is supplied a vocabulary.** A run whose budget is spent after a
+    single chunk sends that chunk's own labels in its only prompt, and does so on every
+    such run — the configuration under which the rejected reading of §5 would have sent
+    an empty vocabulary in every prompt the deployment ever composed.
+24. **A record carrying more labels than the bound does not unbound the chunk.** A
+    chunk containing one record whose decoded `topics` carries
+    `MAX_TOPICS_PER_RECORD + 1` labels contributes exactly `MAX_TOPICS_PER_RECORD` of
+    them, taken from the head of that tuple's own order, and the run completes and
+    advances its cursor.
+25. **The bound is on the install and not on the type.** A `MemoryBase` constructed
+    with `MAX_TOPICS_PER_RECORD + 1` labels is admissible, and a record serialised with
+    that many decodes without raising — the direction a `max_length` would have broken.
+    Installing a proposal carrying them stores exactly `MAX_TOPICS_PER_RECORD`; a write
+    that only **retires** such a record stores it back carrying all of them.
+26. **The fold's overflow keeps the target's labels and admits the incoming's in code
+    point order.** A target already at the bound, reinforced by an incoming record
+    carrying a label it does not have, survives carrying exactly the labels it had —
+    none displaced. A target one label short of the bound, reinforced by an incoming
+    record carrying two labels it does not have, admits the code-point-lesser of the two
+    and not the other. In both cases the survivor's stored tuple is strictly increasing,
+    so the admission order is not the storage order.
+27. **An overflow is not counted anywhere.** The survivor of the fold above carries no
+    field recording what was not admitted, no `core` type gains one, and every other
+    field of the survivor is what the same fold produces under a bound it does not
+    reach.
+28. **A relabel over the bound is refused rather than truncated.** An owner relabel
+    naming `MAX_TOPICS_PER_RECORD + 1` labels leaves the record's topics exactly as they
+    were and reports the bound; one naming exactly `MAX_TOPICS_PER_RECORD` is admitted.
 
 ### 13. What the implementing lane owes
 
 The implementation is one lane, briefed after this ADR merges (ADR-0015 §5, golden
 rule 5). It owes:
 
-1. **The three names and the field** in `core/types.py`, documented in place with
+1. **The four names and the field** in `core/types.py`, documented in place with
    what a value means and what an empty tuple means, and the canonical fakes and
-   record builders in `ai_assistant.testing` extended to carry them.
+   record builders in `ai_assistant.testing` extended to carry them. `topics` carries
+   **no** `max_length`: §1's bound is a writer obligation and the type stays
+   permissive.
 2. **The `MemoryStore` conformance suite** pinning the field's round-trip, so every
    implementation persists and returns it rather than silently dropping it. **No
    Protocol changes and no new Protocol is added, so no triad is owed**
@@ -931,19 +1167,28 @@ rule 5). It owes:
    `ConsolidationStage`'s, ignored rather than counted where it cannot be used (§4),
    with the canonical form applied by the producer before construction.
 4. **The run-scoped accumulation** in `ConsolidationStage` alone: an in-memory count
-   over the labels of records the run has read, bounded and ordered as §5 states, reset
-   per run, and threaded into the prompt the stage already builds. No store read, no
-   migration and no durable state.
-5. **The fold's union** in `memory/ingest.py`, written on both arms beside the two
-   computations that already take a disjunction there.
-6. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
+   over the labels of the records each prompt carries, updated as that prompt is
+   composed and before it is sent so the chunk is in its own vocabulary, reading at most
+   `MAX_TOPICS_PER_RECORD` labels of any one record, bounded and ordered as §5 states,
+   reset per run, and threaded into the prompt the stage already builds. No store read,
+   no migration and no durable state.
+5. **The fold's bounded union** in `memory/ingest.py`, written on both arms beside
+   the two computations that already take a disjunction there, with §8's admission
+   order — the target's labels whole, then the incoming's in code-point order to the
+   bound — and the result stored in §1's canonical order.
+6. **§1's bound at the `MemoryWriter` seam**, applied to every *install* and not to a
+   retire, in the same place and the same sense ADR-0086 §2 puts
+   `MAX_EVIDENCE_CITATIONS`. It is the one place the bound is enforced; nothing is
+   added to `MemoryBase`, to a store or to a producer to enforce it a second time.
+7. **The exclusion** of `topics` from `MemoryUpdateProposal`'s fingerprint
    projection.
-7. **The twenty-two tests of §12.**
+8. **The twenty-eight tests of §12**, less those of the owner's acts (20-22 and 28),
+   which belong to the surface lane the clause below defers them to.
 
 > **Normative.** The owner's acts of §9 are **not** in the implementing lane above.
 > They need a surface, the surface is a promoted-surface change, and it is therefore
 > its own ADR and its own lane (golden rule 5, ADR-0015 §5). A lane implementing the
-> seven items above and adding an owner-facing relabel or merge operation has exceeded
+> eight items above and adding an owner-facing relabel or merge operation has exceeded
 > this decision.
 
 ### 14. What a topic is not
@@ -1034,14 +1279,23 @@ noticing it was a decision.
   record's labels are not its producer's, and `Provenance.source` names the producer
   rather than the labeller. **Fires** with the first surface that renders a topic
   beside where it came from, which is §9's surface lane.
-- **A bound on the topic set a fold may accumulate.** §1 leaves the type unbounded
-  and §8's union can grow it. **Fires** with the first record whose accumulated set is
-  no longer owner-legible, which is a measurement on a real store rather than a number
-  to guess now. The shape such a bound would take is already worked: ADR-0086 §2 puts
-  it at the `MemoryWriter` seam on installs, and §§3–4 oblige a rule for choosing what
-  is dropped and a recorded count of the loss. §1 above says why neither is available
-  for this field today, so a lane taking this on owes an answer to both rather than a
-  `max_length`.
+- **A recorded count of what an overflow did not carry.** §1 takes ADR-0086 §§1–3
+  and declines its §4: an overflow records no number, because §7 already rules that a
+  topic set is never a claim to completeness, and §4 already rules that a topics entry
+  the system cannot use is ignored with no counter moving and no `core` type gaining a
+  member. **Fires** on either of two things this decision cannot see today — a measured
+  store in which folds reach `MAX_TOPICS_PER_RECORD` often enough that owners are losing
+  proposed labels they wanted, or the first surface that renders a record's topics
+  beside a claim about their completeness, which would put this field under the
+  ADR-0073 §4 obligation that ADR-0086 §4 exists to answer and which no surface makes
+  now. A lane taking it on owes the field, its recurrence over every install, and the
+  §7 disclosure it interacts with — not a number appended to the record.
+- **Raising `MAX_TOPICS_PER_RECORD`.** §1 fixes it at 16 and gives the arithmetic the
+  figure comes from. **Fires** with a measurement showing records legitimately about
+  more than sixteen things, and it owes the §11 version test on the day it is taken:
+  §1 keeps the bound off the type precisely so that a raise is a change to what this
+  deployment *writes* and not to what an older peer can *read*, and a lane that raised
+  the constant and added a `max_length` in the same change would take that back.
 - **A store-wide vocabulary read.** §5 supplies a producer the labels of the records
   its own run walked, and nothing wider, because a `MemoryStore` read returning the
   store's whole vocabulary could not be made both cheap and honest about liveness (§5,
@@ -1070,7 +1324,7 @@ cheap, and the corpus makes such records in the superseding ADR's own change
 about this decision's reach, not an economy: where a record were owed, it would be
 made here.
 
-The six nearest candidates are worked through, because each is close enough that a
+The eight nearest candidates are worked through, because each is close enough that a
 reader might expect a record and its absence should be argued rather than assumed.
 
 - **ADR-0100 §6's "whom, not what".** That clause reads: "The axis is *whom*, not
@@ -1115,6 +1369,26 @@ reader might expect a record and its absence should be argued rather than assume
   answered *below* amendment: this is an ADR applying an earlier one's stated principle
   to new ground, which changes neither its text nor its reach, so ADR-0074's `Status`
   line is not touched by this change.
+- **ADR-0086 §§1-4's evidence bound.** §1 above applies that ADR's shape to a second
+  field — a fixed `core` constant (§1), enforcement at the `MemoryWriter` seam on
+  installs and not on the type (§2), an overflow rule for the fold (§3) — and declines
+  its §4. A reader holding only ADR-0086 bounds `Provenance.evidence` at 64, enforces
+  it exactly where §2 puts it, retains the most recently accumulated of a union, and
+  records `evidence_elided`, after this decision precisely as before. Every clause of
+  that ADR is scoped to `evidence` by its own words — §1 states its bound "on the
+  record type rather than on the field" and spends two paragraphs on why it does not
+  even reach `Goal` — so a second field decided the same way widens nothing and
+  narrows nothing there. Reusing a ratified ADR's reasoning is what a corpus is for,
+  and §1 argues each of the three transfers, and the one refusal, on this field's own
+  merits rather than citing ADR-0086 as authority over a field it does not name.
+- **ADR-0111 §4's admissibility condition.** §5 puts an operation inside a
+  consolidation chunk, and §1 and §5 give it a bound computed from figures the
+  configuration already holds. That is the clause being **satisfied**, which is what it
+  asks of every job that chunks — "a job whose chunk reaches an operation with no
+  deadline is not a job that may be chunked under this ADR". A reader holding only
+  ADR-0111 admits exactly the jobs they admitted, on exactly the test they applied, and
+  §4's own instruction that this "must be checked rather than assumed" is discharged
+  here rather than altered.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
@@ -1150,9 +1424,12 @@ label, which is §15's owner-stated topic — and one dishonest one, inferring t
 at read, which §4 forbids.
 
 **What this costs at run time.** A dictionary update per record a consolidation run
-reads, a slightly longer prompt per consolidation chunk after the first, and a few more
-tokens in each producer's response. No store read is added and no schema changes. The
-observation prompt does not grow at all. No new call, no new provider dependency, no
+prompts with — bounded, by §1's constant, to at most `MAX_TOPICS_PER_RECORD` labels of
+that record — a slightly longer prompt per consolidation chunk, and a few more tokens in
+each producer's response. The work one chunk adds is at most
+`scheduler_chunk_size × MAX_TOPICS_PER_RECORD` short strings, which is the bound
+ADR-0111 §4 asks a chunked job's operations to have. No store read is added and no
+schema changes. The observation prompt does not grow at all. No new call, no new provider dependency, no
 new failure mode on any path that had none: the three producers that hold no provider
 are untouched, and the two that do already end their pass on a `ModelError`.
 
@@ -1197,6 +1474,28 @@ ADR-0100 §6's reasoning about values that are nearly right, and on the practica
 ground that the only producer that can emit a non-canonical label is one that did not
 fold its own model's output — a bug that a silent fold would hide in the one place
 nobody reads.
+
+**Leaving the tuple unbounded and stating the residue.** Three rounds of review
+converged on this axis, and the last of them found the same thing from a third
+direction, so the rejected shape is recorded rather than quietly replaced. The proposal
+was: no cardinality bound anywhere, a clause in §5 observing that the accumulation is
+bounded by the labels of records the chunk had already decoded, and §15 naming the
+condition that would fire a bound later. It fails on the one thing it was meant to
+answer. The observation is true and does not help: ADR-0111 §4 asks whether every
+operation *inside a chunk* is bounded, and "the walk had already decoded this, so the
+chunk was already unbounded" concedes the point rather than rebutting it — a job whose
+chunk is unbounded before this decision is a job §4 does not admit, and adding an
+operation over the same unbounded data leaves it there. The comparison to
+`Provenance.evidence` fails in the same place and for a better reason: that field is
+bounded, at 64, by ADR-0086 §1, and its type is permissive only so that records written
+*before* the bound stay readable. Topics have no such population — the field is new —
+so the only thing a permissive type buys here is the forward compatibility §1 keeps it
+for, and nothing at all excuses the absence of a bound at the writer.
+
+**A `max_length` on `MemoryBase.topics`.** Rejected in §1. It is available — ADR-0086
+§2's test is answered *no* for a field no store carries — and it is still the wrong
+seam: it would refuse on decode the records a raise of the constant will produce, and it
+would turn §8's fold into a raised write rather than a bounded record.
 
 **A `None`-for-unrecorded third state.** Rejected in §7 on ADR-0204 §1's argument
 against the same shape: the empty tuple already is the unrecorded state, and a third
