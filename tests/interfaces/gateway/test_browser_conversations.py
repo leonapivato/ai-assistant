@@ -19,19 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import pytest
 from browser_drive import driving
+from playwright.async_api import expect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Dialog, Locator, Route
+    from playwright.async_api import Browser, Dialog, Locator, Page, Route
 
 pytestmark = [
     pytest.mark.integration,
@@ -47,35 +49,38 @@ pytestmark = [
 #: of the formatting rule inside the assertion that checks it.
 _LAST_TURN = datetime(2026, 8, 22, 9, 15, tzinfo=UTC)
 
-#: Counts the page's own reads of a relayed body, per path, **after the body has been
-#: parsed** — installed before any of the bundle runs, in the manner of
-#: ``browser_drive``'s Web Audio probe and for the same reason: what the two ordering
-#: cases below need to know is when the page has *finished with* a response, and no
-#: fact about the network says that.
+#: Holds the page's own handling of one response, **after the gateway has answered
+#: it** — installed over ``fetch`` in the manner of ``browser_drive``'s Web Audio
+#: probe, and for the same reason: what a case needs to control is a moment inside the
+#: page, and no fact about the network reaches it.
 #:
-#: **Why the count is a synchronisation and not a sleep** (ADR-0216 §7). The
-#: increment happens inside the ``await response.json()`` the page's ``relay``
-#: performs, so the handler that acts on that body is a microtask continuation of it.
-#: Every pending microtask drains before the next task runs, and a driver's
-#: ``wait_for_function`` poll *is* a later task — so a poll that observes the count
-#: has, by construction, run after the page finished deciding what to do with the
-#: body. That is the happens-after both cases need, and it is a condition the page
-#: reached rather than a duration guessed at.
-_SETTLED = """() => {
-window.__settled = {};
-const realFetch = window.fetch;
-window.fetch = async function (resource, options) {
-  const response = await realFetch.call(this, resource, options);
-  const path = new URL(typeof resource === "string" ? resource : resource.url, location.href)
-    .pathname;
-  const realJson = response.json.bind(response);
-  response.json = async function () {
-    const body = await realJson();
-    window.__settled[path] = (window.__settled[path] || 0) + 1;
-    return body;
+#: This is what makes a response genuinely *older* rather than merely late. The
+#: request goes out and is answered at the moment the page made it; what is deferred
+#: is the page reading that answer. So the body a case releases is the gateway's own,
+#: taken before whatever the case changed in between, and nothing about it is
+#: fabricated (ADR-0216 §1, §4).
+#:
+#: Holding it here rather than at a Playwright route is also what keeps the layer
+#: fast: an interception left outstanding while the page cancels the request behind it
+#: takes thirty seconds of the context's teardown, which on a sixty-second budget
+#: (ADR-0216 §3) is most of it.
+_HOLDING = """(path) => {
+  window.__held = { path: path, seen: 0, reached: false, release: null };
+  const realFetch = window.fetch;
+  window.fetch = async function (resource, options) {
+    const asked = typeof resource === "string" ? resource : resource.url;
+    const response = await realFetch.call(this, resource, options);
+    if (new URL(asked, location.href).pathname === window.__held.path) {
+      window.__held.seen += 1;
+      if (window.__held.seen === 2) {
+        window.__held.reached = true;
+        await new Promise((resolve) => {
+          window.__held.release = resolve;
+        });
+      }
+    }
+    return response;
   };
-  return response;
-};
 }
 """
 
@@ -154,6 +159,89 @@ def _answering(
 
     drive.page.on("dialog", handle)
     return answered
+
+
+@dataclass
+class _Held:
+    """One request stopped in flight, and the driver's control over when it lands.
+
+    Attributes:
+        reached: Set once the held request has been intercepted, so a case can act in
+            the window where it is outstanding rather than hoping to be inside it.
+        released: Set by :meth:`release` to let it land.
+        settled: Set once the browser has finished with that request, whichever way it
+            ended — delivered, or cancelled by the page because it stopped wanting it.
+        page: The page it was held on.
+    """
+
+    reached: asyncio.Event
+    released: asyncio.Event
+    settled: asyncio.Event
+    page: Page
+
+    async def release(self) -> None:
+        """Let it land, and return once the page has finished with it.
+
+        The wait is the whole value of this: what the cases assert after a release is
+        that a superseded response changed *nothing*, and a negative asserted at an
+        arbitrary moment asserts nothing at all. ``settled`` is the browser saying the
+        request is over, and the ``evaluate`` after it is one further task — so every
+        microtask the response's handler could still have been holding has drained
+        (ADR-0216 §7).
+        """
+        self.released.set()
+        await self.settled.wait()
+        await self.page.evaluate("() => null")
+
+
+async def _holding(drive: Drive, path: str, *, at: int) -> _Held:
+    """Stop the ``at``-th request to ``path`` before it goes out, and hand back control.
+
+    The request has not reached the gateway while it is held, so what a release
+    produces is a *late* answer rather than an old one. Where a case needs a genuinely
+    older answer — one taken before something it then changed — it holds the page's
+    handling of the response instead, with :data:`_HOLDING`.
+
+    Args:
+        drive: The gateway, engine and page under test.
+        path: The exact request path to count and hold.
+        at: Which request to that path is held, counting from one.
+
+    Returns:
+        The handle: when it was reached, and a release that waits for it to be over.
+    """
+    held = _Held(
+        reached=asyncio.Event(),
+        released=asyncio.Event(),
+        settled=asyncio.Event(),
+        page=drive.page,
+    )
+    seen = {"n": 0}
+    mine: dict[str, object] = {}
+
+    async def hold(route: Route) -> None:
+        seen["n"] += 1
+        if seen["n"] != at:
+            await route.continue_()
+            return
+        mine["request"] = route.request
+        held.reached.set()
+        await held.released.wait()
+        # A request the page has since abandoned is already cancelled, so sending it
+        # raises rather than returning -- which is the behaviour under test rather than
+        # a fault in the harness.
+        with contextlib.suppress(Exception):
+            await route.continue_()
+        held.settled.set()
+
+    def note(request: object) -> None:
+        if request is mine.get("request"):
+            held.settled.set()
+
+    drive.page.on("requestfailed", note)
+    drive.page.on("requestfinished", note)
+    await drive.page.route(lambda url: urlparse(url).path == path, hold)
+    return held
 
 
 def _first_row(drive: Drive) -> Locator:
@@ -551,32 +639,56 @@ async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listin
     async with driving(gateway_browser, tmp_path) as drive:
         _seed(drive, "c-1", turns=3)
         _seed(drive, "c-2", turns=1)
-        await drive.page.evaluate(_SETTLED)
-        reached = asyncio.Event()
-        released = asyncio.Event()
-        reads = {"n": 0}
-
-        async def hold_the_refresh(route: Route) -> None:
-            reads["n"] += 1
-            # The first read is the panel opening and the second is the forget's own
-            # refresh; only that one is held.
-            if reads["n"] == 2:
-                reached.set()
-                await released.wait()
-            await route.continue_()
-
-        await drive.page.route(lambda url: urlparse(url).path == "/conversations", hold_the_refresh)
+        held = await _holding(drive, "/conversations", at=2)
         await _open_listing(drive)
         answered = _answering(drive, accept=True)
         await _first_row(drive).get_by_role("button", name="Forget").click()
         assert await answered
-        await reached.wait()
+        await held.reached.wait()
         await drive.page.click("#conversations-button")
-        await drive.page.wait_for_function("() => (window.__settled['/conversations'] || 0) === 2")
+        await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(1)
         assert await drive.page.is_hidden("#forget-outcome")
-        released.set()
-        await drive.page.wait_for_function("() => (window.__settled['/conversations'] || 0) === 3")
+        await held.release()
         assert await drive.page.is_hidden("#forget-outcome")
+
+
+async def test_a_superseded_listing_read_cannot_put_back_a_row_the_newer_one_dropped(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The generation guards the listing itself, and not only the outcome above it.
+
+    Adversarial review round 6, ``major``. Let a read be answered while ``doomed``
+    still exists, hold the page's *handling* of that answer, destroy ``doomed`` from
+    somewhere else, and let a listing the owner asks for afterwards render the shorter
+    truth. The held read resuming last would clear the list and repopulate it from its
+    older answer — putting ``doomed`` back with a "Continue" the hub will refuse,
+    which is the page telling the owner something it has already told them is false.
+
+    The older answer is the gateway's own, taken when the page really asked for it;
+    only the reading of it is deferred. So what is asserted is what the page does with
+    a real stale response, not with one this case wrote.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        _seed(drive, "kept", turns=3)
+        _seed(drive, "doomed", turns=1)
+        await drive.page.evaluate(_HOLDING, "/conversations")
+        rows = drive.page.locator("#conversation-list .conversation-row")
+        await _open_listing(drive)
+        await expect(rows).to_have_count(2)
+        # The second read is answered while `doomed` is still there, and held.
+        await drive.page.click("#conversations-button")
+        await drive.page.wait_for_function("() => window.__held.reached")
+        drive.engine.conversations_held.pop("doomed")
+        drive.engine.activity.pop("doomed")
+        # The third read goes out afterwards and is answered with the shorter truth.
+        await drive.page.click("#conversations-button")
+        await expect(rows).to_have_count(1)
+        await drive.page.evaluate("() => window.__held.release()")
+        # One round trip after the release, which is a later task: every microtask the
+        # held read's continuation could have been holding has drained (ADR-0216 §7).
+        await drive.page.evaluate("() => null")
+        await expect(rows).to_have_count(1)
+        assert await rows.nth(0).locator(".conversation-name").inner_text() == "Conversation kept"
 
 
 async def test_a_second_read_of_the_listing_clears_the_outcome_it_did_not_produce(

@@ -958,6 +958,33 @@ def test_the_forget_outcome_is_written_after_the_refresh_it_triggered() -> None:
     assert forgetting.index("await listConversations();") < forgetting.index("sayForgotten(stated")
 
 
+def test_a_superseded_listing_read_renders_neither_a_list_nor_a_fault() -> None:
+    """Adversarial review round 6: the generation guarded the outcome and not the list.
+
+    Two reads of this listing can overlap — a forget's own refresh and the owner
+    pressing "Conversations" — and the one that resumes last won the panel whether or
+    not it was the newer, re-rendering a snapshot taken before it. A conversation
+    destroyed in between came back as a row with a "Continue" the hub would refuse.
+
+    Both halves are closed and they close different things: stopping the read is what
+    keeps ``relay`` from writing that read's *refusal* into the panel before this
+    function sees a value, and the comparison is what keeps a body that arrived anyway
+    from being rendered. The two together are the reviewer's own direction.
+    """
+    listing = _functions(_code("app.js"))["listConversations"]
+
+    assert "superseded.abort();" in listing
+    assert "const stopping = new AbortController();" in listing
+    assert "listing = stopping;" in listing
+    assert "if (body === null || mine !== listed) {" in listing
+    # And only the newest read is entitled to say the gateway has gone, which is the
+    # same comparison `resumeConversation` makes and for the same reason.
+    assert "if (mine === listed) {" in listing
+    # The stop is registered before the read and taken before the next one begins, so
+    # a read can never abort the controller a later one registered.
+    assert listing.index("superseded.abort();") < listing.index("listing = stopping;")
+
+
 def test_a_refresh_that_is_no_longer_the_newest_listing_writes_no_outcome() -> None:
     """Adversarial review round 1: writing after its own refresh is not enough.
 
