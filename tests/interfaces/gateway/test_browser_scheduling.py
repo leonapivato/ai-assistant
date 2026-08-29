@@ -59,6 +59,12 @@ _USAGE_ERROR = 4
 #: them all on one worker, and therefore behind one browser.
 _GROUP = "gateway_browser"
 
+#: The fixture that launches the browser, and therefore the only honest definition
+#: of "the layer": a case that requests it can build one, and a case that does not
+#: cannot. Auditing the ``browser`` marker by selecting on the ``browser`` marker
+#: would be blind to the one module that matters — the one that declares neither.
+_BROWSER_FIXTURE = "gateway_browser"
+
 #: A corpus in the layer's own shape: two modules under one module-level
 #: ``xdist_group``, and one session-scoped resource that records which process
 #: built it.
@@ -237,10 +243,10 @@ def test_two_modules_sharing_a_group_are_answered_by_one_worker(tmp_path: Path) 
     assert len(_built_by(record)) == 1, run.stdout
 
 
-def test_every_browser_case_this_run_collected_is_in_that_one_group(
+def test_every_case_that_takes_the_browser_carries_both_of_the_layers_markers(
     request: pytest.FixtureRequest,
 ) -> None:
-    """No case of the layer may sit outside the group that keeps it on one worker.
+    """No case that takes the browser may sit outside the group that shares it.
 
     The case above establishes that a shared group is answered by one worker; this
     is the other half — that the layer actually declares it, on every case, and one
@@ -248,12 +254,30 @@ def test_every_browser_case_this_run_collected_is_in_that_one_group(
     a second group name, scatters exactly as ``worksteal`` would, and ADR-0216 §3
     stops holding while every test stays green.
 
+    **The layer is identified by what a case asks for, not by the marker being
+    audited.** Adversarial review, round 4, ``major``: filtering on
+    ``pytest.mark.browser`` made this blind to precisely the module that would break
+    the clause — one that requests the browser and declares neither marker was not in
+    the set, so it could take a second worker's session fixture and a second Chromium
+    with this green. Asking which cases request ``gateway_browser`` cannot miss one:
+    a case that does not request it launches nothing.
+
+    The ``browser`` marker is asserted here for the same reason and in the same
+    place, because §3 obliges it of every module of the layer ("Each such module also
+    carries a second marker … naming it as a browser drive") and nothing else checks
+    that a drive declares itself.
+
     Read off **this run's own collection**, so a module is covered the day it is
     written rather than the day someone remembers to list it here. A run narrowed
     away from the layer collects no such case and this says nothing about one, which
     is worth saying beside the fact that both of ADR-0136 §1's anchors run the whole
     suite.
     """
-    layer = [item for item in request.session.items if item.get_closest_marker("browser")]
+    layer = [
+        item
+        for item in request.session.items
+        if _BROWSER_FIXTURE in getattr(item, "fixturenames", ())
+    ]
 
-    assert {_group_of(item) for item in layer} <= {_GROUP}
+    assert [item.nodeid for item in layer if _group_of(item) != _GROUP] == []
+    assert [item.nodeid for item in layer if item.get_closest_marker("browser") is None] == []
