@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Accepted
+- Status: Accepted, §1 and §8 amended by ADR-0217
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -40,6 +40,28 @@
   §5's first, second and fourth through ninth clauses are untouched, §3's placements
   are untouched, §2's recorded-origin discipline is untouched, and no class becomes
   speakable.
+
+- **Amended: 2026-08-29 by
+  [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md)
+  (§1's third clause and §8's third clause — each only as it names
+  `Provenance.supplied_withheld_content` by field).** ADR-0217 widens ADR-0204's mark
+  into `MemoryBase.placement`, a record's statement of who may receive it, and removes
+  the boolean this ADR's clauses name. §1's third clause reads "a record of the
+  retrieved groups already carrying `supplied_withheld_content` fires the second"; §8's
+  third clause is stated as narrowing "what `Provenance.supplied_withheld_content`
+  *means*". A reader holding only this ADR would look for a field that no longer
+  exists, which is ADR-0082 §1's test met, so the record is owed. **The decision is
+  unchanged.** The set the evaluation ranges over on a channel of unbounded audience is
+  exactly the set §1 named — the members of the turn's supply a relevance read taken
+  with the turn's own goal statement returned, together with the turn's context facets,
+  and never a member held only because it stands in ADR-0074 §5's first group — and
+  ADR-0217 §2's last clause applies it verbatim: an `OWNER`-placed record a relevance
+  read returned is withheld **and** fires the deflection, one held only by the
+  conversation's own recent turns is withheld and fires nothing. §1's fourth clause,
+  that the subtraction runs over the whole supply, binds unchanged. What moves is the
+  name of the recorded value the second term reads, which is why this is an amendment
+  under ADR-0070 §1 rather than a supersession. §8's prose-edit obligation is discharged
+  again by ADR-0217 §9, which owes the same two edits where the field now lives.
 
 ## Context
 

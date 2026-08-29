@@ -1,6 +1,6 @@
 # 204. A record carries whether the supply it was produced over held withheld content, and a channel of unbounded audience withholds one that does
 
-- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns)
+- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns) and ADR-0217 (§1's first through fourth clauses, §3's first and third clauses and §5's first and second clauses, only as they name the field that carries the answer and the values it takes — `Provenance.supplied_withheld_content` becomes `MemoryBase.placement`, whose `OWNER` reach is that field's `True`; the same records are narrowed, on the same evidence, at the same site, by the same producer — together with §7's version footing, `PROTOCOL_VERSION` moving because a member is removed from a wire-carried `core` type)
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0203](0203-on-a-channel-of-unbounded-audience-the-withholding-binds-the-whole-turn.md)
@@ -88,6 +88,48 @@
   episode, a fold, a consolidation and a bounded-channel turn all still disjoin over
   every record they were supplied. §6's residue and §7's version footing stand, and
   §8's other thirteen tests are untouched.
+
+- **Partially superseded: 2026-08-29 by ADR-0217 — the instrument, not the rule:
+  §1's first, second, third and fourth clauses, §3's first and third clauses, §5's
+  first and second clauses, and §7's version footing.** The owner's design note
+  **#1719** asks for a placement on every record — who may receive it — with two
+  reachable values, `{owner}` and `anyone`, and rules that it ships "as a widening of
+  ADR-0204's mark, not a second field". Two recorded values in front of one read is a
+  standing invitation for a supply site to consult one of them and not the other, and
+  that failure is silent; so the mark becomes the placement rather than acquiring a
+  neighbour.
+
+  **Replaced — where the answer lives and what it may say.**
+  `Provenance.supplied_withheld_content` is removed and `MemoryBase.placement` carries
+  the answer, of a new `core` type `Placement` whose reach is `ANYONE` or `OWNER`
+  and which stamps which of three setters wrote it. A record §2's disjunction is
+  `True` of, or §5's inheritance reaches, is written with reach `OWNER` and setter
+  `DERIVED` — the same records, on the same evidence, at the same site, by the same
+  producer. §1's placement argument is not overturned but re-applied: ADR-0100 §2's
+  test places a field "by which question it answers", §1 answered *what material stood
+  in front of the producer* and got `Provenance` correctly, and the widened field
+  answers *who may receive this*, which is the envelope's question beside
+  `about_person` and `validity`. §5's first and second clauses are generalised from a
+  disjunction to a **meet** over reaches, which on two members is the same arithmetic
+  member for member. §7's second and third clauses are replaced by ADR-0217 §9:
+  `PROTOCOL_VERSION` **moves**, because a member is removed from a wire-carried `core`
+  type and another added rather than a hub-computed value changing — the case ADR-0210
+  §8 expressly did not settle ("No frame changes shape or encoding, no member is added
+  or removed").
+
+  **Not replaced — the evaluation, the withholding, the ratchet and the residue.**
+  §2's evaluation is unchanged in every particular: one supply, two terms, between
+  retrieval and planning, narrowed on one channel by ADR-0210 §1. §3's second and
+  fourth clauses bind whole, so any later component assembling for a channel of
+  unbounded audience applies the test and ADR-0203 §2 still governs what follows a
+  removal. §4's bounded-channel rule is untouched entirely. §5's **third, fourth and
+  fifth** clauses bind whole — the `SUPERSEDE` differential, the retained target with
+  its closed window, and the closing prohibition that **no user act clears in place**
+  what the derivation set, which ADR-0217 §3 keeps as the limit of the owner's act and
+  §12 records as a residue with two ratified escapes. §6's residue and §8's tests bind
+  over the new field's `OWNER` reach in place of the old field's `True`, and ADR-0217
+  §10 requires the lane to pin them arm for arm. §7's hub-authoritative clause is kept
+  as a live condition and generalised.
 
 ## Context
 
