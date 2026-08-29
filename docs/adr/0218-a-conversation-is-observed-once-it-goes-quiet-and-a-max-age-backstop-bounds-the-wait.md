@@ -1,6 +1,6 @@
 # 218. A conversation is observed once it goes quiet, a max-age backstop bounds the wait, and the job ships armed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes**
   [ADR-0083](0083-the-hub-is-a-resident-process.md) — §7's job-table row for
