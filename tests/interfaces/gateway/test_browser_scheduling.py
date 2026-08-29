@@ -18,9 +18,17 @@ question by running it.
 
 **Nested rather than in-process**, for ``tests/test_collection_guard.py``'s reason:
 the subject is *when* a configuration hook fires against another plugin's, and
-calling the hook directly would pin its wording and nothing else. Each run is
-``--collect-only``, so the refused one never reaches a worker and the admitted one
-spawns none.
+calling the hook directly would pin its wording and nothing else. The runs about
+the refusal are ``--collect-only``, so the refused ones never reach a worker and
+the admitted one spawns none.
+
+**Three questions, and it takes all three to hold the clause.** That every mode
+but ``loadgroup`` is refused; that a shared group really is answered by one
+worker, so one session-scoped resource is built once; and that every case of the
+layer really declares that group. The middle one is asked of a generated corpus in
+the layer's shape rather than of the layer itself — a nested run of the real
+modules would hold a second Chromium inside a run that may already hold one, which
+is the memory §3 exists to bound.
 """
 
 from __future__ import annotations
@@ -28,8 +36,12 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 #: The repository root, from which the nested runs read this project's own
 #: ``pyproject.toml`` and ``tests/conftest.py``. Both are the subject: the ini
@@ -42,6 +54,54 @@ _TARGET = "tests/test_smoke.py"
 
 #: pytest's exit status for a usage error, which is what a refused mode is.
 _USAGE_ERROR = 4
+
+#: The group every case of the layer declares. It is what makes ``loadgroup`` put
+#: them all on one worker, and therefore behind one browser.
+_GROUP = "gateway_browser"
+
+#: A corpus in the layer's own shape: two modules under one module-level
+#: ``xdist_group``, and one session-scoped resource that records which process
+#: built it.
+#:
+#: It stands in for the layer rather than being it, deliberately. Driving the real
+#: modules distributed from inside this suite would put a second Chromium in a
+#: process tree that may already hold one, which is the memory ADR-0216 §3 exists
+#: to bound. What this establishes is the mechanism the real modules rest on — two
+#: modules sharing a group are answered by one worker, so a session-scoped resource
+#: is built once — and the case below establishes the other half, that the layer
+#: declares that group on every case it has.
+_GROUPED_MODULE = '''\
+"""One half of a two-module group."""
+
+import pytest
+
+pytestmark = [pytest.mark.xdist_group("{group}")]
+
+
+def test_first(costly: str) -> None:
+    assert costly == "built"
+
+
+def test_second(costly: str) -> None:
+    assert costly == "built"
+'''
+
+#: The corpus's conftest. Every case takes ``costly``, so the file it appends to
+#: holds one line per process that built it -- which is the count under test.
+_GROUPED_CONFTEST = '''\
+"""A session-scoped resource that says which process built it."""
+
+import os
+
+import pytest
+
+
+@pytest.fixture(scope="session")
+def costly() -> str:
+    with open(os.environ["GROUP_RECORD"], "a") as record:
+        record.write(f"{os.getpid()}\\n")
+    return "built"
+'''
 
 
 def _collect(*args: str) -> subprocess.CompletedProcess[str]:
@@ -113,3 +173,87 @@ def test_the_group_honouring_mode_and_a_serial_run_are_both_admitted() -> None:
 
     assert grouped.returncode == 0, grouped.stdout + grouped.stderr
     assert serial.returncode == 0, serial.stdout + serial.stderr
+
+
+def _group_of(item: pytest.Item) -> str | None:
+    """The ``xdist_group`` name an item declares, or ``None``."""
+    marker = item.get_closest_marker("xdist_group")
+    if marker is None:
+        return None
+    if marker.args:
+        return str(marker.args[0])
+    return str(marker.kwargs.get("name", "default"))
+
+
+def _built_by(record: Path) -> Sequence[str]:
+    """The distinct processes that built the corpus's session-scoped resource."""
+    return sorted({line for line in record.read_text().splitlines() if line.strip()})
+
+
+@pytest.mark.integration
+def test_two_modules_sharing_a_group_are_answered_by_one_worker(tmp_path: Path) -> None:
+    """The mechanism the layer's ``xdist_group`` rests on, run rather than assumed.
+
+    Four cases across two modules, one group, two workers, one session-scoped
+    resource — and the resource is built once, by one process. That is what makes
+    "The browser is started once and shared by every case in the layer" (ADR-0216
+    §3) true of a distributed run and not only of a serial one.
+
+    In the layer's shape rather than in the layer itself, for the reason
+    :data:`_GROUPED_MODULE` gives: a nested run of the real modules would hold a
+    second browser inside a run that may already hold one.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "conftest.py").write_text(_GROUPED_CONFTEST)
+    (corpus / "test_one.py").write_text(_GROUPED_MODULE.format(group=_GROUP))
+    (corpus / "test_two.py").write_text(_GROUPED_MODULE.format(group=_GROUP))
+    record = tmp_path / "built-by"
+    record.touch()
+
+    run = subprocess.run(  # noqa: S603  # fixed interpreter, generated corpus
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(corpus),
+            "-n",
+            "2",
+            "--dist",
+            "loadgroup",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+        ],
+        cwd=corpus,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(corpus), "GROUP_RECORD": str(record)},
+    )
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "4 passed" in run.stdout
+    assert len(_built_by(record)) == 1, run.stdout
+
+
+def test_every_browser_case_this_run_collected_is_in_that_one_group(
+    request: pytest.FixtureRequest,
+) -> None:
+    """No case of the layer may sit outside the group that keeps it on one worker.
+
+    The case above establishes that a shared group is answered by one worker; this
+    is the other half — that the layer actually declares it, on every case, and one
+    group rather than two. A module added to the layer without the marker, or under
+    a second group name, scatters exactly as ``worksteal`` would, and ADR-0216 §3
+    stops holding while every test stays green.
+
+    Read off **this run's own collection**, so a module is covered the day it is
+    written rather than the day someone remembers to list it here. A run narrowed
+    away from the layer collects no such case and this says nothing about one, which
+    is worth saying beside the fact that both of ADR-0136 §1's anchors run the whole
+    suite.
+    """
+    layer = [item for item in request.session.items if item.get_closest_marker("browser")]
+
+    assert {_group_of(item) for item in layer} <= {_GROUP}
