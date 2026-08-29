@@ -170,7 +170,26 @@ rather than merely narrowing.
 
 > **Normative.** `0` is issued by no store and is the field's default, so a record
 > no store has stored is distinguishable from every record a store has stored, and no
-> caller-constructed default can equal a stored value.
+> caller-constructed default can equal a stored value. Every issued value is
+> **positive**.
+
+> **Normative.** **"For the life of that store" is scoped by durability**, in the
+> shape ADR-0046 §4 scoped its two atomicity obligations. For a **durable** store it
+> is the life of the data the store holds: the issuer's state is persisted beside the
+> records and survives a close, a process restart and a crash, so a stamp issued
+> before a restart is never issued again after one. For a **non-durable** store it is
+> the life of the object, and the obligation is vacuous beyond it — a restart
+> destroys every record the store held, so there is nothing left for a stale
+> expectation to land on, and requiring more would be a contract term nothing can
+> satisfy or test.
+
+> **Normative.** **`clear` destroys records and never the issuer**, on every
+> implementation, durable or not. `clear` is a bulk erase of what the store holds; an
+> issuer reset by it would reissue every stamp it had already issued, which is the
+> ABA hole above arriving through a different door. The same binds any other bulk
+> operation a later lane adds: nothing but the destruction of the store itself resets
+> an issuer, and a durable store may not reconstruct one from the rows currently
+> present.
 
 > **Normative.** Every read that returns a record returns the `revision` the store
 > holds for that row: `get`, `get_many`, `search`, `list_beliefs`, `export` and
@@ -547,6 +566,18 @@ extra="forbid"` — neither of which is true of this one.
 > the existing `TestFakeMemoryStoreContract`, `TestInMemoryMemoryStoreContract` and
 > `TestSqliteMemoryStoreContract` bindings.
 
+> **Normative.** **The issuer survives `clear`**, on every store: read a record,
+> `clear` the store, store a record at the same id, and an `IF_UNCHANGED` carrying
+> the pre-`clear` revision is refused. Asserted for every binding, because the
+> obligation is not a durability one — an issuer reset by `clear` reissues within one
+> object's life.
+
+> **Normative.** **The issuer survives a reopen**, `SqliteMemoryStore`'s own test:
+> read a record, close the store, reopen it on the same file, `delete` the record and
+> store a different one at that id, and an `IF_UNCHANGED` carrying the first read's
+> revision is refused. It sits beside the migration test that plants a legacy row
+> with a `rowid` at or below zero and asserts it reads back at a positive revision.
+
 > **Normative.** **`MemoryWrite`'s two invalid states are refused at construction**,
 > asserted in `core`'s own type tests rather than in the store suite, because they
 > never reach a store: an `IF_UNCHANGED` element with `expected_revision=None`, a
@@ -676,13 +707,27 @@ different questions and read at different sites.
 > column on `records`, in the shape ADR-0045 §9 gave the `validity` columns, plus
 > the store's issuer. No row is rewritten and no record's payload changes.
 
-> **Normative.** The backfill gives every existing row a **distinct non-zero** value
-> and seeds the issuer strictly above all of them. It may **not** backfill `0`: §1
-> reserves `0` for a record no store has stored, and a backfilled `0` would make a
-> caller-constructed default expectation match a real row — the fail-open case §2
-> closes twice, reintroduced by the migration. `records.rowid` is a source that
-> satisfies the requirement without a scan, being `AUTOINCREMENT` and so
-> never-reissued for the reason ADR-0114 §1 gives, and every row has one.
+> **Normative.** The backfill **issues** a stamp for every existing row from the
+> store's own issuer, in one ordered pass, and persists the issuer at the last value
+> it handed out. It may **not** backfill `0`, and it may **not** derive a stamp from
+> `records.rowid`. `0` is reserved by §1 for a record no store has stored, so a
+> backfilled `0` would make a caller-constructed default expectation match a real
+> row — the fail-open case §2 closes twice, reintroduced by the migration. And a
+> `rowid` is a signed 64-bit integer that a legacy table can hold *negative*: this
+> store carries a case planting exactly that
+> (`test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero`), because "``rowid``
+> was only issued by ``AUTOINCREMENT`` from ADR-0114 onwards", so a rowid-derived
+> stamp would breach both `ge=0` and §1's positivity on rows the store is obliged to
+> keep. The pass is the shape `_backfill_valid_from` already runs for ADR-0045 §9's
+> column, and for the same reason it states: "There is no sentinel below every
+> possible ``rowid`` to seed with, so the first page takes no bound at all and the
+> cursor starts from what it actually found."
+
+> **Normative.** The migration and the column land inside `_setup`'s
+> `BEGIN IMMEDIATE`, as every migration in that store already does, so the column,
+> the backfilled stamps and the persisted issuer commit together or not at all. A
+> half-backfilled column would leave some rows at the reserved `0`, which is the
+> state §1 forbids.
 
 > **Normative.** The ingestor change (§5) is a **second change**, after the first,
 > and it is what closes #248. It carries the two call sites, the bounded re-run, and
