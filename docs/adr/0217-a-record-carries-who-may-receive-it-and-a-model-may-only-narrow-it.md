@@ -790,36 +790,56 @@ would fail that test on the first turn.
 > between an act's read and its write, overwritten by a stale `unguard`, is exactly the
 > laundering §3's precedence refuses whenever it can see it.
 
-> **Normative.** **This decision fires ADR-0046 §5's trigger; it does not close it, and
-> the implementing lane closes nothing on its own authority.** The acts are performed
-> by an engine holding a `MemoryStore`; #262's serialisation is an `asyncio.Lock` "held
-> by that one ingestor" and is reachable through no declared seam; and neither
-> `MemoryStore` nor `MemoryWriter` offers a conditional or placement-only write. An act
-> is therefore **a second writer on one store**, which is the consumer ADR-0046 §5
-> named in terms — "If a composition ever does run two writers on one store, closing
-> #248 is that lane's trigger". Closing it needs what that section specified, "a
-> `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode": a `MemoryStore` change
-> behind golden rule 5 and #248's own ADR. **No lane implementing this ADR mints that
-> surface, and none fabricates a `MemoryUpdateProposal` to borrow the ingestor's
-> lock** — a placement act is not a belief proposal, and routing one through the write
-> path would collect a conflict ruling and a policy decision it has no meaning under.
+> **Normative.** **This decision fires ADR-0046 §5's trigger, and it takes the first of
+> the two answers that section allows.** The acts are performed by an engine holding a
+> `MemoryStore`; #262's serialisation is an `asyncio.Lock` "held by that one ingestor"
+> and is reachable through no declared seam; and neither `MemoryStore` nor
+> `MemoryWriter` offers a conditional or a placement-only write. An act is therefore
+> **a second writer on one store** — the consumer ADR-0046 §5 named in terms: "If a
+> composition ever does run two writers on one store, closing #248 is that lane's
+> trigger — either a store CAS (the extension below) or a tested single-writer
+> invariant". The second arm is not available here: the lock that would have to be
+> shared is private to one ingestor, and a placement act routed through
+> `MemoryWriter.ingest` to borrow it would have to be fabricated as an ordinary
+> `MemoryUpdateProposal` and would collect a conflict ruling and a policy decision it
+> has no meaning under. So the first arm binds.
 
-> **Normative.** What the lane owes instead is the discipline that **is** available at
-> the declared seams, and it is ADR-0073 §5's, applied. Each act decides §3's
-> precedence over the record **it read in the call that writes it**, never over one
-> read earlier — a rendered list, a confirmation prompt.
-> `AssistantEngine.forget` already carries that ruling for the same window over the
-> same store — "The show and the delete are two calls. A write landing between them is
-> destroyed without having been shown, and this is named rather than closed" — and its
-> consent is "consent to forget **the belief that id names**, not a guarantee that the
-> bytes destroyed are the bytes rendered". A confirmed `guard` or `unguard` is read the
-> same way, and ADR-0197 §7's confirmation is not a second writer's lock.
+> **Normative.** **No implementation of §7's two acts lands on a tree whose
+> `MemoryStore` cannot make the act's write conditional on the record being unchanged
+> since the act read it.** That conditional write is #248's — "a compare-and-swap
+> extension of `write_atomic` (a `MemoryRecord` concurrency token plus an
+> `IF_UNCHANGED` mode)" — and it is a `MemoryStore` change, so it is decided in **that
+> issue's own ADR** under golden rule 5 and merged ahead of the change carrying these
+> acts. This ADR neither designs that surface nor pre-empts its shape, and no lane
+> implementing this one mints it: what this clause fixes is the **order**, which §11
+> states, and the fact that the acts are not admissible without it.
 
-> **Normative.** The residue is **named and filed, not assumed away**: the window
-> between an act's read and its write can lose a narrowing the derivation made inside
-> it, which is #248's lost update with a disclosure consequence in place of a content
-> one. §12 records it with the condition that fires it, and no clause of this ADR is
-> read as claiming the window closed.
+> **Normative.** **The reason the gate is here and not deferred** is that what the
+> window loses is a narrowing. A derivation landing between an act's read and its write
+> would be overwritten by a stale `unguard` writing reach `ANYONE` with setter
+> `OWNER_ACT`, and that is precisely the in-place clearing of a `DERIVED` placement
+> ADR-0204 §5's closing prohibition forbids and §3 restates. A lost content merge is a
+> defect; this one is a disclosure, and ADR-0046 §5's own disjunction is what makes
+> choosing an arm the lane's obligation rather than its option.
+
+> **Normative.** **On a conflict the act re-reads and re-decides, and never widens on a
+> stale value.** Where the conditional write finds the record changed since the read,
+> the act reads it again and applies §3's precedence to the value it now carries; what
+> it returns is the placement the record carries after the act, which is the same
+> return this section already specifies for an act that wins nothing. So a `guard` or
+> `unguard` racing a derivation ends with the derivation's placement standing, never
+> with a laundered one, and neither operation gains an error to declare.
+
+> **Normative.** The **read discipline stands beside the gate and is not a substitute
+> for it**: each act decides §3's precedence over the record it read in the call that
+> writes it, never over one read earlier — a rendered list, a confirmation prompt.
+> `AssistantEngine.forget` carries that ruling for its own window over the same store —
+> "The show and the delete are two calls. A write landing between them is destroyed
+> without having been shown, and this is named rather than closed" — and its consent is
+> "consent to forget **the belief that id names**, not a guarantee that the bytes
+> destroyed are the bytes rendered". A confirmed `guard` or `unguard` is read the same
+> way: ADR-0197 §7's confirmation is not a writer's lock, and this ADR does not make it
+> one.
 
 > **Normative.** The added members carry the obligations any member of a Protocol
 > carries: the shared `AssistantEngine` conformance suite gains an arm for each clause
@@ -928,6 +948,11 @@ ADR-0201 closed.
 > there is no `Settings` field, no `ContextFacet` and no `NotificationCandidate`
 > member.
 
+> **Normative.** **`MemoryStore`'s conditional write is not part of that surface and is
+> not decided here.** §7 gates the two acts on it and §11 orders it first; the member,
+> its concurrency token and its conflict's error are #248's own ADR's, under golden
+> rule 5. The enumeration above is of what *this* ADR changes.
+
 > **Normative.** The Protocol change is the reason this ADR is ratified and merged
 > before anything implements against it, and it is stated rather than left to be
 > inferred from "the promoted surface": `AssistantEngine` is a `Protocol` in
@@ -937,11 +962,13 @@ ADR-0201 closed.
 
 > **Normative.** **`PROTOCOL_VERSION` moves for this decision**, on **two independent
 > grounds**, and ADR-0124 §9's test is applied rather than asserted past. It moves
-> **once per change that changes a frame**: §11's first change moves it on the two
-> grounds below, and §11's second moves it again for `FeedbackEvent.guarded`, a member
-> a client sets. Two entries in `wire/envelope.py`'s log, each naming its own reason,
-> is what that file's own practice requires; collapsing them into one bump would leave
-> a released version whose log entry does not describe it.
+> **once per change that changes a frame**, and §11 lands three such changes: the field
+> move, on the second ground below; the two acts, on the first; and
+> `FeedbackEvent.guarded`, a member a client sets. Three entries in
+> `wire/envelope.py`'s log, each naming its own reason, is what that file's own
+> practice requires; collapsing them would leave a released version whose log entry
+> does not describe it. Each ground below is sufficient by itself, which is why they
+> can be spent in different changes.
 
 > **Normative.** The **first ground is the promoted surface's method set.** §7 adds
 > `guard` and `unguard` to `AssistantEngine`, and ADR-0210 §8 names that limb of
@@ -1092,9 +1119,14 @@ ADR-0201 closed.
 > stored record as read in the call that writes it, so an act performed after a render
 > that showed a different placement follows the stored value and not the rendered one —
 > a `guard` offered against a `PROPOSED` placement and performed on a record the
-> derivation has since placed `DERIVED` leaves `DERIVED` and writes nothing (§3). What
-> the lane does **not** pin, and must not claim, is the interleaving itself: that
-> window is #248's and stands open (ADR-0046 §5, §7 above).
+> derivation has since placed `DERIVED` leaves `DERIVED` and writes nothing (§3).
+
+> **Normative.** The lane pins **the interleaving itself**, which §7's gate makes
+> testable rather than assumed: with a derivation's write landing between an
+> `unguard`'s read and its write, the conditional write fails, the act re-reads, §3
+> refuses the widening, and the record is left reach `OWNER` with setter `DERIVED` —
+> the returned value saying so. The arm is taken over the store's conditional write and
+> is why §11 orders that change first.
 
 > **Normative.** The lane pins **the inherited bound**: `guard` and `unguard` raise
 > `OversizedValueError` for an oversized `record_id`, in the `AssistantEngine`
@@ -1129,17 +1161,30 @@ ADR-0201 closed.
 > description, names this clause, and widens the change no further — a site not in the
 > inventory above and not required by §9 is outside it.
 
-> **Normative.** That same change carries §7's `AssistantEngine` members, their
-> conformance-suite arms, the canonical fake in `ai_assistant.testing`, the
-> `RoutableOperation` members and the routing that resolves and dispatches them
-> (`orchestration/routing.py`), the two prose edits of §9, and the
-> `PROTOCOL_VERSION` bump with its `wire/envelope.py` log entry. It is one unit of work
-> on `CLAUDE.md`'s contract-seam exception — a contract and the primary implementation
-> whose demands shape it, together (ADR-0137 §2) — and the lane states that exception
-> when it opens, because a change spanning `core`, `orchestration`, `wire` and
-> `testing` is otherwise more than one change.
+> **Normative.** That same change carries the two prose edits of §9 and the
+> `PROTOCOL_VERSION` bump with its `wire/envelope.py` log entry, on §9's second ground.
+> It is one unit of work on `CLAUDE.md`'s contract-seam exception — a contract and the
+> primary implementation whose demands shape it, together (ADR-0137 §2) — and the lane
+> states that exception when it opens, because a change spanning `core`, `memory`,
+> `orchestration`, `wire` and `testing` is otherwise more than one change.
 
-> **Normative.** The **second change** is §7's write-time act, entire and atomic:
+> **Normative.** **§7's two acts are a change of their own and they are gated**, which
+> is the one place this ordering is not a preference. They carry the two
+> `AssistantEngine` members, their conformance-suite arms, the canonical fake in
+> `ai_assistant.testing`, the `RoutableOperation` members and the routing that resolves
+> and dispatches them (`orchestration/routing.py`), and their own `PROTOCOL_VERSION`
+> bump with its log entry, on §9's first ground. **They land after the ADR that gives
+> `MemoryStore` its conditional write and after that ADR's implementation** (§7,
+> ADR-0046 §5, #248), because until then the act's write cannot be made conditional on
+> the record being unchanged since it was read and a stale `unguard` could clear a
+> `DERIVED` placement in place. They are separated from the field move for this reason
+> alone: the field move is complete, correct and unaffected by the window, and holding
+> it behind an ADR nobody has written yet would leave every ADR-0204 narrowing carried
+> by a member two decisions now describe differently.
+
+> **Normative.** The **second change** is §7's write-time act, entire and atomic —
+> independent of the acts' gate, because a producer writing a fresh record reads nothing
+> back and races nobody:
 > `FeedbackEvent.guarded` in `core/types.py`, the `FeedbackProcessor` implementations
 > in `learning/` that honour it, the guarded-event arm on `FeedbackProcessorContract`,
 > `FakeFeedbackProcessor` in `ai_assistant.testing`, and its own `PROTOCOL_VERSION`
@@ -1148,18 +1193,23 @@ ADR-0201 closed.
 > conformance suite that binds it, the canonical fake and the primary implementation
 > are one unit of work — and §7's last clause is why no split of it is admissible.
 
-> **Normative.** §4's model proposal is a **third change**, in `learning/observer.py`
-> and its tests alone. It lands after the first, is independent of the second, and
-> changes no `core` definition and no Protocol.
+> **Normative.** §4's model proposal is a **further change**, in `learning/observer.py`
+> and its tests alone. It changes no `core` definition and no Protocol. It lands
+> **after the acts**, not merely after the field move: a proposal narrowing a record in
+> a tree where the owner cannot lift it in one act would be the one thing §4's whole
+> justification rests on being absent, and §3's answer to ADR-0130 §11 — "the owner can
+> lift it in one act (§7)" — would be false of that tree.
 
 > **Normative.** `assistant learn --guarded` and any rendering of a placement are a
-> **fourth change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
+> **further change**, in `interfaces/` and its tests alone (`CLAUDE.md`, "Interface
 > adapters are thin"): the adapter sets `FeedbackEvent.guarded` and decides nothing.
 > It lands after the second, because a flag reaching a processor that ignored it would
 > be a control silently doing nothing.
 
-> **Normative.** No lane reads the ordering above as licence to widen any of the three.
-> Anything not named in one of them is a change of its own.
+> **Normative.** No lane reads the ordering above as licence to widen any of them.
+> Anything not named in one of them is a change of its own. The order is: the field
+> move; §7's write-time act; #248's conditional write, in its own ADR; §7's two acts;
+> §4's proposal; and the adapter's flag, which follows the write-time act.
 
 > **Normative.** The records this decision owes on ADR-0204, ADR-0199 and ADR-0210 are
 > made in **this ADR's own PR** (ADR-0082 §1, ADR-0070 §1), and are header-only.
@@ -1193,13 +1243,12 @@ ADR-0201 closed.
 > golden rule 5 puts behind its own ADR. Until then a proposal is made without one, and
 > the corrective loop closes through the owner's per-record act.
 
-> **Normative.** **Closing the acts' read-modify-write window** (§7). It is #248's,
-> re-scoped by ADR-0046 §5 to "a compare-and-swap extension of `write_atomic` (a
-> `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode), gated on a consumer
-> that runs two writers on one store" — and this decision is that consumer. Fires with
-> the ADR that adds the token and the mode to `MemoryStore`. Until then the window
-> stands, bounded by §7's read discipline, and its disclosure-flavoured case is
-> recorded on #248 rather than left in this ADR alone.
+> **Normative.** **The shape of the store's conditional write** (§7). Deferred as a
+> *design*, not as an obligation: #248 owns it — "a `MemoryRecord` concurrency token
+> plus an `IF_UNCHANGED` mode" — and its ADR decides the member, the token and the
+> conflict's error. What is **not** deferred is that it lands first: §7 gates the acts
+> on it and §11 orders it, because this decision is the two-writer consumer ADR-0046 §5
+> gated #248 on. The gate is recorded on that issue as well as here.
 
 > **Normative.** **Stating a proposal to the owner in the turn that produced it**
 > (§5). Fires with a decision that puts the proposal in front of a producer that
@@ -1290,22 +1339,32 @@ runs only where a provider was already being consulted — and the read stays a 
 But the corpus has not had a model write into a disclosure decision before, and a reader
 should see that stated rather than discovered.
 
-**`PROTOCOL_VERSION` moves twice, so every spoke redeploys twice.** That is the cost of
-moving a member of a wire-carried `core` type and of adding the promoted surface's two
-operations, and then of a second member a client sets. §9 takes it deliberately in
-preference to a silent disagreement between a hub and a spoke about a disclosure-bearing
-field, and §11's ordering means neither redeployment is on a tree that accepts an
-instruction it does not act on.
+**`PROTOCOL_VERSION` moves three times, so every spoke redeploys three times.** That is
+the cost of moving a member of a wire-carried `core` type, of adding the promoted
+surface's two operations, and of a member a client sets — each in the change that makes
+it, each with its own log entry. §9 takes it deliberately in preference to a silent
+disagreement between a hub and a spoke about a disclosure-bearing field, and §11's
+ordering means no redeployment is on a tree that accepts an instruction it does not act
+on.
 
 **A store carries `DERIVED` narrowings the owner cannot lift.** §12 names it as a residue
 with two ratified escapes. It is the price of keeping ADR-0204 §5's closing prohibition,
 and #1708 is why that price is worth paying.
 
-**Four changes follow, not one**, and §11 orders them and bounds each. The first is
+**Several changes follow, not one**, and §11 orders them and bounds each. The first is
 large and cannot be made smaller: the field move, its decode mapping and every
 production reader of the removed field are one commit, because any split of them is a
 tree that does not type-check or a deployment that widens every narrowed record. It
 takes `CLAUDE.md`'s contract-seam exception and says so.
+
+**And one of them waits on an ADR nobody has written yet.** §7's two acts are a second
+writer on one store, so ADR-0046 §5 obliges this decision to pick an arm and the only
+one available is the store's compare-and-swap — #248's, in its own ADR, merged ahead of
+them. That is a real delay between the owner being able to guard a record **at write**
+(the flag, which needs none of this) and being able to guard one **after the fact**, and
+it is taken deliberately: an `unguard` that can clear a `DERIVED` placement in place
+would be the one failure ADR-0204 §5's closing prohibition exists to prevent, arriving
+by a race rather than by a rule.
 
 ## Alternatives considered
 
