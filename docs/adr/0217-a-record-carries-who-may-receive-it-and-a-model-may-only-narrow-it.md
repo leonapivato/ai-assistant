@@ -568,6 +568,18 @@ that did not need guarding, which the owner can see and lift.
 > (`AssistantEngine.observe`), and every record it proposes is a fresh belief it is
 > about to write — never a record another producer wrote in a turn.
 
+> **Normative.** **ADR-0218 arms a scheduled run, and nothing above rests on what
+> triggers a pass.** That decision adds `Engine.observe_due`, an `orchestration`
+> operation it puts "**not** … on the `AssistantEngine` Protocol in
+> `core/protocols.py`" and whose passes are "never a nested call to `Engine.observe`"
+> (§3), so the contract sentence quoted above stands exactly as quoted. What changes is
+> that a pass now also happens because a schedule came due and not only because a caller
+> asked, and that makes this section's argument stronger rather than weaker: a scheduled
+> pass is outside any turn, composes no reply, and still proposes only fresh beliefs
+> from the episodes it was handed. §4's "rides a pass a producer already makes" is read
+> of the pass ADR-0218 arms exactly as of the one a caller asks for, and this ADR adds a
+> provider call to neither.
+
 > **Normative.** **This ADR states no reply obligation, and no turn it reaches owes
 > one.** A clause requiring "the reply for that turn" to state a proposal would name a
 > surface no path of this decision produces: the pass that makes the proposal composes
@@ -1402,6 +1414,16 @@ version ruling stays true of the change it ruled on — a defaulted addition to
 sentence of ADR-0213 becomes false or over-wide. Its `topics` field and this ADR's
 `placement` are two additive members on one envelope, deciding different questions and
 read at different sites; neither ADR constrains the other's.
+
+**Against ADR-0218 no record is owed**, on ADR-0070 §1's test applied to its text.
+ADR-0218 arms a scheduled run of ADR-0212 passes and adds `Engine.observe_due`; §4 above
+puts a placement proposal on a pass a producer already makes, whichever trigger caused
+it, and §5 says so. No sentence of ADR-0218 becomes false or over-wide: its new
+operation, its due test, its listing bound, its run budget and its failure dispositions
+are used as given, and its counts-only run report is unmoved — "model calls made" in
+particular, because §4 adds no provider call and §10 pins that count as unchanged from
+what it is without this decision. What §4 rides is the pass; what ADR-0218 decides is
+when a pass happens; neither constrains the other.
 
 **Against ADR-0203, ADR-0100, ADR-0197, ADR-0201, ADR-0130 and ADR-0021 no record is
 owed.** ADR-0203 §1's subtraction and §2's bounds are used as given and every sentence of
