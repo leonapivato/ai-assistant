@@ -72,7 +72,6 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
-    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -235,16 +234,6 @@ def _make_engine(
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
     writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        writes=writes,
-        planner=_OneStepPlanner(),
-        feedback=FakeFeedbackProcessor(),
-        now=lambda: AT,
-        id_factory=lambda: "g-1",
-        registry=FakeToolRegistry(),
-    )
     # ``egress`` wires the binding seam and the schema that reaches it, so the
     # recorded CONFIRM carries an ``egress_binding`` (ADR-0152 §1). Off by default:
     # every case above this one is about the *recovery* path rather than the egress
@@ -253,6 +242,20 @@ def _make_engine(
     # The seam claims through the **same** trail the runner records rulings into
     # (ADR-0192 §9's wiring clause); a second one would refuse every claim.
     invoker = FakeToolInvoker([(tool, _succeeds)], ledger=trail, gate=trail)
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writes=writes,
+        planner=_OneStepPlanner(),
+        feedback=FakeFeedbackProcessor(),
+        now=lambda: AT,
+        id_factory=lambda: "g-1",
+        # The same object the runner below resolves against (ADR-0211 §3): a loop
+        # told one vocabulary while selection resolved against another could plan a
+        # step the selecting registry never advertised. Built after the invoker for
+        # that reason, rather than beside the other stores.
+        registry=invoker,
+    )
     runner = StepRunner(
         plans=plans,
         registry=invoker,

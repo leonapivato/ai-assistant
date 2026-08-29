@@ -277,7 +277,10 @@ async def _engine(now: Clock) -> None:
             planner=FakePlanner(now=lambda: _AWARE),
             feedback=FakeFeedbackProcessor(),
             now=lambda: _AWARE,
-            registry=FakeToolRegistry(),
+            # The same object the runner below resolves against (ADR-0211 §3):
+            # a loop told one vocabulary while selection resolved against another
+            # could plan a step the selecting registry never advertised.
+            registry=invoker,
         ),
         runner=StepRunner(
             plans=plans,

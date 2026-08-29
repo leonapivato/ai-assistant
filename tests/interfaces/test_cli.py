@@ -137,7 +137,6 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
-    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     StreamAttempt,
@@ -335,7 +334,10 @@ def _engine(
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=lambda: "g-1",
-        registry=FakeToolRegistry(),
+        # The same object the runner below resolves against (ADR-0211 §3): a
+        # loop told one vocabulary while selection resolved against another
+        # could plan a step the selecting registry never advertised.
+        registry=invoker,
     )
     ids = iter(f"d-{n}" for n in range(1, 50))
     runner = StepRunner(
@@ -2561,7 +2563,10 @@ def _conversation_engine(
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=lambda: next(goals),
-        registry=FakeToolRegistry(),
+        # The same object the runner below resolves against (ADR-0211 §3): a
+        # loop told one vocabulary while selection resolved against another
+        # could plan a step the selecting registry never advertised.
+        registry=invoker,
     )
     runner = StepRunner(
         plans=plans,

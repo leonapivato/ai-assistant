@@ -141,7 +141,6 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
-    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     ObservationGate,
@@ -633,7 +632,10 @@ class Harness:
             feedback=self.feedback,  # type: ignore[arg-type]
             now=lambda: AT,
             id_factory=loop_id_factory if loop_id_factory is not None else lambda: "g-1",
-            registry=FakeToolRegistry(),
+            # The same object the runner below resolves against (ADR-0211 §3):
+            # a loop told one vocabulary while selection resolved against another
+            # could plan a step the selecting registry never advertised.
+            registry=self.invoker,
         )
         runner = StepRunner(
             plans=self.plans,

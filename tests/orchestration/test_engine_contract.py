@@ -134,7 +134,6 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolInvoker,
-    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
 )
@@ -486,7 +485,10 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=_counter("g"),
-        registry=FakeToolRegistry(),
+        # The same object the runner below resolves against (ADR-0211 §3): a
+        # loop told one vocabulary while selection resolved against another
+        # could plan a step the selecting registry never advertised.
+        registry=invoker,
     )
     runner = StepRunner(
         plans=store,

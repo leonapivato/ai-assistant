@@ -136,7 +136,6 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
-    FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
     source_grant,
@@ -617,7 +616,13 @@ def build_world(
         feedback=FakeFeedbackProcessor(),
         now=lambda: NOW,
         id_factory=lambda: f"g-{next(goals)}",
-        registry=FakeToolRegistry(),
+        # **The same object the runner resolves against** (ADR-0211 §3). This
+        # harness drives the real `StepRunner` over the real `build_default_registry`
+        # result, so a loop given a second, empty registry would prompt the planner
+        # that nothing can be done while selection could still find `send_email` —
+        # the divergence the same-object clause exists to close, and one no
+        # assertion here would catch while the planner's model is scripted.
+        registry=registry,
     )
 
     conversations = FakeConversationStore(now=lambda: NOW)
