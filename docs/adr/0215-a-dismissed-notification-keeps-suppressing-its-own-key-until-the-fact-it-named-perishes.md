@@ -546,6 +546,24 @@ produce, so that a QA run and the implementing lane are testing the same thing.
 > lies, the `DROP` having ended its speech and this ADR's guard reaching it not at
 > all.
 
+> **Normative.** The type's predicates are pinned **directly** as well, beside
+> that suite rather than through it, in `tests/core/test_notification_types.py`
+> where `HeldNotification`'s others already are. The lane asserts on the record
+> itself that `speaks_for_its_key_at` answers §1 at its boundaries — a dismissed
+> record speaks strictly before its declared expiry and not at it, one carrying a
+> `DROP` beside the dismissal speaks at no instant after it ceased, and one whose
+> candidate declares no expiry stops speaking exactly where it stops being
+> actionable — and that `is_purgeable_at` answers §4 **whole**: for a record
+> dismissed before its expiry it is `False` past the retention horizon while that
+> expiry is still future, and `True` at the expiry.
+
+> **Normative.** That direct pinning is owed because the store suite cannot see
+> what §4 forbids. An implementation that left the old actionability guard on
+> `is_purgeable_at` and composed `speaks_for_its_key_at` into both backends'
+> purge paths would satisfy every store-level case above and still break §4 — the
+> record would not answer its own rule, and the next backend written against the
+> type would purge a record that still speaks.
+
 > **Normative.** Those two of ADR-0130 §9's conformance obligations that state the
 > replaced rules are superseded by the clause above and are removed rather than
 > left standing beside it: "that a candidate re-offered after its predecessor
