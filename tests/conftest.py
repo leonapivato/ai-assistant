@@ -34,7 +34,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 import pytest
 import pytest_asyncio
@@ -304,6 +304,44 @@ def pytest_configure(config: pytest.Config) -> None:
         )
 
 
+#: The substring Playwright puts in a launch refusal when the build was never
+#: installed. It is matched rather than read off a code because Playwright gives the
+#: condition none: every launch failure is the same `Error` class, and the message is
+#: the only thing separating "you never installed it" from "it is here and will not
+#: start".
+_MISSING_BUILD = "Executable doesn't exist"
+
+
+def classify_launch_refusal(refusal: BrowserError) -> NoReturn:
+    """Answer a Playwright launch refusal the way ADR-0216 §6 requires.
+
+    A *named* helper rather than an arm of :func:`gateway_browser`, so the one branch
+    of the layer that no machine with the browser installed can reach has a caller
+    that is not a browser launch (issue #1808). Every case of the layer needs the
+    launch to have succeeded, so until this was lifted out it was the only line of
+    the harness the suite could not execute -- and §6's skip is the clause that
+    decides whether a fresh clone's anchor is discharged or its gate is simply red.
+
+    It never returns: an absent build skips the layer, and anything else is re-raised.
+
+    Args:
+        refusal: What ``chromium.launch`` raised.
+
+    Raises:
+        BrowserError: The refusal itself, where the build is present and will not
+            start -- a missing system library, a sandbox refusal. §6 skips for an
+            absent build and for nothing else, so that is reported as the failure it
+            is rather than quietly turned into a pass.
+    """
+    if _MISSING_BUILD not in str(refusal):
+        raise refusal
+    pytest.skip(
+        "the browser ADR-0216 §5 pins is not installed in this clone; "
+        f"`{_BROWSER_INSTALL}` installs it "
+        "(`just setup` runs that, and CI installs it unconditionally)"
+    )
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def gateway_browser() -> AsyncIterator[Browser]:
     """The one browser the gateway's executable layer drives (ADR-0216 §3, §5, §6).
@@ -329,7 +367,10 @@ async def gateway_browser() -> AsyncIterator[Browser]:
     ADR-0166 §1's sense, and an anchor discharged by a run carrying it is
     discharged." Only that condition skips: a browser that is present and will not
     start -- a missing system library, a sandbox refusal -- is a failure and is
-    reported as one.
+    reported as one. Which of the two a refusal is, is
+    :func:`classify_launch_refusal`'s to say, and it is a named function rather than
+    an arm of this fixture so that the branch this machine cannot reach is still
+    reachable by a test (``tests/interfaces/gateway/test_browser_harness.py``).
 
     Yields:
         The browser, closed when the session ends.
@@ -338,13 +379,7 @@ async def gateway_browser() -> AsyncIterator[Browser]:
         try:
             browser = await driver.chromium.launch(channel="chromium", args=list(LAUNCH_ARGUMENTS))
         except BrowserError as refusal:
-            if "Executable doesn't exist" not in str(refusal):
-                raise
-            pytest.skip(
-                "the browser ADR-0216 §5 pins is not installed in this clone; "
-                f"`{_BROWSER_INSTALL}` installs it "
-                "(`just setup` runs that, and CI installs it unconditionally)"
-            )
+            classify_launch_refusal(refusal)
         try:
             yield browser
         finally:
