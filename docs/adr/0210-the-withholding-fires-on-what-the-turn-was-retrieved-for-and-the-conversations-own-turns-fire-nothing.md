@@ -4,14 +4,19 @@
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
-  — §2's second clause, **scoped to an operation whose output channel's audience is
-  unbounded**, in the one respect that its disjunction is evaluated over the supply
-  "as assembled and retrieved" *whole*. On such an operation the disjunction is
-  evaluated over the part of that supply retrieval placed there for the turn's own
-  goal statement, and not over the conversation's own recent turns. Both terms of
-  the disjunction, both grounds on which a producer sets the field, §1's field, §3's
-  withholding, §4's bounded-channel rule and §5's no-clearing ratchet are untouched,
-  and the evaluation on a channel of bounded audience is untouched entirely.
+  — §2's second clause **and §5's second clause**, both **scoped to an operation whose
+  output channel's audience is unbounded**, in the one respect that the disjunction
+  each states is evaluated over the supply "as assembled and retrieved" *whole*: §2's
+  as the turn's own rule, §5's as the general producer rule ADR-0204 §2's third clause
+  applies to the turn. On such an operation both are evaluated over the part of that
+  supply retrieval placed there for the turn's own goal statement, and not over the
+  conversation's own recent turns. §5's second clause is narrowed **for that one
+  producer and for no other**: an observer, a fold, a consolidation and a
+  bounded-channel turn still disjoin over every record they were supplied. Both terms
+  of §2's disjunction, both grounds on which a producer sets the field, §1's field,
+  §3's withholding, §4's bounded-channel rule and §5's **first, third, fourth and
+  fifth** clauses — the no-clearing ratchet whole — are untouched, and the evaluation
+  on a channel of bounded audience is untouched entirely.
 - **Partially supersedes:**
   [ADR-0199](0199-the-audience-of-the-output-channel-decides-what-may-be-said-and-a-withheld-class-is-deflected-rather-than-redacted.md)
   — §5's third clause, **scoped to the same operations**, in the one respect that
@@ -278,13 +283,36 @@ loud rather than quiet.
 
 > **Normative.** Nothing here authorises writing `False` over a `True` on a record
 > that already carries one, in a fold, a supersession, a consolidation or anywhere
-> else. ADR-0204 §5 binds whole, and a record this ADR causes not to be stamped is a
-> record that was never stamped rather than one that was cleared.
+> else. ADR-0204 §5's **first, third, fourth and fifth** clauses — the no-clearing
+> ratchet, the `SUPERSEDE` rule, the retained target and the closing prohibition — bind
+> whole and untouched, and a record this ADR causes not to be stamped is a record that
+> was never stamped rather than one that was cleared.
+
+> **Normative.** ADR-0204 §5's **second** clause is narrowed by §1, and the header
+> records it. That clause makes "a producer that derives a record from other records in
+> this store" disjoin the field over "**every record it was supplied**", "never over the
+> subset it cited, selected, ranked or judged relevant" — and ADR-0204 §2's third clause
+> names a turn as exactly such a producer, which is the only route by which §5's second
+> clause reaches a turn at all. For that one producer, on an operation whose output
+> channel's audience is unbounded, the disjunction ranges over §1's set instead. **For
+> every other producer §5's second clause is untouched**, word for word: an observer
+> distilling a belief from a stamped episode, a fold, a consolidation and a
+> bounded-channel turn all still disjoin over every record they were supplied.
 
 **The two are different acts and only one of them is available.** Narrowing what a
 producer *writes* on a new record is a decision about the producer; clearing a value
-an earlier producer wrote is the ratchet ADR-0204 §5 forbids, and ADR-0106 §4's reason
-for it is untouched here.
+an earlier producer wrote is the ratchet ADR-0204 §5's **first** clause forbids, and
+ADR-0106 §4's reason for it is untouched here.
+
+**Narrowing §5's second clause for this one producer keeps §5's own reason intact**, and
+that is why the narrowing is stated at the producer rather than at the clause. §5 gives
+its reason as the second distillation: "an observer distilling a belief from a stamped
+episode would produce an unstamped belief that §3's third clause places speakable —
+#1708's laundering with one more hop in it". The observer is not this producer, the
+bounded channel's captures — which is where #1708's path runs (§4) — are not this
+producer, and the Alternatives entry refusing to drop the inherited route wholesale is
+the same reasoning taken one step less far. What is left of §5's second clause after this
+decision is every application of it except a spoken turn's own capture.
 
 ### 3. The placements, the subtraction and the withholding are untouched
 
@@ -429,7 +457,8 @@ there the store *is* the supply. Saying that here is cheaper than a later reader
 discovering it against the QA rig.
 
 **And #1775's second bullet is not this ADR's.** "§5 has exactly one route out —
-supersession, which retires the record" is a statement about ADR-0204 §5, which stands,
+supersession, which retires the record" is a statement about ADR-0204 §5's clearing
+route — its fifth clause, which stands untouched —
 and about the mirror of the residue ADR-0204 §6's third clause already declines. Nothing
 here reaches it.
 
@@ -449,9 +478,10 @@ here reaches it.
 > `supplied_withheld_content`'s own `Field` description says the same in shorter form.
 > Both sentences stop being true of an episode captured from an operation whose output
 > channel's audience is unbounded, and a `core` type whose documentation describes a rule
-> the system no longer follows is worse than the narrowing it hides. The implementing lane
-> states the exception in both places, cites this ADR beside ADR-0204 §1, and changes
-> nothing else in that file.
+> the system no longer follows is worse than the narrowing it hides. The change §10 item 5
+> names — a change of its own, ordered immediately after the orchestration one — states
+> the exception in both places, cites this ADR beside ADR-0204 §1, and changes nothing
+> else in that file.
 
 > **Normative.** It does, on **one class of record**, narrow what
 > `Provenance.supplied_withheld_content` *means*. ADR-0204 §1 defines the field as
@@ -538,8 +568,8 @@ index is deliberately *not* what is carried, and §1's second clause says why: a
 that both the tail and the supplement's read carry stands in the supply at the tail's
 position alone, where `len(recent)` cannot see it. Carrying the read set to
 `orchestration/disclosure.py` is a change inside one subsystem, over the `SupplyFilter`
-alias `orchestration/loop.py` owns, and §10 item 1 states it as the implementing lane's
-first obligation.
+alias `orchestration/loop.py` owns, and §10 item 1 states it as the orchestration
+change's first obligation.
 
 ### 9. The representative-input tests this decision owes
 
@@ -557,11 +587,23 @@ first obligation.
 > **Normative.** The lane pins **the inherited term over the retrieved groups**, on a
 > fixture ADR-0199 §3 would otherwise place as **speakable** — `about_person` unset and
 > a placed `Provenance.source` — carrying `supplied_withheld_content = True`. Such a
-> record in the relevance-retrieved group, or in ADR-0158's episodic supplement, fires
-> the evaluation, and the same fixture is asserted to be withheld by the stamp alone. A
-> fixture ADR-0199 §3 withholds on its own account fires the **first** term and proves
-> nothing about the second, so a test written over one cannot distinguish §1's narrowing
-> from an implementation that dropped ADR-0204 §2's second term.
+> record fires the evaluation whether it stands in the relevance-retrieved group **or**
+> in ADR-0158's episodic supplement, and the lane pins **both placements** rather than
+> either of them; in each the same fixture is asserted to be withheld by the stamp
+> alone. A fixture ADR-0199 §3 withholds on its own account fires the **first** term and
+> proves nothing about the second, so a test written over one cannot distinguish §1's
+> narrowing from an implementation that dropped ADR-0204 §2's second term.
+
+> **Normative.** The lane pins **the episodic supplement standing on its own**, for
+> **both** terms and separately from the deduplication collision below: a record that
+> `_supplement`'s own relevance read returned and that neither the conversation tail nor
+> the belief composition holds — so ADR-0158 §4's deduplication keeps it and it stands in
+> the supply as the third group — fires the evaluation, once on a fixture ADR-0199 §3
+> withholds on its own account and once on the otherwise-speakable stamped fixture above.
+> Without this pair, an implementation that reaches the supplement *only* through the
+> collision below — carrying the belief composition's records and the colliding ids, and
+> nothing of an ordinary supplemented turn — passes every other test in this section and
+> under-fires on the commonest supplement there is.
 
 > **Normative.** The lane pins **the bounded channel unchanged**: the same conversation
 > tail, the same stamped episode, on `converse`, evaluates `True` and stamps its
@@ -590,34 +632,55 @@ first obligation.
 
 ### 10. What the implementing lane owes
 
-The implementation is one lane, briefed after this ADR merges (ADR-0015 §5, golden
-rule 5). It owes:
+The implementation is briefed after this ADR merges (ADR-0015 §5, golden rule 5), and it
+is **two changes rather than one** — items 1–4 and 6 in `orchestration`, and item 5 in
+`core/types.py` on its own — for the reason the clause below the list gives. It owes:
 
 1. **What the relevance reads returned**, carried from `LearningLoop.respond` to the
    supply filter inside `orchestration`: the belief composition's records and the ids
    `_supplement`'s read returned **before** ADR-0158 §4's deduplication, so §1's second
    clause is answerable. The filter evaluates the boolean over that set while
    subtracting over the whole supply. A group boundary index alone is not enough and
-   §1's second clause says why. No `core` **definition** change and no Protocol change;
-   the two prose edits item 5 names are the whole of this lane's reach into
-   `core/types.py`.
+   §1's second clause says why. No `core` **definition** change and no Protocol change,
+   and this change touches `core/types.py` not at all — item 5's separate change is the
+   whole of the implementation's reach into that file.
 2. **`UnboundedAudienceSupply` alone.** `BoundedAudienceSupply` keeps the whole-supply
    evaluation, and the module docstring's account of what the two share is extended to
    say where they now differ.
-3. **The eight tests of §9.**
+3. **The nine tests of §9.**
 4. **The docstring records**: `supply_for_unbounded_audience`'s Returns section states
    what its third value is now taken over, and `orchestration/disclosure.py`'s module
    docstring gains the group distinction beside its account of the three groups.
 5. **The two prose edits in `core/types.py`** §8's second clause requires — `Provenance`'s
    class docstring and `supplied_withheld_content`'s `Field` description — and nothing
-   else in that file. They put the lane's diff on `core/types.py`, so ADR-0209 §4 governs
-   its merge and it is scheduled when the dispatcher can afford that.
+   else in that file, **as a change of its own**. They put that change's diff on
+   `core/types.py`, so ADR-0209 §4 governs its merge and it is scheduled when the
+   dispatcher can afford that.
 6. **Closing #1775** on the half this decision reaches, with #1785 left open for the
    half it does not.
 
+> **Normative.** Items 1–4 and 6 are one change, in `orchestration`. **Item 5 is a second
+> change**, touching `core/types.py` and nothing else, merged **immediately after** the
+> first with no other change between them. `CLAUDE.md` scopes a change to "a single
+> package plus its tests" and rules of the one exception it names — the Protocol triad,
+> widened by ADR-0137 §2 to carry its primary production implementation — that "**that
+> widening is the whole of it: every other cross-subsystem pairing is still more than one
+> change**". This pairing adds no Protocol and no triad, so it is not that exception and
+> the two may not be combined.
+
+**The window that opens between the two merges is stated rather than hidden, and it is
+the smaller cost.** While it is open, `core/types.py` describes the unnarrowed rule and
+the hub follows the narrowed one — the state §8's second clause calls worse than the
+narrowing it hides. It is bounded by one merge, which is why item 5 is ordered
+*immediately* after rather than merely eventually, and the alternative is breaking a rule
+whose own text says it admits no other exception. Ordering item 5 **first** is worse
+still: `core/types.py` would then describe a rule the running system does not yet follow,
+which is the same defect pointing the other way.
+
 > **Normative.** The records this decision owes on ADR-0204 and on ADR-0199 are owed by
-> the **first** change after this one to touch each file, and the implementing lane is
-> that change unless a nearer one arrives. Each is one change making two edits together:
+> the **first** change after this one to touch each file, and the first of the two changes
+> above is that change unless a nearer one arrives. Each is one change making two edits
+> together:
 > the earlier ADR's `Status` line takes the leading `Partially superseded by ADR-0210
 > (<scope>)` form of ADR-0070 §4 and `docs/adr/template.md` — accumulating a third pair
 > on ADR-0199's line without dropping either of the two it carries, and converting
@@ -664,8 +727,23 @@ recent turns as well; after this decision, on one channel, they do not. That is 
 differently, which is ADR-0070 §1's line, so it is a supersession; and it is partial in
 ADR-0070 §3's sense, because it names one clause of one section and scopes it to one
 class of operation. Both of the clause's terms survive, §1's field survives, §3's
-withholding survives, §4's bounded-channel rule survives untouched, and §5 survives
-whole.
+withholding survives, §4's bounded-channel rule survives untouched, and §5's ratchet —
+its first, third, fourth and fifth clauses — survives whole.
+
+**ADR-0204 §5's second clause — a record is owed on the same test, and reaching it
+through §2 alone would not have been enough.** §5's second clause is written over "a
+producer that derives a record from other records in this store" and requires the
+disjunction over "**every record it was supplied**", "never over the subset it cited,
+selected, ranked or judged relevant". ADR-0204 §2's third clause names a turn as exactly
+such a producer. So a reader holding only ADR-0204 §5 stamps a spoken turn's episode from
+a stamped record in the conversation tail; after this decision, on one channel, they do
+not. That is ADR-0070 §1's line again — and superseding §2's second clause while leaving
+§5's standing would have left two ratified instructions addressed to the same producer,
+one of them naming the very thing §1 does ("the subset it ... judged relevant") as what
+the disjunction may never range over. It is partial in ADR-0070 §3's sense twice over: one
+clause of one section, scoped to one class of operation **and** to one producer. Every
+other producer §5 reaches is untouched, which is why §5's own reason — the observer's
+second distillation — and #1708's closure survive intact (§2, §4).
 
 **ADR-0199 §5's third clause — a record is owed on the same test.** Its condition is
 "Where content was withheld"; a reader holding only ADR-0199 tells the composing stage
