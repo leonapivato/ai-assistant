@@ -2,6 +2,13 @@
 
 - Status: Proposed
 - Date: 2026-08-29
+- **One record is owed on an earlier ADR (ADR-0082 §1), and this change writes it.**
+  §16 names the clause — ADR-0111 §4's second normative clause, which §1 amends by
+  admitting one bounded local operation that carries no deadline — quotes it, and
+  applies ADR-0070 §1's test to it. ADR-0111's `Status` line carries a leading
+  `Partially superseded by` token, so under ADR-0082 §2 the record is its appended
+  dated note and nothing is written on the line. **Nothing here supersedes anything**,
+  wholly or in part, and no other ADR's text is touched by this change.
 
 ## Context
 
@@ -272,10 +279,12 @@ a function of how many chunks the run has already done**:
   run had read — which is the shape a job with a growing per-chunk cost has, and is
   why the cap is on the accumulator and not on its output.
 
-**Which operations §4's deadline clause is about, read out of §4 itself.** What a
-bounded, synchronous, in-memory operation raises is whether it also owes a *timer*.
-Three things in §4 answer no, so this ADR applies that clause rather than narrowing it
-or amending it — §16 classifies it.
+**What the accumulation does *not* have is a deadline, and §4's second normative clause
+as written asks for one on every operation. So this decision amends that clause,
+narrowly, and the record is made on ADR-0111 in this same change** (§16; ADR-0070 §1 and
+ADR-0082 §1/§2). What follows is why the exception is this narrow and why it is safe —
+not an argument that no record is owed. Three things in ADR-0111 mark out the shape of
+the operation §4 was written to exclude, and the accumulation is outside all three.
 
 - **ADR-0111's own header says what that clause was written to stop, and it is
   blocking.** The clause is not a first draft's wording; it was added in review, and
@@ -283,10 +292,9 @@ or amending it — §16 classifies it.
   §4's budget bounds nothing **if a chunk can block indefinitely**", "repaired by §4's
   second normative clause making a per-operation deadline a precondition of being
   chunked at all". A bounded synchronous loop cannot block indefinitely, and a
-  precondition written against indefinite blocking does not reach one. This is the
-  sentence of ADR-0111 that decides the question, and it is in ADR-0111's own file —
-  so a reader holding only that ADR reads the clause this way too, which is why §16
-  finds no record owed rather than arguing one away.
+  precondition written against indefinite blocking does not reach one. That is what
+  bounds the amendment: it admits an operation the clause's own hazard never described,
+  and it leaves every operation that hazard *does* describe exactly where §4 put it.
 - **§4 supplies no way to enforce one.** "**This ADR adds no cancellation mechanism**
   and does not reach inside a chunk." A deadline is enforceable only against an
   operation that yields — an `await` on a provider call or on I/O — because nothing
@@ -306,7 +314,8 @@ or amending it — §16 classifies it.
   already computes over `derived_from_external` and `supplied_withheld_content`. Under a
   reading that demands a timer on each of those, no job in this system may be chunked at
   all — consolidation and the retention purge included, which are the jobs §4 is written
-  for. A clause is not read into a form that forbids what its own ADR ratifies.
+  for. The amendment therefore states what §4's practice already was, rather than
+  carving out an exception the corpus had no room for.
 
 **And what §4 does demand of this operation, it gets.** The hazard §4 names is "a
 provider call that never returns", and its instruction is that admissibility "must be
@@ -1477,19 +1486,42 @@ ADR-0082 §1's test is ADR-0070 §1's applied to the earlier ADR's text: would a
 reader holding only that ADR now act differently, or read one of its clauses more
 widely than it now holds?
 
-> **Normative.** This ADR supersedes nothing, amends nothing and records nothing
-> against any earlier ADR. Every ADR it cites binds after it exactly as it bound
-> before, and no `Status` line moves.
+> **Normative.** This ADR supersedes nothing. It **amends one named clause of one
+> earlier ADR** — ADR-0111 §4's second normative clause — and that record is written in
+> this same change, in ADR-0111's appended dated note. No `Status` line moves: ADR-0111's
+> carries a leading `Partially superseded by` token, so under ADR-0082 §2 the note is
+> the whole of the record. Every other ADR this one cites binds after it exactly as it
+> bound before, and nothing else is recorded against any of them.
+
+**The one record owed, and its scope.** §4 of ADR-0111 reads "A job may be chunked only
+if every operation it performs inside one chunk is itself bounded by a deadline." §5
+puts an operation inside a consolidation chunk that is bounded by a product of
+`scheduler_chunk_size`, `MAX_TOPICS_PER_RECORD` and `DEFAULT_PAGE_SIZE` and by nothing
+resembling a timer. §1 argues at length that such an operation is outside the hazard
+that clause was written against — ADR-0111's own header records the finding it repaired
+as "§4's budget bounds nothing **if a chunk can block indefinitely**" — and that
+argument is why the amendment is *narrow*, not why it is unnecessary. **The clause as
+written says "every operation", and a reader holding only ADR-0111 would refuse a
+chunked job over an operation this ADR admits.** That is ADR-0070 §1's test met on its
+own terms, and a decision whose grounds rest on a header note's account of motivation
+rather than on the normative sentence is exactly the case where the record earns its
+keep: without it, the next reader re-derives the argument from §4's text alone and gets
+it wrong. So the record is made rather than argued away, and it admits **one** shape —
+a local, synchronous, non-blocking operation whose per-chunk cost the configuration and
+this ADR's constants fix, whose admissibility is still checked in the ADR that adds it.
+Every operation that can block still owes §4 a deadline, and no other job's
+admissibility moves.
 
 **Nothing here is withheld for want of room to write it.** A header-only record under
 ADR-0082 §1 — a `Status` line and one dated note, no Decision text rewritten — is
 cheap, and the corpus makes such records in the superseding ADR's own change
 (ADR-0204's, for two earlier ADRs at once). So the absence of one below is a finding
-about this decision's reach, not an economy: where a record were owed, it would be
-made here.
+about this decision's reach, not an economy: where a record is owed it is made here,
+and one is.
 
-The eight nearest candidates are worked through, because each is close enough that a
-reader might expect a record and its absence should be argued rather than assumed.
+The seven nearest candidates for a *second* record are worked through, because each is
+close enough that a reader might expect one and its absence should be argued rather
+than assumed.
 
 - **ADR-0100 §6's "whom, not what".** That clause reads: "The axis is *whom*, not
   *what*. A belief about a company, a project, a device or a topic states no
@@ -1545,39 +1577,6 @@ reader might expect a record and its absence should be argued rather than assume
   narrows nothing there. Reusing a ratified ADR's reasoning is what a corpus is for,
   and §1 argues each of the three transfers, and the one refusal, on this field's own
   merits rather than citing ADR-0086 as authority over a field it does not name.
-- **ADR-0111 §4's admissibility condition.** §5 puts an operation inside a
-  consolidation chunk, and §1 and §5 give it a per-chunk cost computed from figures the
-  configuration and this ADR already fix. That is the clause being **satisfied** — "a
-  job whose chunk reaches an operation with no deadline is not a job that may be chunked
-  under this ADR" — and §4's own instruction that this "must be checked rather than
-  assumed" is discharged here rather than altered.
-
-  **The reading under which a record *would* be owed is named, and answered from
-  ADR-0111's own file, because ADR-0082 §1 asks the sentence to be named either way.**
-  If §4's "bounded by a deadline" reached every synchronous in-memory operation, then
-  admitting one on a cardinality bound alone would read that clause more narrowly than
-  it holds, and a record would be owed. **The sentence that settles it is ADR-0111's own
-  account of where the clause came from**: its ratification note records round 1's
-  finding "that §4's budget bounds nothing **if a chunk can block indefinitely**", and
-  the clause as the repair — "making a per-operation deadline a precondition of being
-  chunked at all". The hazard the clause was written against is an operation that can
-  block indefinitely; a loop bounded by two constants of the configuration is not one.
-  §1 above adds two further readings from §4's own text — that ADR-0111 supplies no
-  cancellation mechanism with which a deadline on a non-yielding operation could be
-  enforced, and that §4's chunk arithmetic carries no term for local work — and notes
-  that the wide reading would forbid consolidation and the retention purge, the two jobs
-  §4 was written for.
-
-  So a reader holding only ADR-0111 admits exactly the jobs they admitted before this
-  decision, on exactly the test they applied, and no clause of it is read more widely or
-  more narrowly. That is ADR-0070 §1's line and this falls below it — the same place the
-  ADR-0074 §4 case above falls: an ADR applying an earlier one's stated condition to new
-  ground. **And a record made anyway would be a mis-declaration**, which ADR-0082 §1
-  names as its own failure: "a later ADR that calls its change an amendment of ADR-N
-  without a clause of ADR-N failing §1's test has mis-declared it, and the record is
-  wrong however the declaration reads." A `Status` note asserting that this decision
-  narrowed §4 would tell every later reader that §4 once reached bounded local work,
-  which is the thing ADR-0111's own header says it never did.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
