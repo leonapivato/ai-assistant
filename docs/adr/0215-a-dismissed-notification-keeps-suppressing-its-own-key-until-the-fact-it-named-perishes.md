@@ -639,10 +639,13 @@ falsifiable and per-fact, which is the property ADR-0130 §5 chose expiry for.
   states the condition that reopens it.
 - **A dismissed record stays in the store longer.** §4's guard holds a record
   through `max(ceased + retention, expiry)` instead of `ceased + retention`, and
-  only where no `DROP` reached it. For
-  the calendar producer that is minutes; for a producer declaring a distant expiry
-  it is that expiry, which the same record already had while undismissed. It is
-  bounded storage, not unbounded, and §9's delete surface still reaches it.
+  only where no `DROP` reached it. For the calendar producer that is minutes; for
+  a producer declaring a distant expiry it is that expiry, which the same record
+  already had while undismissed. What this ADR adds to the wait is the expiry and
+  no more: where `retention` is `None` the record was never purged before this
+  decision and is not purged after it — §7's own deliberate escape, unchanged —
+  and ADR-0130 §9's delete surface reaches it either way, which is the remedy §7
+  already names for that case.
 - **Two populations now exist where one did, and a reader has to hold both.**
   "Actionable" and "suppressing" differ in exactly one case — a dismissed record
   before its expiry — and every clause that names a population now has to name the
