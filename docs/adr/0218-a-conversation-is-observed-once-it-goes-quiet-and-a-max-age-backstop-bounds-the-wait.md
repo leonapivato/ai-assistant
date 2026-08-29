@@ -24,11 +24,17 @@
   — §3's second normative clause, in the single scope of the **machine** seam
   set's membership, which gains one member. The user set, the direct set, the
   unclassified rule and every measure below are untouched. Named in §11(c).
-- **This ADR uses ADR-0212 and does not amend it.** Every pass this decision
-  schedules is ADR-0212's pass, performed against a conversation the run
+- **Partially supersedes**
+  [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md)
+  — §6's disposition of the **deletion race**, in the single respect of whether it
+  halts a run of many passes. §6's three normative clauses about the watermark, its
+  no-re-read consequence, and every other clause of ADR-0212 bind this job unchanged
+  and are relied on throughout. Named in §11(e).
+- **Otherwise this ADR uses ADR-0212 and does not amend it.** Every pass this
+  decision schedules is ADR-0212's pass, performed against a conversation the run
   **names** — which is §3's own optional-id branch — so §3's "given none" default,
   §4's tail start, §5's advance and §8's three operations all bind unchanged.
-  §11(e) applies ADR-0082 §1's test to each and records nothing.
+  §11(f) applies ADR-0082 §1's test to the rest and records nothing.
 - **Contract surface, without a Protocol.** This ADR adds two `Settings` fields
   and changes the default of a third (§7). It touches no Protocol in
   `core/protocols.py`, no type or member in `core/types.py`, no member of the
@@ -221,8 +227,13 @@ merely late.
 > `observation_batch_size` turns — that is, when a whole page is available to read.
 
 > **Normative.** A candidate is **due** when it is quiet, **or** aged, **or** full.
-> A scheduled pass is performed only against a due candidate, and a run that finds
-> no due candidate reads no turns, calls no model and writes nothing.
+> A scheduled pass is performed only against a due candidate. A run that finds no
+> due candidate **performs no pass**: it calls no model, writes nothing, and reads
+> no turn *to observe one*. It does read what the due test itself takes — at most
+> one bounded `turns_after` page per candidate examined, and **none at all** where
+> the head is quiet — which the bound below counts in full. That probe is a read
+> to decide and never a pass, and no clause of this ADR may be read as promising a
+> run that touches the index only when something is due.
 
 > **Normative.** The due test is evaluated by walking the candidate listing in
 > ADR-0212 §3's order and taking the **first** candidate that is due. The listing
@@ -436,6 +447,8 @@ means nothing.
 > order, and — where a due candidate exists **in that listing** — performs exactly
 > one ADR-0212 pass **naming that conversation's id**. It returns when the listing
 > it last read held no due candidate, or when `scheduler_run_budget` is spent.
+> Those are the two ways a run **completes**; a run whose pass raises does not
+> return at all (§9).
 
 > **Normative.** A run establishes nothing about candidates **beyond** the
 > listing's bound, and no clause of this ADR may be read as claiming it does. "No
@@ -444,7 +457,12 @@ means nothing.
 
 > **Normative.** The run budget is checked **only at a pass boundary**, so a run
 > overruns it by at most one pass. That is ADR-0111 §4's clause applied with the
-> pass as the chunk, which is what ADR-0212 §3 already calls it.
+> pass as the chunk, which is what ADR-0212 §3 already calls it — and it is applied
+> with **§4's own second sentence**, not without it: "that bound is worth exactly as
+> much as those deadlines are". §8 says which operations of a pass carry one and
+> which do not, so "one pass" is a bound in wall-clock time only over the
+> operations §8 checks, and this ADR states no worst-case share of the loop that a
+> store call blocked indefinitely would not break (§7, §8).
 
 > **Normative.** The listing one pass considers is a single call to
 > `ConversationStore.conversations_with_unobserved_turns` at the bound ADR-0212 §8
@@ -463,8 +481,11 @@ means nothing.
 > carrying at most: passes performed, conversations observed, episodes read, model
 > calls made, proposals ruled by outcome, and whether the run stopped because the
 > listing it last read held no due candidate or because it spent its budget — never
-> a claim that the store holds none. It returns **no** `ObservationReport`, no proposal, no route
-> and no conversation id, and nothing it returns grows with the number of passes.
+> a claim that the store holds none. Those two terminal reasons are exhaustive over
+> the runs that **return**, which is why there is no third for a failure: a run
+> whose pass raises returns no report at all (§9). It returns **no**
+> `ObservationReport`, no proposal, no route and no conversation id, and nothing it
+> returns grows with the number of passes.
 
 > **Normative.** `scheduler_chunk_size` does not reach this job. ADR-0212 §3 rules
 > that already — "an implementation that hands it to `turns_after` or to
@@ -793,8 +814,14 @@ with no due candidate performs one bounded listing read and returns, so asking m
 often costs almost nothing. What it does cost is the serial loop — ADR-0111 §4's
 arithmetic is "at most one budget plus one chunk per interval", and against
 `scheduler_run_budget`'s five-minute default a fifteen-minute interval holds this
-job's worst-case share of the loop to about a third of its own period, leaving the
-hourly purge and sweep the rest. The user-visible figure it buys is the quiet window
+job's share of the loop to about a third of its own period, leaving the hourly purge
+and sweep the rest. **That is a bound over the operations §8 checks and not a
+worst case over every operation**, because §8 narrows ADR-0111 §4's deadline clause
+off the local store calls: a store call blocked on a stalled filesystem holds the
+loop for as long as it blocks, this figure and every other in this ADR alike. §8
+names that residual and #1817 holds it; ADR-0111 §4's second sentence — "that bound
+is worth exactly as much as those deadlines are" — is the clause that already said
+so, and it is not superseded. The user-visible figure it buys is the quiet window
 plus one interval — twenty-five minutes at the defaults — **to the first run that
 reaches a conversation with nothing queued ahead of it**, which is the figure a
 figure like this can honestly be. The Consequences state what stands between that
@@ -926,20 +953,36 @@ late has two figures to raise and it can see both.
 ### 9. Failure, and the two races a run meets
 
 > **Normative.** A pass that raises leaves ADR-0212 §6 to say what happens to the
-> watermark, and halts the run: no later pass is performed, the run returns, and
-> ADR-0111 §6 retries it at its next due instant with no backoff and no durable
-> failure count.
+> watermark, and halts the run: no later pass is performed, and the exception
+> **propagates out of `observe_due`** rather than being absorbed into a return
+> value. A halted run returns no report, and ADR-0111 §6 retries the job at its
+> next due instant with no backoff and no durable failure count.
 
 > **Normative.** An `UnknownConversationError` raised for the conversation a pass
 > selected is **not** a failure of that pass. It means the conversation was stamped
 > deleted between the listing and the read, the run drops that candidate, and the
 > run continues. It is never treated as a fault to log as one, and it never halts
-> the run.
+> the run. **This is the one disposition of ADR-0212 §6 that this ADR replaces**,
+> and it is recorded as a partial supersession on that ADR's header rather than
+> argued here: §11(e).
 
 > **Normative.** A run whose passes all complete but which observed nothing —
 > because no candidate was due, or because every due candidate's page resolved to
 > no episode — is a **successful** run. It is not logged as a failure and does not
 > change the job's next due instant.
+
+**Propagating is what makes the failure a failure, and swallowing it would be the
+defect.** `Scheduler._run_job` decides the two dispositions by whether the job body
+raises: it logs `hub_scheduler_job_failed` with `error_class` on an exception and
+`hub_scheduler_job_completed` otherwise, which is ADR-0083 §7's "A failing job never
+takes the process down" together with ADR-0004 §5's failure class. A run that caught
+its pass's exception and returned a report saying so would be logged as a completed
+run, and the class of the failure — the thing an operator watching a resident process
+has — would exist nowhere. Nothing durable is lost by propagating: the passes that
+completed before it already advanced their watermarks (ADR-0212 §5), and their counts
+are lost to a caller that discards them anyway — `service/scheduler.py`'s job body
+"return type is `object` because the scheduler never looks at it". This is also why
+§5's report enumerates two terminal reasons and not three.
 
 **Halting on a raise is ADR-0111 §5 applied, not a stricter rule.** §5's disposition
 is "either the chunk was recorded or it was not", and a pass that raises before its
@@ -1038,8 +1081,9 @@ as a value rather than asserted in prose.
 
 **What this ADR does not decide:**
 
-- **The cursor.** ADR-0212's, ratified, and used throughout without amendment
-  (§11(e)).
+- **The cursor.** ADR-0212's, ratified, and used as written but for one
+  disposition — §6's on the deletion race, which §9 replaces and §11(e) records.
+  Nothing about the watermark, the order, the page or the advance is touched.
 - **Anything about the observer's proposals.** ADR-0077's — what may be proposed,
   the utility bar, the prompt, the payload, the route, the confidence function and
   the proposal bound. This ADR changes *when* episodes reach the producer and
@@ -1205,17 +1249,60 @@ not a position, which that clause is stated over. §11's own deferral of "Enabli
 any job the scheduler ships disabled" is discharged by this ADR for one job, which
 is a stacked addition under ADR-0083 §15's rule and not an amendment.
 
-> **Normative.** **(e) This ADR records nothing against ADR-0212, ADR-0093,
-> ADR-0214 or ADR-0074**, and each is used as written.
+> **Normative.** **(e) This ADR partially supersedes ADR-0212**, in exactly one
+> scope: **§6's disposition of the deletion race** — the case in which
+> `UnknownConversationError` is raised for the conversation a pass selected — in the
+> single respect of whether it **halts a run of many passes**. §9 above drops that
+> candidate and continues. §6's three normative clauses about where the watermark
+> stands, its ruling that such a page is never re-read and none is owed, and every
+> other clause of ADR-0212, are untouched.
 
-- **ADR-0212.** Every clause it states about a pass binds this job unchanged, and §3
-  above is written to keep it that way: a scheduled pass takes §3's *named-id*
-  branch, so §3's "given none" default is not narrowed; §4's tail start is not
-  reached by §2's due test, which asks a different question and says so; §5's advance
-  and its overlap rule are relied on for the run's termination and for the
-  hand-run race; §8's three operations are called at the bounds it gave them. §9
-  named this lane as the one that would arm the job, which is a deferral discharged
-  and therefore a stacked addition under ADR-0083 §15's rule.
+The test comes out yes on ADR-0082 §1's first limb — a reader acts differently.
+§6's own prose calls the race a failed pass — "the pass's `record_observed` then raises
+`UnknownConversationError` (§8), which is a refusal and not a commit"; "the failed
+one" — and then says "**This is ADR-0111 §5, inherited whole.**" §5's first clause is
+the halt: "the run stops immediately […] and returns without processing any later
+chunk." A reader holding only ADR-0212, building the multi-pass run ADR-0111 §4
+provides for, therefore halts the whole run because a user deleted a conversation
+while it ran — and after this ADR they should not. That ADR-0212 had no multi-pass run of its own to halt is
+exactly why the disposition needs recording rather than assuming: the clause it
+inherited whole is the one that decides the question, and it decides it the other way.
+
+**Why the replacement, on §5's own carve-out rather than against it.** ADR-0111 §5
+states its rule "over the *disposition*, not over the *reason*" and then carves out
+what is not a failed chunk at all: "A per-item ruling that is a *normal outcome* of
+processing — a proposal the gate rejects, a turn ADR-0074 §5 says is 'skipped, not an
+error' — is not a chunk that failed to be recorded, and does not halt anything." A
+deletion is an ordinary act the user performs (ADR-0074 §8), the listing already
+excludes the state, and the error is reachable from exactly one thing — a deletion
+landing between two calls — so it belongs on the carve-out's side once a run performs
+many passes over many conversations. Two consequences follow that ADR-0212 could not
+have had: the run's remaining budget would be spent on nothing, and — since §9 above
+propagates a halting pass's exception — the deletion would reach the operational log
+as `hub_scheduler_job_failed` with a store error's class, which is ADR-0004 §5
+reporting a user's act as a fault.
+
+**And §5's contiguity argument does not reach this skip.** §5 halts because "a cursor
+is one position in one order" and a partially-advanced position "no longer means what
+§2 says it means". Under ADR-0212 the position is *per conversation* (§2), so
+dropping a candidate advances nothing, skips no position and leaves no range
+ambiguous — the deleted conversation has no position left to keep, and §6 says so
+itself: it "has left the candidate listing, so no later pass can re-read what the
+failed one read". Nothing this ADR does makes a watermark mean less than §2 says.
+
+**Not replaced, and relied on throughout.** §6's watermark clauses are what §9 above
+defers to by name for every other raise. §3's candidacy, its order and its
+one-conversation-per-pass rule; §4's tail start, which §2's due test does not reach
+and says so; §5's advance and its overlap rule, on which §3's termination argument
+and the hand-run race both rest; §8's three operations at the bounds it gave them —
+all bind unchanged. A scheduled pass takes §3's *named-id* branch, so §3's "given
+none" default is not narrowed. §9 named this lane as the one that would arm the job,
+which is a deferral discharged and therefore a stacked addition under ADR-0083 §15's
+rule rather than an amendment.
+
+> **Normative.** **(f) This ADR records nothing against ADR-0093, ADR-0214 or
+> ADR-0074**, and each is used as written.
+
 - **ADR-0093.** §6's clause is used in the direction it was written — it forbids
   transferring observation's disabled default to a sensor — and §5 above declines to
   transfer a sensor's disabled default back. Neither §6 nor §7 states a rule about
