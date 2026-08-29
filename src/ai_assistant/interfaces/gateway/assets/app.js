@@ -5484,6 +5484,21 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
 // resuming one see that it is no longer the last word.
 let listed = 0;
 
+// The listing read in flight, or `null` — the digest read's `describing`, one panel
+// over, and for the same reason.
+//
+// **A superseded read must not render either half of what it came back with**
+// (adversarial review round 6). Two reads of this listing can overlap — a forget's
+// own refresh and the owner pressing "Conversations" — and the one that resumes last
+// wins the panel whether or not it is the newer. It re-renders a snapshot taken
+// before the newer one, so a conversation destroyed in between comes back as a row
+// with a "Continue" the hub will refuse; and its refusal, if it had one, is written
+// into the panel by `relay` before this function sees a value at all.
+//
+// Stopping the read closes both, which a comparison after the `await` closes only the
+// first of.
+let listing = null;
+
 // Read the listing, and hand back the generation the read ran under.
 //
 // The return value is for `forgetConversation` alone and is returned from **every**
@@ -5492,6 +5507,11 @@ let listed = 0;
 // a fault must not silently swallow the outcome as well.
 async function listConversations() {
   listed += 1;
+  if (listing !== null) {
+    const superseded = listing;
+    listing = null;
+    superseded.abort();
+  }
   const mine = listed;
   fault(null, "conversations");
   // The outcome of a forget belongs to the forget, not to the panel: reading the
@@ -5505,11 +5525,14 @@ async function listConversations() {
     showBootstrap();
     return mine;
   }
+  const stopping = new AbortController();
+  listing = stopping;
   try {
-    const body = await relay(half, "/conversations", {}, "conversations");
-    if (body === null) {
+    const body = await relay(half, "/conversations", {}, "conversations", stopping);
+    if (body === null || mine !== listed) {
       return mine;
     }
+    listing = null;
     const list = el("conversation-list");
     clearNode(list);
     if (body.conversations.length === 0) {
@@ -5518,7 +5541,12 @@ async function listConversations() {
     body.conversations.forEach((one) => renderConversation(list, one));
     show("conversations", true);
   } catch (_) {
-    fault(GATEWAY_GONE, "conversations");
+    // An abort is not a transport failure, and only the newest read is entitled to
+    // say the gateway has gone — the same comparison `resumeConversation` makes, for
+    // the same reason.
+    if (mine === listed) {
+      fault(GATEWAY_GONE, "conversations");
+    }
   }
   return mine;
 }
