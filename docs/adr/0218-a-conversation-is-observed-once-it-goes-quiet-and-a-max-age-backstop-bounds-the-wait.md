@@ -779,9 +779,11 @@ often costs almost nothing. What it does cost is the serial loop — ADR-0111 §
 arithmetic is "at most one budget plus one chunk per interval", and against
 `scheduler_run_budget`'s five-minute default a fifteen-minute interval holds this
 job's worst-case share of the loop to about a third of its own period, leaving the
-hourly purge and sweep the rest. The user-visible figure it buys is the sum of the
-quiet window and one interval: at the defaults, a conversation that ends is a belief
-within twenty-five minutes.
+hourly purge and sweep the rest. The user-visible figure it buys is the quiet window
+plus one interval — twenty-five minutes at the defaults — **to the first run that
+reaches a conversation with nothing queued ahead of it**, which is the figure a
+figure like this can honestly be. The Consequences state what stands between that
+and a belief.
 
 **Neither new field is nullable, and ADR-0084 §3's departure is the precedent.**
 There, four figures were made non-nullable because "a scheduler job that never runs
@@ -1213,19 +1215,32 @@ is a stacked addition under ADR-0083 §15's rule and not an amendment.
 ## Consequences
 
 **A fact told in chat becomes a belief without anybody running a command**, which is
-#1737's title and the point of the pair. At the shipped figures a conversation that
-ends is a belief within the quiet window plus one interval — twenty-five minutes —
-and one that never ends becomes **due** two hours after its oldest unobserved turn
-— or, where a caller's clock stamped that turn ahead of the store's and its turns
-are recorded, within `observation_batch_size` quiet windows, 200 minutes, on
-ordinals alone (§2). **Due is not read**: ADR-0083 §7 re-arms this job at completion
-plus its interval and runs it serially, so a candidate that becomes due just after a
-tick waits up to one more `observation_interval`, plus whatever a sibling job on the
-loop adds — which §7 already rules "never a correctness bug". Every figure in this
-paragraph is a due threshold and the read follows it by at most that. **What none of the three arms recovers
-is the prefix below a first pass's tail**, which stays exactly where ADR-0212 §4
-priced it; what arming the job does is make that first pass early enough that little
-accumulates below it.
+#1737's title and the point of the pair. **What this ADR bounds is when a
+conversation becomes *due*, and nothing beyond it.** At the shipped figures a
+conversation that ends is due within the quiet window; one that never ends is due
+two hours after its oldest unobserved turn, or — where a caller's clock stamped that
+turn ahead of the store's and its turns are recorded — within
+`observation_batch_size` quiet windows, 200 minutes, on ordinals alone (§2).
+
+**Due is not read, and read is not a belief.** Four things stand between the
+thresholds above and a new record, none of them decided here, and they are listed so
+that no reader takes a due threshold for a latency promise. A run reads a due
+candidate only on the first tick that reaches it, which is one `observation_interval`
+after the run that did not — ADR-0083 §7 re-arms from completion — and a **newly
+ended conversation sorts last among the quiet ones** in ADR-0212 §3's ascending
+order, so a backlog is served ahead of it and it may wait several runs; a sibling job
+on the serial loop adds to that, which §7 rules "never a correctness bug". A pass may
+raise, and §9 halts the run, ADR-0111 §6 retrying it at the next due instant with no
+backoff. A page whose episodes have all stopped resolving reaches no observer at all
+(ADR-0212 §3). And what the observer proposes and what the gate rules with it are
+ADR-0077 §§2 and 4's, where a proposal below the utility bar, refused, or folded into
+a `REINFORCE` produces no new belief. **The honest end-to-end figure is therefore
+"due within the quiet window, read on the next tick that reaches it"** — 25 minutes
+at the defaults with nothing queued ahead of it, and longer with something.
+
+**What none of the three arms recovers is the prefix below a first pass's tail**,
+which stays exactly where ADR-0212 §4 priced it; what arming the job does is make
+that first pass early enough that little accumulates below it.
 
 **The first tick after an upgrade does real work, and it is bounded work.** ADR-0212
 §4 starts every pre-existing conversation at its tail, so each costs exactly one pass
