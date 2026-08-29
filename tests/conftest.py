@@ -186,6 +186,59 @@ LAUNCH_ARGUMENTS = (
 _BROWSER_INSTALL = "uv run playwright install chromium"
 
 
+#: The only way to distribute this suite, and every other way is refused below.
+#:
+#: ADR-0216 §3: "One ``pytest`` run launches at most one browser process at a time,
+#: whether it is serial or distributed: a distributed run launches no more browsers
+#: than a serial one." The browser is a session-scoped fixture, so that holds exactly
+#: when every case of the layer lands on one worker, which is what the layer's
+#: ``xdist_group`` marker asks for -- and ``loadgroup`` is the only scheduling that
+#: honours it. ``load`` and ``worksteal`` ignore the marker outright; ``loadfile`` and
+#: ``loadscope`` keep a *module* together, which is not the same promise, and the
+#: layer already spans two modules; ``each`` sends every test to every worker.
+_ONLY_DISTRIBUTION = "loadgroup"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse a distributed run that would scatter the browser layer (ADR-0216 §3).
+
+    ``pyproject.toml``'s ``addopts`` selects ``loadgroup``, which is what makes the
+    clause hold for every ordinary invocation -- but ``addopts`` is the *weakest*
+    source of an option: a later ``--dist`` on the command line wins, and so does one
+    in ``PYTEST_ADDOPTS``. Adversarial review, round 1, ``blocker``: under
+    ``worksteal`` the four cases can land on four workers, each launching its own
+    Chromium, and **the run is still green** -- so nothing would ever say that the
+    ratified property had stopped holding.
+
+    So it is refused rather than silently corrected. Correcting it here cannot work:
+    a worker re-parses the controller's argv and ini (``workermanage.py`` sends
+    ``invocation_params.args`` and, of ``config.option``, only ``basetemp``), and a
+    worker suffixes a test's node id with its group only when *its own* ``--dist``
+    reads ``loadgroup``. Rewriting the option on the controller would therefore buy a
+    group-honouring scheduler over node ids no worker had grouped, which is the
+    scattering it was meant to prevent, wearing a fix's clothes.
+
+    A serial run is untouched: ``addopts``' mode is inert without workers, and this
+    refuses nothing there.
+
+    Args:
+        config: The session's configuration.
+
+    Raises:
+        pytest.UsageError: If the run is distributed under any mode but ``loadgroup``.
+    """
+    mode = str(config.getoption("dist", "no"))
+    if not getattr(config.option, "tx", []) or mode == "no":
+        return
+    if mode != _ONLY_DISTRIBUTION:
+        raise pytest.UsageError(
+            f"--dist {mode} would scatter the gateway's browser layer across workers, "
+            f"one Chromium each, which ADR-0216 §3 forbids: a distributed run launches "
+            f"no more browsers than a serial one. Use --dist {_ONLY_DISTRIBUTION} "
+            f"(what pyproject.toml's addopts selects), or -n0 for a serial run."
+        )
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def gateway_browser() -> AsyncIterator[Browser]:
     """The one browser the gateway's executable layer drives (ADR-0216 §3, §5, §6).

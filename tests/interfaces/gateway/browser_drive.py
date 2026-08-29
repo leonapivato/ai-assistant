@@ -68,12 +68,21 @@ _SAMPLE_RATE = 48_000
 #: shorten, and a case that reads a buffer's duration wants samples in it.
 _TONE_HERTZ = 440.0
 
-#: How long a press holds the button. Long enough that ``MediaRecorder`` has
-#: written something by the release — a blob of no bytes is a press the page
-#: answers with "nothing was recorded" and sends nowhere — and short enough that
-#: it costs the layer nothing. It is a duration of the *recording*, not a
-#: synchronisation device: every wait in this layer is on a condition the page
-#: exposes (ADR-0216 §7).
+#: How long a press keeps **recording**, once there is a recorder recording.
+#:
+#: It is a duration of the recording and not a synchronisation device, which is a
+#: distinction :meth:`Drive.press` has to earn rather than assert: it waits for
+#: ``MediaRecorder.start`` to have been called before this elapses at all.
+#: Adversarial review, round 1, ``major``, found the version that did not — a press
+#: released 400 ms after ``pointerdown`` is released *before the recorder exists*
+#: wherever ``getUserMedia`` takes longer than that, and ``startTalking`` then finds
+#: its press already let go, hands the microphone back and sends nothing. Every wait
+#: after that would time out, on a loaded CI runner and nowhere else, which is
+#: exactly the flake ADR-0216 §7 forbids this layer.
+#:
+#: Long enough that the recorder's final block carries audio — a blob of no bytes is
+#: a press the page answers with "nothing was recorded" and sends nowhere — and short
+#: enough that it costs the layer nothing.
 PRESS_MILLISECONDS = 400
 
 #: The one probe the pages carry, installed before any of the bundle runs.
@@ -88,15 +97,26 @@ PRESS_MILLISECONDS = 400
 #:
 #: ``settled`` counts decodes that have *finished*, which is what lets a case wait
 #: for a released decode to have had its chance to start a source rather than
-#: sleeping and hoping (ADR-0216 §7).
+#: sleeping and hoping (ADR-0216 §7). ``recordings`` counts recorders the page has
+#: actually started, which is what :meth:`Drive.press` waits on before it begins to
+#: measure a recording's length — see :data:`PRESS_MILLISECONDS`.
 PROBE = """
 window.__drive = {
   starts: [],
   stops: 0,
   decodes: 0,
   settled: 0,
+  recordings: 0,
   hold: null,
   release: null,
+};
+
+const recorderProto = MediaRecorder.prototype;
+const realRecord = recorderProto.start;
+recorderProto.start = function (...args) {
+  const answer = realRecord.apply(this, args);
+  window.__drive.recordings += 1;
+  return answer;
 };
 
 const sourceProto = AudioBufferSourceNode.prototype;
@@ -252,17 +272,24 @@ class Drive:
         return recorded
 
     async def press(self, *, milliseconds: int = PRESS_MILLISECONDS) -> None:
-        """Hold the talk button down and let it go, as a thumb does.
+        """Record for ``milliseconds``, then let the button go, as a thumb does.
 
-        Real pointer events rather than dispatched ones: the page takes a pointer
-        capture on the press, and a synthetic ``pointerdown`` carrying no live
-        pointer id makes that throw — which is a fault of the drive and would be
-        read as one of the page.
+        **The wait is on the recorder, and the duration is only what is recorded.**
+        Holding for a fixed time from ``pointerdown`` synchronises on nothing: the
+        microphone is opened asynchronously, and a release that lands before the
+        recorder exists ends the press with nothing recorded and nothing sent
+        (``startTalking``'s own ``mine.released`` guard). So this waits for the page
+        to have started a ``MediaRecorder`` — a condition the page exposes, in
+        ADR-0216 §7's sense — and only then measures out the recording.
 
         Args:
-            milliseconds: How long the button is held.
+            milliseconds: How long the recording runs for, once it is running.
         """
+        started = (await self.probe())["recordings"]
         await self.hold()
+        await self.page.wait_for_function(
+            "expected => window.__drive.recordings === expected", arg=started + 1
+        )
         await self.page.wait_for_timeout(milliseconds)
         await self.release()
 

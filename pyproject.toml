@@ -508,6 +508,12 @@ pythonpath = ["."]
 # on the controller would choose the right scheduler over node ids no worker had
 # grouped — green, and one browser per worker. `addopts` is read by both.
 #
+# **And `addopts` is the weakest source of an option**, so it is not the whole of the
+# mechanism: a `--dist` on the command line wins over it, and so does one in
+# `PYTEST_ADDOPTS`. `tests/conftest.py`'s `pytest_configure` refuses a distributed run
+# under any other mode rather than correcting it, because under `worksteal` the layer
+# scatters and the run is still green — nothing would say the property had lapsed.
+#
 # It changes which worker runs a test and neither what is collected nor whether it
 # runs, so ADR-0166 §1 is untouched — one of that clause's options "that changes
 # neither what is collected nor whether it runs", exactly as `worksteal` was. It is
