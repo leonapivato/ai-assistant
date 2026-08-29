@@ -545,23 +545,37 @@ is where the second condition joins. The canonical fake's counterparts are in
 `tests/core/notification_contract.py`. `SqliteNotificationOutbox` needs no change
 at all: every site it reads actionability at still means actionability.
 
-**No new index and no new column, and the work per offer falls rather than
-rises.** The lookup already selects by `candidate_key`; what changes is which of
-the selected rows count. **The rows retained under one key are not bounded**, and
-nothing here claims they are: ADR-0130 §7 grants `retention = None`, under which
-no record is ever purged, and a cursorless producer re-offers the same key after
-each candidate perishes, so that tail grows with the deployment's lifetime. What
-§2's narrowing bounds is the **work** — the offer is decided by the most recently
-admitted record for the key, so one record is decoded per offer whatever the tail
-has accumulated. The ordering that names it is the one the store already keeps,
-`admitted_at` then id, and the index it already carries on `candidate_key`
-selects the rows. That is never more work than the ratified lookup, which decodes
-every uncased row under the key — in the growing-tail case, every row it has,
-each of those predecessors having expired rather than been dismissed — and it is
-less wherever more than one survives. The *storage* that tail occupies is
-ADR-0130 §7's own question and carries §7's own answer: it is "bounded by
-retention and emptied by §9's delete surface", the user's own choice and the
-user's own remedy.
+**No new index and no new column are *required*, and the rows retained under one
+key are not bounded.** Nothing here claims they are. ADR-0130 §7 grants
+`retention = None`, under which no record is ever purged, and a cursorless
+producer re-offers the same key after each candidate perishes, so that tail grows
+with the deployment's lifetime.
+
+**What this decision moves, stated exactly, because two costs are easily read as
+one.** The rows a store *examines* under a key are that whole tail, and they
+already were: ADR-0130's ratified lookup selects by `candidate_key` and then
+tests two stamp columns the key index does not carry, so every row under the key
+is fetched on every offer today. This decision neither adds that cost nor removes
+it. What it moves is the *decode and evaluate* — §2's narrowing makes the offer
+turn on the most recently admitted record for the key alone, so a store decodes
+one candidate per offer where the ratified lookup decodes every uncased row under
+the key, which in the growing-tail case is every row it has, those predecessors
+having expired rather than been dismissed. Less work than the ratified rule
+wherever more than one row survives, and never more. The ordering that names the
+record is the one the store already keeps, `admitted_at` then id.
+
+**A backend may bound the scan as well, and this ADR neither requires nor forbids
+it.** A covering index over `(candidate_key, admitted_at, id)` would answer "the
+most recently admitted record for this key" from the index alone. Whether a
+backend carries one is a storage choice inside that backend rather than a term of
+this contract — the same line §7 draws in putting the predicate on the type and
+leaving the lookup to the store — and the shared conformance suite could not pin
+it in any case, running as it does against the canonical fake, which holds no
+index at all. **#1801** records the scan for the implementing lane to decide on,
+against the ratified store where it already stands. The *storage* the tail
+occupies is ADR-0130 §7's own question and carries §7's own answer: it is
+"bounded by retention and emptied by §9's delete surface", the user's own choice
+and the user's own remedy.
 
 ### 8. Explicitly declined
 
