@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence) and ADR-0218 (§8's third reason, the consent argument for an explicit trigger)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -549,6 +549,57 @@
   per ADR-0070 §1: no text below is rewritten, and §8's sentences stand exactly as
   written. The pair and this note land in the same change as ADR-0212 itself, which is
   the existence condition ADR-0082 §7 states. Refs #1788, #1737, #632, #785.
+
+- Partially superseded: 2026-08-29 by ADR-0218 — **§8's third reason no longer
+  holds: the scheduled observation job ships armed, so an observer runs without the
+  user choosing the moment.**
+  [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
+  §5 replaces it and §11(b) names the scope; this note records the ruling declared
+  there.
+
+  **Replaced — §8's third reason, whole.** "**The first version of a producer that
+  sends accumulated history to a model should not run without the user knowing.** The
+  user chooses when the transcript is read, and the outcome tells them which route
+  read it (§3). That is a stronger form of consent than a setting, and it costs
+  nothing while the product has one user and one spoke (roadmap stance 3)." A reader
+  holding only this ADR would build a hub whose observer runs only when a person asks
+  it to, and would read a shipped-armed default as forbidden; after ADR-0218 the
+  default arms it. That is ADR-0070 §1's test met on both limbs. ADR-0218 §5 gives
+  four grounds — the cursor ADR-0212 landed spends ADR-0083 §7's stated reason for the
+  disabled default; this reason's own qualifiers have turned (it is no longer the
+  *first version*, and #1737 records what "costs nothing" now costs); §3's route
+  default means an armed job "names no new provider" and so cannot breach ADR-0004
+  §2's property; and the disclosure half of this reason survives in the hub's
+  `CONFIGURATION` record, in `hub_ready`'s job list and in the route every run still
+  reports. What is given up is the **per-run** choice, and ADR-0218 §5 says so
+  rather than arguing it away.
+
+  **Not replaced — reasons 1, 2 and 4, and the sentence about the turn.** Reason 1
+  ("**Nothing is waiting on it, and a turn is.**") is kept and restated as a normative
+  clause of ADR-0218 §4, together with "It is **not** wired into the turn": nothing
+  runs inside `converse`, and no turn waits on a pass. Reason 2 — the volume gate
+  naming the `ASK_USER` gap (#423), the contradiction surplus (#313/#314) and
+  bounded-window retirement (#306) — is **discharged rather than superseded**: all
+  four issues are closed, so a reader holding only this ADR checks them and reaches
+  the same answer unaided, and ADR-0214 removes the residue by ruling that an
+  observation agreeing with a user assertion corroborates rather than asking. Reason 4
+  ("**Leg 5's scheduler owns cadence**… Cadence then becomes configuration rather than
+  a contract change") is what ADR-0218 uses; the one place it is stretched is that the
+  scheduler now calls a **second** operation rather than "the same façade operation",
+  which ADR-0218 §3 argues from the wire surface, the trace seam and the report
+  shape. §8's "no polling, no background task" sentence was already spent by ADR-0083
+  §7 putting the job on the table, under §15's rule that "A deferral discharged by
+  the ADR it named is a stacked addition, not an amendment", and ADR-0218 does not
+  reach it again. §1's producer contract, §3's route, §4's gate and §5's confidence
+  function are untouched, and so is everything ADR-0212's note above records as
+  standing.
+
+  **This ADR's `Status` carries the leading `Partially superseded by` token**, so the
+  pair is accumulated on it under ADR-0070 §4 without dropping the five already there,
+  and under ADR-0082 §2 no amendment qualifier is written on the line. Appended note
+  per ADR-0070 §1: no text below is rewritten, and §8's sentences stand exactly as
+  written. The pair and this note land in the same change as ADR-0218 itself, which is
+  the existence condition ADR-0082 §7 states. Refs #1737, #1782.
 
 ## Context
 

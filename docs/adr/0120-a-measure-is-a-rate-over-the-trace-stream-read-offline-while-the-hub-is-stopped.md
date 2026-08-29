@@ -1,7 +1,62 @@
 # 120. A measure is a rate over one window of the trace stream, read offline while the hub is stopped
 
-- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch)
+- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch) and ADR-0218 (§3's second normative clause, in the machine seam set's membership)
 - Date: 2026-08-09
+- Partially superseded: 2026-08-29 by ADR-0218 — **§3's machine seam set gains a
+  member: a scheduled observation run writes on its own initiative and carries its
+  own seam.**
+  [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md)
+  §6 rules the classification and §11(c) names the scope; this note records the ruling
+  declared there.
+
+  **Replaced — §3's second normative clause, in the machine set's membership alone.**
+  That clause reads "Three seam sets are fixed here. The **user** set is `converse`,
+  `resume`, `observe`, `learn` and `answer`. The **machine** set is `ingest`,
+  `consolidate`, `purge_expired` and `start`." ADR-0218 §3 adds `Engine.observe_due`,
+  the operation ADR-0083 §7's observation job calls once it is armed, and §6 puts it
+  in the **machine** set. The user set, the direct set, the unclassified rule and
+  §3's other clauses are untouched, and `observe` stays exactly where this ADR put
+  it — a hand-run pass is still a user seam.
+
+  **Why the test comes out yes here and would not for a rename.** A reader holding
+  only this ADR computes a four-member machine set and drops every scheduled
+  observation write into `unclassified`, which §3 designs to fail safe **and
+  silently**: "A seam on neither set is dropped from every measure into
+  `unclassified`, which fails safe and fails silently". So the reader acts
+  differently and is not told, which is ADR-0070 §1's test on its first limb.
+
+  **Two of §3's own grounds point different ways for this seam, and §6 says which
+  governs.** `observe` is in the user set because "the content originates with the
+  user even though the proposal is the model's", which stays true of a scheduled run;
+  the machine set is "the operations that write on their own initiative", which a
+  scheduled run is. §6 takes the purpose this section states for having the split at
+  all — "Splitting the population by the *cause* of the write is the only way the
+  before/after reads as what #829 says it is" — and ADR-0218 is precisely the act that
+  purpose was written about: it arms a job, so writes carrying the `observe` seam
+  would step every user-set measure on the day of the arming, and the step would be a
+  fact about the scheduler.
+
+  **No record is owed on §5 or §6, and #1815 is why rather than an exception.** Both
+  are defined over §3's seam sets *by reference*, so both stay literally computable
+  and neither definition changes; what changes is the population each ranges over,
+  which is what those definitions are for. Two open questions follow and neither is
+  ADR-0218's: §6's exclusion of the `observe` reinforcement share rests on
+  "Successive observation batches overlap by design", a premise **ADR-0212**'s cursor
+  already falsified before ADR-0218 since successive passes now share no turn; and
+  once the job is armed §6's share is computed over hand-run passes alone while §5's
+  correction rate loses the observation-mined population §3 deliberately included.
+  Whether §6's exclusion still earns its place, whether the share should span both
+  seams, and whether §3 wants a fourth set for a write whose *content* is the user's
+  but whose *cause* is not, are decisions about what should be measured. **#1815**
+  holds all three. Read with the note below: that one records ADR-0214's discontinuity
+  in the same figure, and these are two producers on one measure rather than one.
+
+  **This ADR's `Status` carries the leading `Partially superseded by` token**, so the
+  pair is accumulated on it under ADR-0070 §4 without dropping ADR-0128's, and under
+  ADR-0082 §2 no amendment qualifier is written on the line. Appended note per
+  ADR-0070 §1: no text below is rewritten and §3's sentences stand as written. This
+  note lands in the same change as ADR-0218 itself, which is the existence condition
+  ADR-0082 §7 states. Refs #1737, #1782, #1815, #829.
 - Note (2026-08-29): **§6's `observe` reinforcement share gains a producer and
   carries a discontinuity §8 does not partition on. No clause of this ADR
   changes.** §6's fourth normative clause defines the share over the population
