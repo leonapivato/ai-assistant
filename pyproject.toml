@@ -314,6 +314,35 @@ dev = [
     # `src/`. PEP 561 stubs from the same author, so the test that discharges §4's
     # interop clause type-checks like everything else.
     "pyrage-stubs>=1.3.1",
+    # The browser ADR-0216 §1 makes the front end's executor. It drives a real
+    # Chromium over the shipped `index.html`, `app.js` and `app.css`, from
+    # ordinary `pytest` modules — which is what closes #1707's gap that "nothing
+    # in this repository executes a line of `app.js`". Dev group precisely
+    # because §5 says so in terms: "It is never a runtime dependency, is never
+    # imported from `src/`, and no built distribution carries it."
+    #
+    # **Ranged, not exact-pinned.** ADR-0024 §3's exact-pinned set is the four
+    # packages that decide an embedding space, and this moves no vector: it is a
+    # test harness. The floor is the version `uv.lock` fixes.
+    #
+    # #664's Python 3.14 wheel filter is cleared and was never close: the wheels
+    # are `py3-none-<platform>` with `requires_python >=3.10` and no ABI tag, so
+    # there is no cp314 build to wait for. It brings three transitive packages —
+    # `greenlet`, `pyee`, `typing-extensions` — and perturbs no member of the
+    # audited embedding stack.
+    #
+    # **The browser build is not here, and that is ADR-0216 §5.** It is "not
+    # vendored, not committed and not in `uv.lock`" — 267-656 MB fetched by
+    # `playwright install chromium`, which `just setup` runs locally and
+    # `.github/workflows/gate.yml` runs beside `uv sync --locked`. Where it is
+    # absent the layer skips and says which command installs it (§6).
+    #
+    # **`pytest-playwright` is declined by §5**, on a mechanical ground rather
+    # than a preference: its fixtures are synchronous against an
+    # `asyncio_mode = "auto"` suite, and it adds command-line options to an
+    # invocation whose exact collection defines an anchor (ADR-0166 §1). The
+    # layer uses `playwright.async_api` with the suite's own fixtures.
+    "playwright>=1.62.0",
 ]
 
 # ADR-0024 §4 supersedes ADR-0002's `uv_build` clause: `uv_build` supports no
@@ -460,7 +489,31 @@ testpaths = ["tests"]
 # A regular package wins that scan wherever it sits (PEP 420: `__init__.py` ends
 # the search immediately), so this is deterministic rather than order-dependent.
 pythonpath = ["."]
-addopts = "-ra --strict-markers --strict-config"
+# `--dist loadgroup` is here rather than on a command line, and it is load-bearing.
+#
+# ADR-0216 §3: "One `pytest` run launches at most one browser process at a time,
+# whether it is serial or distributed: a distributed run launches no more browsers
+# than a serial one." The browser is a session-scoped fixture, so that holds exactly
+# when every case of the layer lands on **one worker** — which xdist offers through
+# the `xdist_group` marker, and which only `loadgroup` scheduling honours. Under
+# `load` (what a bare `-n` selects) or `worksteal` the marker is ignored, the layer
+# scatters, and each worker launches a browser: the ~570–600 MB times the core count
+# that ADR-0216's Context refuses, on a machine where concurrent runs have already
+# taken the VM down twice (#1741).
+#
+# **It has to be configuration and not a flag.** A worker re-parses the controller's
+# *argv* and its ini (`workermanage.py` sends `invocation_params.args`, and nothing
+# of `config.option` but `basetemp`), and it suffixes a test's node id with its group
+# only when its own `--dist` reads `loadgroup`. So a conftest that rewrote the option
+# on the controller would choose the right scheduler over node ids no worker had
+# grouped — green, and one browser per worker. `addopts` is read by both.
+#
+# It changes which worker runs a test and neither what is collected nor whether it
+# runs, so ADR-0166 §1 is untouched — one of that clause's options "that changes
+# neither what is collected nor whether it runs", exactly as `worksteal` was. It is
+# inert without `-n`: xdist registers no distributed session where there are no
+# workers, so a serial run is the serial run it was.
+addopts = "-ra --strict-markers --strict-config --dist loadgroup"
 asyncio_mode = "auto"
 markers = [
     "integration: tests that touch the network, filesystem, or external services",
@@ -469,6 +522,13 @@ markers = [
     # Protocol-triad check honours a skipped obligation only when the suite
     # declared it optional this way (tests/core/test_protocol_triad.py).
     "optional_obligation: a contract test an implementation may legitimately skip",
+    # ADR-0216 §3's second marker: "Each such module also carries a second marker,
+    # registered in `[tool.pytest.ini_options].markers`, naming it as a browser
+    # drive, so that the layer can be named on a command line rather than only by
+    # path." It selects and it never deselects — §3's third clause is explicit that
+    # "No recipe deselects it, and it therefore runs at both of ADR-0136 §1's
+    # anchors."
+    "browser: drives the shipped gateway page in a real browser (ADR-0216)",
 ]
 
 # -----------------------------------------------------------------------------

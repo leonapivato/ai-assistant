@@ -35,6 +35,22 @@ jobs:
       - name: Sync the locked environment
         run: uv sync --locked
 
+      # A fifth preparation step beside the four above, and not a sixth gate step
+      # (ADR-0216 §5): it prepares the environment the `Tests` step runs in, it
+      # asserts nothing, and it can fail only as an environment failure. ADR-0010's
+      # five steps and their order are untouched.
+      #
+      # **Unconditional, which is what makes §6's local skip payable.** "CI installs
+      # the browser unconditionally, so the layer runs on every push to an open PR
+      # and every push to `main`. A local run is never the only place it ran." The
+      # full `chromium` rather than the headless shell, because §5 defaults to the
+      # expensive build until a recorded comparison over this layer's cases licenses
+      # the other one. `--with-deps` because a bare runner has none of the shared
+      # libraries the build links against, and a browser that will not start is a
+      # failure rather than a skip.
+      - name: Install the browser the gateway's page layer drives
+        run: uv run playwright install --with-deps chromium
+
       # No `just` here: it was installed only for the tests that drove the
       # justfile end to end (test_workspace.py's
       # test_just_claim_workspace_recipe_*), and ADR-0015 removed those along
