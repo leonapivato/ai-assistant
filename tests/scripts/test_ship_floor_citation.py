@@ -52,6 +52,9 @@ if TYPE_CHECKING:
 _ADR = "docs/adr/0042-a-decision-about-things.md"
 _ADR_OTHER = "docs/adr/0043-another-decision.md"
 _PLAN = "notes/plan.md"
+#: A source file, because §3's "symbol" is a name the repository defines and a
+#: definition lives in code. `notes/plan.md` is where a case wants prose instead.
+_SURFACE = "src/ai_assistant/wire/surface.py"
 
 
 def _adr(body: str) -> str:
@@ -288,14 +291,110 @@ def test_a_moved_adr_naming_a_path_the_pr_touches_is_owed(tmp_path: Path) -> Non
 
 
 def test_a_moved_adr_naming_a_symbol_the_pr_adds_is_owed(tmp_path: Path) -> None:
-    """§3's second test again, through the other half of ADR-0088 §1's form."""
+    """§3's second test again, through the other half of ADR-0088 §1's form.
+
+    The PR's diff adds the definition, which is what makes `PROTOCOL_VERSION` a
+    symbol rather than a backticked word: ADR-0088 §1(b) is a name "identifying
+    something in the repository", and #1799 is what reading the token's *shape*
+    instead cost.
+    """
     repo = tmp_path / "repo"
-    _init(repo, {_ADR: _adr("Nothing.")}, {_PLAN: "PROTOCOL_VERSION = 19\n"})
+    _init(repo, {_ADR: _adr("Nothing.")}, {_SURFACE: "PROTOCOL_VERSION = 19\n"})
 
     judged = _judge(repo, tmp_path, _edit(_ADR, _adr("The wire carries `PROTOCOL_VERSION`.")))
 
     assert judged.owed
     assert any("a symbol this PR's diff carries" in r for r in judged.reasons)
+
+
+#: The vocabulary every ADR in the corpus carries: ADR-0070 §4's status words and
+#: the literal the corpus spells an absent value with. `docs/adr/template.md` puts
+#: `- Status: Proposed` at the head of every one of them.
+_BOILERPLATE = (
+    "A decision whose `Status` is `Proposed` binds nobody: the `Status` line is\n"
+    "rewritten by the ratifying commit, and until then the facet it records is `None`.\n"
+)
+
+
+def test_an_adrs_header_vocabulary_is_not_a_symbol(tmp_path: Path) -> None:
+    """#1799: the match that made ADR-0209's narrowing inert for ADR lanes.
+
+    `None`, `Status` and `Proposed` are backtick-quoted words, not names
+    identifying anything in this repository, so none of them is a symbol §3 can
+    bind on (ADR-0088 §1(b)). Every ADR carries them and every ADR PR's own diff
+    writes them, so a shape-only reading matched between *any* two ADR lanes —
+    which is what cost PR #1795 five bound paths and a round, on ADRs whose
+    subjects it has nothing to do with and whose numbers it never writes.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr(_BOILERPLATE), _ADR_OTHER: _adr(_BOILERPLATE)},
+        {
+            "docs/adr/0044-a-lane-of-its-own.md": (
+                "# 44. A lane of its own\n\n- Status: Proposed\n\n"
+                "## Decision\n\nThe reconciler records `None` where it declines to rule.\n"
+            )
+        },
+    )
+
+    def mutate(r: Path) -> None:
+        for path in (_ADR, _ADR_OTHER):
+            (r / path).write_text(_adr(_BOILERPLATE + "\nRatified.\n"))
+
+    judged = _judge(repo, tmp_path, mutate)
+
+    assert not judged.owed, judged.stderr
+    assert judged.reasons == [_FREE, _FREE]
+
+
+def test_the_package_name_is_not_a_symbol_either(tmp_path: Path) -> None:
+    """PR #1786's shape, strictly wider than #1799's: `ai_assistant`.
+
+    The package name is a backticked token in most ADRs and appears in most
+    diffs. It identifies a *tree*, and whether this PR changes that tree is the
+    path test's question — asked and answered by
+    `test_a_moved_adr_naming_a_path_the_pr_touches_is_owed`. Answering it a second
+    time as a symbol restores the unconditional match rather than narrowing it.
+    The package exists here, so what clears is the token's not being a
+    *definition* rather than the tree's not being there.
+    """
+    repo = tmp_path / "repo"
+    _init(
+        repo,
+        {_ADR: _adr("Nothing."), "src/ai_assistant/wire/codec.py": "class Frame:\n    pass\n"},
+        {_PLAN: "The `ai_assistant` package is laid out by subsystem.\n"},
+    )
+
+    judged = _judge(
+        repo, tmp_path, _edit(_ADR, _adr("Every subsystem lives under `ai_assistant`."))
+    )
+
+    assert not judged.owed, judged.stderr
+    assert judged.reasons == [_FREE]
+
+
+def test_a_symbol_resolver_that_will_not_answer_binds_under_section_6(tmp_path: Path) -> None:
+    """Found nowhere is decided; unable to look is not.
+
+    #1799's fix turns a token the repository defines nowhere into an *evaluated*
+    not-a-symbol, which is why it clears. The complement is this: a search that
+    cannot be run has evaluated nothing, and §6 is a rule rather than a list, so
+    the base move binds. The head endpoint here is a sha no object store holds.
+    """
+    repo = tmp_path / "repo"
+    _init(repo, {_ADR: _adr("The wire carries `PROTOCOL_VERSION`.")}, {_SURFACE: "X = 19\n"})
+
+    out = _run_floor_test(
+        repo,
+        entries=[("M", _ADR, "")],
+        old=_git(repo, "rev-parse", "main"),
+        new=_git(repo, "rev-parse", "HEAD"),
+        pr_head="0" * 40,
+    )
+
+    assert out[0][1] == "bind"
+    assert "§6" in out[0][2]
 
 
 def test_an_adr_renamed_within_the_tree_is_read_at_both_endpoints(tmp_path: Path) -> None:
@@ -528,7 +627,11 @@ def test_a_removed_line_beginning_with_two_dashes_is_content_not_a_header(
     repo = tmp_path / "repo"
     _init(
         repo,
-        {_ADR: _adr("Nothing."), "notes/legacy.sql": "-- PROTOCOL_VERSION is pinned here\n"},
+        {
+            _ADR: _adr("Nothing."),
+            _SURFACE: "PROTOCOL_VERSION = 18\n",
+            "notes/legacy.sql": "-- PROTOCOL_VERSION is pinned here\n",
+        },
         {"notes/legacy.sql": "\n"},
     )
 
@@ -579,7 +682,12 @@ def test_a_pr_that_adds_the_cited_file_is_judged_on_the_endpoint_it_has(tmp_path
 
 
 def test_a_pr_that_deletes_the_cited_file_is_judged_on_the_endpoint_it_has(tmp_path: Path) -> None:
-    """The mirror image: a deletion has no head-side endpoint and is not a failure."""
+    """The mirror image: a deletion has no head-side endpoint and is not a failure.
+
+    It carries a second load since #1799: `render` is a definition at the *base*
+    endpoint and at no other, so a symbol resolver reading the head alone would
+    clear the floor here — on exactly the PR the moved ADR is about.
+    """
     repo = tmp_path / "repo"
     _init(
         repo,
@@ -1286,6 +1394,7 @@ def _floor_test_process(  # noqa: PLR0913  # one parameter per input the helper 
     new: str,
     pr_listing: bytes | None = None,
     pr_diff: bytes = b"",
+    pr_head: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run `floor_test.py` against `repo`, with inputs the caller controls."""
     scratch = repo.parent / "floor-inputs"
@@ -1323,7 +1432,7 @@ def _floor_test_process(  # noqa: PLR0913  # one parameter per input the helper 
             "--pr-base",
             _git(repo, "merge-base", "main", "HEAD"),
             "--pr-head",
-            _git(repo, "rev-parse", "HEAD"),
+            pr_head if pr_head is not None else _git(repo, "rev-parse", "HEAD"),
             "--pr-diff",
             str(diff),
             "--pr-listing",
@@ -1346,11 +1455,18 @@ def _run_floor_test(  # noqa: PLR0913  # one parameter per input the helper read
     new: str,
     pr_listing: bytes | None = None,
     pr_diff: bytes = b"",
+    pr_head: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """Return one `(floor, verdict, reason)` triple per entry."""
     stdin = b"".join(b"\0".join(field.encode() for field in entry) + b"\0" for entry in entries)
     result = _floor_test_process(
-        repo, stdin=stdin, old=old, new=new, pr_listing=pr_listing, pr_diff=pr_diff
+        repo,
+        stdin=stdin,
+        old=old,
+        new=new,
+        pr_listing=pr_listing,
+        pr_diff=pr_diff,
+        pr_head=pr_head,
     )
     assert result.returncode == 0, result.stderr.decode()
     fields = result.stdout.decode().split("\0")[:-1]
