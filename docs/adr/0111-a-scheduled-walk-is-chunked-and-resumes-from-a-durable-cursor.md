@@ -303,7 +303,11 @@
   tokens sit together, as ADR-0114's and ADR-0212's do there; an amendment on a
   leading-token line is recorded four lines lower instead, and writing it on the line
   anyway would add a token ADR-0082 §2 excludes and ADR-0070 §4 does not recognise.
-  ADR-0213 ships in the same change as this note and is ratified in it. Appended per
+  ADR-0213 ships in the same change as this note; while it stands `Proposed` in that
+  change, this note names a decision that is drafted rather than ratified, which is the
+  form the ADR-0114 note above already records `main` as carrying, and the separate
+  `Proposed` → `Accepted` edit ADR-0070 §1 requires is not folded into this change's
+  content commit. Appended per
   ADR-0070 §1: no text below is rewritten and §4's second normative clause is the only
   sentence of this ADR this record reaches. Refs #1720.
 
