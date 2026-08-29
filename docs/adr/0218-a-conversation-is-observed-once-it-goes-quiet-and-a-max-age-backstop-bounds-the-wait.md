@@ -268,25 +268,36 @@ decided by counting rows and by nothing a caller supplies. That is the same reas
 ADR-0212 §2 made the *cursor* an ordinal rather than an instant, applied to the
 trigger so that the two do not rest on different kinds of thing.
 
-**The arithmetic the full arm buys, stated with the condition it rests on rather
-than without it.** A conversation that is never quiet is, by §1's definition, one
-whose `last_active_at` — the **store's** clock, set by `mark_active`, never a
-caller's — moves at least once every `observation_quiet_window`. Where those moves
-are turns that are **recorded**, each one is a row above the watermark, so such a
-candidate accumulates a full page within at most `observation_batch_size` quiet
-windows and is due on the full arm — 200 minutes at the shipped figures —
-**whatever any caller stamped on any turn**. That is the guarantee, and its
-condition is stated in it: recorded turns, not activity.
+**What the full arm bounds is counted in recorded turns, not in elapsed time.**
+Every turn `append` records is a row above the watermark, allocated its ordinal
+inside the same indivisible step that writes it, so a candidate is due on the full
+arm once `observation_batch_size` turns have been **recorded** above its
+watermark — **whatever any caller stamped on any turn**, and whatever any clock is
+doing. That is the whole of the guarantee, and it is deliberately stated in
+recordings rather than in minutes: the only rate that converts it into a duration is
+the rate turns are **recorded** at, and this decision does not fix that rate. Where
+a candidate's turns are recorded at least once per `observation_quiet_window`, the
+conversion is one quiet window per recording and the full arm fires within
+`observation_batch_size` quiet windows — 200 minutes at the shipped figures. Where
+they are recorded faster it fires sooner, and where slower, later in the same
+proportion. No figure here promises otherwise.
 
-**The condition is load-bearing, because activity and a recorded turn are not the
-same event.** `mark_active` "Record[s] that a turn has *begun*" and is explicitly
-called before the work — "a turn that never completes still says the user was here,
-which is the honest input to 'which conversation?'" — while a row above the
-watermark exists only where `append` ran. So a conversation kept out of quiet by
-turns that never complete gains no rows, and if the one unobserved turn it already
-holds carries an `occurred_at` ahead of the store's clock, it is quiet on no
-reading, aged on no reading, and full on no reading. **That residual is real and it
-is accepted and named**, on four grounds and with a bound of its own:
+**Why the guarantee is stated over recordings and never over activity: they are
+different events, at different rates.** `mark_active` "Record[s] that a turn has
+*begun*" and is explicitly called before the work — "a turn that never completes
+still says the user was here, which is the honest input to 'which conversation?'" —
+while a row above the watermark exists only where `append` ran. So `last_active_at`
+moves at the rate turns **begin**, the full arm advances at the rate they are
+**recorded**, and the second is never faster than the first and can be arbitrarily
+slower: a client that begins a turn inside every quiet window, each turn's work
+outlasting the window its beginning refreshed, stays out of quiet for as long as it
+keeps that up while adding rows more slowly than it adds activity. Turns that never
+complete are the limit of that — they add no rows at all — and a conversation kept
+out of quiet by those, holding one unobserved turn whose `occurred_at` is ahead of
+the store's clock, is quiet on no reading, aged on no reading and full on no
+reading. **That residual — turns recorded more slowly than they begin, up to and
+including never — is real and it is accepted and named**, on four grounds and with a
+bound of its own:
 
 - **It requires three ordinary events to be suppressed at once, indefinitely.** The
   candidate becomes due the moment the user stops for one quiet window, or the
@@ -764,13 +775,17 @@ the quiet window, so a conversation with any ordinary pause is served by the qui
 arm and the backstop stays the exception — twelve times above, at the defaults. It
 must be far below `episode_retention`'s 30 days, so a continuously-active
 conversation's oldest unobserved turns are distilled long before they can expire.
-And it must be **below the full-page arm's own worst case**, which §2's arithmetic
-puts at `observation_batch_size` quiet windows — 200 minutes at the shipped figures.
-A max age above that would fire only after the full arm already had, which is a
-field that never binds: a figure an operator can set, a paragraph arguing it, and no
-behaviour behind it. Two hours sits under 200 minutes with room, so the age arm is
-what ordinarily serves a conversation trickling slowly enough never to go quiet, and
-the full arm is the floor beneath it that no clock can defer.
+And it must be **below the time the full arm takes in the regime this backstop is
+for** — a conversation trickling one recorded turn per quiet window, which §2 puts at
+`observation_batch_size` quiet windows, 200 minutes at the shipped figures. A max age
+above that would fire, in that regime, only after the full arm already had, which is
+a field that never binds: a figure an operator can set, a paragraph arguing it, and
+no behaviour behind it. Two hours sits under 200 minutes with room. Recording slower
+than that moves the full arm later and never earlier (§2), so the age arm binds
+across that whole direction; recording faster is a conversation the full arm reaches
+sooner than either figure. So the age arm is what ordinarily serves a conversation
+trickling slowly enough never to go quiet, and the full arm is the floor beneath it
+that no clock can defer.
 
 **Fifteen minutes for the interval, and the figure is bought against the loop rather
 than against cost.** The tick decides latency, not spend: with the cursor, a tick
@@ -1219,8 +1234,10 @@ is a stacked addition under ADR-0083 §15's rule and not an amendment.
 conversation becomes *due*, and nothing beyond it.** At the shipped figures a
 conversation that ends is due within the quiet window; one that never ends is due
 two hours after its oldest unobserved turn, or — where a caller's clock stamped that
-turn ahead of the store's and its turns are recorded — within
-`observation_batch_size` quiet windows, 200 minutes, on ordinals alone (§2).
+turn ahead of the store's — once `observation_batch_size` further turns have been
+**recorded**, on ordinals alone and on no clock at all: 200 minutes at the shipped
+figures where recording keeps pace with the quiet window, and later in the same
+proportion where it does not (§2).
 
 **Due is not read, and read is not a belief.** Four things stand between the
 thresholds above and a new record, none of them decided here, and they are listed so
@@ -1266,7 +1283,8 @@ should do about it.
 lets a continuously-active conversation's oldest unobserved turns expire before that
 arm fires; a max age at or below the quiet window makes the quiet arm inert and the
 job an age trigger; a max age above `observation_batch_size` quiet windows makes the
-age arm itself inert, since the full arm would always have fired first. All three
+age arm inert wherever recording keeps pace with the quiet window, since the full arm
+will have fired first (§2). All three
 are coherent configurations, none is refused at load (§7), and all three are named
 here so that an operator meeting one recognises it.
 
