@@ -272,20 +272,43 @@ a function of how many chunks the run has already done**:
   run had read — which is the shape a job with a growing per-chunk cost has, and is
   why the cap is on the accumulator and not on its output.
 
-**What §4 asks of a local operation is a bound and not a timer, and reading it the
-other way makes it unsatisfiable.** The accumulation calls no provider, waits on no
-I/O and scales with nothing outside the chunk; a reading under which it owes a
-*deadline* would equally oblige every chunked job to put one on its own JSON decode,
-its digest computation and its list comprehension, which nothing in the corpus does and
-which §4's own arithmetic presupposes is unnecessary — it computes "a chunk's true
-bound" as "``max_attempts * timeout + total backoff``, multiplied by the chunk's
-records", a per-record cost times a record count, and names the hazard it is written
-against as "a provider call that never returns". A per-record cost that the
-configuration and this ADR's constants determine is exactly what that arithmetic
-consumes. The finding this answers was right that the *earlier* draft failed the test:
-with no bound anywhere, the per-record cost was a function of a tuple nothing limited,
-and the product was not computable at all. §5 restates the arithmetic where the
-accumulation is defined, and §12 pins the input that would otherwise have broken it.
+**Which operations §4's deadline clause is about, read out of §4 itself.** What a
+bounded, synchronous, in-memory operation raises is whether it also owes a *timer*.
+Three things in §4 answer no, so this ADR applies that clause rather than narrowing it
+or amending it — §16 classifies it.
+
+- **§4 supplies no way to enforce one.** "**This ADR adds no cancellation mechanism**
+  and does not reach inside a chunk." A deadline is enforceable only against an
+  operation that yields — an `await` on a provider call or on I/O — because nothing
+  preempts a synchronous Python frame. Reading the clause as demanding a timer around
+  an operation that never yields would have it require exactly what its own section
+  says it does not supply.
+- **§4's arithmetic carries no term for local work.** It computes "a chunk's true
+  bound" as "``max_attempts * timeout + total backoff``, multiplied by the chunk's
+  records" — a per-record *provider* cost times a record count, with nothing in it for
+  a decode, a digest, a comparison or a sort. That is a correct bound only if such
+  operations are not what the clause counts, and §4 offers it as the figure "worth
+  computing before setting a chunk size".
+- **The literal reading would forbid the jobs ADR-0111 exists to admit.** Every
+  chunked job already performs local operations with no deadline: the JSON decode and
+  model reconstruction a store runs per record on every read (`SqliteMemoryStore._decode`,
+  which ADR-0086 §2 relies on by name), the digest, and the disjunctions `_merge`
+  already computes over `derived_from_external` and `supplied_withheld_content`. Under a
+  reading that demands a timer on each of those, no job in this system may be chunked at
+  all — consolidation and the retention purge included, which are the jobs §4 is written
+  for. A clause is not read into a form that forbids what its own ADR ratifies.
+
+**And what §4 does demand of this operation, it gets.** The hazard §4 names is "a
+provider call that never returns", and its instruction is that admissibility "must be
+checked rather than assumed". Checked, here: the accumulation's per-chunk cost is the
+two terms above, each a constant of the configuration and of this ADR and neither
+growing with the run; and the only operation in a consolidation chunk that can fail to
+return is the model call, which `model_timeout_seconds` already bounds and which this
+decision does not touch. The rounds that raised this were right about the *earlier*
+draft — with no bound anywhere the per-record factor was the length of a tuple nothing
+limited, and the product §4 asks for could not be computed at all. §5 restates the
+arithmetic where the accumulation is defined, and §12 pins the two inputs that would
+otherwise have broken it.
 
 **What is deliberately *not* copied is ADR-0086 §4's recorded count**, and the
 asymmetry is in what the two tuples claim.
@@ -790,9 +813,11 @@ saying how it is read.
 
 > **Normative.** **The fold's union.** Where two records are folded — a `REINFORCE`
 > on either arm — the survivor's topics are the **union** of both sides' labels, in
-> §1's canonical order. No fold, record merge, reinforcement or consolidation drops a
-> label **the target** carried, and no implementation writes one side's tuple over the
-> other's.
+> §1's canonical order. **Where the target conforms to §1's bound** — which is every
+> record this deployment installs — no fold, record merge, reinforcement or
+> consolidation drops a label the target carried, and no implementation writes one
+> side's tuple over the other's. The one target that does not conform is ruled two
+> clauses below, and it is a target this deployment cannot have written.
 
 > **Normative.** **The retained subset, and it is total over every install.** Where
 > an install would carry more than `MAX_TOPICS_PER_RECORD` labels, the record installed
@@ -959,10 +984,16 @@ preference §9 captures, not a second belief id.
 > rejected-to-corrected mapping — and no implementation may read a preference into it,
 > because the labels it carries are the labels of the records the run has prompted with
 > and nothing else. What
-> steers the next proposal is the **merge act above**: after it, the abandoned label
-> is on no live record, so no later run reads it and no later prompt is supplied it,
-> and the corrected one takes its place. A run already under way keeps the vocabulary
-> it has accumulated (§5); the correction reaches the next one.
+> steers the next proposal is the **merge act above**: after it, the abandoned label is
+> on none of the records the act reached, so a later run reading those records reads
+> the corrected label and is supplied that instead. A record carrying the abandoned
+> label that the act did **not** reach — one installed after its read, or one a
+> producer mints afterwards — is read like any other, so a later prompt may still be
+> supplied the abandoned label until the owner acts again. That is the same fact the
+> clause below states from the other side, and it is why the merge is a correction of
+> what the store holds rather than a guarantee about what it will hold. A run already
+> under way keeps the vocabulary it has accumulated (§5); the correction reaches the
+> next one.
 
 > **Normative.** A merge is an edit of the store and **not a prohibition on a label**.
 > No clause of this ADR forbids any producer from minting an admissible label the owner
@@ -1493,13 +1524,24 @@ reader might expect a record and its absence should be argued rather than assume
   and §1 argues each of the three transfers, and the one refusal, on this field's own
   merits rather than citing ADR-0086 as authority over a field it does not name.
 - **ADR-0111 §4's admissibility condition.** §5 puts an operation inside a
-  consolidation chunk, and §1 and §5 give it a bound computed from figures the
-  configuration already holds. That is the clause being **satisfied**, which is what it
-  asks of every job that chunks — "a job whose chunk reaches an operation with no
-  deadline is not a job that may be chunked under this ADR". A reader holding only
-  ADR-0111 admits exactly the jobs they admitted, on exactly the test they applied, and
-  §4's own instruction that this "must be checked rather than assumed" is discharged
-  here rather than altered.
+  consolidation chunk, and §1 and §5 give it a per-chunk cost computed from figures the
+  configuration and this ADR already fix. That is the clause being **satisfied** — "a
+  job whose chunk reaches an operation with no deadline is not a job that may be chunked
+  under this ADR" — and §4's own instruction that this "must be checked rather than
+  assumed" is discharged here rather than altered.
+
+  **The reading under which a record *would* be owed is named, because it is an
+  available one.** If §4's "bounded by a deadline" reached every synchronous in-memory
+  operation, a decision admitting one on a cardinality bound alone would be narrowing
+  §4, and ADR-0082 §1 would want a record on it. §1 above sets out why that is not §4's
+  reading: §4 adds no cancellation mechanism, so a deadline is unenforceable against an
+  operation that never yields; §4's own chunk arithmetic has no term for local work; and
+  the reading forbids the two jobs §4 was written for, consolidation among them. On §4's
+  actual reading a reader holding only ADR-0111 admits exactly the jobs they admitted
+  before this decision, on exactly the test they applied, and no clause of it is read
+  more widely or more narrowly. That is ADR-0070 §1's line and this falls below it — the
+  same place the ADR-0074 §4 case above falls: an ADR applying an earlier one's stated
+  condition to new ground.
 - **ADR-0072 §5 and ADR-0113 §4.** §14's first clause restates their rules for this
   axis rather than touching them, and §11 adds no argument to `search`. A reader
   holding only either ADR ranks exactly as they did.
