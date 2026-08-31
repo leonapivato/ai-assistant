@@ -1,6 +1,6 @@
 # 220. The watermark-driven observation walk tiles contiguously, and forgoes ADR-0162 §7's window overlap
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
