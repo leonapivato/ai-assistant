@@ -38,6 +38,7 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
+    MemoryStoreStaleError,
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
@@ -2783,3 +2784,291 @@ async def test_a_blob_written_before_the_field_existed_decodes_as_unknown(
 
     assert got is not None
     assert got.provenance.last_confirmed_at is None
+
+
+# --- the revision issuer, where its guarantees actually live (ADR-0219 §7) ------
+
+
+def _revisions(database: Path) -> dict[str, int]:
+    """Every row's stored ``revision``, keyed by record id, read out of band."""
+    raw = sqlite3.connect(str(database))
+    try:
+        return {str(row[0]): int(row[1]) for row in raw.execute("SELECT id, revision FROM records")}
+    finally:
+        raw.close()
+
+
+async def test_the_revision_issuer_survives_a_reopen(tmp_path: Path) -> None:
+    """ADR-0219 §1's durability half, which no in-memory store can be asked for.
+
+    "For the life of that store" is scoped by durability: for a durable store it is
+    the life of the *data*, so the issuer's state is persisted beside the records
+    and a stamp issued before a restart is never issued again after one. The record
+    is deleted and a different one stored at its id across the reopen, because that
+    is the sequence a per-id counter or a rebuilt-from-the-rows issuer would get
+    wrong — and getting it wrong lands a stale write on a replacement it was never
+    decided against.
+    """
+    db = tmp_path / "memory.db"
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        await store.add(_semantic("t", "the record the caller read"))
+        first = await store.get("t")
+        assert first is not None
+    finally:
+        store.close()
+
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        assert await reopened.delete("t") is True
+        await reopened.add(_semantic("t", "a different record at the same id"))
+
+        with pytest.raises(MemoryStoreStaleError):
+            await reopened.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the destroyed row"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+
+        survivor = await reopened.get("t")
+        assert survivor is not None
+        assert survivor.content == "a different record at the same id"
+    finally:
+        reopened.close()
+
+
+async def test_the_migration_stamps_every_legacy_row_positively(tmp_path: Path) -> None:
+    """ADR-0219 §10's backfill: issued stamps, never ``0`` and never from ``rowid``.
+
+    The rows are planted at ``rowid`` **at or below zero**, which is the case that
+    separates an issued stamp from a derived one: ``rowid`` is a signed 64-bit
+    integer a legacy table can hold negative — ``rowid`` "was only issued by
+    ``AUTOINCREMENT`` from ADR-0114 onwards" — so a rowid-derived stamp would breach
+    both ``ge=0`` and §1's positivity on rows the store is obliged to keep. And a
+    backfilled ``0`` would make a caller-constructed default expectation match a real
+    row, which is the fail-open case §2 closes twice, reintroduced by the migration.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(db, [], drop_top=False)
+    legacy = sqlite3.connect(db)
+    for rowid, record_id in ((-9, "below"), (0, "zero"), (1, "above")):
+        legacy.execute(
+            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
+            (rowid, record_id, "semantic", _semantic(record_id, "legacy").model_dump_json()),
+        )
+    legacy.commit()
+    legacy.close()
+
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        chunk = await store.walk_records("migrated", limit=10)
+        stamps = {record.id: record.revision for record in chunk.records}
+        assert set(stamps) == {"below", "zero", "above"}
+        assert all(stamp > 0 for stamp in stamps.values()), stamps
+        assert len(set(stamps.values())) == 3, "two migrated rows share one stamp"
+    finally:
+        store.close()
+
+
+async def test_the_migration_rewrites_no_payload(tmp_path: Path) -> None:
+    """ADR-0219 §7's byte-for-byte arm, asserted over the blobs and not the values.
+
+    §10's clause is about the *bytes*: a migration that decoded each record and
+    re-serialised it — reformatting an instant, dropping a member this version
+    ignores, or writing ``revision`` into the payload §1 keeps out of it — would
+    satisfy every other arm here while breaching the one thing a migration over
+    stored data must not do. A blob with an unknown member is planted deliberately,
+    because that is the member a decode-and-re-serialise pass would silently drop.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(db, [_semantic(str(i), f"legacy {i}") for i in range(1, 4)], drop_top=False)
+    legacy = sqlite3.connect(db)
+    try:
+        payload = json.loads(
+            str(legacy.execute("SELECT data FROM records WHERE id = '1'").fetchone()[0])
+        )
+        payload["a_member_this_build_does_not_know"] = "kept"
+        legacy.execute("UPDATE records SET data = ? WHERE id = '1'", (json.dumps(payload),))
+        legacy.commit()
+        before = {
+            str(row[0]): str(row[1]) for row in legacy.execute("SELECT id, data FROM records")
+        }
+    finally:
+        legacy.close()
+
+    SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    ).close()
+
+    raw = sqlite3.connect(db)
+    try:
+        after = {str(row[0]): str(row[1]) for row in raw.execute("SELECT id, data FROM records")}
+    finally:
+        raw.close()
+    assert after == before, "the migration rewrote a stored payload"
+    assert all(stamp > 0 for stamp in _revisions(db).values())
+
+
+async def test_the_migrated_issuer_survives_a_reopen(tmp_path: Path) -> None:
+    """ADR-0219 §7, and a separate arm from the reopen above deliberately.
+
+    That one is taken on a store this code created and never migrated. Without this
+    one a migration that stamps every legacy row correctly and then persists its
+    issuer at ``0`` passes both — the rows do read back positive, and the new-store
+    reopen is untouched by it — while reissuing, on the first write after the
+    reopen, values it had already handed out. That is §1's never-reissued clause
+    breached by the one path that writes a stamp without going through a write.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(db, [_semantic(str(i), f"legacy {i}") for i in range(1, 4)], drop_top=False)
+
+    migrated = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        backfilled = await migrated.get("1")
+        assert backfilled is not None
+        assert backfilled.revision > 0
+        handed_out = set(_revisions(db).values())
+    finally:
+        migrated.close()
+
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        await reopened.add(_semantic("1", "rewritten after the reopen"))
+        rewritten = await reopened.get("1")
+        assert rewritten is not None
+        assert rewritten.revision not in handed_out, (
+            "the first write after a reopen took a stamp the backfill had already "
+            "handed out, so the migrated issuer was not persisted"
+        )
+
+        with pytest.raises(MemoryStoreStaleError):
+            await reopened.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("1", "computed over the pre-close revision"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=backfilled.revision,
+                    )
+                ]
+            )
+    finally:
+        reopened.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the child's exit assumes POSIX semantics")
+async def test_the_revision_issuer_survives_a_crash_and_not_only_a_close(tmp_path: Path) -> None:
+    """ADR-0219 §1's own word, and the trap the reopen arms cannot reach.
+
+    An implementation holding the issuer in memory and flushing it on ``close``
+    passes every one of them and reissues after a kill. The child stores records and
+    is killed without closing the store, having first deleted the highest-revision
+    row — the value no surviving row records, so reconstructing an issuer from the
+    rows present (which §1 forbids by name) hands it out again on the very next
+    write.
+    """
+    db = tmp_path / "memory.db"
+    child = Path(__file__).parent / "_revision_crash_child.py"
+    result = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, str(child), str(db)],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 42, f"the child did not die where it meant to: {result.stderr!r}"
+    destroyed = int(result.stdout.strip())
+    assert destroyed > 0
+
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        await store.add(_semantic("doomed", "stored again at the destroyed id"))
+        reborn = await store.get("doomed")
+        assert reborn is not None
+        assert reborn.revision != destroyed, (
+            "the first write after a crash reissued the stamp a deleted row held, so "
+            "the issuer was rebuilt from the rows present rather than persisted"
+        )
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("doomed", "computed over the pre-crash row"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=destroyed,
+                    )
+                ]
+            )
+    finally:
+        store.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the child assumes POSIX process semantics")
+async def test_a_conditional_write_is_refused_over_another_processs_commit(
+    tmp_path: Path,
+) -> None:
+    """The half of #248's residual no in-process lock can close (ADR-0219 §7).
+
+    ``MemoryIngestor.ingest``'s docstring names it: "An in-process lock says nothing
+    about two processes sharing a store file. Closing that needs a compare-and-swap
+    on the store itself." So the case is driven across the boundary the claim is
+    about — the parent reads a record's revision, a **second process** commits at
+    that id, and the parent's conditional write is refused rather than silently
+    discarding what the other process wrote.
+
+    A contract arm could not carry this: a non-durable store has no second process,
+    and a clause it cannot satisfy is the trap ADR-0046 §4 avoided by scoping
+    durability obligations to durable backends (ADR-0219 §7).
+    """
+    db = tmp_path / "memory.db"
+    child = Path(__file__).parent / "_revision_writer_child.py"
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        await store.add(_semantic("t", "the version the parent read"))
+        read = await store.get("t")
+        assert read is not None
+
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, str(child), str(db), "t", "the version the other process wrote"],
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"the child's write failed: {result.stderr.decode()}"
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over what the parent read"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=read.revision,
+                    )
+                ]
+            )
+
+        survivor = await store.get("t")
+        assert survivor is not None
+        assert survivor.content == "the version the other process wrote", (
+            "the other process's commit was overwritten by a write decided against a "
+            "snapshot taken before it — the lost update #248 is about"
+        )
+    finally:
+        store.close()
