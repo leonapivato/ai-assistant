@@ -75,6 +75,25 @@ class TestSeamSets:
         assert vocabulary.OBSERVE_SEAM in vocabulary.USER_SEAMS
         assert vocabulary.OBSERVE_SEAM not in vocabulary.DIRECT_SEAMS
 
+    def test_the_scheduled_run_is_a_machine_seam_and_the_hand_run_pass_is_not(self) -> None:
+        """ADR-0218 §6, which is the whole reason the run is a second operation.
+
+        Two of §3's grounds pull opposite ways for a scheduled observation — the
+        content originates with the user, and the run writes on its own initiative
+        — and §3's stated purpose decides it: "A correction rate that counted those
+        would rise on the day of the arming, and the rise would be a fact about the
+        scheduler rather than about the user model." ADR-0218 arms this job, so a
+        lane that put ``observe_due`` in the user set would produce that confound
+        with the very act §3 was written about.
+
+        Asserted in **both** directions, because a lane that moved ``observe``
+        across instead would satisfy the first half alone while breaking every
+        measure over a hand-run pass.
+        """
+        assert "observe_due" in vocabulary.MACHINE_SEAMS
+        assert "observe_due" not in vocabulary.USER_SEAMS
+        assert vocabulary.OBSERVE_SEAM not in vocabulary.MACHINE_SEAMS
+
 
 class TestNotificationLiterals:
     """ADR-0141 §10's last clause: the restated literals against the emitter's own.
