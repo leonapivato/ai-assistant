@@ -117,6 +117,7 @@ from ai_assistant.core.types import (
     DeferralAdmissionOutcome,
     Disposition,
     Evidence,
+    ExchangeDisposition,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -124,6 +125,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryWrite,
     MemoryWriteMode,
+    Modality,
     NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
@@ -1181,32 +1183,44 @@ def conversation_summary(conversation: Conversation) -> ConversationSummary:
     )
 
 
-def _outcome_of(step: StepOutcome | None) -> str:  # noqa: PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
-    """How the exchange turned out, as the captured episode's ``outcome`` (ADR-0074 §4).
+def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
+    """What became of the exchange, as the captured episode's ``disposition`` (ADR-0221 §2).
 
     Total over :class:`~ai_assistant.orchestration.runner.Disposition` and
     mechanically so — the wildcard does nothing but ``assert_never`` — so a
-    disposition added without a phrase here fails the gate rather than recording an
-    exchange whose outcome reads as empty. This is deterministic recording, not a
+    disposition added without a member here fails the gate rather than recording an
+    exchange whose disposition reads as empty. This is deterministic recording, not a
     judgement: it says what the engine did, and infers nothing about the user.
+
+    **A member rather than the phrase this returned until ADR-0221** (§2, §3). The
+    eight strings composed here were stored in the episode's ``outcome``; §1 gives
+    that field to the composed reply, so the fact goes into ``disposition`` as a
+    member of a closed vocabulary and the phrase is produced by each of
+    ``learning/observer.py``, ``planning/planner.py`` and
+    ``orchestration/composing.py`` from a table written out at that site. §2 fixes
+    those phrases as the strings this function used to return, byte for byte, which
+    is what makes the three prompts identical across the change — and ``NO_ACTION``
+    aside, the mapping below is one member of :class:`ExchangeDisposition` per member
+    of :class:`~ai_assistant.orchestration.runner.Disposition`, never a collapse of
+    two onto one (§2).
     """
     if step is None:
-        return "no action was needed"
+        return ExchangeDisposition.NO_ACTION_NEEDED
     match step.disposition:
         case Disposition.EXECUTED:
-            return "the selected tool ran"
+            return ExchangeDisposition.STEP_EXECUTED
         case Disposition.DENIED:
-            return "the action was refused by the permission policy"
+            return ExchangeDisposition.STEP_DENIED
         case Disposition.AWAITING_CONFIRMATION:
-            return "the action was parked for the user to confirm"
+            return ExchangeDisposition.STEP_AWAITING_CONFIRMATION
         case Disposition.NO_CAPABLE_TOOL:
-            return "no tool advertised the capability the step needed"
+            return ExchangeDisposition.STEP_NO_CAPABLE_TOOL
         case Disposition.AMBIGUOUS_CAPABILITY:
-            return "several tools advertised the capability, so none was chosen"
+            return ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY
         case Disposition.INVALID_PARAMETERS:
-            return "the step's arguments did not fit the declared schema of any capable tool"
+            return ExchangeDisposition.STEP_INVALID_PARAMETERS
         case Disposition.EGRESS_UNBINDABLE:
-            return "the outbound call could not be described, so nothing was asked or sent"
+            return ExchangeDisposition.STEP_EGRESS_UNBINDABLE
         case _:  # pragma: no cover - exhaustive
             assert_never(step.disposition)
 
@@ -1234,38 +1248,49 @@ def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: 
     return "\n".join(lines)
 
 
-def _routed_outcome_of(outcome: RouteOutcome) -> str:  # noqa: PLR0911 — one return per RouteOutcome member; collapsing them would hide the totality `assert_never` rests on
-    """How a routed exchange turned out, as the captured episode's ``outcome`` (§10).
+def _routed_outcome_of(outcome: RouteOutcome) -> ExchangeDisposition:  # noqa: PLR0911 — one return per RouteOutcome member; collapsing them would hide the totality `assert_never` rests on
+    """What became of a routed exchange, as its episode's ``disposition`` (§10, ADR-0221 §2).
 
     Total over :class:`~ai_assistant.core.types.RouteOutcome` and mechanically so — the
-    wildcard does nothing but ``assert_never`` — so a member added without a phrase here
-    fails the gate rather than recording an exchange whose outcome reads as empty.
+    wildcard does nothing but ``assert_never`` — so a member added without a member here
+    fails the gate rather than recording an exchange whose disposition reads as empty.
 
-    **Every phrase is about the route and none is about its subject** (ADR-0197 §10).
+    **A member rather than the phrase this returned until ADR-0221**, on the same
+    ground as :func:`_outcome_of` and with the same three render sites producing §2's
+    phrase for it. The ``ROUTED_*`` half of :class:`ExchangeDisposition` is one member
+    per member of :class:`~ai_assistant.core.types.RouteOutcome`, and §2 forbids
+    collapsing any of it onto the ``STEP_*`` half: ``ROUTED_PERFORMED`` and
+    ``STEP_EXECUTED`` are synonyms in ordinary English and different acts under
+    different clauses, so both ship.
+
+    **Every member is about the route and none is about its subject** (ADR-0197 §10).
     The captured episode carries no part of the routed account: not the listing, not the
     display subject, not the scalar argument, and not the candidates. That is §6's second
     sentence made mechanical rather than hoped for — a conversation's recent turns are
     retrieved into the next turn's prompt (ADR-0074 §5, ADR-0158 §5), so a capture that
     folded a routed listing into the episode would deliver the routed result to a model
-    one turn later, satisfying every same-pass clause of §6 while breaking §6.
+    one turn later, satisfying every same-pass clause of §6 while breaking §6. ADR-0221
+    §1 puts the composed *reply* in that episode's ``outcome`` and leaves the clause
+    true, because ADR-0197 §6 hands the composing stage two enum values and nothing
+    else, so a routed reply cannot contain what §6 withholds.
     """
     match outcome:
         case RouteOutcome.PERFORMED:
-            return "the assistant performed the operation the user asked for"
+            return ExchangeDisposition.ROUTED_PERFORMED
         case RouteOutcome.AWAITING_CONFIRMATION:
-            return "the operation was parked for the user to confirm"
+            return ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION
         case RouteOutcome.REFUSED:
-            return "the user declined, so the operation was not performed"
+            return ExchangeDisposition.ROUTED_REFUSED
         case RouteOutcome.AMBIGUOUS:
-            return "more than one record matched, so nothing was performed"
+            return ExchangeDisposition.ROUTED_AMBIGUOUS
         case RouteOutcome.AMBIGUOUS_TRUNCATED:
-            return "more records matched than could be shown, so nothing was performed"
+            return ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED
         case RouteOutcome.NOT_FOUND:
-            return "nothing matched, so nothing was performed"
+            return ExchangeDisposition.ROUTED_NOT_FOUND
         case RouteOutcome.UNRECORDED:
-            return "the decision could not be recorded, so nothing was performed"
+            return ExchangeDisposition.ROUTED_UNRECORDED
         case RouteOutcome.FAILED:
-            return "the operation was attempted and failed"
+            return ExchangeDisposition.ROUTED_FAILED
         case _:  # pragma: no cover - exhaustive
             assert_never(outcome)
 
@@ -1402,6 +1427,17 @@ class _Parked:
     rendering the parking turn's warrant produced. ``False`` on a recovered entry,
     whose ``turn`` is ``None``: its episode carries no goal statement and no plan
     rationale of any turn, so there is nothing in it for a narrowing to be about.
+
+    ``modality`` is retained for the same reason and by the same argument, one field
+    over (ADR-0221 §5's second case, which is "ADR-0204 §2's fourth clause applied to
+    a second field, for that clause's own reason"). The resolution's episode renders
+    **the parked turn's** user material, so what it is stamped with is that turn's own
+    value, "retained with the parked turn and applied unchanged. No implementation
+    re-evaluates, recomputes or defaults it at the second capture" — never the
+    resuming pass's, which is what a ``resume`` of a spoken turn would otherwise
+    record as typed. :data:`Modality.TEXT` on a recovered entry, whose ``turn`` is
+    ``None``: §5's third case, and true of what that episode holds rather than a
+    fallback, because it renders no user material at all.
     """
 
     turn: TurnResult | None
@@ -1409,6 +1445,7 @@ class _Parked:
     step_id: str
     confirmation_id: str | None
     supplied_withheld: bool = False
+    modality: Modality = Modality.TEXT
 
 
 @dataclass(frozen=True, slots=True)
@@ -6870,6 +6907,12 @@ class Engine:
         # so every capture below stamps the same turn's own value and no branch can
         # recompute it from a supply that has moved on.
         withheld = supply.withheld
+        # ADR-0221 §5's first case, decided once for this pass: the episode renders
+        # this pass's own user material, and `SPEECH` goes exactly where `_capture` is
+        # given a `_SpokenCapture` — the passes of `converse_spoken` and no other.
+        # Nothing is inferred and nothing is asked; this method is told which
+        # operation it is running under, exactly as it is for the delivery.
+        modality = Modality.TEXT if spoken is None else Modality.SPEECH
         self._check_plan_is_for_goal(turn)
         if not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
@@ -6885,6 +6928,7 @@ class Engine:
                 resumed=False,
                 composed=composed,
                 supplied_withheld=withheld,
+                modality=modality,
                 spoken=spoken,
             )
         first = turn.plan.steps[0]
@@ -6918,6 +6962,7 @@ class Engine:
                 step_id=first.id,
                 handle=handle,
                 supplied_withheld=withheld,
+                modality=modality,
             )
         finally:
             # The reservation held the slot across the awaits. It is now either in
@@ -6948,6 +6993,7 @@ class Engine:
             parked=parked,
             composed=composed,
             supplied_withheld=withheld,
+            modality=modality,
             spoken=spoken,
         )
 
@@ -7439,6 +7485,13 @@ class Engine:
             # ``False``, and it is true of this episode rather than a default — its
             # content holds no goal statement and no plan rationale of any turn.
             supplied_withheld=False,
+            # ADR-0221 §5's third case, at the site §12 names and drawn over the same
+            # partition: this episode "carries neither a turn nor an utterance and
+            # renders the bare fact of the resumption alone", so `TEXT` is true of
+            # what it holds rather than a default it falls back on. It is `TEXT` even
+            # where the pass that *parked* was spoken — the modality belongs to the
+            # material the episode renders, and this one renders none.
+            modality=Modality.TEXT,
         )
 
     async def _finish_route(
@@ -7470,6 +7523,11 @@ class Engine:
             routed=routed,
             utterance=utterance,
             spoken=spoken,
+            # ADR-0221 §5's first case: this episode renders the utterance this pass
+            # threads to the capture point, so the value is this pass's own —
+            # `SPEECH` "whether or not that pass routed", which is what makes a routed
+            # pass of `converse_spoken` record a transcript as one.
+            modality=Modality.TEXT if spoken is None else Modality.SPEECH,
             # A routed pass reaches no retrieval and no planner, so there is no
             # supply for the predicate to find and nothing in the episode for a
             # stamp to be about (ADR-0204 §2's fifth clause).
@@ -8139,6 +8197,13 @@ class Engine:
             # it captures renders the parked turn's goal and plan, so what it is
             # stamped with is that turn's own evaluation, applied unchanged.
             supplied_withheld=parked.supplied_withheld,
+            # And the parking turn's modality, on ADR-0221 §5's second case, which is
+            # that same clause applied to a second field: the value is "retained with
+            # the parked turn and applied unchanged. No implementation re-evaluates,
+            # recomputes or defaults it at the second capture". A recovered park
+            # retained `TEXT`, which is §5's third case and true of an episode that
+            # renders no user material at all.
+            modality=parked.modality,
         )
 
     async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation and its spoken capture; every one is a distinct fact about the pass
@@ -8150,6 +8215,7 @@ class Engine:
         resumed: bool,
         composed: ComposedReply | None,
         supplied_withheld: bool,
+        modality: Modality,
         parked: ParkedBinding | None = None,
         routed: RoutedOperation | None = None,
         utterance: str | None = None,
@@ -8165,10 +8231,30 @@ class Engine:
         abandoned park would erase the question they actually asked.
 
         ``composed`` is what the composing stage produced for this pass, or ``None``
-        where no answer was owed (:meth:`_compose`). It reaches the outcome and
-        nothing else: what is captured is the exchange, and whether the composed
-        answer joins the episode is ADR-0170 §9's deferral to ``track:memory``
-        (#1314) rather than this method's to decide.
+        where no answer was owed (:meth:`_compose`). **It reaches the captured
+        episode's ``outcome``, whole** (ADR-0221 §1), which is what ADR-0170 §9
+        deferred to ``track:memory`` (#1314) and what ADR-0221 decides. No prefix, no
+        summary, no elision: an assertion's meaning depends on its ending, and a store
+        that half-keeps one holds a record worse than no record.
+
+        ``outcome`` is ``None`` on exactly the five paths that produced no reply, and
+        this method computes none of them — it writes what ``composed`` carries.
+        ``composed`` is itself ``None`` on three (a step parked for confirmation, a
+        routed park, and a resume driven from a recovered park) and carries a ``text``
+        of ``None`` on two more (a classified composition failure, the blank
+        completion included, and a stream that published nothing before it stopped).
+        **A stream that stopped after publishing stores what it published**, on the
+        ceiling stop and on a mid-stream ``ModelError`` alike: that text is the whole
+        of what the assistant said rather than a prefix of something longer, because
+        no continuation of it was ever composed. Whether the pass completed is
+        ``reply_degraded``'s to report and is reported there; §1 adds no field saying
+        a stored reply was cut short.
+
+        **What became of the pass goes into ``disposition``, as a member** (ADR-0221
+        §2) — :func:`_outcome_of` on a driven or undriven step, :func:`_routed_outcome_of`
+        on a routed pass — where until ADR-0221 the phrase for it went into ``outcome``.
+        The three render sites produce that phrase from ``disposition``, so no prompt
+        moves and the reply reaches no model (§3).
 
         **A routed pass is captured too, and its content is threaded rather than read off
         a turn it does not have** (ADR-0197 §10). ``utterance`` is that thread: a lane that
@@ -8202,6 +8288,18 @@ class Engine:
         an absent value is never read as delivered and never read as heard (§3). The
         episode id the index allocated is written back onto it here, which is the one
         place that knows it.
+
+        **``modality`` is passed at every call site and this method neither computes
+        nor defaults it** (ADR-0221 §5) — the same shape as ``supplied_withheld``, for
+        the same reason and at the same sites. It belongs to *the user material the
+        episode renders*, not to the pass performing the capture, so it cannot be read
+        off the ``spoken`` above: :meth:`_capture_resumption` hands none and yet its
+        episode renders a turn that may have been spoken. §5's three cases are
+        answered by the callers — :meth:`_run_turn` and :meth:`_finish_route` from
+        their own pass's ``_SpokenCapture``, :meth:`_capture_resumption` from the
+        value the park retained, and :meth:`_compose_and_capture_routed` with
+        ``TEXT`` — and a required parameter is what makes a site that has not thought
+        about it fail to compile rather than silently record ``TEXT``.
         """
         report = await self._conversations.capture(
             conversation_id,
@@ -8210,9 +8308,13 @@ class Engine:
                 if routed is None
                 else _routed_exchange_of(utterance, resumed=resumed)
             ),
-            outcome=_outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome),
+            outcome=None if composed is None else composed.text,
+            disposition=(
+                _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
+            ),
             parked=parked,
             supplied_withheld=supplied_withheld,
+            modality=modality,
             delivery=None if spoken is None else spoken.delivery,
         )
         if spoken is not None:
@@ -8385,7 +8487,7 @@ class Engine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
 
-    def _step_outcome(
+    def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the two values a park retains for its resolution's capture; every one is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         disposition: StepDisposition,
@@ -8393,6 +8495,7 @@ class Engine:
         step_id: str,
         handle: str | None,
         supplied_withheld: bool = False,
+        modality: Modality = Modality.TEXT,
     ) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
 
@@ -8407,6 +8510,11 @@ class Engine:
         off. It reaches nothing else: the ``StepOutcome`` this method returns gains no
         member, and a pass that cannot park — a resumption, whose park already exists
         — passes none, exactly as it passes no handle.
+
+        ``modality`` travels the same way and for the same reason (ADR-0221 §5's
+        second case): it is this turn's own value, bound for the parked entry so the
+        resolution stamps the material *this* turn supplied rather than recomputing
+        one from a pass that has no user material of its own.
         """
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
@@ -8425,6 +8533,7 @@ class Engine:
                 disposition,
                 handle,
                 supplied_withheld=supplied_withheld,
+                modality=modality,
             )
         return StepOutcome(
             disposition=disposition.disposition,
@@ -8441,6 +8550,7 @@ class Engine:
         handle: str,
         *,
         supplied_withheld: bool = False,
+        modality: Modality = Modality.TEXT,
     ) -> Confirmation:
         """Assemble the confirmation content around a pre-minted token (ADR-0042 §4).
 
@@ -8469,8 +8579,11 @@ class Engine:
             confirmation_id=recorded.id,
             # The parking turn's own evaluation, retained beside the turn it belongs
             # to so the resolution's capture stamps that turn's value rather than
-            # recomputing one from a pass that retrieves nothing (ADR-0204 §2).
+            # recomputing one from a pass that retrieves nothing (ADR-0204 §2) — and
+            # its own modality beside it, retained for ADR-0221 §5's second case,
+            # which is that clause applied to a second field.
             supplied_withheld=supplied_withheld,
+            modality=modality,
         )
         return Confirmation(
             tool_id=recorded.tool.id,
