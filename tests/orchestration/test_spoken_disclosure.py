@@ -1094,6 +1094,63 @@ async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> N
     )
 
 
+async def test_a_bounded_turn_supplied_a_guarded_record_keeps_it_and_stamps_its_episode() -> None:
+    """ADR-0217 §2 and §3 together, on the one pairing the setter could split.
+
+    Two claims, and they are not in tension — the first is about the **subtraction**
+    and the second about the **evaluation**, which ADR-0204 §4 already separates.
+
+    **Nothing is withheld from the bounded channel on this ADR's account** (§2): both
+    reaches admit the owner, "no park, no tap, no marker on a screen only the owner
+    sees", so the guarded belief is in ``turn.memories`` and in the rationale exactly
+    as an unguarded one would be. A build that read the reach as a *subtraction* on
+    this channel would fail here.
+
+    **And the capture is still narrowed** (§3). ADR-0204 §2's evaluation is unchanged
+    and its second term "reads this field's reach in place of the removed boolean and
+    is otherwise the same term" — *the reach*, with no qualifier on who set it. So an
+    episode whose warrant held a record the **owner** guarded is written reach
+    ``OWNER`` setter ``DERIVED``, "on that ground alone, whatever the placements of
+    the records it was supplied".
+
+    **The setter is deliberately ``OWNER_ACT`` here, which is the case that decides
+    it.** An implementation that fired the evaluation only for a ``DERIVED``
+    placement would keep every ADR-0204 arm green and launder the owner's own act in
+    one turn: guard a belief, type a question, and the episode rendering that
+    belief's content is captured speakable for the next spoken turn to read aloud —
+    #1708's path with the setter changed. §3 forbids it in terms on the neighbouring
+    rule, for a **weaker** setter than this one: a derivation "takes the narrowest
+    reach over **every** record it was supplied, whatever each one's setter", because
+    "an ``OWNER`` input discarded is an ``OWNER`` input **laundered**". A reading on
+    which the owner's act is the one narrowing that does not propagate, while a
+    model's proposal does, is not available.
+    """
+    planner = _EchoingPlanner()
+    harness = _wired(FakeModelProvider(_ANSWER), planner=planner)
+    guarded = _belief("rec-2", _WITHHELD_CONTENT).model_copy(
+        update={
+            "placement": Placement(
+                reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_AT
+            )
+        }
+    )
+    await _seed(harness, _belief("rec-1", _SPEAKABLE_CONTENT), guarded)
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert "rec-2" in {one.id for one in outcome.turn.memories}, (
+        "§2: a bounded channel withholds nothing on this ADR's account"
+    )
+    assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
+    captured = _episodes(await harness.memory.export())
+    assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
+    assert captured[0].placement == _derived_at(captured[0]), (
+        "§3: the evaluation fires on the reach, whoever set it, so the owner's act "
+        "is not laundered through this turn's capture"
+    )
+
+
 async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
     """§8 case 1's third caller: ``converse_streaming`` (#1728).
 
