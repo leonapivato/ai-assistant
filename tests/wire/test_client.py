@@ -16,7 +16,7 @@ import json
 import os
 import socket
 from base64 import b64encode
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -28,6 +28,9 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    FeedbackEvent,
+    FeedbackKind,
+    MemoryKind,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenDelivery,
@@ -308,6 +311,49 @@ async def test_a_client_from_before_the_optional_memory_kind_is_refused_at_conne
     assert str(env.PROTOCOL_VERSION - 1) in reply.payload["message"]
     assert "finish the upgrade" in reply.payload["message"], "and the operator action"
     assert engine.calls == [], "refused before any request of this build's shape is decoded"
+
+
+async def test_a_guarded_feedback_event_reaches_the_hub_still_guarded(tmp_path: Path) -> None:
+    """ADR-0217 §7 and §9: the member the bump is spent on actually crosses.
+
+    The version pin above says the constant moved and the log entry says why, and
+    the sibling test's own reasoning is that a bump is worth nothing on its own —
+    "asserted on the refusal rather than only on the constant — a bump nothing ever
+    reaches through the handshake buys nothing". The same holds for the member the
+    bump is *for*. ``AssistantEngine.learn`` takes a whole ``FeedbackEvent``, so
+    ``guarded`` crosses inside an argument rather than in a result, and every other
+    arm this change adds constructs its event directly in front of a processor.
+
+    A projection or an argument decode that dropped the member would be silent in
+    exactly the way ADR-0217 §7's atomicity clause is written against: the client
+    handshakes at 24, submits ``guarded=True``, the hub decodes ``False``, the
+    owner's act is recorded nowhere and the record it produces is speakable on a
+    channel of unbounded audience. Nothing raises and nothing is logged.
+
+    Driven over a real socket against a real ``serve_connection``, and asserted on
+    the event the **hub's** engine was handed rather than on what the client sent.
+    """
+    engine = FakeAssistantEngine()
+    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers not to be asked about the appointment aloud",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        guarded=True,
+    )
+
+    async with _listening(tmp_path / "hub.sock", _hub) as client:
+        await client.learn(event)
+
+    [(method, arguments)] = engine.calls
+    assert method == "learn"
+    assert arguments["event"] == event, "the whole event crosses unaltered"
+    assert arguments["event"].guarded is True, "and the owner's act with it"
 
 
 # --- authenticating the hub from the kernel (ADR-0084 §1) ------------------

@@ -30,6 +30,9 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -147,7 +150,52 @@ async def test_feedback_becomes_a_reusable_memory() -> None:
     stored = await store.get("pref-1")
     assert isinstance(stored, PreferenceMemory)
     assert stored.preference == "prefers concise replies"
+    # The default event is not an act, so what lands is ADR-0217 §6's default
+    # placement, which is ADR-0199 §3's placement of the record's class.
+    assert stored.placement == Placement()
     assert [r.id for r in (await store.search("concise")).records] == ["pref-1"]
+
+
+async def test_a_guarded_write_lands_in_the_store_still_placed_for_the_owner() -> None:
+    """ADR-0217 §7's act, over the *real* vertical rather than at the processor alone.
+
+    Every other arm this change adds starts and stops at a producer: the shared
+    contract asserts what a processor returns, and nothing there says the placement
+    survives the write path. It has one more stage to cross — ``MemoryIngestor``
+    rules on the proposal and writes it, folding it against anything already stored
+    — and a stage that dropped or defaulted the field would leave the owner's act
+    accepted, reported as ``STORED``, and absent from the record. That is a silent
+    disclosure rather than a visible failure, which is the shape ADR-0122's own
+    defect took here: "each correct on their own, and they did not compose."
+
+    So this is the vertical, with the real processor, the real policy, the real
+    ingestor and the real store, and it asserts on what the **store** holds — not
+    on what the processor proposed.
+    """
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy()
+    )
+    processor = RuleBasedFeedbackProcessor(id_factory=lambda: "guarded-1")
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers not to be asked about the appointment aloud",
+        created_at=_WHEN,
+        guarded=True,
+    )
+
+    [proposal] = await processor.process(event)
+    result = await ingestor.ingest(proposal)
+
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT
+    stored = await store.get("guarded-1")
+    assert stored is not None
+    assert stored.placement == Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=_WHEN,
+    )
 
 
 # --------------------------------------------------------------------------- #
