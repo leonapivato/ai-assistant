@@ -28,6 +28,7 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.types import (
     EpisodicMemory,
+    ExchangeDisposition,
     MemoryKind,
     Message,
     ObservationOutcome,
@@ -731,15 +732,26 @@ def _prompt_of(provider: FakeModelProvider) -> tuple[str, str]:
 # --- complete intake and the assistant's half (ADR-0162 §1, §8) -------------
 
 
-def _told(episode_id: str, *, content: str, outcome: str | None = None) -> EpisodicMemory:
+def _told(
+    episode_id: str,
+    *,
+    content: str,
+    outcome: str | None = None,
+    disposition: ExchangeDisposition | None = None,
+) -> EpisodicMemory:
     """One episode of ADR-0162 §1's class, optionally carrying the assistant's half.
 
     Built by copy off the shared suite's ``episode`` rather than inline, so a batch
     here is the same capture-shaped record every other case uses and the only thing
-    this helper adds is the field §8 rules on.
+    this helper adds are the two fields §8 and ADR-0221 §3 rule on.
     """
     record = episode(episode_id, content=content)
-    return record if outcome is None else record.model_copy(update={"outcome": outcome})
+    update: dict[str, object] = {}
+    if outcome is not None:
+        update["outcome"] = outcome
+    if disposition is not None:
+        update["disposition"] = disposition
+    return record if not update else record.model_copy(update=update)
 
 
 async def test_the_prompt_asks_for_a_record_of_everything_the_user_stated() -> None:
@@ -862,6 +874,146 @@ async def test_an_episode_carrying_no_outcome_renders_exactly_as_it_did() -> Non
         "Episodes (recorded times withheld: no local calendar is configured):",
         "  [E1] I took the coastal route",
     ]
+
+
+# --- ADR-0221 §3: the assistant half this prompt renders ---------------------
+#
+# §11's tests 5, 6 and 7. §3 replaces ADR-0162 §8's first clause: the phrase for the
+# episode's ``disposition`` where it records one, its ``outcome`` where it does not.
+# The three populations a store now holds must reach this batch as the same bytes
+# for the same fact, and the composed reply an episode now carries must reach it not
+# at all — this is the interpolation #672 is about, and the one prompt whose syntax
+# a multi-line reply would break.
+
+#: ADR-0221 §2's phrase table, written out here.
+#:
+#: **Deliberately a fourth copy** of the sixteen strings the three render sites each
+#: hold (§3). A test importing ``observer._disposition_phrase`` would assert that a
+#: function equals itself and would pass on a table with every phrase wrong; written
+#: out, this module pins the values §2 fixes as well as the byte-identity §11's test
+#: 5 asks for. A member added to the enum without an entry here fails rather than
+#: being skipped, because the parametrisation ranges over the enum and looks it up.
+_PHRASES: Final[dict[ExchangeDisposition, str]] = {
+    ExchangeDisposition.NO_ACTION_NEEDED: "no action was needed",
+    ExchangeDisposition.STEP_EXECUTED: "the selected tool ran",
+    ExchangeDisposition.STEP_DENIED: "the action was refused by the permission policy",
+    ExchangeDisposition.STEP_AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
+    ExchangeDisposition.STEP_NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
+    ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY: (
+        "several tools advertised the capability, so none was chosen"
+    ),
+    ExchangeDisposition.STEP_INVALID_PARAMETERS: (
+        "the step's arguments did not fit the declared schema of any capable tool"
+    ),
+    ExchangeDisposition.STEP_EGRESS_UNBINDABLE: (
+        "the outbound call could not be described, so nothing was asked or sent"
+    ),
+    ExchangeDisposition.ROUTED_PERFORMED: (
+        "the assistant performed the operation the user asked for"
+    ),
+    ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION: (
+        "the operation was parked for the user to confirm"
+    ),
+    ExchangeDisposition.ROUTED_REFUSED: "the user declined, so the operation was not performed",
+    ExchangeDisposition.ROUTED_AMBIGUOUS: "more than one record matched, so nothing was performed",
+    ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED: (
+        "more records matched than could be shown, so nothing was performed"
+    ),
+    ExchangeDisposition.ROUTED_NOT_FOUND: "nothing matched, so nothing was performed",
+    ExchangeDisposition.ROUTED_UNRECORDED: (
+        "the decision could not be recorded, so nothing was performed"
+    ),
+    ExchangeDisposition.ROUTED_FAILED: "the operation was attempted and failed",
+}
+
+#: A composed reply of the shape ADR-0221 §1 gives ``outcome``: prose rather than a
+#: phrase, multi-line — which is the shape that would break this batch's one-line-per
+#: -half syntax — and carrying a span nothing else in these fixtures does.
+_REPLY = "The coastal one, I think.\nIt is longer, but Salamander-Kestrel-9 is on it."
+
+
+@pytest.mark.parametrize("disposition", list(ExchangeDisposition), ids=lambda d: d.value)
+async def test_a_typed_disposition_renders_what_the_stored_phrase_used_to(
+    disposition: ExchangeDisposition,
+) -> None:
+    """ADR-0221 §11's test 5 at this site, over the whole membership.
+
+    An episode captured after the decision carries the reply in ``outcome`` and a
+    member in ``disposition``; one captured before it carries that member's phrase in
+    ``outcome`` and no member. §3 makes the two render identically — not similarly —
+    so the assertion is on the whole batch rather than on the assistant line.
+
+    And the reply reaches no prompt (§3), which is what keeps this observer from
+    becoming an accidental reader of model prose through the one unescaped prompt
+    interpolation in the system: neither the batch nor the system turn carries it.
+    """
+    observer, provider = _observer(_envelope())
+    await observer.observe(
+        [_told("e1", content="I asked which route", outcome=_REPLY, disposition=disposition)]
+    )
+    system, typed = _prompt_of(provider)
+
+    observer, provider = _observer(_envelope())
+    await observer.observe(
+        [_told("e1", content="I asked which route", outcome=_PHRASES[disposition])]
+    )
+    _, legacy = _prompt_of(provider)
+
+    assert typed == legacy
+    assert f"       Assistant: {_PHRASES[disposition]}" in typed.splitlines()
+    assert "Salamander-Kestrel-9" not in typed
+    assert "Salamander-Kestrel-9" not in system
+
+
+async def test_a_record_written_before_the_decision_renders_and_observes() -> None:
+    """ADR-0221 §11's test 6 at this site: the legacy population is untouched.
+
+    Absence of a ``disposition`` is the discriminator (§8), so an episode written
+    before the decision — a phrase in ``outcome``, no member beside it — takes the
+    fallback arm, renders the bytes it did before this change, and completes an
+    observation pass without error, which is what the ``observe`` call above it is.
+    """
+    observer, provider = _observer(_envelope())
+
+    outcome = await observer.observe(
+        [_told("e1", content="I asked which route", outcome="the selected tool ran")]
+    )
+
+    assert outcome.proposals == ()
+    _, batch = _prompt_of(provider)
+    assert batch.splitlines() == [
+        "Episodes (recorded times withheld: no local calendar is configured):",
+        "  [E1] I asked which route",
+        "       Assistant: the selected tool ran",
+    ]
+
+
+async def test_a_harness_row_renders_the_other_speakers_turn() -> None:
+    """ADR-0221 §11's test 7 at this site: the benchmark arm does not move.
+
+    ``benchmarks/memory/ingest.py``'s ``exchanges_of`` pairs a user run with the
+    assistant run that follows it and puts the latter in ``Exchange.outcome``, which
+    ``ConversationLifecycle.capture`` writes to the episode; it runs no engine and
+    writes no disposition. The record is built here rather than imported, because
+    ``benchmarks`` is not this lane's to touch and a test that imported it would be
+    pinning the harness rather than this renderer. This is the arm ADR-0162 §8 opened
+    for #1029's single-session-assistant questions, and §3 leaves it exactly where it
+    was.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(
+        [
+            _told(
+                "e1",
+                content="I asked which route to take",
+                outcome="I recommended the coastal one",
+            )
+        ]
+    )
+
+    _, batch = _prompt_of(provider)
+    assert "       Assistant: I recommended the coastal one" in batch.splitlines()
 
 
 def test_the_producers_default_proposal_bound_is_the_one_settings_ships() -> None:
