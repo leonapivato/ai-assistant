@@ -146,8 +146,11 @@ SEAM_STARTUP: Final = "hub_startup"
 # so (§9's third clause).
 #
 # **`observation_interval` is the closest live analogue of #829's arming**, and
-# the reason this pair shape is worth the keys: it ships disabled, an operator
-# turns it on, and the before/after is exactly what #829 requires be datable.
+# the reason this pair shape is worth the keys: the before/after of a job that
+# grows the user model is exactly what #829 requires be datable. It reads that way
+# in both directions since ADR-0218 §5 armed it by default — the act this pair
+# dates is now usually the upgrade that moved the default rather than an operator,
+# and an operator who sets the disable sentinel is dated by the same diff.
 
 #: Whether the retention purge is armed (ADR-0083 §7). It expires memory records,
 #: reclaims purgeable deferred questions, and sweeps the trace store itself
@@ -166,8 +169,14 @@ CONVERSATION_SWEEP_ARMED: Final = "conversation_sweep_interval_armed"
 CONVERSATION_SWEEP_SECONDS: Final = "conversation_sweep_interval_seconds"
 
 #: Whether belief distillation is armed (ADR-0083 §7, ADR-0077). This is the job
-#: that *grows* the user model, and it ships disabled — so the moment it is armed
-#: is an intervention no measure of accuracy may straddle unknowingly.
+#: that *grows* the user model, and since ADR-0218 §5 it ships **armed** — so the
+#: moment it is armed is, for most deployments, the upgrade that moved the default
+#: rather than an operator's act. The intervention is no less datable for that, and
+#: this pair is what dates it: arming changes the ``CONFIGURATION`` trace the hub
+#: emits at every start, and ADR-0120 §8 "partitions at a ``CONFIGURATION`` trace
+#: diff", so a window straddling the upgrade is partitioned by the mechanism that
+#: already existed for an operator flipping it by hand. §6 of that ADR is what keeps
+#: the *populations* apart once it is armed, by giving a scheduled run its own seam.
 OBSERVATION_ARMED: Final = "observation_interval_armed"
 
 #: How often it runs, present only when armed.

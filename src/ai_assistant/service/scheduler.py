@@ -167,11 +167,31 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       run any number of times", and ADR-0076 §5 is explicit that the scheduler
       "inherits this method unchanged" — so this job is that method, not a copy of
       it.
-    * **Observation** — disabled by default, and that is deliberate (§7): without a
-      durable cursor (ADR-0083 §13) a periodic run re-reads the same recent window
-      and spends a model call each time, and it cannot reach the turns the window
-      has already passed. Enabling it on a timer before the cursor exists buys
-      repeated cost and no new coverage.
+    * **Observation** — ``Engine.observe_due``, and **armed by default** since
+      ADR-0218 §5, which partially supersedes §7's row in its ``Default`` and
+      ``Calls`` cells and in nothing else. The disabled default had one stated
+      reason and ADR-0212's watermark spent it: without a cursor "a periodic run
+      re-reads the same recent window and spends a model call each time", where now
+      a tick with nothing due reads one bounded listing, calls no model and writes
+      nothing, and a pass strictly advances. What it calls is a *run* rather than a
+      pass: it observes the conversations ADR-0218 §2 rules due — quiet, or aged, or
+      holding a whole page — until the listing it last read holds none or
+      ``scheduler_run_budget`` is spent, so it is the second **chunked** job on this
+      serial loop and the arithmetic adds (ADR-0111 §4).
+
+      **It is not the same operation ``assistant observe`` calls, and that is
+      ADR-0218 §3 rather than an implementation detail.** A second seam is what
+      keeps an armed job's writes distinguishable from a user's deliberate ones
+      under ADR-0120 §3, and it is what keeps a cadence from moving
+      ``PROTOCOL_VERSION``: ``observe`` is a wire operation declared on
+      ``AssistantEngine``, so an argument on it would be a protocol bump bought to
+      express a schedule.
+
+      **Arming it is disclosed rather than silent** (§5): the state and the cadence
+      are in the hub's ``CONFIGURATION`` record at every start, the job is in
+      ``hub_ready``'s list, and each run appears in the log below with its name and
+      how long it took. An operator who wants it off sets the interval to the
+      disable sentinel, which is §7's existing convention and not new surface.
     * **Calendar reader** — leg 6's read-only ingestion (ADR-0093 §6), and the one
       job whose disabled default is *only* about consent. §7 is emphatic that
       "nothing may read a user's personal files because a default said so — not
@@ -179,17 +199,20 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       ``None`` until an operator sets it (§7a) and the job is simply absent until
       then.
 
-      **It is not observation's kind of disabled, and §6 says so in as many
+      **It was never observation's kind of disabled, and §6 says so in as many
       words**: "A reader's job may ship enabled once §9's gate is discharged. The
       reason observation ships disabled is specific to observation and does not
-      transfer." §9's gate is ADR-0092, which is ratified — so an operator who
-      arms this job gets a job that works, where arming observation would buy
-      "repeated cost and no new coverage" whatever the operator wanted. The
-      difference is §5's: a reader's bound moves with the clock, so every run
-      recomputes its window from scratch and nothing accumulates behind a cursor
-      that does not exist. Stating this is the point of the ADR — left unstated,
-      the next lane reads the observation default as the house posture for
-      scheduled ingestion and ships a switch nobody can safely flip.
+      transfer." Observation's reason has since been spent and its job is armed
+      (ADR-0218 §5), which changes nothing here and is the same clause read the
+      other way: §6 forbids transferring observation's posture to a reader, and
+      ADR-0218 §5 correspondingly declines to transfer a reader's back. This job
+      stays off until an operator sets a path and an interval, because what its
+      default would decide is a **grant** over a file the assistant does not own —
+      "a fresh install that read a calendar unasked would be making the grant
+      decision by omission" — and there is no such grant to make by omission for a
+      job reading the user's own turns with this assistant. Stating this is the
+      point of that ADR — left unstated, the next lane reads one job's default as
+      the house posture for every scheduled job.
 
       ``Settings`` refuses an interval whose source path is unset (ADR-0093 §7a),
       so this entry can never arm a job with nothing to read: the incoherent
@@ -305,11 +328,13 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       against this text once ratified".
 
       **Disabled by default, and for none of observation's reasons.** Observation
-      ships off because it has no durable cursor; this job has one — ADR-0111 §1's
-      walk position, advanced strictly after each chunk's effects — so an armed run
-      resumes rather than repeats what the last one did. What the default expresses
-      is cost and duty cycle: a model call per chunk, and a sibling's worst-case
-      delay a fresh install must not accept by omission.
+      shipped off because it had no durable cursor and is armed now that it has one
+      (ADR-0218 §5); this job has had one from the start — ADR-0111 §1's walk
+      position, advanced strictly after each chunk's effects — so its default was
+      never about repetition and is not reached by that change. What it expresses is
+      cost and duty cycle: a model call per chunk, and a sibling's worst-case delay
+      a fresh install must not accept by omission. ADR-0218 §10 records leaving it
+      where it is as a non-decision rather than an oversight.
 
       **It is also the job ADR-0083 §7's revisit condition named** — "revisit when
       a job's typical runtime approaches its interval, which is what consolidation
@@ -345,7 +370,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table: tuple[tuple[str, timedelta | None, JobBody], ...] = (
         ("retention_purge", settings.retention_purge_interval, engine.purge_expired),
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
-        ("observation", settings.observation_interval, engine.observe),
+        ("observation", settings.observation_interval, engine.observe_due),
         ("calendar_reader", settings.calendar_reader_interval, engine.ingest_calendar),
         (
             "notification_reconsider",

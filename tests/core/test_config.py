@@ -1249,6 +1249,17 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
+        # ADR-0218 §7's two trigger durations, acknowledged here for the reason
+        # every duration above is. Neither is nullable and ADR-0084 §3's departure
+        # is why: "the job is off" is a coherent deployment and is spelled once, on
+        # the interval above, where a quiet window of `None` would have to mean
+        # "observe mid-conversation" — a policy §1 ruled against rather than a way
+        # of turning anything off. The `bool` guard bites in the direction that
+        # matters most for the first: a one-second quiet window makes *every*
+        # candidate quiet, which is the mid-conversation read the field exists to
+        # prevent, arrived at through the value meant to prevent it.
+        "observation_quiet_window",
+        "observation_max_unobserved_age",
         # ADR-0111 §11's arming of leg 7's chunked walk, acknowledged here for the
         # reason the three above are: joining this tuple is what subjects it to the
         # parametrised guards below. It follows ADR-0083 §7's convention exactly —

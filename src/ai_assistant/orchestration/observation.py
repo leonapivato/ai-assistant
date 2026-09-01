@@ -21,9 +21,25 @@ holds both durable stores by injection (ADR-0074 §9). This stage:
 * **reports** what happened, including the route that read the episodes (§3) and
   every deferral the gate would otherwise drop silently (§4).
 
-There is no polling, no background task and no per-turn trigger: nothing waits on
-an observation while a turn does, and leg 5's scheduler becomes a second caller of
-the same operation with no contract change (§8).
+There is no per-turn trigger: nothing waits on an observation while a turn does,
+and ADR-0077 §8's first reason is kept whole (ADR-0218 §4). What there *is* is a
+scheduled **run** — :meth:`ObservationStage.run`, behind ``Engine.observe_due`` —
+which reads the candidate listing, applies ADR-0218 §2's due test in ADR-0212 §3's
+order, and performs one pass against the first due candidate, until the listing it
+last read holds none or its run budget is spent. A run is not a second trigger on
+the turn path and it is not ambient machinery: it is the job ADR-0083 §7 put on the
+scheduler's table, now armed by default (ADR-0218 §5).
+
+**Due is quiet, aged, or full, and the third arm rests on no clock** (ADR-0218 §2).
+A candidate is *quiet* when the run's clock instant minus its ``last_active_at``
+reaches ``observation_quiet_window``; *aged* when that instant minus the
+``occurred_at`` of its unobserved page's **first** turn reaches
+``observation_max_unobserved_age``; and *full* when a whole page of
+``observation_batch_size`` turns is available to read. The full arm is the
+load-bearing one: ordinals are the store's own, allocated inside the step that
+writes the row, so "does a whole page exist" is decided by counting rows and by
+nothing a caller supplied — which is what bounds a conversation whose oldest
+unobserved turn carries an ``occurred_at`` stamped ahead of the store's clock.
 
 **There is a durable cursor, and it is a position rather than a certificate**
 (ADR-0212 §1). The ``ConversationStore`` holds one watermark per conversation, this
@@ -48,12 +64,17 @@ only through its Protocol (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import UnknownConversationError, UnresolvedEvidenceError
 from ai_assistant.core.types import (
     EpisodicMemory,
     Evidence,
+    LearnDecision,
     MemoryKind,
     ObservationReport,
     ObservedProposal,
@@ -64,6 +85,7 @@ from ai_assistant.orchestration.engine import learn_decision
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
@@ -72,11 +94,25 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Conversation,
         ConversationTurn,
-        LearnDecision,
         MemoryIngestResult,
         MemoryUpdateProposal,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage
+
+#: Defaults for ADR-0218 §7's three run figures. All three are also
+#: composition-root arguments, so an operator's ``Settings`` values win; these are
+#: what the class does when nobody says, exactly as
+#: :class:`~ai_assistant.orchestration.consolidation.ConsolidationStage` states its
+#: own two.
+DEFAULT_QUIET_WINDOW: Final = timedelta(minutes=10)
+DEFAULT_MAX_UNOBSERVED_AGE: Final = timedelta(hours=2)
+DEFAULT_RUN_BUDGET: Final = timedelta(minutes=5)
+
+#: The rulings that **committed**: everything the write path did not refuse and did
+#: not park as a question. Spelled as the complement of those two rather than as a
+#: list of three, so a sixth :class:`~ai_assistant.core.types.LearnDecision` member
+#: cannot quietly stop being counted at all.
+_NOT_COMMITTED: Final = frozenset({LearnDecision.REJECTED, LearnDecision.DEFERRED})
 
 #: What :attr:`ObservedProposal.reason` says for a proposal the write path refused
 #: because the evidence it cited no longer resolves (ADR-0077 §5). The stage's own
@@ -110,6 +146,116 @@ def _check_batch_size(value: int) -> None:
     if not 1 <= value < 2**63:
         msg = f"batch_size must be at least 1 and below 2**63, got {value}"
         raise ValueError(msg)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _check_duration(name: str, value: timedelta) -> None:
+    """Refuse a run figure that is not an exact, strictly positive ``timedelta``.
+
+    ``Settings`` refuses the same values at load — ADR-0218 §7 gives all three
+    ``gt=timedelta(0)`` "in the form ADR-0083 §7 requires of every duration on this
+    loop" — and this constructor is exported, so a caller wiring it directly would
+    otherwise get behaviour §7 forbids. It is
+    :func:`~ai_assistant.orchestration.consolidation._check_budget`'s guard applied
+    to three fields instead of one, and for its reasons: ``timedelta(0)`` is the
+    value that looks harmless and is not, because a zero budget spends itself before
+    the first pass boundary and a zero quiet window makes every candidate quiet,
+    which is the mid-conversation read ADR-0218 §1 exists to prevent.
+
+    ``type(...) is timedelta`` rather than ``isinstance``, which closes the other
+    end: a subclass overriding ``total_seconds`` to return infinity makes the run's
+    deadline unreachable and the run unbounded. A native ``timedelta`` cannot hold a
+    non-finite value, so excluding subclasses is the whole check rather than a first
+    step.
+
+    Raises:
+        TypeError: If ``value`` is not exactly a ``timedelta``.
+        ValueError: If it is not strictly positive.
+    """
+    if type(value) is not timedelta:
+        msg = f"{name} must be a timedelta, got {type(value).__name__}: {value!r}"
+        raise TypeError(msg)
+    if value <= timedelta(0):
+        msg = f"{name} must be strictly positive, got {value!r}"
+        raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationRunReport:
+    """What one scheduled observation run did (ADR-0218 §3).
+
+    A frozen ``orchestration`` dataclass in
+    :class:`~ai_assistant.orchestration.consolidation.ConsolidationReport`'s shape
+    and for its reasons: it crosses no *subsystem* boundary, and every field is
+    Tier 2 — counts and one disposition, no belief text, no route and no
+    conversation id — so the whole of it is loggable under ADR-0004 §5.
+
+    **Counts rather than reports, and §3 argues that rather than assuming it.** A
+    run is bounded by *time* and not by a pass count, and its cheapest passes are
+    its fastest, so "one :class:`~ai_assistant.core.types.ObservationReport` per
+    pass" would be a list whose length is bounded by nothing in that ADR, holding
+    Tier 1 proposal content, retained until the run returns, for a caller that
+    discards it — ``service/scheduler.py``'s job body "return type is ``object``
+    because the scheduler never looks at it". **Nothing here grows with the number
+    of passes.**
+
+    ``ObservationReport`` itself gains nothing and stays exactly what a *pass*
+    returns to the CLI, which is what ADR-0212 §9 left standing.
+
+    Attributes:
+        passes: How many passes this run performed. A pass is ADR-0212 §3's pass,
+            against a conversation this run **named**, so §3's "given none" default
+            is not narrowed and a hand-run ``assistant observe`` still gets it.
+        conversations: How many **distinct** conversations those passes served. Not
+            the same figure as :attr:`passes`: a candidate with many pages of
+            unobserved turns stays at the head of the ascending order and is served
+            pass after pass until it is exhausted or the budget is spent, which is
+            ADR-0212 §3's order working rather than a case to spread the budget over.
+        episodes_read: How many episodes reached the producer, summed over the
+            passes. Short of the pages read wherever a turn's episode no longer
+            resolves, and zero for a run whose pages had all expired.
+        model_calls: How many passes actually called the observer — at most one call
+            per pass (ADR-0212 §3), and none at all for a page that resolved to no
+            episode. It is the run's spend, which is the figure an operator arming
+            a job on a cadence wants.
+        proposed: How many proposals the observer returned, summed over the passes.
+        committed: How many earned a committing ruling — stored, reinforced or
+            superseded.
+        deferred: How many the policy parked as a question for the user.
+        rejected: How many the gate refused outright.
+        dropped_unsupported: How many the **write path** refused because every
+            episode they cited had stopped resolving between selection and the
+            write. An ordinary consequence of a finite retention horizon, never a
+            producer fault — a fault propagates instead.
+        discarded_unusable: Model output the producer could not use, relayed
+            unchanged and counted rather than repaired (ADR-0077 §4).
+        discarded_over_limit: Usable beliefs the producer dropped to meet its
+            configured maximum, counted apart from the unusable ones because the
+            two are different facts about a run.
+        budget_spent: Which of the **two** terminal reasons ended this run.
+            ``True`` means ``scheduler_run_budget`` was spent; ``False`` means the
+            listing the run last read held no due candidate — **never** a claim
+            that the store holds none, which ADR-0218 §3 forbids any clause being
+            read as. The two are exhaustive over the runs that *return*, which is
+            why there is no third for a failure: a run whose pass raises returns no
+            report at all (§9).
+    """
+
+    passes: int = 0
+    conversations: int = 0
+    episodes_read: int = 0
+    model_calls: int = 0
+    proposed: int = 0
+    committed: int = 0
+    deferred: int = 0
+    rejected: int = 0
+    dropped_unsupported: int = 0
+    discarded_unusable: int = 0
+    discarded_over_limit: int = 0
+    budget_spent: bool = False
 
 
 def _check_citations(
@@ -268,7 +414,7 @@ def _observed(
 class ObservationStage:
     """Selects a batch of episodes, observes it, and ingests what comes back."""
 
-    def __init__(  # noqa: PLR0913 — four injected collaborators plus the bound and the route label
+    def __init__(  # noqa: PLR0913 — four injected collaborators plus the route label, the page bound and the three run figures
         self,
         *,
         observer: Observer,
@@ -277,6 +423,10 @@ class ObservationStage:
         writes: MemoryWriteStage,
         batch_size: int,
         route: str,
+        quiet_window: timedelta = DEFAULT_QUIET_WINDOW,
+        max_unobserved_age: timedelta = DEFAULT_MAX_UNOBSERVED_AGE,
+        run_budget: timedelta = DEFAULT_RUN_BUDGET,
+        now: Clock = _utcnow,
     ) -> None:
         """Wire the stage from injected contracts.
 
@@ -333,18 +483,45 @@ class ObservationStage:
                 ``conversations_with_unobserved_turns`` is not implementing ADR-0212.
             route: The ``"provider:model"`` spec the observer reads through,
                 reported on every pass that actually called it (ADR-0013 §6).
+            quiet_window: How long a conversation must have been inactive before a
+                **scheduled** run reads it (ADR-0218 §1). It reaches :meth:`run`
+                and nothing else: :meth:`observe` applies no due test, because an
+                operator who typed the command has already decided it is time.
+            max_unobserved_age: How long the oldest turn above a conversation's
+                watermark may wait before a scheduled run reads it whether or not
+                the conversation has gone quiet (ADR-0218 §2). Independent of
+                ``quiet_window`` and not validated against it: a max age at or
+                below the window makes the job a pure age trigger, which is a
+                policy an operator can state (§7).
+            run_budget: How long one :meth:`run` may spend before returning with
+                work remaining. Checked **at a pass boundary**, so no pass is
+                abandoned part-way and a run overruns by at most one pass
+                (ADR-0111 §4, with the pass as the chunk).
+            now: Clock for the due test, injectable for deterministic tests and
+                guarded by :func:`~ai_assistant.core.clock.checked_clock`
+                (ADR-0026 §7). It is **not** the budget's clock: that is the event
+                loop's monotonic one, for the reason :meth:`run` gives.
 
         Raises:
-            TypeError: If ``batch_size`` is not an integer.
-            ValueError: If ``batch_size`` is outside ``[1, 2**63)``.
+            TypeError: If ``batch_size`` is not an integer, or any of the three
+                durations is not exactly a ``timedelta``.
+            ValueError: If ``batch_size`` is outside ``[1, 2**63)``, or any of the
+                three durations is not strictly positive.
         """
         _check_batch_size(batch_size)
+        _check_duration("quiet_window", quiet_window)
+        _check_duration("max_unobserved_age", max_unobserved_age)
+        _check_duration("run_budget", run_budget)
         self._observer = observer
         self._conversations = conversations
         self._memory = memory
         self._writes = writes
         self._batch_size = batch_size
         self._route = route
+        self._quiet_window = quiet_window
+        self._max_unobserved_age = max_unobserved_age
+        self._run_budget = run_budget
+        self._now = checked_clock(now, owner="ObservationStage")
 
     async def observe(self, conversation_id: str | None = None) -> ObservationReport:
         """Observe one conversation's recent turns and ingest what they justify.
@@ -469,7 +646,24 @@ class ObservationStage:
         target = await self._target(conversation_id)
         if target is None:
             return ObservationReport()
-        page = await self._page(target)
+        return await self._pass(target, await self._page(target))
+
+    async def _pass(
+        self, target: Conversation, page: Sequence[ConversationTurn]
+    ) -> ObservationReport:
+        """Observe one already-selected conversation's already-read page.
+
+        The body of :meth:`observe` from the page down, factored out because a
+        scheduled run selects and pages differently and must not read a turn twice
+        to decide whether to read it (ADR-0218 §2). Everything below this line is
+        the same act for both callers: what a pass *does* is ADR-0212 §3's pass and
+        no clause of it is narrowed by being scheduled.
+
+        Args:
+            target: The conversation this pass serves, as the record rather than
+                the id, because the watermark travels on it.
+            page: The turns it reads, ordinal ascending, possibly empty.
+        """
         if not page:
             # No ordinal for this pass to name, so no attempt is made and nothing is
             # written anywhere (ADR-0212 §5). `None` is not a position and
@@ -529,6 +723,229 @@ class ObservationStage:
             conversation_id=target.id,
             episodes_read=len(episodes),
         )
+
+    async def run(self) -> ObservationRunReport:
+        """Observe due conversations until none is due or the budget is spent (ADR-0218 §3).
+
+        **One run performs zero or more passes.** Before each it reads the candidate
+        listing afresh, applies §2's due test in ADR-0212 §3's order, and — where a
+        due candidate exists **in that listing** — performs exactly one pass
+        *naming that conversation's id*. So §3's optional-id branch is the one a
+        scheduled pass takes, and §3's "given none" default stays exactly what a
+        hand-run ``assistant observe`` gets.
+
+        **A run establishes nothing about candidates beyond the listing's bound.**
+        "No due candidate" is always a statement about the listing this run read and
+        never about the store: the listing is a single call at ADR-0212 §8's bound of
+        fifty, with no offset, no continuation and no widening, so a due candidate
+        can sit beyond it. That takes more than fifty conversations having had a turn
+        *begin* inside one quiet window — §1's monotonicity read backwards: if the
+        head is not quiet then no candidate anywhere is quiet — and it is **accepted
+        and named** rather than closed, because closing it is ``ConversationStore``
+        surface and so a contract ADR of its own.
+
+        **The budget is checked only at a pass boundary**, so a run overruns it by at
+        most one pass — ADR-0111 §4 with the pass as the chunk. It is measured on the
+        event loop's **monotonic** clock and never on the injected one, for the reason
+        :meth:`~ai_assistant.orchestration.consolidation.ConsolidationStage.run`
+        gives at length: a civil clock moved backwards by NTP or an operator would
+        leave the deadline in the future for as long as the correction lasts, and a
+        serial job would hold ADR-0083 §7's loop for exactly that long.
+
+        **The run terminates, and the argument is ADR-0212 §5's.** Every candidate
+        holds at least one turn above its watermark (§3), so every pass this run
+        performs reads a non-empty page and makes exactly one advance attempt to a
+        position strictly above the watermark it read — "the watermark never stands
+        still across a pass over a non-empty page". Each pass therefore strictly
+        shrinks the unobserved span of the conversation it served, and a conversation
+        leaves the candidate set once its watermark reaches its highest turn. Turns
+        arriving *during* a run remove only the **quiet** basis for due-ness, never
+        the aged or full ones, and this run does not rest termination on them: where
+        turns arrive faster than passes complete, what bounds the run is the budget.
+
+        **One conversation may take the whole run, and that is the ordering
+        working.** A candidate with many pages of unobserved turns stays at the head
+        of the ascending order — no new turns, so no new activity instant — and is
+        served pass after pass until it is exhausted or the budget is spent. ADR-0212
+        §3 chose that order because "It serves the material nearest its expiry
+        first", and spreading the budget would serve the material *furthest* from
+        expiry with the same number of model calls. What the next run does is resume.
+
+        **A pass that raises halts the run and the exception propagates** (§9), which
+        is what makes the failure a failure: ``Scheduler._run_job`` decides its two
+        dispositions by whether the job body raises, so a run that caught its pass's
+        exception and returned a report saying so would be logged as a completed run
+        with the fault's class recorded nowhere. Nothing durable is lost: the passes
+        that completed already advanced their watermarks, and their counts are lost
+        to a caller that discards them anyway. The one exception is the deletion
+        race below.
+
+        Returns:
+            What the run did, in Tier 2 counts and one disposition. Every count zero
+            is a **successful** run over a listing that held nothing due, and no
+            caller may read it as a failure.
+
+        Raises:
+            ConversationStoreError: If the listing, a page or an advance could not
+                be read or written.
+            MemoryStoreError: If an episode could not be read, or the write path
+                failed.
+            ModelError: Propagated unwrapped from a pass's provider, its
+                classification intact (ADR-0013 §5).
+            DeferralStoreError: If a deferred question could not be parked.
+            ValueError: If the injected clock's reading does not conform, or a
+                producer breaks the batch contract.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._run_budget.total_seconds()
+        served: set[str] = set()
+        passes = episodes = calls = proposed = committed = deferred = rejected = 0
+        unsupported = unusable = over_limit = 0
+        budget_spent = False
+        while True:
+            # At a pass *boundary*, so no pass is abandoned part-way (ADR-0111 §4).
+            if loop.time() >= deadline:
+                budget_spent = True
+                break
+            selected = await self._due()
+            if selected is None:
+                break
+            target, probed = selected
+            try:
+                page = (
+                    probed
+                    if probed is not None and target.observed_through is not None
+                    else await self._page(target)
+                )
+                report = await self._pass(target, page)
+            except UnknownConversationError:
+                # The conversation was stamped deleted between the listing and the
+                # read, which is an ordinary act the user performs (ADR-0074 §8) and
+                # not a fault: the listing already excludes deleted conversations,
+                # so this error is reachable from exactly one thing. It is caught,
+                # the candidate is dropped, and the run continues (ADR-0218 §9,
+                # partially superseding ADR-0212 §6's classification of it as a
+                # failed pass). It cannot loop: the next listing no longer holds it.
+                continue
+            served.add(target.id)
+            passes += 1
+            episodes += report.episodes_read
+            calls += 1 if report.episodes_read else 0
+            proposed += len(report.proposals)
+            committed += sum(
+                1
+                for entry in report.proposals
+                if entry.decision is not None and entry.decision not in _NOT_COMMITTED
+            )
+            deferred += sum(
+                1 for entry in report.proposals if entry.decision is LearnDecision.DEFERRED
+            )
+            rejected += sum(
+                1 for entry in report.proposals if entry.decision is LearnDecision.REJECTED
+            )
+            unsupported += report.dropped_unsupported
+            unusable += report.discarded_unusable
+            over_limit += report.discarded_over_limit
+        return ObservationRunReport(
+            passes=passes,
+            conversations=len(served),
+            episodes_read=episodes,
+            model_calls=calls,
+            proposed=proposed,
+            committed=committed,
+            deferred=deferred,
+            rejected=rejected,
+            dropped_unsupported=unsupported,
+            discarded_unusable=unusable,
+            discarded_over_limit=over_limit,
+            budget_spent=budget_spent,
+        )
+
+    async def _due(self) -> tuple[Conversation, list[ConversationTurn] | None] | None:
+        """The first due candidate in one freshly-read listing, and the page it read.
+
+        **The listing is walked in ADR-0212 §3's order and the first due candidate
+        is taken** (ADR-0218 §2). It is never re-sorted, and a later due candidate is
+        never preferred over an earlier one on the ground that its span is older or
+        its page fuller.
+
+        **The clock is read once, for the whole walk.** §1's decisive property is
+        that quietness is monotone decreasing in ``last_active_at`` ascending, so for
+        a **fixed** instant the quiet candidates are a prefix of the order exactly —
+        which is what makes a quiet head the answer without a scan, and what a
+        second reading part-way down the walk would quietly break.
+
+        **A quiet head costs no probe at all**, which is the ordinary case: the head
+        is quiet exactly when any candidate is quiet. The other two arms cost one
+        bounded ``turns_after`` per candidate examined, so a run pays at most fifty
+        bounded index reads before it selects, with no model call and no embedding
+        among them — and those are paid only on a tick where nothing is quiet, which
+        is exactly the state the backstop exists to resolve.
+
+        Returns:
+            The due candidate and the page read to decide it, or ``None`` when this
+            listing held none. The page is ``None`` where the **quiet** arm decided
+            it, since no probe was read — which is not the same fact as a probe that
+            came back empty.
+        """
+        now = self._now()
+        candidates = await self._conversations.conversations_with_unobserved_turns()
+        for candidate in candidates:
+            if now - candidate.last_active_at >= self._quiet_window:
+                return candidate, None
+            try:
+                page = await self._conversations.turns_after(
+                    candidate.id,
+                    after_ordinal=candidate.observed_through,
+                    limit=self._batch_size,
+                )
+            except UnknownConversationError:
+                # The same deletion race one call earlier: stamped between the
+                # listing and the probe rather than between the probe and the pass.
+                # The candidate is dropped and the walk carries on, for ADR-0218 §9's
+                # reason — a user's ordinary act is not a fault, and this one has not
+                # even reached a pass.
+                continue
+            if self._aged(page, now=now) or self._full(page):
+                return candidate, page
+        return None
+
+    def _aged(self, page: Sequence[ConversationTurn], *, now: datetime) -> bool:
+        """Whether this candidate's unobserved span has waited too long (ADR-0218 §2).
+
+        **The span begins at the page's *first* turn**, which is its oldest
+        unobserved one. The question the arm asks is "has material been waiting too
+        long", and measuring on ``last_active_at`` would make an actively-used
+        conversation permanently *not* aged — the case the arm exists for — while
+        measuring on the newest unobserved turn would do the same thing one turn
+        later. The oldest is the only one of the three that ages.
+
+        ``occurred_at`` is the **caller's** instant and this project never promises
+        a monotonic clock, so a turn stamped ahead of the store's clock has a
+        negative age and this arm does not fire until the store's clock catches up.
+        That is why it is not the only arm: :meth:`_full` rests on no instant at all.
+        Using a caller's instant here is not ADR-0111 §2's excluded shape either —
+        nothing here is a *position*; the walk's position is ADR-0212's ordinal
+        watermark, and this decides only whether to walk now.
+        """
+        return bool(page) and now - page[0].occurred_at >= self._max_unobserved_age
+
+    def _full(self, page: Sequence[ConversationTurn]) -> bool:
+        """Whether a whole page is available to read (ADR-0218 §2).
+
+        **The arm that rests on no clock, and the load-bearing half of the
+        backstop.** Ordinals are the store's own — dense, unique and monotonic,
+        allocated inside the same indivisible step that writes the row — so this is
+        decided by counting rows and by nothing a caller supplies. What it bounds is
+        counted in **recorded** turns rather than in elapsed time: a candidate is due
+        here once ``observation_batch_size`` turns have been recorded above its
+        watermark, whatever any caller stamped on any of them.
+
+        The comparison is ``>=`` where ADR-0218 §2 says "exactly": ``turns_after``
+        bounds its page at ``limit``, so the two are the same test, and the
+        inequality is the direction that fails safe if a store ever returned more.
+        """
+        return len(page) >= self._batch_size
 
     async def _target(self, conversation_id: str | None) -> Conversation | None:
         """The conversation this pass reads, or ``None`` when there is none.
@@ -687,6 +1104,7 @@ class ObservationStage:
 
 __all__ = [
     "ObservationReport",
+    "ObservationRunReport",
     "ObservationStage",
     "ObservedProposal",
 ]

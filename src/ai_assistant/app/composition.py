@@ -1341,6 +1341,20 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 writes=writes,
                 batch_size=settings.observation_batch_size,
                 route=observer_route,
+                # ADR-0218 §7's three run figures, from `Settings` so that an
+                # operator's values win over the stage's own defaults. They reach
+                # the **scheduled** run and nothing else: `assistant observe`
+                # applies no due test, because an operator who typed the command
+                # has already decided it is time (§10).
+                #
+                # `scheduler_run_budget` is the same field the consolidation stage
+                # below is given, which is ADR-0111 §4's budget reaching a second
+                # chunked job rather than a second budget: "Two chunked jobs may be
+                # armed at once, and the arithmetic adds" (ADR-0218 §8), and both
+                # intervals are readable off the hub's configuration record.
+                quiet_window=settings.observation_quiet_window,
+                max_unobserved_age=settings.observation_max_unobserved_age,
+                run_budget=settings.scheduler_run_budget,
             ),
             # The answer path (ADR-0078 §8, §9), over the *same* deferral queue the
             # write stage above enqueues into, the *same* writer an ordinary `learn`

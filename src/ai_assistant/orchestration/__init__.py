@@ -120,7 +120,11 @@ hands them to the injected ``Observer``, and puts every proposal that comes back
 through the ratified write path — reporting what was proposed, what became of it,
 and which model route read the episodes (``ObservationReport``,
 ``ObservedProposal``). The producer holds no store, so selecting the batch could
-never have been its job (ADR-0077 §1).
+never have been its job (ADR-0077 §1). It also owns the **scheduled run** behind
+``Engine.observe_due`` (ADR-0218 §3): the due test, the candidate walk and the
+passes are all behind this façade, so the scheduler learns nothing about
+watermarks, quiet windows or spans, and what a run returns is an
+``ObservationRunReport`` of counts rather than a list of pass reports.
 
 ``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
 ADR-0114), the fourth producer's stage and the only one that is also its own
@@ -207,6 +211,7 @@ from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
 from ai_assistant.orchestration.observation import (
+    ObservationRunReport,
     ObservationStage,
     observed_ruled,
     observed_unsupported,
@@ -245,6 +250,7 @@ __all__ = [
     "LearningLoop",
     "MemoryWriteStage",
     "NotificationWriteStage",
+    "ObservationRunReport",
     "ObservationStage",
     "QuestionStage",
     "RecoveryScan",

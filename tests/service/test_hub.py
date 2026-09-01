@@ -78,6 +78,7 @@ class FakeEngine:
         self.closed = 0
         self.purged = 0
         self.observed = 0
+        self.observed_due = 0
         self.ingested = 0
         self.mail_ingested = 0
         self.consolidated = 0
@@ -115,6 +116,16 @@ class FakeEngine:
     async def observe(self, *, conversation_id: str | None = None) -> None:
         self.observed += 1
         _marker.info("fake_engine_observed")
+
+    async def observe_due(self) -> None:
+        # ADR-0218 §3's scheduled run, which is what §7's observation row calls
+        # since §5 armed it — a **second** operation and not an argument on
+        # `observe`, so a stand-in for the façade owes both. Present for
+        # `ingest_calendar`'s reason and now for a sharper one: this job is armed
+        # by default, so a fake missing it fails the hub's startup on a deployment
+        # that configured nothing at all.
+        self.observed_due += 1
+        _marker.info("fake_engine_observed_due")
 
     async def ingest_calendar(self) -> None:
         # Leg 6's read-only ingestion (ADR-0093 §6). Present whether or not a
@@ -386,10 +397,13 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
     """One of the two observables §3 names, and the one needing no supervisor.
 
     The job set is what the scheduler actually armed, so an operator reads which
-    jobs are enabled from the same line that says the hub is up. ADR-0083 §7 ships
-    observation **disabled by default** precisely so "enabled" is a question worth
-    asking — and asserting the default set here is what makes the omission of
-    ``observation`` visible rather than incidental.
+    jobs are enabled from the same line that says the hub is up. Since ADR-0218 §5
+    ``observation`` is one of them on a hub that configured nothing, and this line
+    is one of the three places §5 relies on for its disclosure: "the armed state and
+    its cadence are in the hub's ``CONFIGURATION`` record at every start, the job is
+    in ``hub_ready``'s job list, and each run appears in the operational log". So
+    asserting the default set here is what keeps the *presence* of ``observation``
+    on that line a checked fact rather than an incidental one.
     """
     engine.on_start = _stop_after_start()
 
@@ -402,6 +416,7 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
     assert ready["jobs"] == [
         "retention_purge",
         "conversation_sweep",
+        "observation",
         "notification_reconsider",
     ]
 
@@ -690,6 +705,7 @@ async def test_shutdown_reports_its_completion_its_phase_and_what_it_cost(
     assert done["jobs"] == [
         "retention_purge",
         "conversation_sweep",
+        "observation",
         "notification_reconsider",
     ]
     for field in ("drain_seconds", "scheduler_join_seconds", "elapsed_seconds"):
