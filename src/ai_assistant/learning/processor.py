@@ -14,6 +14,13 @@ implementation behind this Protocol to answer a question that is the same for
 all of them — while `learning` stays dependent only on `core` (ADR-0009 §3). So
 an unresolved event is *refused* here rather than answered (§7).
 
+It also honours the owner's explicit write-time placement act (ADR-0217 §7):
+where ``event.guarded`` is set, every record it produces is written with reach
+``OWNER`` and setter ``OWNER_ACT``. That is a clause of the ``FeedbackProcessor``
+Protocol's *behavioural* contract rather than of this class's rules — the
+signature does not move, the member rides the event this Protocol already takes,
+and ``FeedbackProcessorContract`` holds every implementation to it.
+
 Its one seam beyond the model of the feedback itself is an injected clock, which
 stamps *transaction* time on what it proposes (ADR-0045 §3). The event supplies
 the instants that are facts about the world; the clock supplies the one that is a
@@ -34,6 +41,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -54,6 +64,47 @@ def _uuid() -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _placement(event: FeedbackEvent) -> Placement:
+    """The placement ``event``'s guarded flag writes, or the default (ADR-0217 §7).
+
+    ``guarded=True`` is the owner's explicit act at write, so every record the
+    event produces carries reach ``OWNER`` with setter ``OWNER_ACT``. ``False`` is
+    **not an act of any kind** and yields ``Placement()`` — ADR-0217 §6's default,
+    which is ADR-0199 §3's placement of the record's class. There is no widening
+    act at write: on a fresh record a widening would be a no-op, and the act that
+    lifts a narrowing after the fact is §7's ``unguard``.
+
+    **The instant is the event's, not this processor's clock**, and the two are
+    genuinely different quantities here (ADR-0103 §9). ``set_at`` names *when the
+    narrowing was made*, and the narrowing is the owner's act — the same reading
+    ADR-0109 §4 gives ``last_confirmed_at``, which is the utterance's instant
+    because an ``ASSERTED`` belief is confirmed by the user stating it. Reading
+    the clock instead would make a queued, retried or replayed event record an act
+    performed at an instant the owner acted at nothing, wrongly by exactly the
+    delay — which is #775's defect with the two fields exchanged. ``last_updated``
+    stays this processor's clock, because transaction time is a fact about our
+    write and this is not.
+
+    No third setter can write here, so §3's same-act precedence is not reached:
+    this processor mints the record, the placement slot is empty until this
+    function fills it, and ADR-0204 §2's evaluation is `orchestration`'s at
+    capture rather than a producer's at proposal.
+
+    Args:
+        event: The feedback whose flag decides the placement.
+
+    Returns:
+        The narrowed placement for a guarded event, and the default otherwise.
+    """
+    if not event.guarded:
+        return Placement()
+    return Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=event.created_at,
+    )
 
 
 class RuleBasedFeedbackProcessor:
@@ -128,6 +179,14 @@ class RuleBasedFeedbackProcessor:
         false record §7 requires the input route in order to avoid, reintroduced
         one layer further down.
 
+        **Both branches carry the owner's write-time placement act across, and a
+        deferred kind has nothing to carry it onto** (ADR-0217 §7). ``guarded`` is
+        honoured by the producer that builds the record, so it lands here beside
+        the other fields the event supplies rather than in ``process``: where the
+        final arm proposes nothing there is no record for a placement to be
+        written on, and "every record that event produces" is then vacuously
+        satisfied. See :func:`_placement` for what it writes and which instant.
+
         **An unresolved ``memory_kind`` is refused, not deferred** (ADR-0122 §7).
         The final arm's ``None`` is the right answer for a ``PROCEDURAL`` or
         ``EPISODIC`` target ADR-0009 §6 defers: there is nothing this processor can
@@ -161,6 +220,7 @@ class RuleBasedFeedbackProcessor:
                     context=event.subject,
                     about_person=event.about_person,
                     provenance=self._provenance(event),
+                    placement=_placement(event),
                 )
             case MemoryKind.SEMANTIC:
                 return SemanticMemory(
@@ -169,6 +229,7 @@ class RuleBasedFeedbackProcessor:
                     fact=event.content,
                     about_person=event.about_person,
                     provenance=self._provenance(event),
+                    placement=_placement(event),
                 )
             case _:  # PROCEDURAL, EPISODIC — need richer structure (deferred, ADR-0009 §6)
                 return None

@@ -14,6 +14,11 @@ implementation at all. The fake synthesises a well-formed proposal for every
 :class:`~ai_assistant.core.types.MemoryKind`, and a test that wants an exact
 proposal — or none — scripts one instead.
 
+It honours the owner's write-time placement act (ADR-0217 §7) on both paths, the
+scripted one included: a fake that ignored ``FeedbackEvent.guarded`` would put a
+default placement on records in every orchestration and world test that used one,
+which is the silent loss that clause exists to prevent.
+
 Beyond the contract it records every event it was given to :attr:`events`, so a
 test can assert what its subject actually fed the learning step. Only the
 behaviour pinned by the shared ``FeedbackProcessor`` conformance suite is part of
@@ -31,6 +36,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -77,6 +85,81 @@ def _derived_id(event: FeedbackEvent) -> str:
     test process can collide by accident.
     """
     return f"fake-memory-{sha256(event.model_dump_json().encode()).hexdigest()[:16]}"
+
+
+def _act(event: FeedbackEvent) -> Placement | None:
+    """The placement ``event``'s guarded flag writes, or ``None`` for no act.
+
+    ``guarded=True`` is the owner's explicit act at write (ADR-0217 §7), so every
+    record the event produces carries reach ``OWNER`` with setter ``OWNER_ACT``
+    and the instant of the act. ``False`` is **not an act of any kind**, which is
+    why this returns ``None`` rather than ``Placement()``: the caller must be able
+    to tell "nothing to apply" from "apply the default", because on the scripted
+    path applying a default would overwrite whatever placement the consumer's own
+    script carries.
+
+    **The instant is the event's**, matching ``RuleBasedFeedbackProcessor`` and
+    for its reason: ``set_at`` names when the narrowing was made, and the
+    narrowing is the owner's act, which is the utterance rather than our write
+    (ADR-0109 §4's reading of ``last_confirmed_at``).
+
+    Args:
+        event: The feedback whose flag decides the placement.
+
+    Returns:
+        The act's placement, or ``None`` where the event carries no act.
+    """
+    if not event.guarded:
+        return None
+    return Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=event.created_at,
+    )
+
+
+def _placed(proposal: MemoryUpdateProposal, act: Placement | None) -> MemoryUpdateProposal:
+    """Return ``proposal`` with the owner's write-time act applied to its record.
+
+    Applied on **both** paths — the synthesised record and the scripted one —
+    because the obligation is the Protocol's and not this fake's convenience
+    (ADR-0217 §7): "the canonical fake in ``ai_assistant.testing`` honours the
+    member. A fake that ignores it would put a default placement on records in
+    every orchestration and world test that uses one, which is the silent loss
+    this clause exists to prevent." A script is the consumer's stated *outcome*,
+    and everywhere else this fake treats it as one — but the guarded arm of
+    ``FeedbackProcessorContract`` binds every subclass, the scripted one included,
+    and a fake that could be configured out of its own contract is the thing its
+    constructor already refuses for a blank proposal.
+
+    **The act does not simply overwrite**, it takes ADR-0217 §3's same-act
+    precedence: "Where more than one setter would write in one act, the narrower
+    reach stands. Where two would write the same reach, the recorded setter is
+    decided by one total order, strongest first: ``DERIVED``, then ``OWNER_ACT``,
+    then ``PROPOSED``." That arithmetic is :meth:`Placement.narrowest_of`'s, and
+    it is called rather than restated for ``_meet``'s own reason — a meet stated
+    in two places is a meet that can drift between them. What it buys is the one
+    case an overwrite would get wrong: a script whose record already carries a
+    ``DERIVED`` narrowing keeps it, because ADR-0217 §10 pins that "a record the
+    derivation and an owner's act both place ``OWNER`` records setter
+    ``DERIVED``" — an act does not lift a derivation, and it does not launder one
+    into an ``OWNER_ACT`` stamp either.
+
+    Args:
+        proposal: The proposal about to be returned.
+        act: The act's placement, or ``None`` where the event carried no act.
+
+    Returns:
+        ``proposal`` unchanged where there is no act or the act writes nothing,
+        and a copy carrying the resolved placement otherwise.
+    """
+    if act is None:
+        return proposal
+    placement = Placement.narrowest_of((proposal.proposed.placement, act))
+    if placement == proposal.proposed.placement:
+        return proposal
+    record = proposal.proposed.model_copy(update={"placement": placement})
+    return proposal.model_copy(update={"proposed": record})
 
 
 class FakeFeedbackProcessor:
@@ -139,6 +222,11 @@ class FakeFeedbackProcessor:
         The returned proposals are deep copies, so a caller that mutates one
         cannot reach the fake's script and change what a later call sees.
 
+        **The owner's write-time placement act is honoured on both paths**
+        (ADR-0217 §7, :func:`_placed`), so a consumer driving a guarded
+        ``FeedbackEvent`` through this fake sees the record it would see from a
+        real processor rather than a default placement.
+
         Raises:
             ValueError: If the event's ``memory_kind`` is unresolved and there is no
                 script to answer with (:meth:`_to_record`, ADR-0122 §7). A *scripted*
@@ -147,12 +235,16 @@ class FakeFeedbackProcessor:
                 branch that would otherwise invent a drawer.
         """
         self.events.append(event.model_copy(deep=True))
+        act = _act(event)
         if self._proposals is not None:
-            return [p.model_copy(deep=True) for p in self._proposals]
+            return [_placed(p.model_copy(deep=True), act) for p in self._proposals]
         return [
-            MemoryUpdateProposal(
-                proposed=self._to_record(event),
-                rationale=f"fake: user {event.kind.value}: {event.content}",
+            _placed(
+                MemoryUpdateProposal(
+                    proposed=self._to_record(event),
+                    rationale=f"fake: user {event.kind.value}: {event.content}",
+                ),
+                act,
             )
         ]
 
