@@ -804,6 +804,24 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     value where the meaning lost is the restrictive one. The types are wire-carried
     through ``TurnResult.memories``, which ADR-0210 §8 reasons from in terms.
 
+    **ADR-0217 §7 is under the second limb too**, and moves only the version, to 24
+    against the same forty methods — the second of the three bumps §9 spends, and
+    the first here whose ground is a member of an **argument** rather than of a
+    result. ``FeedbackEvent`` gains ``guarded``, the owner's explicit act placing
+    what a piece of feedback establishes for themselves alone, and
+    ``AssistantEngine.learn`` takes a whole ``FeedbackEvent``. ``FeedbackEvent``
+    does not set ``extra="forbid"``, so a client at 24 sending ``guarded: true`` to
+    a hub at 23 is **not refused** — it is accepted with the member ignored, the
+    owner's act recorded nowhere and the record left speakable on a channel of
+    unbounded audience. That is §9's "accepted with a different meaning" again,
+    with the direction reversed: 23's hazard is an old peer misreading a result,
+    and this one is an old hub misreading an instruction. ADR-0213 §11's ruling on
+    a defaulted addition is not reached, because it reasons about a *result* an
+    older peer merely ignores and nothing acts on. The **method set does not
+    move** — ``learn`` already exists and its signature is unchanged, the member
+    riding the event the Protocol already takes — and ADR-0087 §2c's scalar table
+    gains no row, ``bool`` being a shape ``project`` already carries.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -812,7 +830,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 23), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 24), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -990,6 +990,36 @@ def test_feedback_event_constructs_with_defaults() -> None:
     )
     assert event.subject is None
     assert event.evidence == ()
+    assert event.guarded is False
+
+
+def test_a_feedback_events_guard_is_absent_by_default_and_carried_when_set() -> None:
+    """ADR-0217 §7: the owner's explicit placement act at write, defaulting to none.
+
+    Defaulted so that no existing producer becomes wrong on the day the member
+    lands: ``False`` is **not an act of any kind**, and a record built from it
+    carries §6's default placement, which is ADR-0199 §3's placement of its class.
+    That is also what makes ``assistant learn --guarded`` a purely additive
+    follow-on consumer lane rather than a change nothing compiles without
+    (ADR-0217 §11) — nothing is red between the two.
+
+    It is a ``bool`` and not a :class:`Placement`, because the act it records has
+    exactly one direction: there is no widening act at write, which on a fresh
+    record would be a no-op, and the reach and setter it writes are fixed by §7
+    rather than chosen by the caller. A ``Placement`` on the event would let a
+    client author a setter — ``DERIVED`` above all, the one stamp §3's closing
+    clause forbids an owner's act to lift — over the wire.
+    """
+    guarded = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers concise replies",
+        created_at=_WHEN,
+        guarded=True,
+    )
+
+    assert guarded.guarded is True
+    assert FeedbackEvent.model_validate_json(guarded.model_dump_json()) == guarded
 
 
 def test_feedback_event_memory_kind_is_optional_and_absent_by_default() -> None:

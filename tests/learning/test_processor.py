@@ -14,6 +14,9 @@ from ai_assistant.core.types import (
     FeedbackKind,
     MemoryKind,
     MemorySource,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     SemanticMemory,
 )
@@ -38,6 +41,7 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
     about_person: str | None = None,
     evidence: tuple[str, ...] = (),
     created_at: datetime = _WHEN,
+    guarded: bool = False,
 ) -> FeedbackEvent:
     return FeedbackEvent(
         kind=kind,
@@ -47,6 +51,7 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
         about_person=about_person,
         evidence=evidence,
         created_at=created_at,
+        guarded=guarded,
     )
 
 
@@ -339,6 +344,63 @@ async def test_a_deferred_target_reads_no_clock() -> None:
     [proposal] = await processor.process(_event(memory_kind=MemoryKind.PREFERENCE))
     assert proposal.proposed.provenance.last_updated == _WRITTEN_AT
     assert len(readings) == 1  # one write, one reading
+
+
+@pytest.mark.parametrize(
+    ("memory_kind", "record_type"),
+    [(MemoryKind.PREFERENCE, PreferenceMemory), (MemoryKind.SEMANTIC, SemanticMemory)],
+)
+async def test_a_guarded_event_is_stamped_at_the_owners_act_not_at_our_write(
+    memory_kind: MemoryKind, record_type: type
+) -> None:
+    """ADR-0217 §7's act, on **both** branches that mint a record, with the right clock.
+
+    The shared suite pins the reach and the setter for every implementation. What
+    is this processor's own is **which instant** ``set_at`` carries, and this
+    fixture is built to tell the two candidates apart: ``_WHEN`` is when the user
+    said it and ``_WRITTEN_AT`` is when the injected clock says we wrote it down,
+    two months apart on purpose.
+
+    ``set_at`` names *when the narrowing was made*, and the narrowing is the
+    owner's act — the utterance, not our write. That is ADR-0109 §4's reading of
+    ``last_confirmed_at``, which this record carries at the same instant for the
+    same reason, and it is why ``last_updated`` is the *other* value: transaction
+    time is a fact about our write and the act is not. Reading the clock for
+    ``set_at`` would make a queued, retried or replayed event record an act
+    performed at an instant the owner acted at nothing, wrongly by exactly the
+    delay — #775's defect with the two fields exchanged.
+
+    Both branches are taken because a placement written on one of them is a
+    guarded correction of a *fact* silently unguarded, or the reverse, and nothing
+    else in this file would notice.
+    """
+    [proposal] = await _processor().process(_event(memory_kind=memory_kind, guarded=True))
+
+    record = proposal.proposed
+    assert isinstance(record, record_type)
+    assert record.placement == Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=_WHEN,
+    )
+    assert record.provenance.last_updated == _WRITTEN_AT, "transaction time is still ours"
+
+
+@pytest.mark.parametrize("memory_kind", [MemoryKind.PROCEDURAL, MemoryKind.EPISODIC])
+async def test_a_guarded_event_for_a_deferred_kind_proposes_nothing_and_does_not_raise(
+    memory_kind: MemoryKind,
+) -> None:
+    """ADR-0217 §7 places "every record that event produces", and here there are none.
+
+    A deferred target is ADR-0009 §6's silence, and the guard does not turn it into
+    an error or into a record: there is nothing this processor can build, so there
+    is nothing for a placement to be written on and the clause is satisfied
+    vacuously. Pinned because the alternative reading — that an unhonoured guard
+    must fail loudly — would make the owner's act refuse feedback the system
+    already accepts, and the follow-on ``assistant learn --guarded`` lane would
+    inherit a command that raises on two of its four kinds.
+    """
+    assert await _processor().process(_event(memory_kind=memory_kind, guarded=True)) == []
 
 
 async def test_a_non_conforming_clock_reading_is_refused_and_names_this_seam() -> None:

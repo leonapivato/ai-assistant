@@ -21,6 +21,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -42,6 +45,7 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
     subject: str | None = None,
     about_person: str | None = None,
     evidence: tuple[str, ...] = (),
+    guarded: bool = False,
 ) -> FeedbackEvent:
     return FeedbackEvent(
         kind=kind,
@@ -51,11 +55,14 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
         about_person=about_person,
         evidence=evidence,
         created_at=_WHEN,
+        guarded=guarded,
     )
 
 
 def _proposal(
-    content: str = "scripted memory", rationale: str = "scripted by the test"
+    content: str = "scripted memory",
+    rationale: str = "scripted by the test",
+    placement: Placement | None = None,
 ) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
         proposed=SemanticMemory(
@@ -63,6 +70,7 @@ def _proposal(
             content=content,
             fact=content,
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_WHEN),
+            placement=placement if placement is not None else Placement(),
         ),
         rationale=rationale,
     )
@@ -225,6 +233,127 @@ async def test_episodes_that_differ_only_in_when_are_distinct_records() -> None:
         await store.add(proposal.proposed)
 
     assert len(await store.export()) == 2
+
+
+_ACT = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_WHEN)
+
+
+@pytest.mark.parametrize(
+    "memory_kind",
+    [MemoryKind.PREFERENCE, MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL, MemoryKind.EPISODIC],
+)
+async def test_a_guarded_event_places_a_synthesised_record_at_the_events_instant(
+    memory_kind: MemoryKind,
+) -> None:
+    """ADR-0217 §7, on all four kinds this fake covers and none the real rules defer.
+
+    The shared suite pins the reach and the setter. What is this fake's own is that
+    it covers every kind — which is the whole reason a consumer reaches for it — so
+    a guarded event drives the ``PROCEDURAL`` and ``EPISODIC`` branches
+    ``RuleBasedFeedbackProcessor`` cannot reach at all.
+
+    The instant is the **event's**, matching the real processor, so a consumer
+    swapping one for the other sees the same record: ``set_at`` names when the
+    narrowing was made and the narrowing is the owner's act, which is the
+    utterance rather than our write (ADR-0109 §4's reading of
+    ``last_confirmed_at``).
+    """
+    [proposal] = await FakeFeedbackProcessor().process(
+        _event(memory_kind=memory_kind, guarded=True)
+    )
+
+    assert proposal.proposed.placement == _ACT
+
+
+async def test_a_guarded_event_places_a_scripted_record_too() -> None:
+    """ADR-0217 §7: the fake honours the member on the path a script takes as well.
+
+    Everywhere else this fake treats a script as the consumer's stated outcome and
+    returns it verbatim. Here it does not, and the reason is the clause itself: "A
+    fake that ignores it would put a default placement on records in every
+    orchestration and world test that uses one, which is the silent loss this
+    clause exists to prevent." The obligation is the Protocol's, and
+    ``FeedbackProcessorContract`` binds the scripted subclass beside the other two
+    — a fake configurable out of its own contract is what its constructor already
+    refuses for a blank proposal.
+    """
+    processor = FakeFeedbackProcessor([_proposal()])
+
+    [proposal] = await processor.process(_event(guarded=True))
+
+    assert proposal.proposed.placement == _ACT
+
+
+async def test_an_unguarded_event_leaves_a_scripted_records_own_placement_alone() -> None:
+    """``guarded=False`` is not an act, so it writes nothing — not even the default.
+
+    This is why the act is computed as "a placement or nothing" rather than as a
+    placement that happens to be the default: applying ``Placement()`` for an
+    unguarded event would overwrite whatever the consumer's script carried, which
+    on an ``OWNER``-placed record is a widening no clause of ADR-0217 permits and
+    on a ``DERIVED`` one is the in-place clearing §3's closing clause forbids
+    outright.
+    """
+    scripted = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_WHEN)
+    processor = FakeFeedbackProcessor([_proposal(placement=scripted)])
+
+    [proposal] = await processor.process(_event())
+
+    assert proposal.proposed.placement == scripted
+
+
+async def test_a_guarded_event_does_not_launder_a_derived_narrowing_into_an_act() -> None:
+    """ADR-0217 §3's same-act precedence, at the one place this fake can reach it.
+
+    "Where two would write the same reach, the recorded setter is decided by one
+    total order, strongest first: ``DERIVED``, then ``OWNER_ACT``, then
+    ``PROPOSED``", and §10 pins the case: "a record the derivation and an owner's
+    act both place ``OWNER`` records setter ``DERIVED``". The reach is the same
+    either way, so a reach-only assertion would pass on the wrong answer — and the
+    wrong answer matters, because an ``OWNER_ACT`` stamp is one a later ``unguard``
+    may lift and a ``DERIVED`` stamp is one no act may.
+    """
+    derived = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_WHEN)
+    processor = FakeFeedbackProcessor([_proposal(placement=derived)])
+
+    [proposal] = await processor.process(_event(guarded=True))
+
+    assert proposal.proposed.placement == derived
+
+
+async def test_a_guarded_event_narrows_a_record_the_owner_had_unguarded() -> None:
+    """The differing-reach half of the same rule: the narrower reach stands (§3).
+
+    A script carrying reach ``ANYONE`` with setter ``OWNER_ACT`` is a record the
+    owner had unguarded. This is a *fresh* write rather than a fold of two stored
+    placements, so nothing here is the eligibility clause: the act simply narrows,
+    and the stamp it leaves is its own.
+    """
+    unguarded = Placement(
+        reach=PlacementReach.ANYONE,
+        set_by=PlacementSetter.OWNER_ACT,
+        set_at=datetime(2025, 6, 1, tzinfo=UTC),
+    )
+    processor = FakeFeedbackProcessor([_proposal(placement=unguarded)])
+
+    [proposal] = await processor.process(_event(guarded=True))
+
+    assert proposal.proposed.placement == _ACT
+
+
+async def test_the_guard_is_part_of_a_records_identity() -> None:
+    """``_derived_id`` hashes the whole event, and the guard now reaches the record.
+
+    The id derivation's own reasoning is that "every field of the event reaches the
+    synthesised record", so a subset would let two events producing *different*
+    records share an id and ``MemoryStore.add``'s upsert would destroy the first.
+    A guarded and an unguarded statement of the same words produce records that
+    differ in placement, so they must not collide.
+    """
+    [guarded] = await FakeFeedbackProcessor().process(_event(guarded=True))
+    [plain] = await FakeFeedbackProcessor().process(_event())
+
+    assert guarded.proposed.id != plain.proposed.id
 
 
 async def test_evidence_is_part_of_a_records_identity() -> None:
