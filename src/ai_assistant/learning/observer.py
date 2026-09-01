@@ -25,6 +25,15 @@ boundaries shape the module:
   no clock, no randomness, nothing from the response — so re-observing the same
   episodes cannot inflate a belief through a ``REINFORCE`` that takes the maximum
   (ADR-0077 §5, §8).
+- **The model may narrow a record's placement and may never widen it**
+  (ADR-0217 §4). This producer is the one the ADR names as proposing, and the
+  proposal **rides the pass rather than opening a seam of its own**: it is one
+  optional key in the envelope the model already fills in, so this class makes
+  the provider calls it always made and no read path gains one. What a proposal
+  writes is reach ``OWNER`` with setter ``PROPOSED`` and the instant of the pass;
+  no value the model can emit makes a record *more* speakable, an unusable value
+  leaves ADR-0217 §6's default standing, and the owner lifts the narrowing in one
+  act (§7).
 - **A malformed response degrades; a model failure propagates.** Entries that
   cannot be used are discarded and *counted* rather than repaired, invented, or
   re-prompted for: an observation has nothing waiting on it, so the cheap remedy
@@ -55,6 +64,9 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Message,
     ObservationOutcome,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -165,11 +177,12 @@ _INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M %z"
 _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 
 #: The prompt's opening, which says nothing about time and is shared by both
-#: variants below. Five paragraphs after the framing: the **recording rule**
+#: variants below. After the framing come, in order: the **recording rule**
 #: ADR-0162 §1 states as a producer-side obligation, the one-record-one-thing
 #: clause beside it, ADR-0162 §8's boundary between what the user said and what
-#: this assistant asserted, **how a belief that clears the rule is phrased**, and
-#: the two epistemic steps.
+#: this assistant asserted, **how a belief that clears the rule is phrased**, the
+#: two epistemic steps, the citation rule, ADR-0213 §4's filing words, and
+#: ADR-0217 §4's placement flag.
 #:
 #: **The recording rule replaces ADR-0077 §2's warrant bar here** (ADR-0162 §1),
 #: and the replacement is what the prompt had to carry: the measurement says the
@@ -273,6 +286,34 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: leap honestly: ``INFERRED`` from a single episode is refused by the evidence
 #: floor (§5, and ``_EVIDENCE_FLOOR`` above), which is why the paragraph sits
 #: directly above the two epistemic steps rather than anywhere else.
+#:
+#: **The placement paragraph is last, and it is asked per belief rather than per
+#: category** (ADR-0217 §4). It comes after everything that decides *whether* a
+#: belief is proposed and *what it says*, because it decides neither: a flag on an
+#: entry changes who may receive the record and nothing else, and putting it
+#: earlier would invite a model to weigh disclosure when deciding whether to
+#: record at all — which would silently reintroduce the selectivity bar ADR-0162
+#: §1 replaced, and lose the belief instead of narrowing it.
+#:
+#: **It states the effect, the asymmetry and the correction, because all three
+#: are what calibrate it.** A model told only "flag the sensitive ones" has no way
+#: to price a mistake. It is told that a guarded belief is still recorded,
+#: retrieved and spoken where the user alone is listening (ADR-0217 §2's bounded
+#: channel, where nothing is withheld on this field's account); that the flag can
+#: only narrow, so there is no value it can emit that makes a record more
+#: speakable than ADR-0199 §3 already places it (ADR-0217 §6); and that the owner
+#: lifts it in one act (§7) — which is ADR-0217 §4's own answer to ADR-0130 §11
+#: put in front of the thing making the judgement. The closing sentence is the
+#: counterweight and is deliberate: over-flagging is the failure this text can
+#: actually cause, it is silent, and it costs exactly the exit test ADR-0199 §3
+#: and ADR-0217 §6 were written to keep answerable.
+#:
+#: **Nothing here decides a class, which is what keeps it outside ADR-0199 §2's
+#: prohibition** — and §4 states the ground rather than leaving it to be
+#: reconstructed. §2 forbids deciding *a class* by reading content, at a supply
+#: site, on every read. This is a producer recording a value once, over the record
+#: it is about to write; §2's classes are unmoved, ADR-0199 §3's placement of them
+#: is computed exactly as it was, and every later read is a field read.
 _PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
@@ -333,7 +374,20 @@ spaces, at most 64 characters, with no leading or trailing space — "health", \
 belief in this reply, and do not repeat a word within one belief. Where no short \
 honest word fits, give an empty list: a label stretched to fit is worse than \
 none, and the list is how the belief is filed rather than a second statement of \
-what it says."""
+what it says.
+
+Last, set a belief's `guarded` flag where hearing it said out loud, in a room \
+where someone other than the user might be listening, would be unwelcome to \
+them — the kind of thing about health, money, relationships, convictions or \
+trouble that a person tells one confidant and not a room. A guarded belief is \
+still recorded, still retrieved and still said back where the user alone is \
+listening; the only thing it loses is being spoken where anyone nearby would \
+hear it. The flag goes one way in your hands: you can hold a belief back, you \
+can never make one more speakable than it already is, and the user can lift your \
+flag on any belief in a single act. So flag what a careful person would not want \
+overheard and leave everything else unflagged — most of what anyone says is \
+ordinary, and flagging the ordinary leaves the assistant unable to answer aloud \
+the questions the user most wants answered."""
 
 #: What a producer holding the zone says about time (ADR-0156 §2, §3). Four things,
 #: in the order they bite: what the rendered instant *is*, when a belief states a
@@ -413,6 +467,14 @@ proposed without them."""
 #: The envelope, and the ban ADR-0156 §7 narrows rather than lifts: the model still
 #: supplies no value for a field the producer computes, and a date it is entitled
 #: to state goes in the sentence, where nothing mechanises it (§1).
+#:
+#: **``guarded`` is the one key whose absence is a stated answer** rather than a
+#: gap: ADR-0217 §6's default is what a belief carries when nothing narrows it, so
+#: an envelope written before this key existed — or by a model that ignores it —
+#: is complete and not degraded. The line says only ``true`` narrows, because the
+#: producer refuses everything else (:func:`_placement`) and a schema that let a
+#: model believe ``"yes"`` or ``1`` would work is a schema that loses narrowings
+#: silently.
 _PROMPT_ENVELOPE: Final = """\
 Reply with a single JSON object and nothing else — no prose, no code fence:
 
@@ -422,6 +484,7 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
     "content": "<the belief, in one sentence>",
     "evidence": ["<label>", ...],
     "topics": ["<filing word>", ...],
+    "guarded": true | false,
     "rationale": "<why the cited episodes justify it>",
     "steps": ["<ordered step>", ...]}
  ]}
@@ -429,10 +492,12 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
 `beliefs` must be a list, and may be empty. `steps` applies to a "procedural" \
 belief only and is otherwise ignored. `topics` must be a list of strings and may \
 be empty; a `topics` list this system cannot use is dropped and the belief is \
-kept, so a belief is never worth omitting over its filing words. Do not include \
-ids, confidence values, or any timestamp field of your own; those are assigned \
-downstream. A date you are entitled to state belongs in the belief's `content` \
-sentence and nowhere else."""
+kept, so a belief is never worth omitting over its filing words. `guarded` is \
+optional and defaults to false: write the literal `true` to flag a belief, and \
+anything else — `false`, "true", 1, or leaving the key out — leaves the belief \
+unflagged. Do not include ids, confidence values, or any timestamp field of your \
+own; those are assigned downstream. A date you are entitled to state belongs in \
+the belief's `content` sentence and nowhere else."""
 
 
 def _uuid() -> str:
@@ -460,10 +525,11 @@ class ModelBackedObserver:
     """An ``Observer`` that distils beliefs out of episodes with an LLM.
 
     Structurally implements :class:`~ai_assistant.core.protocols.Observer`. The
-    model proposes each belief's kind, epistemic step, content and citations; this
-    class mints the ids, maps the citations back onto the episodes it actually
-    read, computes the confidence, stamps the timestamp, applies its own bound,
-    and counts everything it threw away (ADR-0077).
+    model proposes each belief's kind, epistemic step, content, citations and — on
+    ADR-0217 §4 — whether it should be narrowed to the owner; this class mints the
+    ids, maps the citations back onto the episodes it actually read, computes the
+    confidence, stamps the timestamp, decides what a narrowing flag actually
+    writes, applies its own bound, and counts everything it threw away (ADR-0077).
     """
 
     def __init__(  # noqa: PLR0913 — one model, one clock, one id factory, one calendar and the two bounds; each is one knob a deployment sets on its own
@@ -661,6 +727,16 @@ class ModelBackedObserver:
         the batch wholesale. Evidence attached to satisfy a rule is not evidence,
         and it would make the "why do you believe that?" answer a list of
         everything the observer happened to be reading (ADR-0077 §5).
+
+        **The placement is written here, at construction, and ``now`` is the
+        instant it carries** (ADR-0217 §4). ADR-0217 §3 admits a proposal "only
+        where the record's placement is reach ``ANYONE`` with setter ``None``",
+        and that holds by construction rather than by a check: this method mints
+        the record, so the slot is empty until :func:`_record` fills it and no
+        stored placement is in reach — which is the same clause's "never runs on a
+        record already in the store", read from the producing side. The instant is
+        the pass's, read once before the model call, so every proposal in one
+        outcome carries the instant of the pass that made it.
         """
         if not isinstance(entry, dict):
             return None
@@ -699,6 +775,7 @@ class ModelBackedObserver:
                 provenance,
                 self._id_factory(),
                 _topics(entry.get("topics")),
+                _placement(entry.get("guarded"), now),
             )
         except ValidationError:
             # A `core` invariant the entry's own text broke. Counted like any
@@ -966,6 +1043,61 @@ def _topics(raw: object) -> tuple[str, ...]:
     return tuple(sorted(labels))
 
 
+def _placement(raw: object, now: datetime) -> Placement:
+    """The placement the entry's ``guarded`` key proposes, or the default.
+
+    ADR-0217 §4's proposal, and the whole of what a model may say about who
+    receives a record. A flag writes reach ``OWNER`` with setter ``PROPOSED`` and
+    the instant of the pass; anything else leaves ``Placement()``, which is
+    ADR-0217 §6's default — ADR-0199 §3's placement of the record's class,
+    subtracting nothing. There is no third answer, because the mechanism has no
+    widening direction to express: §3 gives the proposal reach ``OWNER`` or
+    nothing at all.
+
+    **Only the literal ``True``**, and ``is`` rather than a truth test, because
+    every other reading of this key is a route by which something that is not a
+    model's judgement becomes a narrowing. JSON's ``1`` and Python's ``True`` are
+    equal and ``isinstance(True, int)`` holds, so ``raw == True`` would let a
+    count, an index or a bare ``1`` place a record; a truthiness test would let a
+    non-empty string, list or object do it. The model is told in the envelope that
+    only ``true`` flags a belief, and this is that sentence enforced.
+
+    **An unusable value leaves the default rather than narrowing, and that
+    direction is decided rather than assumed.** Fail-closed is the rule where a
+    system must choose *what to do with a narrowing it holds*, and every such
+    clause of ADR-0217 keeps it — §3's ratchet, the fold's meet, the refusal to
+    widen a ``DERIVED`` placement. This is the prior question: whether a proposal
+    was made at all. A value the model did not write is not a proposal, and
+    treating one as such would attribute to the model a judgement it never made,
+    on the exact input — a malformed reply — where its judgement is least
+    evidenced. ADR-0217 §4 rules the unproposed case explicitly: a record carrying
+    the default "is not a degraded state", and §6 is what makes that true.
+
+    **Ignored rather than counted**, on :func:`_topics`' reasoning exactly:
+    :class:`~ai_assistant.core.types.ObservationOutcome`'s two counts are
+    exhaustive and disjoint over what the model emitted, so counting a usable
+    entry whose flag was malformed would report one proposal *and* one discard for
+    one entry.
+
+    Args:
+        raw: Whatever the entry's ``guarded`` key held — absent, null, a boolean,
+            or any other JSON value.
+        now: The instant of the pass, which a proposal records as ``set_at``.
+            ADR-0217 §1 requires one on a ``PROPOSED`` placement and refuses the
+            value without it, so this argument is not optional in either sense.
+
+    Returns:
+        The narrowed placement, or ADR-0217 §6's default.
+    """
+    if raw is not True:
+        return Placement()
+    return Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.PROPOSED,
+        set_at=now,
+    )
+
+
 def _latest_occurred(cited: Sequence[str], occurred: Mapping[str, datetime]) -> datetime | None:
     """A ``DERIVED`` belief's confirming instant (ADR-0103 §9, ADR-0109 §4).
 
@@ -983,13 +1115,14 @@ def _latest_occurred(cited: Sequence[str], occurred: Mapping[str, datetime]) -> 
     return max((occurred[episode_id] for episode_id in cited), default=None)
 
 
-def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warrant, topics, id
+def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warrant, topics, placement, id
     kind: str,
     content: str,
     raw_steps: object,
     provenance: Provenance,
     record_id: str,
     topics: tuple[str, ...],
+    placement: Placement,
 ) -> MemoryRecord:
     """Build the typed record the entry names.
 
@@ -1000,6 +1133,13 @@ def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warr
     in §1's order — so the field's validators cannot refuse what this passes them.
     That is the point of checking before constructing rather than after: §4 forbids
     a bad filing word discarding the belief that carried it.
+
+    ``placement`` is :func:`_placement`'s output and is passed on **every** arm,
+    which is ADR-0217 §1's field being on ``MemoryBase``: the flag says who may
+    receive the record and says nothing about what kind of record it is, so a kind
+    this producer proposes and forgot to pass it to would be a narrowing the model
+    made and this module dropped — the one failure here that no counter reports
+    and no later read could detect.
     """
     match kind:
         case "preference":
@@ -1009,6 +1149,7 @@ def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warr
                 provenance=provenance,
                 preference=content,
                 topics=topics,
+                placement=placement,
             )
         case "procedural":
             steps = (
@@ -1023,6 +1164,7 @@ def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warr
                 situation=content,
                 steps=steps,
                 topics=topics,
+                placement=placement,
             )
         case _:
             return SemanticMemory(
@@ -1031,6 +1173,7 @@ def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warr
                 provenance=provenance,
                 fact=content,
                 topics=topics,
+                placement=placement,
             )
 
 

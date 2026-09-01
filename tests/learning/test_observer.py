@@ -31,6 +31,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     Message,
     ObservationOutcome,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Role,
 )
 from ai_assistant.learning import DEFAULT_OBSERVATION_MAX_PROPOSALS, ModelBackedObserver
@@ -1642,3 +1645,267 @@ async def test_the_observation_prompt_carries_nothing_derived_from_a_belief() ->
     assert "already in use" not in system
     assert "already in use" not in batch
     assert "Filing words" not in batch
+
+
+# --- ADR-0217 §4: the model's placement proposal ----------------------------
+# §10's three-arm clause on this producer, plus the arms that clause cannot reach
+# because they are statements about a *model response*. The decision's whole
+# justification is that the proposal rides a pass this producer already makes and
+# runs at no read, so the arms come in two families: what a flag writes, and what
+# the pass costs.
+#
+# **§10's third arm is not taken here, and its absence is deliberate rather than
+# an omission.** That arm pins the provider-call count on the *read* paths —
+# supply, composition, delivery and any rendering — and there is no read path in
+# `learning`. ADR-0217 §11 confines this change to ``learning/observer.py`` and
+# its tests in terms, and the tree already pins the arm where the read path lives:
+# ``tests/orchestration/test_engine_composing.py`` →
+# ``test_one_completion_per_turn_and_no_more`` drives a whole turn and asserts one
+# model call. This diff adds no call to any read path, so that arm holds unchanged
+# and duplicating it here would put an orchestration assertion in a learning test.
+
+
+def _placements_of(outcome: object) -> list[Placement]:
+    """The placement of each proposed record, in order."""
+    assert isinstance(outcome, ObservationOutcome)
+    return [proposal.proposed.placement for proposal in outcome.proposals]
+
+
+#: What ADR-0217 §4 says a proposal writes, at this suite's fixed clock: reach
+#: ``OWNER``, setter ``PROPOSED``, and the instant of the pass. Spelled once so
+#: every arm below asserts the whole value rather than the field it happens to
+#: care about — a producer writing the right reach with the wrong setter would
+#: hand the owner a narrowing §3 forbids them to lift.
+_PROPOSED: Final = Placement(
+    reach=PlacementReach.OWNER,
+    set_by=PlacementSetter.PROPOSED,
+    set_at=_WHEN,
+)
+
+
+async def test_a_flagged_belief_is_narrowed_to_the_owner_by_the_models_proposal() -> None:
+    """§10's first arm: the mechanism is shown to work at all.
+
+    Without it every refusal below passes a producer that ignores the key
+    unconditionally — which is exactly the silent failure §4's proposal has, since
+    an unproposed record carries §6's default and looks like a model that saw
+    nothing to narrow.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], guarded=True)))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _placements_of(outcome) == [_PROPOSED]
+
+
+async def test_an_unflagged_belief_carries_the_default_placement() -> None:
+    """§6: the default is ADR-0199 §3's placement and this decision subtracts nothing.
+
+    The envelope a model wrote before this key existed is the same envelope, and
+    ADR-0217 §4 rules the record it produces "not a degraded state".
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"])))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _placements_of(outcome) == [Placement()]
+
+
+@pytest.mark.parametrize(
+    "guarded",
+    [
+        pytest.param(False, id="the-literal-false"),
+        pytest.param(None, id="null"),
+        pytest.param(1, id="the-number-one"),
+        pytest.param(0, id="the-number-zero"),
+        pytest.param("true", id="the-string-true"),
+        pytest.param("yes", id="a-non-empty-string"),
+        pytest.param([True], id="a-list-holding-true"),
+        pytest.param({"guarded": True}, id="an-object"),
+        pytest.param([], id="an-empty-list"),
+    ],
+)
+async def test_a_flag_that_is_not_the_literal_true_leaves_the_default_and_keeps_the_belief(
+    guarded: object,
+) -> None:
+    """Every JSON value but ``true``, and the two that would slip through a truth test.
+
+    ``1`` and ``[True]`` are the arms that matter: ``isinstance(True, int)`` holds
+    and ``1 == True``, so an equality test would let a count place a record, and a
+    truthiness test would let any non-empty container do it. A value the model did
+    not write is not a proposal — attributing one to it would be this module
+    inventing a judgement on the one input where the model's judgement is least
+    evidenced — and the belief itself is unaffected either way.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], guarded=guarded)))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _placements_of(outcome) == [Placement()]
+    assert len(outcome.proposals) == 1
+
+
+async def test_no_reply_widens_a_placement_or_records_a_setter_that_is_not_the_models() -> None:
+    """§3's "may only narrow", stated as the property rather than case by case.
+
+    The reach is ``OWNER`` or the default, and the setter is ``PROPOSED`` or none:
+    there is no value in this envelope — the literal ``true`` included — that
+    produces reach ``ANYONE`` beside a setter, or a setter of ``OWNER_ACT`` or
+    ``DERIVED``. A reviewer can check that without knowing what any model proposed,
+    which is the whole point of ADR-0217 §3's lattice.
+    """
+    observer, _ = _observer(
+        _envelope(
+            *(
+                _belief(evidence=["E1"], content=f"belief {index}", guarded=value)
+                for index, value in enumerate([True, False, None, 1, "true", "OWNER_ACT"])
+            )
+        ),
+        max_proposals=10,
+    )
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert len(_placements_of(outcome)) == 6
+    assert set(_placements_of(outcome)) <= {Placement(), _PROPOSED}
+
+
+async def test_the_flag_is_read_per_belief_and_never_per_reply() -> None:
+    """§4 proposes "over the record it is about to write", one record at a time.
+
+    A producer applying one entry's flag to the pass would narrow beliefs the model
+    placed nowhere — a widening in the other direction, invisible because every
+    record still reads as something a model proposed.
+    """
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"], content="the user's scan was clear", guarded=True),
+            _belief(evidence=["E1"], content="the user drives to work"),
+            _belief(evidence=["E1"], content="the user is paying off a loan", guarded=True),
+        ),
+    )
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _placements_of(outcome) == [_PROPOSED, Placement(), _PROPOSED]
+
+
+@pytest.mark.parametrize(
+    ("kind", "memory_kind"),
+    [
+        pytest.param("semantic", MemoryKind.SEMANTIC, id="semantic"),
+        pytest.param("preference", MemoryKind.PREFERENCE, id="preference"),
+        pytest.param("procedural", MemoryKind.PROCEDURAL, id="procedural"),
+    ],
+)
+async def test_every_proposable_kind_carries_the_proposed_placement(
+    kind: str, memory_kind: MemoryKind
+) -> None:
+    """ADR-0217 §1 puts the field on ``MemoryBase``, so no kind is exempt.
+
+    Taken over all three because the producer builds each kind on its own arm: one
+    arm that forgot the placement would drop a narrowing the model made, and
+    nothing downstream could tell that from a belief the model saw no reason to
+    narrow.
+    """
+    observer, _ = _observer(
+        _envelope(_belief(evidence=["E1"], kind=kind, guarded=True, steps=["a step"]))
+    )
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert [proposal.proposed.kind for proposal in outcome.proposals] == [memory_kind]
+    assert _placements_of(outcome) == [_PROPOSED]
+
+
+async def test_a_malformed_flag_moves_no_counter_and_keeps_the_invariant() -> None:
+    """The half of ADR-0077 §4 this key takes, and the half it must not.
+
+    ``ObservationOutcome``'s two counts are exhaustive and disjoint over what the
+    model emitted, so counting a usable entry whose flag was malformed would report
+    one proposal *and* one discard for one entry — the same rule ADR-0213 §4 fixed
+    for a filing word, at a second key.
+    """
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"], guarded="please"),
+            _belief(evidence=["E2"], content="the user runs", guarded=True),
+            {"kind": "nonsense"},
+        )
+    )
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert outcome.discarded_unusable == 1
+    assert outcome.discarded_over_limit == 0
+    assert len(outcome.proposals) + outcome.discarded_unusable + outcome.discarded_over_limit == 3
+    assert _placements_of(outcome) == [Placement(), _PROPOSED]
+
+
+@pytest.mark.parametrize(
+    "guarded", [pytest.param(True, id="flagged"), pytest.param(False, id="not")]
+)
+async def test_the_proposal_adds_no_provider_call_to_the_pass(guarded: bool) -> None:
+    """§10's second arm, and the whole of why §4 rides a pass rather than opening a seam.
+
+    One completion per pass whether or not anything was flagged: the proposal is a
+    key in the envelope the model already fills in, so ADR-0077's cost and egress
+    are what they were and ADR-0130 §11's "cannot run when no provider is
+    reachable" objection is answered by there being nothing extra to run.
+    """
+    observer, provider = _observer(_envelope(_belief(evidence=["E1"], guarded=guarded)))
+
+    await observer.observe(batch_of(1))
+
+    assert len(provider.calls) == 1
+
+
+async def test_every_proposal_in_one_pass_carries_that_passs_instant() -> None:
+    """§4's "the instant of the pass", which §1 requires of a ``PROPOSED`` placement.
+
+    The clock is read once, before the model call, so a pass proposing three
+    narrowings stamps one instant and not a spread of them — and it is the same
+    instant the warrant's transaction time carries. A producer re-reading per
+    proposal would drain the iterator and take the second reading for the second
+    belief, which is what the moving clock here detects.
+    """
+    instants = iter([_WHEN, _WHEN + timedelta(days=400), _WHEN + timedelta(days=800)])
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"], guarded=True),
+            _belief(evidence=["E1"], content="the user runs", guarded=True),
+        ),
+        now=lambda: next(instants),
+    )
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert _placements_of(outcome) == [_PROPOSED, _PROPOSED]
+    assert [proposal.proposed.provenance.last_updated for proposal in outcome.proposals] == [
+        _WHEN,
+        _WHEN,
+    ]
+
+
+async def test_the_prompt_asks_for_the_flag_and_states_what_it_does() -> None:
+    """The producer reads a key, so the prompt has to ask for it and price it.
+
+    Three things, and each is load-bearing. The **key** must be in the schema or no
+    conforming reply ever carries one, and the axis is lost silently — no counter
+    moves for a flag nobody was asked for. The **effect** must be stated or the
+    model cannot price its own mistake; the sentence that a guarded belief is still
+    said back to the user alone is ADR-0217 §2's bounded channel, where nothing is
+    withheld on this field's account. And the **asymmetry** must be stated because
+    §3's proposal may only narrow: a model that believed it could mark a belief
+    *more* speakable would be reasoning about a control this producer does not
+    implement and ADR-0217 §6 forbids.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert '"guarded": true | false' in system
+    assert "write the literal `true` to flag a belief" in system
+    assert "still said back where the user alone is listening" in system
+    assert "never make one more speakable" in system
