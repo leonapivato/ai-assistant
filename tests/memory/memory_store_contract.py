@@ -44,11 +44,15 @@ from ai_assistant.core.types import (
     MAX_TOPICS_PER_RECORD,
     Attestation,
     BeliefBand,
+    Capture,
+    EpisodicMemory,
+    ExchangeDisposition,
     MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    Modality,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -197,6 +201,22 @@ def _preference(
         content=content,
         preference=content,
         provenance=_provenance(source=source, last_updated=last_updated),
+    )
+
+
+def _episodic(record_id: str, content: str) -> EpisodicMemory:
+    """An episode carrying neither of ADR-0221's fields unless a case states one.
+
+    Typed as :class:`EpisodicMemory` rather than as ``MemoryRecord`` because the one
+    case using it reads ``disposition`` and ``capture`` off what came back, and those
+    are on this kind alone: ``capture`` is on :class:`EpisodicMemory` and not on
+    ``MemoryBase`` (ADR-0221 §5).
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        provenance=_provenance(),
+        occurred_at=_REVISED,
     )
 
 
@@ -795,6 +815,55 @@ class MemoryStoreContract:
         plain = await store.get("unlabelled")
         assert plain is not None
         assert plain.topics == ()
+
+    async def test_an_episodes_disposition_and_capture_survive_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0221 §12.5, on the contract rather than on one store.
+
+        The suite's other two round-trip arms pin fields a *withholding* or a
+        *deletion* reads; this pins two whose loss is silent in a different and
+        worse way. ADR-0221 §8 makes the **absence** of ``disposition`` the
+        discriminator between a record written before that decision and one written
+        after it, and forbids inferring the population from the record's text, its
+        length, its instant or its store. So an implementation that dropped the field
+        would not merely lose a value: every record it had ever stored would read as
+        pre-change, and §3's render rule would put a phrase where the reply is — for
+        as long as the store held anything, with no error anywhere and nothing else
+        left to tell the two populations apart.
+
+        ``capture`` is pinned beside it because it is the one field on this record
+        that is a fact about the world rather than about this system (§5): a store
+        that dropped it would answer ``TEXT`` for a transcript, which is the value
+        that says the material was *not* derived from speech. That is the wrong
+        direction of the two, exactly as the disclosure stamp's is.
+
+        Both are pinned in both states — stated, and left at their defaults — for the
+        reason the arms above pin both: an implementation that invented a value would
+        be as wrong as one that dropped it, and only the second-state assertion
+        catches it.
+        """
+        spoken = _episodic("spoken", "the user asked about the flights, aloud")
+        await store.add(
+            spoken.model_copy(
+                update={
+                    "disposition": ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED,
+                    "capture": Capture(modality=Modality.SPEECH),
+                    "outcome": "More records matched than I can show you here.",
+                }
+            )
+        )
+        await store.add(_episodic("legacy", "the user asked about the flights"))
+
+        got = await store.get("spoken")
+        assert isinstance(got, EpisodicMemory)
+        assert got.disposition is ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED
+        assert got.capture == Capture(modality=Modality.SPEECH)
+        assert got.outcome == "More records matched than I can show you here."
+        plain = await store.get("legacy")
+        assert isinstance(plain, EpisodicMemory)
+        assert plain.disposition is None
+        assert plain.capture == Capture()
 
     async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
         # Upsert is a full replacement, not a merge: re-adding an id must leave no
