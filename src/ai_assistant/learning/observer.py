@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import TypeAdapter, ValidationError
@@ -60,6 +60,7 @@ from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     MAX_TOPICS_PER_PROPOSAL,
+    ExchangeDisposition,
     MemorySource,
     MemoryUpdateProposal,
     Message,
@@ -921,14 +922,17 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     header says the times are withheld and the lines carry none — the state the
     system prompt's second variant is written against.
 
-    **And ``outcome`` is rendered where the episode carries one** (ADR-0162 §8).
-    It has been stored and outside the prompt since the field existed: the harness
-    pairs a user turn with the assistant turn that follows it and puts the latter
-    here, so under the pre-#1184 LoCoMo mapping roughly half the corpus was never
-    visible to distillation at all (#1185). No supersession is owed for it, on
-    ADR-0156 §2's own ground — it is a field of the very records whose ``content``
-    ADR-0077 §3 already sends, not a second class of data, so §3's four refusals
-    stand verbatim.
+    **And the assistant's half is rendered where the episode carries one**
+    (ADR-0162 §8, as ADR-0221 §3 replaces its first clause): the phrase for the
+    episode's ``disposition`` where it records one, and its ``outcome`` where it
+    does not. It has been stored and outside the prompt since the field existed:
+    the harness pairs a user turn with the assistant turn that follows it and puts
+    the latter here, so under the pre-#1184 LoCoMo mapping roughly half the corpus
+    was never visible to distillation at all (#1185). No supersession is owed for
+    admitting it, on ADR-0156 §2's own ground — it is a field of the very records
+    whose ``content`` ADR-0077 §3 already sends, not a second class of data, so
+    §3's four refusals stand verbatim; ADR-0162 §8's four remaining clauses bind
+    unchanged, and :func:`_outcome_lines` is where §3's rule is applied.
 
     **Under the same label, on a continuation line, and never as a second entry.**
     An episode is cited whole (ADR-0162 §8): the model is shown two texts and the
@@ -936,8 +940,8 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     one episode supply the two *distinct* supports an ``INFERRED`` record owes —
     the failure ADR-0077 §5's distinct-id counting exists to prevent. The line is
     prefixed ``Assistant:`` because the system prompt names that word when it
-    partitions what the half supports, and an episode carrying no ``outcome``
-    renders exactly as it did.
+    partitions what the half supports, and an episode carrying neither a
+    ``disposition`` nor an ``outcome`` renders exactly as it did.
     """
     if zone is None:
         lines = ["Episodes (recorded times withheld: no local calendar is configured):"]
@@ -953,15 +957,95 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
 
 
 def _outcome_lines(record: EpisodicMemory) -> list[str]:
-    """The episode's ``outcome`` as its own continuation line, or nothing.
+    """The episode's assistant half as its own continuation line, or nothing.
 
-    Empty where the episode carries none, which keeps a batch of outcome-less
+    **The phrase where the episode records a ``disposition``, its ``outcome`` where
+    it does not** (ADR-0221 §3), which partially supersedes ADR-0162 §8's first
+    clause and replaces it with exactly this rule. The two populations render the
+    same string for the same fact: a record captured before ADR-0221 holds the
+    phrase in ``outcome`` and renders it; one captured after holds the composed
+    reply there and a member of :class:`~ai_assistant.core.types.ExchangeDisposition`
+    beside it, and renders :func:`_disposition_phrase` of that member — which is the
+    phrase the older record carries, byte for byte. A benchmark row holds the other
+    speaker's turn and no disposition, and renders that text exactly as it did.
+
+    **The reply reaches no prompt, and that is the point rather than a side effect**
+    (ADR-0221 §3). The interpolation below is the one unescaped prompt span in this
+    system (#672), and this batch's syntax is one line per half, so a composed reply
+    rendered here would both make the observer an accidental reader of model prose
+    and break the batch's structure on ordinary non-adversarial replies. Whoever
+    first *reads* the reply owes the escaping fix, newline normalisation and the
+    render budget none of the three prompts has today; until then the reply is
+    stored and rendered nowhere.
+
+    Empty where the episode carries neither, which keeps a batch of outcome-less
     episodes rendering byte for byte as it did before ADR-0162 §8. The indent is
     deeper than the label's so the two texts read as one entry rather than two.
     """
+    if record.disposition is not None:
+        return [f"       Assistant: {_disposition_phrase(record.disposition)}"]
     if record.outcome is None:
         return []
     return [f"       Assistant: {record.outcome}"]
+
+
+def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
+    """ADR-0221 §2's phrase for one disposition, written out at this site.
+
+    **This table is not shared and must not become shared** (ADR-0221 §3). It is one
+    of three copies of the same sixteen strings — the others are in
+    ``planning/planner.py`` and ``orchestration/composing.py`` — and no
+    implementation extracts them into a shared module, a ``core`` mapping, a method
+    on the enum or a helper any two of the three import. Golden rule 1 is the
+    reason: three subsystems rendering their own prompts do not reach into one
+    another, and what they share is the ADR's table rather than a module.
+
+    Total over :class:`~ai_assistant.core.types.ExchangeDisposition` and
+    mechanically so — the wildcard does nothing but ``assert_never`` — so a member
+    added to that enum without a phrase here fails the gate at this site rather than
+    rendering an episode whose assistant half reads as empty.
+
+    Args:
+        disposition: The member the episode records.
+
+    Returns:
+        §2's phrase for it, byte for byte.
+    """
+    match disposition:
+        case ExchangeDisposition.NO_ACTION_NEEDED:
+            return "no action was needed"
+        case ExchangeDisposition.STEP_EXECUTED:
+            return "the selected tool ran"
+        case ExchangeDisposition.STEP_DENIED:
+            return "the action was refused by the permission policy"
+        case ExchangeDisposition.STEP_AWAITING_CONFIRMATION:
+            return "the action was parked for the user to confirm"
+        case ExchangeDisposition.STEP_NO_CAPABLE_TOOL:
+            return "no tool advertised the capability the step needed"
+        case ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY:
+            return "several tools advertised the capability, so none was chosen"
+        case ExchangeDisposition.STEP_INVALID_PARAMETERS:
+            return "the step's arguments did not fit the declared schema of any capable tool"
+        case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
+            return "the outbound call could not be described, so nothing was asked or sent"
+        case ExchangeDisposition.ROUTED_PERFORMED:
+            return "the assistant performed the operation the user asked for"
+        case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
+            return "the operation was parked for the user to confirm"
+        case ExchangeDisposition.ROUTED_REFUSED:
+            return "the user declined, so the operation was not performed"
+        case ExchangeDisposition.ROUTED_AMBIGUOUS:
+            return "more than one record matched, so nothing was performed"
+        case ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED:
+            return "more records matched than could be shown, so nothing was performed"
+        case ExchangeDisposition.ROUTED_NOT_FOUND:
+            return "nothing matched, so nothing was performed"
+        case ExchangeDisposition.ROUTED_UNRECORDED:
+            return "the decision could not be recorded, so nothing was performed"
+        case ExchangeDisposition.ROUTED_FAILED:
+            return "the operation was attempted and failed"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(disposition)
 
 
 def _step_of(raw: object) -> MemorySource | None:

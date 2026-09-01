@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     CurrentContext,
     Disposition,
     EpisodicMemory,
+    ExchangeDisposition,
     ExecutionState,
     Goal,
     MemorySource,
@@ -782,6 +783,133 @@ async def test_an_episode_is_rendered_whole_with_its_instant_and_outcome() -> No
     prompt = _prompt(model)
     assert (AT - timedelta(days=1)).isoformat() in prompt
     assert "how it turned out" in prompt
+
+
+# --- ADR-0221 §3: the outcome line at this site ------------------------------
+#
+# §11's tests 5, 6 and 7. The three populations a store now holds — captured before
+# the decision, captured after it, and written by the benchmark harness — must reach
+# this prompt as the same bytes for the same fact, and the composed reply a record
+# now carries in ``outcome`` must reach it not at all.
+
+#: ADR-0221 §2's phrase table, written out here.
+#:
+#: **Deliberately a fourth copy** of the sixteen strings the three render sites each
+#: hold (§3). A test importing ``composing._disposition_phrase`` would assert that a
+#: function equals itself and would pass on a table with every phrase wrong; written
+#: out, this module pins the values §2 fixes as well as the byte-identity §11's test
+#: 5 asks for. A member added to the enum without an entry here fails rather than
+#: being skipped, because the parametrisation ranges over the enum and looks it up.
+_PHRASES: Final[dict[ExchangeDisposition, str]] = {
+    ExchangeDisposition.NO_ACTION_NEEDED: "no action was needed",
+    ExchangeDisposition.STEP_EXECUTED: "the selected tool ran",
+    ExchangeDisposition.STEP_DENIED: "the action was refused by the permission policy",
+    ExchangeDisposition.STEP_AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
+    ExchangeDisposition.STEP_NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
+    ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY: (
+        "several tools advertised the capability, so none was chosen"
+    ),
+    ExchangeDisposition.STEP_INVALID_PARAMETERS: (
+        "the step's arguments did not fit the declared schema of any capable tool"
+    ),
+    ExchangeDisposition.STEP_EGRESS_UNBINDABLE: (
+        "the outbound call could not be described, so nothing was asked or sent"
+    ),
+    ExchangeDisposition.ROUTED_PERFORMED: (
+        "the assistant performed the operation the user asked for"
+    ),
+    ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION: (
+        "the operation was parked for the user to confirm"
+    ),
+    ExchangeDisposition.ROUTED_REFUSED: "the user declined, so the operation was not performed",
+    ExchangeDisposition.ROUTED_AMBIGUOUS: "more than one record matched, so nothing was performed",
+    ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED: (
+        "more records matched than could be shown, so nothing was performed"
+    ),
+    ExchangeDisposition.ROUTED_NOT_FOUND: "nothing matched, so nothing was performed",
+    ExchangeDisposition.ROUTED_UNRECORDED: (
+        "the decision could not be recorded, so nothing was performed"
+    ),
+    ExchangeDisposition.ROUTED_FAILED: "the operation was attempted and failed",
+}
+
+#: A composed reply of the shape ADR-0221 §1 gives ``outcome``: prose rather than a
+#: phrase, carrying a span nothing else in these fixtures does, so an assertion that
+#: it reaches no prompt cannot pass by coincidence.
+_REPLY = "The forecast is dry. I would take the Salamander-Kestrel-9 trail either way."
+
+
+async def _rendered(episode: EpisodicMemory) -> str:
+    """The prompt this stage assembles for a turn holding ``episode`` and nothing else."""
+    model = FakeModelProvider("answer")
+    await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
+        turn=_turn(memories=(episode,)), step=None, undriven=()
+    )
+    return _prompt(model)
+
+
+def _exchange(
+    *, outcome: str | None, disposition: ExchangeDisposition | None = None
+) -> EpisodicMemory:
+    """One captured episode carrying the assistant half under test."""
+    return EpisodicMemory(
+        id="rec-4",
+        content="asked about the weekend",
+        occurred_at=AT - timedelta(days=1),
+        outcome=outcome,
+        disposition=disposition,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
+    )
+
+
+@pytest.mark.parametrize("disposition", list(ExchangeDisposition), ids=lambda d: d.value)
+async def test_a_typed_disposition_renders_what_the_stored_phrase_used_to(
+    disposition: ExchangeDisposition,
+) -> None:
+    """ADR-0221 §11's test 5 at this site, over the whole membership.
+
+    A record captured after the decision carries the reply in ``outcome`` and a member
+    in ``disposition``; one captured before it carries that member's phrase in
+    ``outcome`` and no member. §3 makes the two render identically — not similarly —
+    so the assertion is on the whole prompt rather than on the outcome line, which is
+    what catches a renderer that got the line right and moved something else.
+
+    And the reply reaches no prompt (§3): it is stored, and this is one of the three
+    sites where "rendered nowhere" is checked rather than assumed.
+    """
+    typed = await _rendered(_exchange(outcome=_REPLY, disposition=disposition))
+    legacy = await _rendered(_exchange(outcome=_PHRASES[disposition]))
+
+    assert typed == legacy
+    assert f"    how it turned out: {json.dumps(_PHRASES[disposition])}" in typed.splitlines()
+    assert "Salamander-Kestrel-9" not in typed
+
+
+async def test_a_record_written_before_the_decision_renders_its_stored_phrase() -> None:
+    """ADR-0221 §11's test 6 at this site: the legacy population is untouched.
+
+    Absence of a ``disposition`` is the discriminator (§8), so a record written before
+    the decision — a phrase in ``outcome``, no member beside it — takes the fallback
+    arm and renders exactly the bytes it did before this change.
+    """
+    prompt = await _rendered(_exchange(outcome="the selected tool ran"))
+
+    assert '    how it turned out: "the selected tool ran"' in prompt.splitlines()
+
+
+async def test_a_harness_row_renders_the_other_speakers_turn() -> None:
+    """ADR-0221 §11's test 7 at this site: the benchmark arm does not move.
+
+    ``benchmarks/memory/ingest.py``'s ``exchanges_of`` pairs a user run with the
+    assistant run that follows it and puts the latter in ``Exchange.outcome``, which
+    ``ConversationLifecycle.capture`` writes to the episode; it runs no engine and
+    writes no disposition. The record is built here rather than imported, because
+    ``benchmarks`` is not this lane's to touch and a test that imported it would be
+    pinning the harness rather than this renderer.
+    """
+    prompt = await _rendered(_exchange(outcome="Bo: what is her name?"))
+
+    assert '    how it turned out: "Bo: what is her name?"' in prompt.splitlines()
 
 
 # --- #1374: the conversation's own turns are named as such -------------------

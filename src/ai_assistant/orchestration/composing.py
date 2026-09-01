@@ -80,7 +80,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 import structlog
 
@@ -90,6 +90,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     Disposition,
     EpisodicMemory,
+    ExchangeDisposition,
     Message,
     ReplyChunk,
     Role,
@@ -1326,6 +1327,18 @@ def _render_record(record: MemoryRecord) -> str:
     **A belief states the standing it is held with** (ADR-0072 §6): a derived belief
     reaching a prompt is rendered as a belief, carrying its band and its confidence,
     "never as a bare fact indistinguishable from what the user stated".
+
+    **An episode's outcome line carries the phrase where the record carries a
+    ``disposition``, and ``outcome`` where it does not** (ADR-0221 §3). §1 gives
+    ``outcome`` to the composed reply and §2 puts what became of the exchange in a
+    closed enum, so this line renders :func:`_disposition_phrase` of that member —
+    the very string a record captured before ADR-0221 carries in ``outcome``, byte
+    for byte, so the bullet is identical across the two populations and the reply
+    reaches no model. A record carrying no ``disposition`` — one written before that
+    decision, or a benchmark-harness row — renders its ``outcome`` exactly as it
+    did. The phrase is quoted by :func:`_quoted_span` like every other span here,
+    though it is a constant of this system's own: the transform is applied to the
+    line, not to a judgement about the value.
     """
     provenance = record.provenance
     band = band_of(provenance.source)
@@ -1348,11 +1361,77 @@ def _render_record(record: MemoryRecord) -> str:
             f"{label} ({standing}) the assistant recorded this exchange at "
             f"{record.occurred_at.isoformat()}: {content}"
         ]
-        if record.outcome is not None:
+        if record.disposition is not None:
+            phrase = _disposition_phrase(record.disposition)
+            lines.append(f"    how it turned out: {_quoted_span(phrase)}")
+        elif record.outcome is not None:
             lines.append(f"    how it turned out: {_quoted_span(record.outcome)}")
         return "\n".join(lines)
 
     return f"{label} ({standing}) {_STANCE[band]}: {content}"
+
+
+def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
+    """ADR-0221 §2's phrase for one disposition, written out at this site.
+
+    **This table is not shared and must not become shared** (ADR-0221 §3). It is one
+    of three copies of the same sixteen strings — the others are in
+    ``learning/observer.py`` and ``planning/planner.py`` — and no implementation
+    extracts them into a shared module, a ``core`` mapping, a method on the enum or
+    a helper any two of the three import. Golden rule 1 is the reason: three
+    subsystems assembling their own prompts do not reach into one another, and what
+    they share is the ADR's table rather than a module. It is the same reason
+    :func:`_split_conversation_tail` is written out here rather than imported from
+    ``planning``.
+
+    Total over :class:`~ai_assistant.core.types.ExchangeDisposition` and
+    mechanically so — the wildcard does nothing but ``assert_never`` — so a member
+    added to that enum without a phrase here fails the gate at this site rather than
+    rendering a bullet whose outcome line reads as empty. That is the same shape
+    ``engine._outcome_of`` and ``engine._routed_outcome_of`` already have over the
+    two source vocabularies.
+
+    Args:
+        disposition: The member the episode records.
+
+    Returns:
+        §2's phrase for it, byte for byte.
+    """
+    match disposition:
+        case ExchangeDisposition.NO_ACTION_NEEDED:
+            return "no action was needed"
+        case ExchangeDisposition.STEP_EXECUTED:
+            return "the selected tool ran"
+        case ExchangeDisposition.STEP_DENIED:
+            return "the action was refused by the permission policy"
+        case ExchangeDisposition.STEP_AWAITING_CONFIRMATION:
+            return "the action was parked for the user to confirm"
+        case ExchangeDisposition.STEP_NO_CAPABLE_TOOL:
+            return "no tool advertised the capability the step needed"
+        case ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY:
+            return "several tools advertised the capability, so none was chosen"
+        case ExchangeDisposition.STEP_INVALID_PARAMETERS:
+            return "the step's arguments did not fit the declared schema of any capable tool"
+        case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
+            return "the outbound call could not be described, so nothing was asked or sent"
+        case ExchangeDisposition.ROUTED_PERFORMED:
+            return "the assistant performed the operation the user asked for"
+        case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
+            return "the operation was parked for the user to confirm"
+        case ExchangeDisposition.ROUTED_REFUSED:
+            return "the user declined, so the operation was not performed"
+        case ExchangeDisposition.ROUTED_AMBIGUOUS:
+            return "more than one record matched, so nothing was performed"
+        case ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED:
+            return "more records matched than could be shown, so nothing was performed"
+        case ExchangeDisposition.ROUTED_NOT_FOUND:
+            return "nothing matched, so nothing was performed"
+        case ExchangeDisposition.ROUTED_UNRECORDED:
+            return "the decision could not be recorded, so nothing was performed"
+        case ExchangeDisposition.ROUTED_FAILED:
+            return "the operation was attempted and failed"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(disposition)
 
 
 def _render_plan(
