@@ -404,10 +404,12 @@ async def test_ingestion_is_summarised_on_every_record(tmp_path: Path) -> None:
     assert ingestion["turns_captured"] == 3
     assert ingestion["turns_degraded"] == 0
     assert ingestion["observation_passes"] == 2
-    # The closing window is partial and the read has no offset, so it re-reads one
-    # turn the first pass already distilled — counted, not hidden.
-    assert ingestion["episodes_read"] == 4
-    assert ingestion["episodes_reobserved"] == 1
+    # Two passes over three turns at a batch of two: the first reads turns 1 and 2, the
+    # closing flush reads turn 3 and nothing else. Against the tail read this pass
+    # re-read turn 2 as well; against the watermark it reads only what is above it, so
+    # every turn is read exactly once and nothing is re-observed (ADR-0220 §§1, 3).
+    assert ingestion["episodes_read"] == 3
+    assert ingestion["episodes_reobserved"] == 0
 
 
 async def test_beliefs_distilled_from_the_conversation_reach_the_prompt(
