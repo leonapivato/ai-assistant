@@ -51,8 +51,9 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 
+import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -82,6 +83,8 @@ if TYPE_CHECKING:
         Goal,
         MemoryRecord,
     )
+
+_log = structlog.get_logger(__name__)
 
 #: Total ``complete`` calls a single ``plan`` may make: one initial request plus
 #: one bounded repair round (ADR-0047 §6). The constructor rejects anything < 1.
@@ -666,6 +669,26 @@ def _render_request(
     were handed**, unchanged; the header is inserted at the boundary, nothing is
     reordered or dropped.
 
+    **The tail group, and only the tail group, also renders what the assistant
+    replied** (ADR-0222 §1 and §2). :func:`_reply_lines` is called from the tail loop
+    and from nowhere else, so the reply reaches this prompt for a record of the
+    conversation the turn is *in* and never for one relevance retrieved: §2 keeps the
+    retrieved group phrase-only on three independent grounds, of which the narrowest
+    is that a record retrieved by content was not retrieved for a reply nothing
+    embedded. It is also the group split that keeps ``benchmarks/`` still, since
+    ``planner._split_conversation_tail`` over the harness's records always returns an
+    empty leading run.
+
+    **§5's counter pair is emitted here, once per assembly, and always.** One
+    statement carries both integers — the records eligible to render a reply, and how
+    many §4's ceiling bound on — so the denominator and the numerator of the elision
+    share are observed together and lost together (ADR-0141 §6's rule for the
+    duplicate share). An assembly with no eligible record reports ``0`` and ``0``
+    rather than staying silent, so a missing pair is distinguishable from an empty
+    one, and the statement carries **no reply text** at all (ADR-0004 §5, ADR-0221
+    §11's test 14). ADR-0222 §5 states why these two counts cannot ride an
+    ``OPERATION`` trace instead.
+
     ``context``'s facets are rendered by :func:`_render_facets` under the same
     "Current context:" heading as the four temporal scalars, and **below** them:
     the scalars are this system's own reading of its own clock, a facet is a
@@ -695,11 +718,17 @@ def _render_request(
     lines += _render_facets(context)
     lines.append("")
 
+    eligible = elided = 0
     if memories:
         turns, retrieved = _split_conversation_tail(memories)
         if turns:
             lines.append(_TAIL_HEADING)
-            lines += [_render_record(record) for record in turns]
+            for record in turns:
+                lines.append(_render_record(record))
+                reply = _reply_lines(record)
+                lines += reply.lines
+                eligible += reply.eligible
+                elided += reply.elided
             if retrieved:
                 lines.append("")
         if retrieved:
@@ -708,6 +737,7 @@ def _render_request(
     else:
         lines.append("No stored memories were retrieved for this goal.")
 
+    _log.info("planner_tail_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
 
 
@@ -852,6 +882,169 @@ def _quoted_span(value: str) -> str:
         The quoted, escaped span to interpolate into a prompt line.
     """
     return json.dumps(value)
+
+
+#: ADR-0222 §4's ceiling on one rendered reply, counted on the **output** of
+#: :func:`_quoted_span` with its delimiters included.
+#:
+#: **Written out here and not imported**, which is §4's own instruction: three
+#: subsystems rendering their own prompts do not reach across a boundary golden
+#: rule 1 forbids them to cross, so what ``learning/observer.py``,
+#: ``orchestration/composing.py`` and this module share is the ADR's number rather
+#: than a module — exactly as ADR-0221 §3 has them hold three copies of one phrase
+#: table. ADR-0222 §12 defers promoting it to a ``Settings`` field until §5's
+#: counter pair says a deployment wants a different one.
+#:
+#: **On the quoted rendering, because the expansion is not uniform** (§4). At
+#: ``ensure_ascii=True`` a newline costs two output characters, a BMP code point six
+#: and an astral one — an emoji — twelve, because :func:`json.dumps` writes it as two
+#: surrogate escapes rather than one. A ceiling on *source* characters would admit a
+#: span six or twelve times this long while claiming to admit this much; counted on
+#: the output there is nothing left to get wrong. 640 is roughly a hundred words of
+#: English, about 105 CJK code points and about 53 emoji.
+_REPLY_CEILING: Final = 640
+
+#: The two quote characters :func:`json.dumps` puts around every span. Subtracted
+#: from the ceiling in :func:`_bounded_reply` to bound the search, because a prefix
+#: of *k* characters always renders to at least ``k + 2``.
+_QUOTE_DELIMITERS: Final = 2
+
+
+class _BoundedReply(NamedTuple):
+    """One reply's quoted span, and whether ADR-0222 §4's ceiling bound on it.
+
+    Attributes:
+        span: The rendering to interpolate — at most :data:`_REPLY_CEILING`
+            characters, delimiters included.
+        kept: How many of the reply's **own** characters the span carries, or
+            ``None`` where the whole reply fitted. ``None`` is what §5's "an
+            unelided reply carries no marker" is read off, and the integer is the
+            first of the two numbers §5 puts in the marker.
+    """
+
+    span: str
+    kept: int | None
+
+
+def _bounded_reply(reply: str) -> _BoundedReply:
+    """The longest prefix of ``reply`` whose quoted rendering fits §4's ceiling.
+
+    **The cut is taken on the source text although the ceiling is measured on the
+    output** (ADR-0222 §4). Slicing the *quoted* form could split a six-character
+    unicode escape, or one half of the surrogate pair an astral code point renders
+    as, and produce a span that is not valid JSON at all; slicing the reply's own
+    characters cannot, because a Python string holds code points and
+    :data:`~ai_assistant.core.types.EncodableText` refuses a lone surrogate at the
+    type boundary. So the prefix is chosen over the reply's characters and
+    *measured* by rendering it.
+
+    **A binary search, bounded by arithmetic rather than by the reply's length.**
+    The quoted length is non-decreasing in the prefix length — each further
+    character adds its own escape and nothing is removed — so the predicate is
+    monotone. The search's upper bound is ``_REPLY_CEILING - _QUOTE_DELIMITERS``
+    rather than ``len(reply)`` because every character costs at least one output
+    character, so a longer prefix cannot fit whatever it is made of. That keeps this
+    function's cost independent of how long the stored reply is, which matters
+    because :data:`~ai_assistant.core.types.EncodableText` bounds no length.
+
+    Args:
+        reply: The stored reply, verbatim as this system holds it.
+
+    Returns:
+        The span to render, and the prefix length where the ceiling bound —
+        ``kept`` is ``None`` exactly when the whole reply is rendered.
+    """
+    low = 0
+    high = min(len(reply), _REPLY_CEILING - _QUOTE_DELIMITERS)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(_quoted_span(reply[:middle])) <= _REPLY_CEILING:
+            low = middle
+        else:
+            high = middle - 1
+    return _BoundedReply(_quoted_span(reply[:low]), None if low == len(reply) else low)
+
+
+class _ReplyLines(NamedTuple):
+    """One tail record's reply line, and ADR-0222 §5's two counts of it.
+
+    The counts ride out of the renderer rather than being recomputed over the tail,
+    because eligibility and elision are decided *here* — by reading the two fields
+    and by rendering the reply — and a second walk to count them is a second
+    implementation of §1's and §4's conditions to disagree with the first.
+
+    Attributes:
+        lines: The continuation line to write under the record's own bullet, or
+            nothing where the record is not one §1 admits.
+        eligible: ``1`` where the record was eligible to render a reply under
+            ADR-0222 §1 — a conversation-tail episode carrying a ``disposition``
+            **and** an ``outcome`` — and ``0`` otherwise. §5's denominator, per
+            record.
+        elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise. §5's
+            numerator, per record, and never greater than ``eligible``.
+    """
+
+    lines: list[str]
+    eligible: int
+    elided: int
+
+
+def _reply_lines(record: MemoryRecord) -> _ReplyLines:
+    """The reply line ADR-0222 §1 adds under one **conversation-tail** record's bullet.
+
+    **Called by the tail assembler and never by :func:`_render_record`, and that is
+    what keeps the benchmark harness still** (§1's third clause). ``benchmarks/
+    memory/answer.py`` imports ``_render_record`` by name and calls it directly, so
+    anything put *inside* that function would reach the harness's prompt whether or
+    not the harness meant to build a tail. Emitting the line from the caller makes
+    §2's "no benchmark result moves" true by construction rather than by a gate the
+    harness would have to keep passing — and it is the shape
+    ``composing._render_delivery`` already has for ADR-0205 §5's delivery fact, which
+    "is written under the turn it is about, and only in the tail".
+
+    **The reply is rendered beside the phrase and never instead of it** (§1). The
+    ``how it turned out:`` line :func:`_render_record` emits is unchanged, is
+    rendered first, and states what became of the pass — a typed fact this system
+    authored about its own pipeline. This line states what the user was actually
+    shown. A reply saying "I've set that up for you" beside a phrase saying the
+    action was parked for confirmation is the pair a model needs; either alone is a
+    half-truth, so no site is permitted to trade one for the other.
+
+    **The retrieved group gets none of this** (§2), which is why this function is
+    called from one arm of :func:`_render_request` and not from both. A retrieved
+    episode was not retrieved *for* its reply — retrieval is content-addressed and
+    ``outcome`` is not embedded — so rendering it there would spend budget on prose
+    no part of the selection ever read.
+
+    **The marker is held data and sits outside the quoted span** (§5, ADR-0098 §2).
+    A marker written *inside* the quoted reply is a string the reply itself could
+    contain, so a reply ending in this system's own elision wording would render as
+    though it had been cut when it had not. Both numbers come from :func:`len` over
+    held text and the wording is a literal here, so neither is reachable from the
+    reply; an unelided reply carries no marker, and that absence is what says the
+    line carries the reply whole.
+
+    Args:
+        record: One record of the conversation-tail group.
+
+    Returns:
+        The line to write under its bullet, and §5's two counts for this record.
+    """
+    if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
+        return _ReplyLines([], eligible=0, elided=0)
+    if record.disposition is None or record.outcome is None:
+        return _ReplyLines([], eligible=0, elided=0)
+    span, kept = _bounded_reply(record.outcome)
+    if kept is None:
+        return _ReplyLines([f"    what the assistant replied: {span}"], eligible=1, elided=0)
+    return _ReplyLines(
+        [
+            f"    what the assistant replied "
+            f"(first {kept} of {len(record.outcome)} characters): {span}"
+        ],
+        eligible=1,
+        elided=1,
+    )
 
 
 def _render_record(record: MemoryRecord) -> str:

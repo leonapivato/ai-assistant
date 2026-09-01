@@ -4366,6 +4366,71 @@ async def test_observe_delegates_to_the_stage_and_reports_what_happened() -> Non
     assert all(isinstance(entry, ObservedProposal) for entry in report.proposals)
 
 
+async def test_a_hand_run_pass_records_its_own_counts_on_its_own_trace() -> None:
+    """ADR-0222 §9's counting hook: the interactive seam becomes as legible as the scheduled one.
+
+    §9 names the gap in terms: a scheduled run is traced with a twelve-metric mapper
+    while "a single interactive pass is traced [...] with no mapper and therefore
+    empty metrics. So the denominator of any per-pass figure is readable for scheduled
+    runs and not for interactive ones. That asymmetry is not this decision's to
+    justify and is cheap to close, so the lane closes it."
+
+    **Only counts the report already carries** (ADR-0222 §5's closing clause, which is
+    what makes this hook lawful where §5's own elision counts are not). Every metric
+    below is a field of ``ObservationReport`` or a property it defines; nothing here
+    re-derives a rule that lives in ``orchestration.observation``, and nothing reads
+    proposal *content*, which is why §9's act-record share and laundering count stay a
+    QA-pass reading rather than becoming a field or a trace metric.
+
+    The seam is still ``observe`` and is still outside ADR-0120 §3's machine set — §9
+    adds a mapper, not an operation.
+    """
+    harness = Harness()
+    conversation = await _one_captured_turn(harness)
+
+    report = await harness.engine.observe(conversation_id=conversation)
+
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "observe"
+    assert trace.outcome is TraceOutcome.OK
+    metrics = dict(trace.metrics)
+    assert metrics["episodes_read"] == report.episodes_read == 1
+    assert metrics["proposed"] == len(report.proposals)
+    assert metrics["proposed"] > 0, "the default fake observer proposes from the batch"
+    assert metrics["stored"] == report.stored
+    assert metrics["dropped_unsupported"] == report.dropped_unsupported
+    assert metrics["discarded_unusable"] == report.discarded_unusable
+    assert metrics["discarded_over_limit"] == report.discarded_over_limit
+
+
+async def test_a_hand_run_pass_over_nothing_carries_zeroes_rather_than_no_metrics() -> None:
+    """The same hook, on the pass that used to be indistinguishable from an untraced one.
+
+    A pass whose target holds nothing above its watermark reads no episode and calls
+    no observer, and before ADR-0222 §9 it recorded empty metrics — exactly what a
+    seam with no mapper records. A reader could not tell "nothing to observe" from
+    "nobody wired a reading", which is the asymmetry §9 closes; the zeroes are what
+    makes the two distinguishable.
+    """
+    harness = Harness()
+    conversation = await _one_captured_turn(harness)
+    await harness.engine.observe(conversation_id=conversation)
+
+    report = await harness.engine.observe(conversation_id=conversation)
+
+    assert report.episodes_read == 0
+    _, trace = harness.trace_sink.recorded
+    assert trace.seam == "observe"
+    assert dict(trace.metrics) == {
+        "episodes_read": 0,
+        "proposed": 0,
+        "stored": 0,
+        "dropped_unsupported": 0,
+        "discarded_unusable": 0,
+        "discarded_over_limit": 0,
+    }
+
+
 async def test_observe_with_no_id_selects_the_most_recently_active_conversation() -> None:
     """The façade relays "no id" as ADR-0077 §8's selector, not as "everything"."""
     harness = Harness()

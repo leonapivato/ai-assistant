@@ -755,6 +755,54 @@ def _consolidated(report: ConsolidationReport) -> Observation:
     )
 
 
+def _observed(report: ObservationReport) -> Observation:
+    """Read one **interactive** observation pass onto its own trace (ADR-0222 §9).
+
+    **The asymmetry this closes was not a decision, which is why it is closed here
+    in passing.** A scheduled run has carried a twelve-metric reading since ADR-0218
+    (:func:`_observed_due`), while a hand-run pass was tracked with no mapper at all
+    and therefore recorded empty metrics — so the denominator of any per-pass figure
+    was readable for the scheduler and not for the user. ADR-0222 §9 names that "cheap
+    to close", and closing it is the whole of the mechanism that ADR owes: the
+    act-record share and the laundering count it defines are a **reading of proposal
+    content** in a QA pass, and no field, flag or enum member is added to carry
+    either.
+
+    **Only counts the report already carries** (ADR-0222 §5's closing clause, which
+    is what makes this hook lawful where §5's own elision counts are not). Every
+    value below is a field of
+    :class:`~ai_assistant.core.types.ObservationReport` or a property it defines:
+    ``proposed`` is the length of the entries it returned and ``stored`` is its own
+    property for how many left a record live. Nothing here re-derives a rule that
+    lives in :mod:`ai_assistant.orchestration.observation` — a second statement of
+    which rulings count as committing is a second thing to disagree with the first —
+    and nothing here reaches for content, which ADR-0119 forbids a trace to carry at
+    all.
+
+    **No outcome, because there is no second one to reach.** A pass that raises
+    propagates and takes ``_tracked``'s fault path; a pass that returns is ``OK``,
+    which is the default, and stating it again here would be a second place for the
+    two to disagree. That is the difference from :func:`_consolidated`, whose
+    ``INCOMPLETE`` is a real fourth state ADR-0111 §9 gives a value.
+
+    Args:
+        report: What the pass read, proposed, and what memory did with it.
+
+    Returns:
+        The pass's own counts, on the operation's own trace.
+    """
+    return Observation(
+        metrics={
+            "episodes_read": report.episodes_read,
+            "proposed": len(report.proposals),
+            "stored": report.stored,
+            "dropped_unsupported": report.dropped_unsupported,
+            "discarded_unusable": report.discarded_unusable,
+            "discarded_over_limit": report.discarded_over_limit,
+        }
+    )
+
+
 def _observed_due(report: ObservationRunReport) -> Observation:
     """Read one scheduled observation run onto its own ``OPERATION`` trace (ADR-0119 §8).
 
@@ -4015,7 +4063,11 @@ class Engine:
 
         Tracked like :meth:`converse`/:meth:`learn`: it reads both durable stores
         and writes to one, so shutdown must drain it before closing those
-        connections (ADR-0042 §2).
+        connections (ADR-0042 §2). **And read onto its own trace by
+        :func:`_observed`** (ADR-0222 §9), which is the counting hook that decision
+        owes: a hand-run pass used to record empty metrics while a scheduled run
+        recorded twelve, so the denominator of any per-pass figure was readable for
+        the scheduler and not for the user.
 
         Args:
             conversation_id: The conversation to observe, or ``None`` for the most
@@ -4050,7 +4102,9 @@ class Engine:
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
         check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
-        return await self._tracked(self._observation.observe(selected), "observe", checked=True)
+        return await self._tracked(
+            self._observation.observe(selected), "observe", _observed, checked=True
+        )
 
     async def observe_due(self) -> ObservationRunReport:
         """Observe every conversation that is due, one bounded run (ADR-0218 §3).
