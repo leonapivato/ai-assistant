@@ -28,9 +28,12 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     Attestation,
+    Capture,
     EpisodicMemory,
+    ExchangeDisposition,
     MemoryKind,
     MemorySource,
+    Modality,
     Provenance,
     Validity,
 )
@@ -147,12 +150,25 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
     that contradict each other and two things that both happened never do; and
     ``evidence`` stays empty because an episode is the terminal citation — the thing
     other records cite — so requiring one would demand a regress.
+
+    **Three fields divide the exchange between them since ADR-0221**, and the two new
+    ones are stamped here exactly as ``content`` is: handed over by the pipeline and
+    written unexamined. ``outcome`` carries what the assistant *said* — the composed
+    reply, whole (§1) — where it used to carry one of sixteen constant phrases;
+    ``disposition`` carries what became of the pass (§2); and ``capture`` carries how
+    the user material this episode renders reached this system (§5). Everything ADR-0074
+    §4 and ADR-0217 §1 fix is stamped as it always was, which is the whole of what §12
+    asks of this method.
     """
     wiring = Wiring()
     conversation = await wiring.stage.begin(None)
 
     report = await wiring.stage.capture(
-        conversation.id, content="The user asked: hello", outcome="no action was needed"
+        conversation.id,
+        content="The user asked: hello",
+        outcome="Nothing needed doing, so I did nothing.",
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+        modality=Modality.SPEECH,
     )
 
     assert report.degraded is False
@@ -161,7 +177,13 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
     assert isinstance(stored, EpisodicMemory)
     assert stored.kind == MemoryKind.EPISODIC.value
     assert stored.content == "The user asked: hello"
-    assert stored.outcome == "no action was needed"
+    assert stored.outcome == "Nothing needed doing, so I did nothing.", (
+        "ADR-0221 §1: the composed reply, whole — not a phrase for the disposition"
+    )
+    assert stored.disposition is ExchangeDisposition.NO_ACTION_NEEDED
+    assert stored.capture == Capture(modality=Modality.SPEECH), (
+        "ADR-0221 §5: the value the pipeline passed, neither defaulted nor recomputed here"
+    )
     assert stored.occurred_at == AT
     assert stored.provenance.source is MemorySource.OBSERVED
     assert stored.provenance.confidence == CAPTURE_CONFIDENCE
@@ -194,6 +216,34 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
     # came from, which is why ADR-0201 §1's exclusion of `EPISODIC` from a routed
     # `forget`'s lookup is aligned with this decision rather than in tension with it.
     assert stored.topics == ()
+    # ADR-0221 §6: capture stamps no origin mark. The field exists and the producer is
+    # in hand, and the decision is still deferred — because stamping it changes the
+    # composing prompt's origin phrase and removes ADR-0181 §5's automatic ALLOW for
+    # the egress calls of every later turn. A lane that stamps it changes this line.
+    assert stored.provenance.derived_from_external is False
+
+
+async def test_capture_defaults_the_two_new_fields_where_a_caller_states_neither() -> None:
+    """ADR-0221 §8's defaults, at the seam that writes them.
+
+    A caller stating neither — which after this change is no production path, and is
+    what a benchmark-style row or an older caller looks like — leaves ``disposition``
+    ``None`` and ``capture`` at ``TEXT``. That is §8's discriminator working from the
+    writing side: the **absence** of ``disposition`` is what separates a record written
+    before ADR-0221 from one written after it, so a producer that quietly stamped a
+    member here would erase the distinction the three render sites read.
+    """
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+
+    report = await wiring.stage.capture(conversation.id, content="The user asked: hello")
+
+    assert report.episode_id is not None
+    stored = await wiring.memory.get(report.episode_id)
+    assert isinstance(stored, EpisodicMemory)
+    assert stored.outcome is None
+    assert stored.disposition is None
+    assert stored.capture == Capture(modality=Modality.TEXT)
 
 
 async def test_a_capture_on_a_resumed_conversation_still_writes_no_topics() -> None:
