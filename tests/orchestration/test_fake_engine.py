@@ -1048,3 +1048,35 @@ async def test_an_id_another_open_question_calls_gone_is_never_handed_to_a_new_b
     survivor = await engine.belief(written.record_id)
     assert survivor is not None, "answering the other question touched nothing of it"
     assert survivor.content == "an unrelated correction"
+
+
+async def test_seeding_over_a_held_id_replaces_its_placement_rather_than_inheriting_one() -> None:
+    """``hold``'s ``placement`` default means the default placement, not the last one.
+
+    The table is held beside the beliefs rather than on them, so a conditional write
+    into it would leak: ``hold(id, placement=DERIVED)`` followed by a plain ``hold(id)``
+    would leave a **fresh** belief carrying the previous one's ``DERIVED`` narrowing, and
+    ``unguard`` would then refuse an act on a record no producer had ever narrowed.
+
+    The refusal is what makes this worth a case rather than a comment: it is silent and
+    it fails *closed*, so a consumer meeting it would read a correct-looking
+    "``unguard`` declined" and have no way to tell it from ADR-0217 §3's real clause.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold(
+        "rec-1",
+        content="the merger is off",
+        placement=Placement(
+            reach=PlacementReach.OWNER,
+            set_by=PlacementSetter.DERIVED,
+            set_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        ),
+    )
+
+    engine.hold("rec-1", content="the merger is back on")
+
+    lifted = await engine.unguard("rec-1")
+
+    assert lifted is not None
+    assert lifted.reach is PlacementReach.ANYONE
+    assert lifted.set_by is PlacementSetter.OWNER_ACT
