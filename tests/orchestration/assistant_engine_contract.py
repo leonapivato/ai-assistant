@@ -3255,6 +3255,37 @@ class AssistantEngineContract(ABC):
         assert placed.set_by is PlacementSetter.OWNER_ACT
         assert placed.set_at is not None
 
+    async def test_an_unguard_on_the_default_placement_records_the_owner_s_act(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§7's writing rule in the direction that looks like a no-op and is not.
+
+        The default placement is already reach ``ANYONE``, so an ``unguard`` on it moves
+        no reach — and it **writes anyway**, because §7's exception is for an act that
+        changes "neither the reach nor the setter", and this changes the setter from
+        ``None`` to ``OWNER_ACT``.
+
+        What the write buys is ADR-0217 §3's eligibility clause, which is the whole
+        reason the case matters: a placement whose setter is ``OWNER_ACT`` is **not**
+        displaced by a freshly proposed ``OWNER``/``PROPOSED`` side in a fold, while one
+        whose setter is ``None`` is. So an implementation that returned the default
+        unchanged here would look correct on every reach assertion and would leave a
+        record the owner had explicitly released open to a model narrowing it again by
+        duplication — §3's finality defeated without anything ever writing to the
+        owner's record.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston"))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+
+        released = await engine.unguard(record_id)
+
+        assert released is not None
+        assert released.reach is PlacementReach.ANYONE
+        assert released.set_by is PlacementSetter.OWNER_ACT
+        assert released.set_at is not None
+        assert await engine.unguard(record_id) == released
+
     async def test_a_second_guard_returns_the_first_s_value_and_moves_no_instant(
         self, engine: AssistantEngine
     ) -> None:

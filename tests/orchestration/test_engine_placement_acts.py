@@ -197,6 +197,39 @@ async def test_an_unguard_lifts_a_model_s_proposal_in_one_act(
     assert await _standing(store) == lifted
 
 
+async def test_an_unguard_on_the_default_placement_writes_and_advances_the_revision(
+    plain: tuple[Harness, FakeMemoryStore],
+) -> None:
+    """The store's half of the shared suite's arm, which only a store can say.
+
+    The shared suite pins that the act *returns* reach ``ANYONE`` with setter
+    ``OWNER_ACT``; an implementation that returned that value while writing nothing
+    would pass it and leave the record carrying the default. ADR-0219 §1 gives the
+    check its shape: "every write that stores a row stamps it with a fresh
+    ``revision``", so a revision that moved is the store saying a write landed, and one
+    that did not is the store saying none did.
+
+    It is the exact converse of the case below, which asserts the revision **unmoved**
+    for an act §7 says writes nothing — the two together are what make "writes" and
+    "writes nothing" observable rather than asserted.
+    """
+    harness, store = plain
+    await _seed(store, Placement())
+    before = await store.get(_RECORD)
+    assert before is not None
+
+    released = await harness.engine.unguard(_RECORD)
+
+    after = await store.get(_RECORD)
+    assert after is not None
+    assert released is not None
+    assert released.reach is PlacementReach.ANYONE
+    assert released.set_by is PlacementSetter.OWNER_ACT
+    assert released.set_at is not None
+    assert after.placement == released
+    assert after.revision != before.revision
+
+
 async def test_an_act_that_writes_nothing_leaves_the_stored_revision_alone(
     plain: tuple[Harness, FakeMemoryStore],
 ) -> None:

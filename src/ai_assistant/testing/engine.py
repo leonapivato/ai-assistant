@@ -1920,6 +1920,12 @@ class FakeAssistantEngine:
             rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
         self.beliefs_held[record_id] = held
+        # The placement follows the belief it belongs to, so seeding over an id this
+        # engine already holds **replaces** it rather than inheriting the last one's.
+        # A conditional write here would let `hold(id, placement=DERIVED)` followed by a
+        # plain `hold(id)` leave a fresh, default-placed belief that `unguard` refuses —
+        # a state no producer can reach and one the argument's own default denies.
+        self.placements.pop(record_id, None)
         if placement is not None:
             self.placements[record_id] = placement
         self._spent.add(record_id)
