@@ -6,19 +6,27 @@ composed reply, whole** (§1); ``disposition`` carries what became of the pass a
 member of §2's closed vocabulary; and ``capture.modality`` carries how the user
 material the episode renders reached this system (§5).
 
-ADR-0221 §11's tests 1, 2, 3, 4, 10, 11, 12, 13, 14 and 15 live here, each named in
-the case that discharges it, plus issue #1873's population — a record carrying a
+ADR-0221 §11's tests 1, 2, 3, 10, 11, 12, 13, 14 and 15 live here, each named in the
+case that discharges it, plus issue #1873's population — a record carrying a
 ``disposition`` beside an ``outcome`` of ``None``, which this flip is the first
 thing in the system to write.
 
-**Two of §11's cases are about what does *not* happen**, and they are the ones worth
-reading first. Test 4 asserts that a distinctive span in a captured reply reaches no
-prompt the observer, the planner or the composer assembled: the reply is stored,
-rendered nowhere, and available to the lane that decides to read it. §13's second
-bullet defers every such reader, and each owes #672's escaping fix and newline
-normalisation before it renders a reply into the observer's line-oriented batch — so
-:func:`test_a_captured_replys_distinctive_span_reaches_no_prompt` is "the test a
-reader lane must consciously delete". Test 14 asserts the same of the logs.
+**§11's test 4 has been deleted, and this is where it was.** It asserted that a
+distinctive span in a captured reply reached no prompt the observer, the planner or
+the composer assembled, and §11 named it in terms as "the test a reader lane must
+consciously delete". ADR-0222 §8 performs that deletion — "it is performed here
+rather than left to the implementing lane's discretion" — because §1 and §3 now
+render the reply in the conversation tail and in the observation batch. What replaces
+it is not nothing: §8's assertion 10 keeps test 4's *shape* over the population §2
+keeps phrase-only, at each request assembler, which is why the deletion is a
+narrowing rather than an abandonment. The positive half is asserted end to end here,
+in the case below that used to be test 4.
+
+**Test 14 is untouched and is the case ADR-0222 most easily breaks**, so §8's
+assertion 12 restates it over the change's own surface: the capture path, the
+observation path and the three render sites emit no log event whose payload contains
+the reply's text, elided or whole. Rendering a reply into a prompt is not a licence
+to log it (ADR-0004 §5).
 """
 
 from __future__ import annotations
@@ -761,7 +769,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
             )
 
 
-# --- §11 tests 4 and 14: the reply reaches no prompt and no log ---------------
+# --- §11 test 14, and ADR-0222 §8's assertions 1, 2 and 12, end to end --------
 
 
 def _assembled(*providers: FakeModelProvider) -> str:
@@ -774,26 +782,25 @@ def _assembled(*providers: FakeModelProvider) -> str:
     )
 
 
-async def test_a_captured_replys_distinctive_span_reaches_no_prompt() -> None:
-    """§11 test 4. **This is the test a reader lane must consciously delete.**
+async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch() -> None:
+    """ADR-0222 §8's assertions 1 and 2, driven end to end, where §11's test 4 stood.
 
-    §3: "A record carrying a ``disposition`` has its ``outcome`` rendered into no model
-    prompt by any of them", and the fallback is the whole of the safety argument — a
-    post-change episode renders the phrase for its disposition, which is the string a
-    pre-change episode of the same shape carried, so the prompt is byte-identical and
-    the reply reaches no model.
+    §11's test 4 asserted the opposite of this and named itself "the test a reader
+    lane must consciously delete"; ADR-0222 §8 deletes it, and this is the case that
+    stands in its place over the same fixture. A reply is captured carrying a span
+    nothing else here holds, a **further turn of the same conversation** runs so the
+    episode enters the next turn's supply as a tail record, and an **observation
+    pass** runs over it. The real planner, composer and observer stand behind
+    recording providers, because a fake assembles no prompt and the render sites live
+    inside the producers.
 
-    Driven end to end rather than at the render sites, because that is what §11 test 4
-    asks for: a reply is captured carrying a span nothing else in the fixture holds, a
-    **further turn of the same conversation** runs so the episode enters the next
-    turn's supply, and an **observation pass** runs over it. The real planner and the
-    real observer stand behind recording providers, because a fake assembles no prompt
-    and the render sites live inside the producers.
+    **The phrase is still there beside it**, which is §1's and §3's whole shape: the
+    two are different facts and neither implies the other, so the assertion is that
+    the prompt carries both and not that it carries the reply.
 
-    §13's second bullet is what this defends: every reader of the stored reply is
-    deferred, and each owes #672's escaping fix *and* newline normalisation before it
-    renders a reply into the observer's line-oriented batch. A lane that wants the
-    reply in a prompt deletes this case deliberately and pays those costs.
+    §13's second bullet is what this discharges — "every reader of the stored reply"
+    was deferred, and this lane is two of the four it names. The escaping and
+    normalisation it conditioned them on are ``_quoted_span``'s, at all three sites.
     """
     planning_model = FakeModelProvider(
         json.dumps(
@@ -829,19 +836,28 @@ async def test_a_captured_replys_distinctive_span_reaches_no_prompt() -> None:
     )
     await harness.engine.observe(conversation_id=first.conversation_id)
 
-    assembled = _assembled(planning_model, observing_model, composing_model)
-    assert _SPAN not in assembled, (
-        "ADR-0221 §3: a record carrying a disposition has its outcome rendered into no "
-        "model prompt by the observer, the planner or the composer"
+    tail = _assembled(planning_model, composing_model)
+    batch = _assembled(observing_model)
+    assert f"what the assistant replied: {json.dumps(f'You went hiking, {_SPAN}.')}" in tail, (
+        "ADR-0222 §1: a conversation-tail record renders its reply under its own bullet"
     )
-    assert "the selected tool ran" in assembled, (
-        "and what is rendered in its place is §2's phrase for the disposition, which is "
-        "the string a pre-change episode of the same shape carried"
+    assert f"Assistant said: {json.dumps(f'You went hiking, {_SPAN}.')}" in batch, (
+        "ADR-0222 §3: the observation batch renders it as a second continuation line"
     )
+    assert "the selected tool ran" in tail, (
+        "§1: the phrase line is rendered first and the reply never replaces it"
+    )
+    assert "the selected tool ran" in batch, "§3: the same, over the observation batch"
 
 
 async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> None:
-    """§11 test 14: ADR-0004 §5 names "message bodies" a redaction target.
+    """§11 test 14, restated by ADR-0222 §8's assertion 12 over the new render sites.
+
+    ADR-0004 §5 names "message bodies" a redaction target, and §8 restates this case
+    "because this is the change that would most easily break it": rendering a reply
+    into a prompt is not a licence to log it. So the subjects are the capture path,
+    the observation path **and the three render sites**, each of which now emits
+    ADR-0222 §5's counter pair — two integers and no text — once per assembly.
 
     The capture path logs only where something failed, so the degraded routes are the
     ones worth driving: a refused ``append`` writes ``conversation_capture_degraded``
@@ -878,10 +894,22 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
             raise ConversationStoreError(msg)
 
     observing_model = FakeModelProvider(json.dumps({"beliefs": []}))
+    # The *real* planner on the happy path, so its render site is a subject here too
+    # (ADR-0222 §8's assertion 12 names all three): a fake planner assembles no prompt
+    # and emits no counter pair.
+    planning_model = FakeModelProvider(
+        json.dumps(
+            {
+                "rationale": "one step",
+                "steps": [{"intent": "send it", "capability": CAPABILITY, "parameters": {}}],
+            }
+        )
+    )
     with structlog.testing.capture_logs() as captured:
         happy = Harness(
+            tools=(tool(),),
             composing=_replying(f"Certainly, {_SPAN}."),
-            planner=NoStepPlanner(),
+            planner=ModelBackedPlanner(planning_model),
             observer=ModelBackedObserver(observing_model),
         )
         outcome = await happy.engine.converse("go on", timeout=PATIENT)
@@ -914,7 +942,16 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
     assert stages == {"append", "episode"}, (
         "both of capture's logging branches ran, so the assertion below has both subjects"
     )
+    counted = {
+        event["event"] for event in captured if str(event["event"]).endswith("replies_rendered")
+    }
+    assert counted == {
+        "planner_tail_replies_rendered",
+        "composing_tail_replies_rendered",
+        "observation_batch_replies_rendered",
+    }, "all three of ADR-0222 §5's counting sites ran, so they are subjects here too"
     assert not any(_SPAN in json.dumps(event, default=str) for event in captured), (
-        "ADR-0221 §11 test 14: no log event on the capture or observation path carries "
-        "the captured reply's text"
+        "ADR-0221 §11 test 14, as ADR-0222 §8's assertion 12 restates it: no log event "
+        "on the capture path, the observation path or the three render sites carries the "
+        "reply's text, elided or whole"
     )

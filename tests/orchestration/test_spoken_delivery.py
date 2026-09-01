@@ -559,7 +559,11 @@ async def test_a_report_about_turn_one_reaches_turn_threes_composing_input() -> 
     assert len(bullets) >= 3, "the tail carries the three earlier turns"
     lines = prompt.splitlines()
     at = lines.index(bullets[0])
-    assert any("THE USER DID NOT HEAR ALL OF THIS" in one for one in lines[at + 1 : at + 3]), (
+    # Three lines of window rather than two, since ADR-0222 §1: a tail record renders
+    # its bullet, the `how it turned out:` line, and now the reply line, and the
+    # delivery fact is written under all of them — deliberately last, so that "ALL OF
+    # THIS" reads as the text on the line above it.
+    assert any("THE USER DID NOT HEAR ALL OF THIS" in one for one in lines[at + 1 : at + 4]), (
         "the fact follows the first turn's bullet, which is the episode it qualifies"
     )
     assert "THE USER DID NOT HEAR ALL OF THIS" not in "\n".join(
