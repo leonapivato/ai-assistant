@@ -5642,6 +5642,16 @@ def _step_headline(status: StepStatus, tool: str) -> str:
 #: What the ask was routed to, in words, for the one line that says what was asked
 #: for. Total over :class:`RoutableOperation` so a member added under ADR-0197 §3's
 #: widening rule fails here rather than rendering as its enum value.
+#:
+#: **ADR-0217 §7's two acts are entries here and not a rendering decision** (§11). That
+#: section's closing clause admits "no gateway route, no rendering and no further
+#: consumer", and this map is neither: the widening lane owes it, by the sentence above
+#: and by ADR-0197 §3's widening rule, and deferring it is the failure that sentence
+#: names — `_render_routed_candidates`' fall-through raises for any confirm-owed member
+#: with no arm, which both acts are. What §11 forbids a lane to add is a rendering of a
+#: **placement** — a reach, a setter, an instant — and nothing here renders one. The
+#: entries are ADR-0137 §1 adaptation into a map this adapter already owns, not the
+#: §4 consumer that is briefed after a merged contract: neither act is called here.
 _ROUTED_ASKED: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.QUESTIONS: "list what is waiting on your answer",
     RoutableOperation.RECENT_READS: "list the attempts to read your sources",

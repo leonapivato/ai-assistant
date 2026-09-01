@@ -131,6 +131,33 @@ class _RacingStore(FakeMemoryStore):
         return found
 
 
+class _DeletingStore(FakeMemoryStore):
+    """A store in which the record is **destroyed** inside the act's window.
+
+    ``_RacingStore``'s other writer, taken to its limit: ADR-0219 §3 makes a row that
+    is gone a *stale* conditional write and not a silent no-op — "a row deleted between
+    the caller's read and its write is a lost update of the starkest kind" — so this is
+    the one interleaving that reaches the act's retry and then finds nothing to decide
+    over. The act must answer ``None``, on ``forget``'s reading of an id naming nothing
+    live, rather than surfacing the store's refusal.
+    """
+
+    def __init__(self) -> None:
+        """Create a store that deletes the record after the first read of it."""
+        super().__init__(now=lambda: AT)
+        #: Whether the deletion has landed. A negative control: an act that never
+        #: re-read would leave this ``False`` at the end of a passing assertion.
+        self.destroyed = False
+
+    async def get(self, record_id: str) -> MemoryRecord | None:
+        """Read as the fake does, then destroy the record the first time."""
+        found = await super().get(record_id)
+        if found is not None and not self.destroyed:
+            self.destroyed = True
+            await self.delete(record_id)
+        return found
+
+
 async def _engine(store: FakeMemoryStore) -> AsyncIterator[Harness]:
     """A wired engine over ``store``, started and closed."""
     harness = Harness(memory=store, now=lambda: AT)
@@ -394,6 +421,32 @@ async def test_an_act_follows_the_stored_placement_and_not_a_rendered_one(
 
     assert answered == _DERIVED
     assert await _standing(store) == _DERIVED
+
+
+@pytest.mark.parametrize("method", ["guard", "unguard"])
+async def test_a_record_destroyed_inside_the_window_answers_none_after_the_retry(
+    method: str,
+) -> None:
+    """The retry's other ending, which the case below cannot reach.
+
+    That case deletes **before** the act runs, so the act's *first* read finds nothing
+    and returns without ever attempting a write. Here the record is there when the act
+    reads it and gone when it writes: ADR-0219 §3 makes that a ``MemoryStoreStaleError``
+    rather than a no-op, precisely so "answering it with a silent no-op would hand the
+    caller exactly the healthy result the race used to hand both writers".
+
+    So the act meets the stale refusal, re-reads under §7's bound, finds nothing, and
+    answers ``None``. An implementation that let the store's refusal reach the caller
+    would raise ``MemoryStoreError`` on an id that simply is not there any more, which
+    is the one case ADR-0217 §7 says is **not** an error — and it would pass every other
+    case in this file, because every other interleaving leaves a record behind.
+    """
+    store = _DeletingStore()
+    async for harness in _engine(store):
+        await _seed(store, Placement())
+
+        assert await getattr(harness.engine, method)(_RECORD) is None
+        assert store.destroyed
 
 
 async def test_an_act_on_a_record_the_store_no_longer_holds_answers_none(
