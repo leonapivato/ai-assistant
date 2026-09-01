@@ -1848,6 +1848,7 @@ class FakeAssistantEngine:
         evidence_elided: int = 0,
         attestation: Attestation | None = None,
         derived_from_external: bool = False,
+        placement: Placement | None = None,
     ) -> Belief:
         """Put one belief in memory, and return it.
 
@@ -1893,6 +1894,13 @@ class FakeAssistantEngine:
                 the ``ATTESTED`` band and refused on the other two.
             derived_from_external: Whether a ``DERIVED`` belief's warrant traces to
                 recorded external content.
+            placement: Who may receive this record (ADR-0217 §1). A knob because
+                nothing on this surface writes one but the owner's own act: ADR-0204
+                §2's derivation runs inside a turn and ADR-0217 §4's proposal is a
+                producer's, so the two placements a consumer most needs to test an act
+                against — a ``DERIVED`` narrowing and a model's ``PROPOSED`` one —
+                cannot be reached by calling the fake. ``None`` leaves the record
+                carrying §6's default, which is what a fresh belief has.
 
         Returns:
             The belief now held.
@@ -1912,6 +1920,8 @@ class FakeAssistantEngine:
             rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
         self.beliefs_held[record_id] = held
+        if placement is not None:
+            self.placements[record_id] = placement
         self._spent.add(record_id)
         return held
 

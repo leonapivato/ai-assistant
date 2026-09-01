@@ -47,6 +47,7 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
@@ -79,6 +80,9 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Message,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PlanStep,
     Provenance,
     Reversibility,
@@ -745,6 +749,50 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def derived_placement(self) -> AsyncIterator[DerivedPlacementSubject]:
+        """One wired engine over a store holding a belief the derivation placed.
+
+        The record is written **into the store** rather than reached through the
+        surface, for :attr:`routed_park`'s reason with no turn to drive: ADR-0204 §2's
+        evaluation runs between retrieval and planning and writes what a producer
+        writes, and ADR-0217 §4's proposal is a producer's too, so no call on this
+        engine produces setter ``DERIVED``.
+
+        The placement carries an **instant**, because ADR-0217 §1 admits an untimed
+        ``DERIVED`` placement for §9's decode alone: a producer that narrowed stamps
+        one, and a fixture that omitted it would be handing the suite a record only the
+        legacy decode can produce.
+        """
+        records = FakeMemoryStore(now=lambda: AT)
+        await records.write_atomic(
+            [
+                MemoryWrite(
+                    record=SemanticMemory(
+                        id="rec-derived",
+                        content="the user's consultant said the merger is off",
+                        fact="the user's consultant said the merger is off",
+                        validity=Validity(),
+                        provenance=Provenance(
+                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                        ),
+                        placement=Placement(
+                            reach=PlacementReach.OWNER,
+                            set_by=PlacementSetter.DERIVED,
+                            set_at=AT,
+                        ),
+                    ),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                )
+            ]
+        )
+        built = _wire(memory=records)
+        await built.start()
+        try:
+            yield DerivedPlacementSubject(engine=built, record_id="rec-derived")
         finally:
             await built.aclose()
 

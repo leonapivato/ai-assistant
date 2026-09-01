@@ -86,9 +86,12 @@ if TYPE_CHECKING:
 #: than about how fast the suite runs.
 AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
-#: The nine members ADR-0197 §3 fixes, split by its own tag. Spelled out rather than
+#: The members ADR-0197 §3 fixes, split by its own tag. Spelled out rather than
 #: derived from :attr:`RoutableOperation.confirm_owed`, because deriving it would make
 #: the roster agree with the property by construction and assert nothing about either.
+#: The count is not stated: it is the roster's own length, and a numeral beside it
+#: would be a second claim to keep in step (`CONTRIBUTING.md` -> "No state claims in
+#: living documents").
 _READ_ONLY: Final = (
     "questions",
     "recent_reads",
@@ -97,7 +100,7 @@ _READ_ONLY: Final = (
     "standing_grants",
     "spend_totals",
 )
-_CONFIRM_OWED: Final = ("forget", "revoke", "forget_question")
+_CONFIRM_OWED: Final = ("forget", "revoke", "forget_question", "guard", "unguard")
 
 
 # --- the smallest coherent value of each RoutedListing arm -------------------
@@ -211,6 +214,8 @@ _ROW: Final[Mapping[RoutableOperation, Callable[[], BaseModel]]] = {
     RoutableOperation.FORGET: belief,
     RoutableOperation.REVOKE: grant,
     RoutableOperation.FORGET_QUESTION: question,
+    RoutableOperation.GUARD: belief,
+    RoutableOperation.UNGUARD: belief,
 }
 
 
@@ -251,14 +256,15 @@ def parked_step() -> StepOutcome:
 # --- §3's vocabulary and §8's outcomes, pinned as rosters --------------------
 
 
-def test_the_routable_vocabulary_is_exactly_the_nine_members_section_three_names() -> None:
-    """ADR-0197 §3 closes the vocabulary at nine, and the closure is the decision.
+def test_the_routable_vocabulary_is_exactly_the_members_section_three_names() -> None:
+    """ADR-0197 §3 closes the vocabulary, and the closure is the decision.
 
-    A tenth member is a ``core/types.py`` change ratified contract-first, and §3's
+    A member added to it is a ``core/types.py`` change ratified contract-first, and §3's
     widening rule states five conditions a lane must show its member satisfies. Pinning
     the roster here is what makes a member added silently fail the gate — "adding a
     member silently does not satisfy this clause, and neither does citing this ADR in
-    place of the statement".
+    place of the statement". ADR-0217 §7 is the widening this roster last grew for, and
+    it states all five in its own text.
 
     **The values are pinned too**, because they are ``StrEnum`` strings the router
     emits and a stored row carries: renaming one changes what a conforming model must

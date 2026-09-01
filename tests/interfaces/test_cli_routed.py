@@ -309,6 +309,35 @@ async def test_an_ambiguous_route_shows_every_candidate_and_performed_nothing(
     assert code == 0, "an ambiguity is an answer to the request, not a failure of it"
 
 
+@pytest.mark.parametrize("operation", [RoutableOperation.GUARD, RoutableOperation.UNGUARD])
+async def test_an_ambiguous_placement_act_renders_its_candidates_as_beliefs(
+    output: StringIO,
+    operation: RoutableOperation,
+) -> None:
+    """ADR-0217 §7 puts both acts on ``forget``'s candidate set, so both list beliefs.
+
+    The arm matters because the fall-through in this adapter's candidate renderer
+    raises: a confirm-owed member with no arm of its own would reach it, and a member
+    §8 says "is never ambiguous" is exactly what these two are not — they are
+    confirm-owed, so ADR-0197 §8 admits all eight outcomes to them, the two ambiguous
+    ones included.
+    """
+    engine = FakeAssistantEngine()
+    engine.turn_outcome = _routed(
+        operation,
+        RouteOutcome.AMBIGUOUS,
+        listing=(_belief("b-1", content="you drink tea"), _belief("b-2", content="you drink chai")),
+    )
+
+    code = await _drive(engine)
+
+    rendered = output.getvalue()
+    assert "you drink tea" in rendered
+    assert "you drink chai" in rendered
+    assert "the belief is placed as it was" in rendered
+    assert code == 0
+
+
 async def test_the_truncated_member_says_there_are_more_than_it_can_show(
     output: StringIO,
 ) -> None:
@@ -461,6 +490,107 @@ async def test_a_revoke_card_says_what_withdrawing_costs(output: StringIO) -> No
     assert "About to withdraw the grant on one source" in rendered
     assert "calendar" in rendered
     assert "destroys nothing I have already learned from it" in rendered
+
+
+@pytest.mark.parametrize(
+    ("operation", "asked", "note"),
+    [
+        (
+            RoutableOperation.GUARD,
+            "About to keep one belief for you alone",
+            "It destroys nothing, changes nothing I hold, and you can undo it.",
+        ),
+        (
+            RoutableOperation.UNGUARD,
+            "About to let one belief be spoken to anyone again",
+            "Where I narrowed it myself, that narrowing stands",
+        ),
+    ],
+)
+async def test_a_placement_act_s_card_says_what_the_act_does_not_do(
+    output: StringIO, operation: RoutableOperation, asked: str, note: str
+) -> None:
+    """ADR-0197 §7's card, over ADR-0217 §7's two acts.
+
+    The second half of each note is the half a person cannot read off the belief on
+    screen, and it is the half that would otherwise be guessed wrong in each direction:
+    guarding looks like it might discard something and does not, and unguarding looks
+    total and is not — "where I narrowed it myself, that narrowing stands", which is
+    ADR-0204 §5's closing prohibition said in the one place a user meets it.
+
+    **Not ADR-0073 §5's forget ceremony**, although the subject is the same ``Belief``
+    arm: that ceremony is about destruction, and rendering it here would tell a user an
+    act that changes an audience destroys their record.
+    """
+    engine = FakeAssistantEngine()
+    card = engine.park_routed("h-1", operation=operation, subject=(_belief(),))
+    engine.turn_outcome = TurnOutcome(
+        turn=None,
+        conversation_id="c-1",
+        routed=RoutedOperation(
+            operation=operation,
+            outcome=RouteOutcome.AWAITING_CONFIRMATION,
+            confirmation=card,
+        ),
+        reply=None,
+    )
+
+    await _drive(engine, answer=False)
+
+    rendered = output.getvalue()
+    assert asked in rendered
+    assert note in rendered
+    assert "This destroys the record" not in rendered
+
+
+async def test_an_unguard_that_ran_does_not_claim_the_belief_is_now_speakable(
+    output: StringIO,
+) -> None:
+    """The one line in this adapter that ADR-0217 §7 obliges to be **hedged**.
+
+    A ``PERFORMED`` ``unguard`` may have written nothing: "where the placement's setter
+    is ``DERIVED``, ``unguard`` writes **nothing**", and it reports that by returning
+    the unchanged placement rather than by raising. A routed pass cannot tell the two
+    apart, because ``perform`` drops the returned value under ADR-0197 §6, so a
+    sentence claiming the belief is now speakable would be a claim this surface cannot
+    check — on the one axis where the meaning lost is the restrictive one.
+
+    ``guard`` needs no such hedge and is asserted plainly beside it, because every
+    branch of ADR-0217 §3 leaves the record at reach ``OWNER``, the refusal included.
+    """
+    engine = FakeAssistantEngine()
+    engine.turn_outcome = TurnOutcome(
+        turn=None,
+        conversation_id="c-1",
+        routed=RoutedOperation(operation=RoutableOperation.UNGUARD, outcome=RouteOutcome.PERFORMED),
+        reply=_REPLY,
+    )
+
+    await _drive(engine)
+
+    rendered = output.getvalue()
+    assert "A narrowing I derived myself still stands" in rendered
+    assert "an act does not lift one" in rendered
+
+
+async def test_a_guard_that_ran_says_plainly_what_it_did(output: StringIO) -> None:
+    """The unhedged counterpart, which is what makes the hedge above load-bearing.
+
+    A suite that only pinned the hedge could be satisfied by an adapter that hedged
+    both, which would tell a user their explicit guard might not have taken effect when
+    it always does.
+    """
+    engine = FakeAssistantEngine()
+    engine.turn_outcome = TurnOutcome(
+        turn=None,
+        conversation_id="c-1",
+        routed=RoutedOperation(operation=RoutableOperation.GUARD, outcome=RouteOutcome.PERFORMED),
+        reply=_REPLY,
+    )
+
+    await _drive(engine)
+
+    assert "That belief is kept for you alone." in output.getvalue()
 
 
 async def test_a_routed_park_composes_no_answer_beside_the_question(

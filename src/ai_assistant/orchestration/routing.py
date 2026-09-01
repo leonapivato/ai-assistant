@@ -174,6 +174,8 @@ The operations you may name, and nothing else:
   forget               — destroy one thing the assistant believes about the user
   revoke               — withdraw the user's grant on one source
   forget_question      — destroy one question the assistant is waiting on
+  guard                — keep one belief for the user alone, spoken to nobody else
+  unguard              — let one belief be spoken to anyone again
 
 Where the user is asking for one of those, reply with a ROUTE:
 
@@ -182,9 +184,9 @@ Where the user is asking for one of those, reply with a ROUTE:
 `query` is the user's own words for WHICH belief, source or question they mean, \
 copied from their sentence: the words that NAME the thing, without the words that ask \
 for the operation and without the connective that joined them — "forget that I like \
-jazz" gives "I like jazz". Include it for forget, revoke and forget_question, and \
-omit it for the six listing operations, which take no subject. Never invent an \
-identifier; never guess a subject the user did not name.
+jazz" gives "I like jazz". Include it for forget, revoke, forget_question, guard and \
+unguard, and omit it for the listing operations, which take no subject. Never invent \
+an identifier; never guess a subject the user did not name.
 
 Where the user is asking for anything else at all — a question about the world, a \
 task, a conversation, or an operation not on the list — reply with a DECLINE:
