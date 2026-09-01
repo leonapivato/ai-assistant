@@ -233,6 +233,11 @@ class _WatchedConversations(FakeConversationStore):
         #: When set, the conversation is stamped deleted immediately before the
         #: advance — §6's deletion race, which no fake produces on its own.
         self.stamp_before_advance = False
+        #: Seconds the candidate listing parks for before answering. ADR-0218 §2's
+        #: due test is awaited work of its own — a listing and up to fifty page
+        #: probes — so a case about the run budget needs a way to spend it *there*
+        #: rather than inside a pass.
+        self.listing_delay = 0.0
         #: Every ``turns_after`` and every ``turns`` this store was asked for, in
         #: call order. ADR-0218 §2 rules that "the page read to decide is the page
         #: the pass reads: no turn is read twice", which is a claim about *calls*
@@ -264,6 +269,12 @@ class _WatchedConversations(FakeConversationStore):
         which the conversation is gone by the time the pass ends.
         """
         return self._conversations[conversation_id].observed_through
+
+    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
+        """List the candidates, parking first if the case wants the budget spent here."""
+        if self.listing_delay:
+            await asyncio.sleep(self.listing_delay)
+        return await super().conversations_with_unobserved_turns(limit=limit)
 
     async def turns_after(
         self,
@@ -2212,6 +2223,34 @@ async def test_a_run_drains_one_conversation_across_passes_until_it_leaves_the_s
     # The third pass is stopped by the **watermark** and not by the listing's bound:
     # the conversation has left the candidate set because nothing stands above it.
     assert await harness.watermark(conversation) == 5
+
+
+async def test_a_budget_the_due_test_spent_leaves_the_pass_unbegun() -> None:
+    """The other half of the boundary, and the half a pass-length case cannot reach.
+
+    ADR-0218 §2's due test is awaited work of its own — one listing, and up to fifty
+    bounded page probes on a tick where nothing is quiet — so a run that checked its
+    budget only *before* selecting could begin a pass on a budget those reads had
+    already spent, and overrun by the due test **as well as** by one pass where §3
+    allows one pass.
+
+    Here the listing alone outlasts the budget, so the candidate is due, is selected,
+    and is then not served: no model is called and no watermark moves, which is the
+    difference between abandoning a pass part-way and never beginning one. What the
+    check cannot bound is the listing's own duration — those are local store calls,
+    which ADR-0218 §8 narrows out of ADR-0111 §4's deadline clause and #1817 holds.
+    """
+    harness = Harness(now=_Clock(), run_budget=timedelta(milliseconds=10))
+    harness.conversations.listing_delay = 0.05
+    conversation = await harness.conversation_stamped(active_at=AT, stamps=[AT, AT])
+
+    report = await harness.stage.run()
+
+    assert report.passes == 0
+    assert report.budget_spent is True
+    assert harness.fake.call_count == 0
+    assert harness.conversations.advances == []
+    assert await harness.watermark(conversation) is None
 
 
 @pytest.mark.parametrize("figure", ["quiet_window", "max_unobserved_age", "run_budget"])
