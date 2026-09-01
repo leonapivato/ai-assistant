@@ -28,6 +28,7 @@ from ai_assistant.core.errors import (
     FoldOntoCitedRecordError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    MemoryStoreStaleError,
     SelfConsumingWriteError,
     UnresolvedEvidenceError,
 )
@@ -2025,7 +2026,12 @@ class MemoryIngestor:
         )
         self._id_factory = id_factory
         self._reconciler = reconciler
-        # Guards the read-modify-write in `ingest` (issue #248). Constructed
+        # Guards the read-modify-write in `ingest` (issue #248). **Kept** by
+        # ADR-0219 §5 rather than made redundant by the conditional fold: it is
+        # the only thing serialising the injected policy's `decide` within one
+        # ingestor, and it keeps the common case off the retry path entirely.
+        # Whether it can be narrowed or dropped is a question for a lane that
+        # measures it. Constructed
         # here rather than lazily because since Python 3.10 an `asyncio.Lock`
         # binds no loop until it is first awaited, so an ingestor may be built
         # before the loop exists.
@@ -2050,25 +2056,33 @@ class MemoryIngestor:
         ``SUPERSEDE``) folds the proposal into a conflict snapshot taken by the
         search above it, and writes the result back at that record's id.
         Interleaved, two ingests both snapshot the same target before either
-        writes, and the second ``add`` silently discards the first — with both
-        callers handed a healthy result. Since ADR-0038 the discarded write may
-        be a user correction, so the whole sequence is serialised on a lock held
-        by this ingestor.
+        writes, and an unconditional write silently discards the first — with both
+        callers handed a healthy result. Since ADR-0038 the discarded write may be
+        a user correction.
 
-        What that does **not** cover, stated plainly because the guarantee is
-        narrower than "ingestion is safe":
+        **Two mechanisms close that, and they close different halves of it**
+        (issue #248, ADR-0046 §5, ADR-0219 §5).
 
-        - **Only this ingestor.** Two ``MemoryIngestor`` instances over one
-          store hold two different locks and race exactly as before.
-        - **Only this process.** An in-process lock says nothing about two
-          processes sharing a store file. Closing that needs a compare-and-swap
-          on the store itself — a ``MemoryStore`` contract change, tracked as
-          issue #104 with issue #248.
+        - **The lock keeps the common case off the retry path.** The whole
+          sequence is serialised on an ``asyncio.Lock`` held by this ingestor
+          (#262), so two ingests through *this* object never interleave at all. It
+          spans the injected policy's ``decide``, because the ruling is what the
+          write is derived from; a policy that blocks on I/O therefore blocks
+          other ingests. That is the cost of the guarantee, not an oversight.
+        - **The conditional write closes what the lock cannot reach.** The fold
+          writes ``IF_UNCHANGED`` at the revision of the record it was derived
+          from, so a target another writer moved in between is *refused* rather
+          than overwritten, and :meth:`_ingest` re-runs the whole cycle once
+          against the store as it now stands. That covers the two residuals
+          ADR-0046 §5 named and #262's lock does not: a second
+          ``MemoryIngestor`` over one store, holding a different lock, and a
+          second *process* sharing a store file, which no in-process lock
+          reaches. On a durable backend the comparison and the write are one
+          indivisible step inside the batch's transaction (ADR-0219 §3).
 
-        The lock spans the injected policy's ``decide`` as well, because the
-        ruling is what the write is derived from; a policy that blocks on I/O
-        therefore blocks other ingests. That is the cost of the guarantee, not
-        an oversight.
+        Neither is redundant and neither is a substitute for the other, which is
+        why ADR-0219 §5 keeps the lock: the mode does not serialise ``decide``,
+        and the lock does not cross an object or a process boundary.
 
         **Five refusals precede or replace a ruling**, in the order they fire:
 
@@ -2133,7 +2147,10 @@ class MemoryIngestor:
                 target is not covered by a confirmation, if a ``SUPERSEDE`` names a
                 conflict this writer holds a ``RESTATES`` or ``ADDS`` relation for,
                 if a retirement's window cannot be closed, or on any other store or
-                applier failure.
+                applier failure. That includes the ``MemoryStoreStaleError`` a fold
+                raises where **both** of its two attempts met a target another
+                writer had moved (ADR-0219 §5): a subclass, so this member gains no
+                error and ADR-0028 §5's one-error seam is unmoved.
         """
         # One observation of the caller's proposal, taken on this coroutine's
         # first executed line — before the lock, which is `ingest`'s first await
@@ -2189,10 +2206,17 @@ class MemoryIngestor:
         single writer serialised as #262 serialises one today ... with no new
         ``core`` surface at all". The general two-writer case is **not** closed here
         and was never claimed to be: ADR-0046 §5 scopes that residual to "any two
-        writers not sharing that lock" and leaves it to #248, and ADR-0110 §5b
-        withholds the compare-and-swap and its concurrency token in terms, so
-        building a store-wide primitive here would be deciding a second lane's
-        contract inside this one. What holds the premise up is the composition root
+        writers not sharing that lock".
+
+        **The conditional write now exists and this path deliberately does not use
+        it.** ADR-0219 supplies the compare-and-swap ADR-0110 §5b withheld, and the
+        fold takes it (:meth:`_fold`, :meth:`_apply_supersede`) — but §5 names those
+        two call sites and no others, and the closes :meth:`_close_absent` computes
+        are a different read-modify-write with a different read: the *selection* of
+        what a coverage warrants closing, which no per-record revision expectation
+        covers. Making them conditional is a lane of its own with its own decision to
+        take, and asserting it here would be deciding it. What holds the premise up
+        for this member is still the composition root
         wiring exactly one writer, which ``tests/app/test_composition.py`` asserts by
         identity — the only place a type cannot express it (ADR-0028 §4).
 
@@ -2486,6 +2510,43 @@ class MemoryIngestor:
             offset += _ABSENCE_PAGE
 
     async def _ingest(self, observed: MemoryUpdateProposal) -> _Ingested:
+        """One proposal's read-modify-write, re-run once if the store moved under it.
+
+        ADR-0219 §5's bound, and the half of #248 that the conditional write on its
+        own does not close: the mode makes a lost update *impossible*, and this makes
+        the ingest that met one *converge*. Without it a stale refusal would reach the
+        caller as a `MemoryStoreError` on an ingest that had nothing wrong with it.
+
+        **The re-run is the whole cycle and never a re-submission** (§5). Conflict
+        detection, the reconciler, the policy's ruling and the fold all run again
+        against the store as it now stands, and the merge computed over the rejected
+        snapshot is discarded rather than resent. A fold folds a proposal into a
+        *snapshot*: re-submitting that payload against a moved target is the lost
+        update wearing a conditional write's clothes, and re-asking the policy is the
+        only thing that keeps the ruling derived from the state the write lands on.
+        That is the property #262's lock buys within one ingestor, restored across
+        ingestors and across processes.
+
+        **Two attempts in all**, matching ADR-0217 §7's bound, and written as two
+        statements rather than a loop so the bound is the code rather than a constant
+        the code consults. A second refusal propagates as the ``MemoryStoreError`` it
+        is — the caller is told the store would not take the write, and is never
+        handed the healthy ``MemoryIngestResult`` ADR-0046 §5 says the old race handed
+        both writers. Raised from inside the first refusal's handler, so the traceback
+        names both.
+
+        Raises:
+            MemoryStoreStaleError: If a second attempt is also refused as stale.
+                Nothing is written by either attempt.
+        """
+        try:
+            return await self._ingest_once(observed)
+        except MemoryStoreStaleError:
+            # Nothing was written — ADR-0219 §3's all-or-nothing — so there is no
+            # partial state to unwind before the cycle runs again.
+            return await self._ingest_once(observed)
+
+    async def _ingest_once(self, observed: MemoryUpdateProposal) -> _Ingested:
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._detect_conflicts(observed.proposed)
         resolved = tuple(record.id for record in conflicts)
@@ -2880,7 +2941,18 @@ class MemoryIngestor:
                 # function of its arguments, which is what makes ADR-0109 §5's
                 # selection deterministic under test.
                 return _Applied(
-                    await self._fold(_installed(_merge(target, proposed, now=self._now_utc())))
+                    await self._fold(
+                        _installed(_merge(target, proposed, now=self._now_utc())),
+                        # ADR-0219 §5: the fold is conditional on the revision of
+                        # the record it was *derived from*, read off `target`
+                        # rather than off the merged record. `_merge` carries the
+                        # target's fields forward, so the two happen to agree
+                        # today — but the merged record is one this ingestor
+                        # *built*, and §2 makes reading an expectation off a built
+                        # record the fail-open mistake the separate field exists to
+                        # rule out.
+                        expected_revision=target.revision,
+                    )
                 )
             case _:  # REJECT, ASK_USER — nothing is written.
                 return _Applied(None)
@@ -2920,29 +2992,51 @@ class MemoryIngestor:
         )
         return written[0]
 
-    async def _fold(self, record: MemoryRecord) -> str:
-        """Write ``record`` at the fold target's id, declaring the overwrite.
+    async def _fold(self, record: MemoryRecord, *, expected_revision: int) -> str:
+        """Write ``record`` at the fold target's id, conditional on that target.
 
-        ADR-0108 §2's one deliberate upsert. A ``REINFORCE`` folds at the *target
-        the ruling named* (:func:`_merge` keeps the target's id), so landing on a
-        stored record is the decision rather than a collision — this is exactly the
-        case ADR-0022 §4 protected when it defended the upsert, and it survives as
-        something this caller **states** rather than something every write silently
-        carries.
+        ADR-0108 §2's one deliberate upsert, made **conditional** by ADR-0219 §5.
+        A ``REINFORCE`` folds at the *target the ruling named* (:func:`_merge` keeps
+        the target's id), so landing on a stored record is the decision rather than
+        a collision — this is exactly the case ADR-0022 §4 protected when it
+        defended the upsert. What ADR-0219 adds is that the record standing there
+        must still be the one the fold was computed over: an ``UPSERT`` would
+        overwrite a target another writer moved between this ingest's search and
+        this write, discarding that writer's content and its evidence while handing
+        both callers a healthy ``MemoryIngestResult`` (issue #248, ADR-0046 §5).
 
-        It goes through ``write_atomic`` rather than ``add``, though ``add`` *is*
-        the upsert verb, because a mode named at the call is a declaration and a
-        method name is not: a write that can destroy a standing record then says so
-        in a word a reader can grep for.
+        The declaration survives the change rather than being replaced by it.
+        ``IF_UNCHANGED`` is still a mode named at the call and still greppable, and
+        it says strictly more than ``UPSERT`` did: this write may destroy a standing
+        record, and only the one it read.
+
+        It goes through ``write_atomic`` rather than ``add`` — and now could not go
+        through ``add`` at all, since ADR-0219 §2 leaves ``add`` unconditional and
+        makes ``write_atomic`` the only conditional door.
+
+        Args:
+            record: The merged record, already at the target's id.
+            expected_revision: The ``revision`` of the record this fold was derived
+                from — the target as conflict detection read it, never the merged
+                record's own (ADR-0219 §2).
 
         Raises:
+            MemoryStoreStaleError: The target moved, or was deleted, between the
+                read this fold was computed over and this write. Nothing is
+                written; :meth:`_ingest` re-runs the whole cycle once.
             MemoryStoreError: The store refused the write — including a cross-kind
                 collision, ADR-0108 §4's backstop, which a ``REINFORCE`` cannot
                 reach because its target came from a kind-filtered search. Nothing
                 is written.
         """
         written = await self._store.write_atomic(
-            [MemoryWrite(record=record, mode=MemoryWriteMode.UPSERT)]
+            [
+                MemoryWrite(
+                    record=record,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=expected_revision,
+                )
+            ]
         )
         return written[0]
 
@@ -2953,12 +3047,23 @@ class MemoryIngestor:
         (:func:`_retirement_set`, ADR-0050 §1 / #244): the policy's best-ranked
         target leads, followed by every other supersedable conflict the correction
         contradicts. All of them plus the correction are one atomic batch —
-        ``[UPSERT(T_closed) for each target] + [INSERT_IF_ABSENT(P_new)]`` — via
+        ``[IF_UNCHANGED(T_closed) for each target] + [INSERT_IF_ABSENT(P_new)]`` — via
         :meth:`MemoryStore.write_atomic` (ADR-0046), so a failure part-way cannot
         leave some beliefs retired with no live replacement (the regression ADR-0045
         §8 refused to ship). Retiring N is as atomic and reversible-in-history as
         retiring one, which is why closing N windows needs no ``target_id`` widening
         in ``core`` (issue #244, ADR-0045 §7).
+
+        **Every close is conditional** (ADR-0219 §5): a window-close is computed from
+        a target this ingest read, so it carries that read's ``revision`` and is
+        refused where another writer moved the row in between. ``IF_UNCHANGED``'s
+        presence requirement is *physical* (ADR-0219 §4), which is what lets a
+        window-close be conditional at all — an already-closed or expired target is
+        present, and its revision is the one compared. The correction's
+        ``INSERT_IF_ABSENT`` is untouched and carries no expectation: it names an id
+        that must be **absent**, which is the opposite condition and a different
+        refusal, so the batch stays the two kinds of element ADR-0045 §4 and
+        ADR-0046 §2 shape it into.
 
         The correction's id is minted by the guarded id factory and written
         insert-if-absent, so a collision with any stored record — every retained
@@ -2995,6 +3100,11 @@ class MemoryIngestor:
             retired target's (ADR-0045 §4).
 
         Raises:
+            MemoryStoreStaleError: If any target moved, or was deleted, between the
+                read this supersession was computed over and the batch. Nothing is
+                written and every target is left live and unchanged; it leaves the
+                re-mint loop unretried — an id is not what went wrong — and
+                :meth:`_ingest` re-runs the whole cycle once (ADR-0219 §5).
             MemoryStoreError: If the id factory is malformed (:func:`_checked_id`), if
                 a target's window cannot be closed (:func:`_close_window`), if the
                 bounded re-mint cannot find a free id, or on any other store failure —
@@ -3053,9 +3163,20 @@ class MemoryIngestor:
             # The correction *is* an install, and carries the proposal's own count
             # — never the target's, which ADR-0040 §5a keeps off the record that
             # overturns it (ADR-0086 §4).
+            # ADR-0219 §5: each window-close is conditional on the target it was
+            # computed from, and the paired install is left exactly as ADR-0045 §4
+            # and ADR-0046 §2 shape it — so the batch is still the two elements
+            # those sections describe, one of them now carrying an expectation.
+            # The expectation comes off `targets` and never off `closed`: a
+            # `_close_window` result is a record this ingestor *built*, and §2 rules
+            # out reading an expectation off one of those.
             batch = [
-                MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT)
-                for closed_target in closed
+                MemoryWrite(
+                    record=closed_target,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=target.revision,
+                )
+                for target, closed_target in zip(targets, closed, strict=True)
             ]
             batch.append(
                 MemoryWrite(
