@@ -433,8 +433,8 @@ supersession.** ADR-0074 §11 defers *"Cross-device presence — which device is
 a conversation"*, observing that *"nothing on a turn records where it came from"* and
 that recording it *"would require a device identity, whose enrolment and revocation
 the later arc owns"*. That rationale is exact for device identity and does not reach
-modality: naming how the material the user supplied on a pass reached this system
-needs no enrolment, no revocation and no identity of any kind. §11 is a "what this ADR does not decide"
+modality: naming how the user material an episode renders reached this system needs
+no enrolment, no revocation and no identity of any kind. §11 is a "what this ADR does not decide"
 section and says of this bullet that it is *"Not foreclosed, and deliberately not
 started"* and that *"adding it later is additive"*, so deciding it is what the bullet
 invites. The deferral is **discharged in part**, not superseded: its device-identity
@@ -691,12 +691,15 @@ The implementation is three lanes, each briefed after the one before it merges
 1. `ExchangeDisposition` with §2's sixteen members and their values, documented in
    place with what each denotes and which source vocabulary it mirrors.
 2. `Modality` with `TEXT` and `SPEECH` and the values §5 fixes, and `Capture` as a
-   frozen model carrying `modality` alone. `Capture` and its field are documented in
-   §5's terms and in no wider ones: `modality` records how **the material the user
-   supplied on the pass this episode records** reached this system, and says nothing
-   about the plan rationale in `content` or the composed reply in `outcome`, which
-   are text this system produced whatever the utterance was. The docstring also
-   records that `Capture` is the record §5's two deferred facts land in.
+   frozen model carrying `modality` alone. **The docstring states §5's meaning by
+   quoting §5 rather than paraphrasing it** — three lanes restating one rule is how
+   the two drift apart — so it says that the value belongs to the user material
+   *whose rendering the episode carries*, which on the resolution of a parked step is
+   the parked turn's and not the resuming pass's; that it says nothing about the plan
+   rationale in `content` or the composed reply in `outcome`, which are text this
+   system produced whatever the utterance was; that §5 is where the three capture
+   cases are decided and a producer reads them there; and that `Capture` is the record
+   §5's two deferred facts land in.
 3. `EpisodicMemory.disposition: ExchangeDisposition | None = None` and
    `EpisodicMemory.capture: Capture`, defaulted as §5 states.
 4. A rewritten description on `EpisodicMemory.outcome` saying what it now carries,
