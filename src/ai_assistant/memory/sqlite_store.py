@@ -44,6 +44,7 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
+    MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
     MemoryRecord,
@@ -263,6 +264,13 @@ def _to_micros(instant: datetime) -> int:
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
+#: One element of a batch, ready to write: the snapshotted record, its mode, the
+#: revision an ``IF_UNCHANGED`` element was computed against (``None`` in every
+#: other mode, which :class:`~ai_assistant.core.types.MemoryWrite`'s validator
+#: guarantees), and the vector embedded for it before the lock was taken.
+type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding]
+
+
 @dataclass(frozen=True, slots=True)
 class _Retrieved:
     """One relevance read's records together with what only the read can count.
@@ -437,8 +445,10 @@ class SqliteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
-                "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
+                "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
+                "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
             )
+            self._init_revision_issuer(conn)
             conn.execute(
                 # A table of its own rather than a row in ``meta``: ``meta`` is
                 # verified as an *exact* key set by the re-embedding migration
@@ -471,6 +481,59 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         return conn
+
+    @staticmethod
+    def _init_revision_issuer(conn: sqlite3.Connection) -> None:
+        """Create the revision issuer and seed it, inside the caller's transaction.
+
+        ADR-0219 §1's never-reissued stamp needs a *persisted* issuer: "for the life
+        of that store" is scoped by durability, so this one survives a close, a
+        process restart and a crash. It survives them by being a row rather than a
+        field — the counter is advanced inside the very transaction that writes the
+        row it stamped, so a crash either commits both or neither, and an
+        implementation flushing an in-memory counter on ``close`` would reissue
+        after a kill.
+
+        **A table of its own rather than a row in** ``meta``, for the reason
+        ``walk_positions`` is one: ``meta`` is verified as an *exact* key set by the
+        re-embedding migration (``_verify`` in ``memory/reembed.py``), so a counter
+        parked there would fail a build-and-swap that is otherwise none of its
+        business.
+
+        **Not reconstructed from the rows present**, which §1 forbids by name: a
+        store that recomputed ``max(revision)`` on open would reissue the stamp of
+        the row it had just deleted — the one value no surviving row records.
+        ``sqlite_sequence`` is exactly this shape for the walk key and this is the
+        same shape for the same reason; it is a separate counter because ``rowid`` is
+        per-*record* and survives an upsert, while a stamp is per-*write* and must
+        not.
+        """
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS revision_issuer("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 0), issued INTEGER NOT NULL)"
+        )
+        # Seeded at zero, which is the one value §1 reserves and no row may carry:
+        # the first stamp this store issues is 1.
+        conn.execute("INSERT OR IGNORE INTO revision_issuer(singleton, issued) VALUES (0, 0)")
+
+    @staticmethod
+    def _issue_revision(conn: sqlite3.Connection, count: int = 1) -> int:
+        """Take ``count`` stamps from the issuer, returning the last one.
+
+        Advanced inside the caller's transaction, so the stamps and the rows they
+        are written onto commit together (ADR-0219 §1). The values handed out are
+        the ``count`` integers ending at the return value; a single write takes one
+        and the migration's backfill takes a page at a time.
+
+        Read back with a second statement rather than ``RETURNING``, which keeps the
+        floor at the SQLite this project already requires rather than raising it for
+        one clause.
+        """
+        conn.execute("UPDATE revision_issuer SET issued = issued + ? WHERE singleton = 0", (count,))
+        (issued,) = conn.execute(
+            "SELECT issued FROM revision_issuer WHERE singleton = 0"
+        ).fetchone()
+        return int(issued)
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
         """Bring the lifecycle columns to epochs, and add the subject and window columns.
@@ -561,6 +624,16 @@ class SqliteMemoryStore:
             if "valid_from" not in info:
                 conn.execute("ALTER TABLE records ADD COLUMN valid_from INTEGER")
                 self._backfill_valid_from(conn)
+            if "revision" not in info:
+                # ``NOT NULL DEFAULT 0`` so the migrated shape is byte for byte the
+                # created one, and because ``ADD COLUMN`` demands a non-null default
+                # for a ``NOT NULL`` column. The ``0`` every existing row takes is
+                # the state ADR-0219 §1 *forbids* a stored row to be in, which is
+                # why the backfill below is not optional and why both run inside
+                # :meth:`_setup`'s one transaction: a half-backfilled column would
+                # leave rows at the reserved value.
+                conn.execute("ALTER TABLE records ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+                self._backfill_revisions(conn)
             return
         conn.execute(
             # Carries ``AUTOINCREMENT`` so a store on the legacy epoch schema pays
@@ -569,7 +642,8 @@ class SqliteMemoryStore:
             "CREATE TABLE records_migrated("
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
-            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
+            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
+            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
         )
         # Stream the source rows through a dedicated read cursor rather than
         # ``fetchall()``, so migrating a large legacy store does not
@@ -596,6 +670,54 @@ class SqliteMemoryStore:
             )
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_migrated RENAME TO records")
+        # Every copied row landed on the column's ``0`` default — the value ADR-0219
+        # §1 reserves for a record no store has stored — so the rebuild owes the
+        # same backfill the in-place ``ADD COLUMN`` above owes, in this same
+        # transaction.
+        self._backfill_revisions(conn)
+
+    def _backfill_revisions(self, conn: sqlite3.Connection) -> None:
+        """Issue a stamp for every row still at the reserved ``0`` (ADR-0219 §10).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, like every other migration
+        here, so the column, the stamps and the advanced issuer commit together or
+        not at all. A half-backfilled column would leave some rows at ``0``, which
+        is the state §1 forbids: ``0`` is reserved for a record no store has stored,
+        so a row carrying it would match a caller-constructed default expectation —
+        the fail-open case §2 closes twice, reintroduced by the migration.
+
+        **The stamps are issued, never derived from** ``rowid``. A ``rowid`` is a
+        signed 64-bit integer a legacy table can hold *negative* — this store carries
+        a case planting exactly that
+        (``test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero``), because
+        ``rowid`` was only issued by ``AUTOINCREMENT`` from ADR-0114 onwards — so a
+        rowid-derived stamp would breach both ``ge=0`` and §1's positivity on rows
+        the store is obliged to keep. Issuing also leaves the issuer standing above
+        every value handed out, which is what makes the *next* write after a reopen
+        take a stamp the backfill never issued.
+
+        **Chunked, each page read whole before anything is written**, and the first
+        page takes no bound at all — :meth:`_backfill_valid_from`'s shape, for the
+        reason stated there: there is no sentinel below every possible ``rowid`` to
+        seed with, and a skipped row would keep the reserved value.
+        """
+        chunk = conn.execute(
+            "SELECT rowid FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+        ).fetchall()
+        while chunk:
+            # One advance of the issuer per page rather than per row: the page's
+            # stamps are the ``len(chunk)`` integers ending at ``last``, every one of
+            # them a value this store has never issued.
+            last = self._issue_revision(conn, len(chunk))
+            first = last - len(chunk) + 1
+            for offset, (rowid,) in enumerate(chunk):
+                conn.execute(
+                    "UPDATE records SET revision = ? WHERE rowid = ?", (first + offset, rowid)
+                )
+            chunk = conn.execute(
+                "SELECT rowid FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
 
     def _backfill_valid_from(self, conn: sqlite3.Connection) -> None:
         """Fill a freshly-added ``valid_from`` column from each record's blob.
@@ -685,21 +807,29 @@ class SqliteMemoryStore:
             "CREATE TABLE records_walkable("
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
-            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
+            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
+            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
         )
         # Streamed through a dedicated read cursor rather than ``fetchall()``, as
         # the sibling rebuild is, so migrating a large store does not materialise
         # ``records`` whole. Reads and writes are on different tables, so the scan
         # cursor stays valid across the inserts.
+        #
+        # ``revision`` is carried across explicitly rather than re-backfilled:
+        # :meth:`_migrate_records` runs first and leaves every row stamped on every
+        # path, so re-issuing here would burn a second stamp per row for nothing and
+        # — worse — would make a rebuild look like a write to a caller holding a
+        # revision it read before the upgrade (ADR-0219 §1).
         read = conn.execute(
-            "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person "
-            "FROM records"
+            "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, "
+            "revision FROM records"
         )
         for source in read:
             conn.execute(
                 "INSERT INTO records_walkable"
-                "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, "
+                "revision) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 source,
             )
         conn.execute("DROP TABLE records")
@@ -918,6 +1048,13 @@ class SqliteMemoryStore:
         lock is already held when the ``SELECT`` below runs and the rowid it reads
         cannot be deleted out from under the vector write that follows (#526).
 
+        **The stamp is taken here** (ADR-0219 §1), for the same reason the
+        cross-kind refusal is: this is the shared body of both upsert-capable doors,
+        so one line covers ``add`` and every ``write_atomic`` mode rather than three
+        implementers each remembering. It is taken from the persisted issuer inside
+        the caller's transaction, so the row and the counter that stamped it commit
+        together, and a submitted ``revision`` is discarded rather than persisted.
+
         **The cross-kind refusal lives here** (ADR-0108 §4), which is why it costs
         nothing and why it cannot be reached around. The ``SELECT`` this method
         already runs to choose insert-versus-update reads one more column, so no
@@ -936,7 +1073,13 @@ class SqliteMemoryStore:
         """
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
-        data = record.model_dump_json()
+        # ``revision`` is excluded from the payload rather than written into it
+        # (ADR-0219 §1): the stamp is a property of the row this store holds, not of
+        # the bytes a producer wrote, so it lives in a column beside the blob. That
+        # is what keeps an ``UPSERT`` — a full replacement of every column — from
+        # carrying a *submitted* stamp in as part of the payload it replaces, and it
+        # is what makes the migration mechanical, since no stored blob is rewritten.
+        data = record.model_dump_json(exclude={"revision"})
         expires = _to_micros(record.expires_at) if record.expires_at is not None else None
         valid_until = (
             _to_micros(record.validity.valid_until)
@@ -959,11 +1102,16 @@ class SqliteMemoryStore:
                 f"a {row[1]} record is already stored under that id"
             )
             raise MemoryStoreError(msg)
+        # One stamp per write that stores a row, taken from the issuer inside the
+        # caller's transaction (ADR-0219 §1). Taken on both branches and after the
+        # cross-kind refusal, so a refused write burns nothing and an upsert takes a
+        # value the store has never issued rather than resuming a per-id count.
+        revision = self._issue_revision(conn)
         if row is None:
             cursor = conn.execute(
                 "INSERT INTO records"
-                "(id, kind, data, expires_at, valid_until, valid_from, about_person) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -972,6 +1120,7 @@ class SqliteMemoryStore:
                     valid_until,
                     valid_from,
                     record.about_person,
+                    revision,
                 ),
             )
             rowid = cursor.lastrowid
@@ -979,7 +1128,7 @@ class SqliteMemoryStore:
             rowid = row[0]
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
-                "valid_from = ?, about_person = ? WHERE rowid = ?",
+                "valid_from = ?, about_person = ?, revision = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -987,6 +1136,7 @@ class SqliteMemoryStore:
                     valid_until,
                     valid_from,
                     record.about_person,
+                    revision,
                     rowid,
                 ),
             )
@@ -1005,45 +1155,58 @@ class SqliteMemoryStore:
         Embedding happens before the lock (like :meth:`add`); the transaction is
         held only for the writes themselves.
 
+        **An ``IF_UNCHANGED`` element's comparison and write are one indivisible
+        step** (ADR-0219 §3). The stored revision is read and the row rewritten
+        inside the same ``BEGIN IMMEDIATE`` the batch already takes, which holds the
+        write lock against another *process* for the whole of it — so the window this
+        mode closes is not reopened one layer down, and #248's cross-process residual
+        closes rather than merely narrowing.
+
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
+            MemoryStoreStaleError: an ``IF_UNCHANGED`` element's id names a stored
+                row at a different ``revision``, or names no stored row at all
+                (ADR-0219 §3). Nothing is written.
             MemoryStoreEmbeddingExpiredError: an element's embedding outlived its
                 deadline (ADR-0118 §5). Every embedding is awaited before the lock,
                 so nothing is written and no later element is embedded.
-            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
-                different ``kind`` (ADR-0108 §4, refused in
-                :meth:`_persist_record`), the batch names the same id twice
-                (ADR-0046 §3), or any backend failure (with the ``sqlite3`` cause
-                retained). Nothing is written.
+            MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of a different ``kind`` (ADR-0108 §4 and ADR-0219 §4,
+                refused in :meth:`_persist_record`), the batch names the same id
+                twice (ADR-0046 §3), or any backend failure (with the ``sqlite3``
+                cause retained). Nothing is written.
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
         # change the id the duplicate-id check validated, desync content from the
         # embedding computed for it, or otherwise alter the committed write-set
         # (ADR-0046 §3). Everything downstream reads only the immutable snapshot.
-        snapshot = [(write.record.model_copy(deep=True), write.mode) for write in writes]
-        ids = [record.id for record, _ in snapshot]
+        # ``MemoryWrite`` is frozen, so the mode and the expectation are already
+        # immutable and are carried across unchanged.
+        snapshot = [
+            (write.record.model_copy(deep=True), write.mode, write.expected_revision)
+            for write in writes
+        ]
+        ids = [record.id for record, _, _ in snapshot]
         if len(set(ids)) != len(ids):
             msg = "an atomic batch may not write the same id twice"
             raise MemoryStoreError(msg)
         if not snapshot:
             return []
-        prepared: list[tuple[MemoryRecord, MemoryWriteMode, Embedding]] = []
-        for record, mode in snapshot:
+        prepared: list[_PreparedWrite] = []
+        for record, mode, expected in snapshot:
             vector = await self._embed_one(record.content)
-            prepared.append((record, mode, vector))
+            prepared.append((record, mode, expected, vector))
         async with self._lock:
             await _run_to_completion(self._write_atomic_sync, prepared)
         return ids
 
-    def _write_atomic_sync(
-        self, prepared: Sequence[tuple[MemoryRecord, MemoryWriteMode, Embedding]]
-    ) -> None:
+    def _write_atomic_sync(self, prepared: Sequence[_PreparedWrite]) -> None:
         try:
             with self._transaction("commit an atomic memory batch") as conn:
-                for record, mode, vector in prepared:
+                for record, mode, expected, vector in prepared:
                     if mode is MemoryWriteMode.INSERT_IF_ABSENT:
                         row = conn.execute(
                             "SELECT rowid FROM records WHERE id = ?", (record.id,)
@@ -1054,8 +1217,15 @@ class SqliteMemoryStore:
                                 f"a record with that id is already stored"
                             )
                             raise MemoryStoreConflictError(msg)
+                    if mode is MemoryWriteMode.IF_UNCHANGED:
+                        self._refuse_stale(conn, record.id, expected)
                     self._persist_record(record, vector)
         except MemoryStoreError:
+            # `MemoryStoreStaleError` arrives through this arm too, as the
+            # `MemoryStoreError` it is (ADR-0219 §3): the transaction has rolled
+            # back, so one stale element committed nothing of the whole batch —
+            # ADR-0046 §4's all-or-nothing kept whole rather than qualified.
+            #
             # Already rolled back by the transaction, which propagates anything
             # that is not a backend failure unchanged. The in-scope collision is
             # *this*: the presence check above raises MemoryStoreConflictError
@@ -1085,6 +1255,44 @@ class SqliteMemoryStore:
             # raw.
             msg = f"failed to commit an atomic memory batch: {exc}"
             raise MemoryStoreError(msg) from exc
+
+    @staticmethod
+    def _refuse_stale(conn: sqlite3.Connection, record_id: str, expected: int | None) -> None:
+        """Refuse a conditional write whose expectation the store does not meet.
+
+        ADR-0219 §3, read inside the caller's ``BEGIN IMMEDIATE`` — which is what
+        makes the comparison and the write that follows it one indivisible step
+        against another process's writer as well as another coroutine's.
+
+        The ``SELECT`` reads the stored row's ``revision`` with **no** lifecycle
+        predicate: presence is *physical*, in ``INSERT_IF_ABSENT``'s sense, so an
+        expired or window-closed row is present and its revision is the one compared
+        (§4). That is what lets a window-close be conditional, which is the write
+        ADR-0045 §4's applier makes onto a target it read.
+
+        An absent id takes the same refusal and not a different one: a row deleted
+        between the caller's read and its write is a lost update of the starkest
+        kind, and a silent no-op would hand the caller the healthy result the race
+        used to hand both writers.
+
+        Raises:
+            MemoryStoreStaleError: The id names no stored row, or names one at a
+                different ``revision``. The caller's transaction rolls the refusal
+                back, so nothing this batch touched is committed.
+        """
+        row = conn.execute("SELECT revision FROM records WHERE id = ?", (record_id,)).fetchone()
+        if row is None:
+            msg = (
+                f"cannot write {record_id!r} at revision {expected}: "
+                f"no record is stored under that id"
+            )
+            raise MemoryStoreStaleError(msg)
+        if int(row[0]) != expected:
+            msg = (
+                f"cannot write {record_id!r} at revision {expected}: "
+                f"the stored record is at revision {int(row[0])}"
+            )
+            raise MemoryStoreStaleError(msg)
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
@@ -1129,6 +1337,21 @@ class SqliteMemoryStore:
             msg = f"stored memory could not be decoded: {exc}"
             raise MemoryStoreError(msg) from exc
 
+    @classmethod
+    def _decoded_at(cls, data: str, revision: int) -> MemoryRecord:
+        """Decode a stored row and put its stored ``revision`` back on the record.
+
+        The stamp is held in a column beside the payload rather than inside it
+        (ADR-0219 §1), so every read that returns a record has to overlay it — and
+        §1 requires *every* one of them to: ``get``, ``get_many``, ``search``,
+        ``list_beliefs``, ``export`` and ``walk_records``. A read that decoded the
+        blob alone would hand back the model's default ``0``, and a caller that read
+        through that path would then meet ``MemoryStoreStaleError`` on a write that
+        is not stale — which is why the conformance arm is parameterised over all
+        six rather than taken on one.
+        """
+        return cls._decode(data).model_copy(update={"revision": revision})
+
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.
 
@@ -1145,20 +1368,20 @@ class SqliteMemoryStore:
         """
         async with self._lock:
             now = self._now()
-            data = await _run_to_completion(self._get_sync, record_id, _to_micros(now))
-        if data is None:
+            row = await _run_to_completion(self._get_sync, record_id, _to_micros(now))
+        if row is None:
             return None
-        record = self._decode(data)
+        record = self._decoded_at(*row)
         return record if record.validity.live_at(now) else None
 
-    def _get_sync(self, record_id: str, now: int) -> str | None:
+    def _get_sync(self, record_id: str, now: int) -> tuple[str, int] | None:
         row = self._conn.execute(
-            "SELECT data FROM records WHERE id = ? "
+            "SELECT data, revision FROM records WHERE id = ? "
             "AND (expires_at IS NULL OR expires_at > ?) "
             "AND (valid_until IS NULL OR valid_until > ?)",
             (record_id, now, now),
         ).fetchone()
-        return None if row is None else row[0]
+        return None if row is None else (str(row[0]), int(row[1]))
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
@@ -1186,11 +1409,11 @@ class SqliteMemoryStore:
         # result can disagree about when "now" was (ADR-0045 §6, §9).
         return {
             record.id: record
-            for record in (self._decode(data) for data in rows)
+            for record in (self._decoded_at(data, revision) for data, revision in rows)
             if record.validity.live_at(now)
         }
 
-    def _get_many_sync(self, record_ids: Sequence[str], now: int) -> list[str]:
+    def _get_many_sync(self, record_ids: Sequence[str], now: int) -> list[tuple[str, int]]:
         """Read every named row, chunked to fit one statement, in one transaction.
 
         SQLite caps bound parameters per statement (``SQLITE_MAX_VARIABLE_NUMBER``
@@ -1214,16 +1437,18 @@ class SqliteMemoryStore:
         room = self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - _GET_MANY_FIXED_PARAMS
         chunk = max(room, 1)
         base = (
-            "SELECT data FROM records "
+            "SELECT data, revision FROM records "
             "WHERE (expires_at IS NULL OR expires_at > ?) "
             "AND (valid_until IS NULL OR valid_until > ?)"
         )
-        rows: list[str] = []
+        rows: list[tuple[str, int]] = []
         with self._transaction("read memories in a batch", immediate=False) as conn:
             for start in range(0, len(record_ids), chunk):
                 ids = record_ids[start : start + chunk]
                 sql = base + f" AND id IN ({', '.join('?' * len(ids))})"
-                rows.extend(row[0] for row in conn.execute(sql, [now, now, *ids]))
+                rows.extend(
+                    (str(row[0]), int(row[1])) for row in conn.execute(sql, [now, now, *ids])
+                )
         return rows
 
     async def search(
@@ -1364,7 +1589,8 @@ class SqliteMemoryStore:
             )
         return _Retrieved(
             records=[
-                self._decode(data).model_copy(update={"score": score}) for data, score in rows
+                self._decoded_at(data, revision).model_copy(update={"score": score})
+                for data, revision, score in rows
             ],
             capped=capped,
             observed=observed,
@@ -1377,7 +1603,7 @@ class SqliteMemoryStore:
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
         now: int,
-    ) -> tuple[list[tuple[str, float]], bool, dict[str, int]]:
+    ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
 
         **One restriction carries all five axes** (ADR-0128 §1): ``kind``, the
@@ -1446,8 +1672,11 @@ class SqliteMemoryStore:
         deliberately did not.
 
         Returns:
-            The surviving ``(data, score)`` rows, whether the ceiling bound them,
-            and the counts keyed by ``memory.traces``' literal metric keys.
+            The surviving ``(data, revision, score)`` rows, whether the ceiling
+            bound them, and the counts keyed by ``memory.traces``' literal metric
+            keys. The revision comes off the joined ``records`` row rather than the
+            blob, because ADR-0219 §1 keeps the stamp out of the payload and
+            requires every read that returns a record to carry it.
         """
         # No over-fetch, only the clamp: sqlite-vec raises above ``_VEC_KNN_MAX_K``,
         # so an over-large ``limit`` serves a short result instead of crashing — and
@@ -1480,7 +1709,7 @@ class SqliteMemoryStore:
             )
             restriction.extend(sorted(wanted_sources))
         sql = (
-            "SELECT r.data, v.distance FROM vec_records v "  # noqa: S608 — bound above
+            "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? "
             f"AND v.rowid IN (SELECT rowid FROM records WHERE {' AND '.join(eligible)}) "
@@ -1502,7 +1731,10 @@ class SqliteMemoryStore:
             msg = f"failed to search: {exc}"
             raise MemoryStoreError(msg) from exc
         # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
-        results = [(data, max(0.0, 1.0 - distance)) for data, distance in rows[:limit]]
+        results = [
+            (str(data), int(revision), max(0.0, 1.0 - distance))
+            for data, revision, distance in rows[:limit]
+        ]
         # The ceiling bound this read only if the KNN filled its whole budget *and*
         # still came up short of what the caller asked for — which requires
         # ``fetch_k < limit``, i.e. the clamp. Anywhere else a short result is the
@@ -1594,7 +1826,7 @@ class SqliteMemoryStore:
             rows = await _run_to_completion(self._list_beliefs_sync, wanted_kinds, _to_micros(now))
         matched = [
             record
-            for record in (self._decode(data) for data in rows)
+            for record in (self._decoded_at(data, revision) for data, revision in rows)
             if record.validity.live_at(now)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
         ]
@@ -1603,7 +1835,7 @@ class SqliteMemoryStore:
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
         return [record.model_copy(update={"score": None}) for record in page]
 
-    def _list_beliefs_sync(self, kinds: frozenset[str] | None, now: int) -> list[str]:
+    def _list_beliefs_sync(self, kinds: frozenset[str] | None, now: int) -> list[tuple[str, int]]:
         """Read every candidate row for one page: the column predicates, unpaged.
 
         ``kinds`` is non-empty when it is not ``None`` — the caller short-circuits an
@@ -1612,7 +1844,7 @@ class SqliteMemoryStore:
         text carries no caller data.
         """
         sql = (
-            "SELECT data FROM records "
+            "SELECT data, revision FROM records "
             "WHERE (expires_at IS NULL OR expires_at > ?) "
             "AND (valid_until IS NULL OR valid_until > ?)"
         )
@@ -1625,7 +1857,7 @@ class SqliteMemoryStore:
         except sqlite3.Error as exc:
             msg = f"failed to list beliefs: {exc}"
             raise MemoryStoreError(msg) from exc
-        return [row[0] for row in rows]
+        return [(str(row[0]), int(row[1])) for row in rows]
 
     async def walk_records(self, walk: str, *, limit: int) -> RecordChunk:
         """Read the next chunk of ``walk`` without changing anything (ADR-0114 §1).
@@ -1645,7 +1877,7 @@ class SqliteMemoryStore:
             rows = await _run_to_completion(self._walk_records_sync, walk, limit)
         eligible = [
             record
-            for record in (self._decode(data) for _, data in rows)
+            for record in (self._decoded_at(data, revision) for _, data, revision in rows)
             # Both axes on one reading of the clock: retention (ADR-0007) and the
             # validity window at both ends (ADR-0045 §6) — the same predicate `get`
             # and `search` apply, so the walk cannot hand a producer content those
@@ -1659,7 +1891,7 @@ class SqliteMemoryStore:
         position = mint_position(walk, rows[-1][0]) if rows else None
         return RecordChunk(records=tuple(eligible), position=position)
 
-    def _walk_records_sync(self, walk: str, limit: int) -> list[tuple[int, str]]:
+    def _walk_records_sync(self, walk: str, limit: int) -> list[tuple[int, str, int]]:
         """Take the next ``limit`` rows in rowid order, filtering nothing.
 
         Deliberately applies **no** lifecycle predicate in SQL. The contract bounds
@@ -1687,14 +1919,17 @@ class SqliteMemoryStore:
             # bound of zero: `rowid` is an explicit `INTEGER PRIMARY KEY`, so a
             # legacy row can sit below zero and `rowid > 0` would silently skip it
             # while reporting exhaustion — the sentinel ADR-0114 §4 refuses by name.
-            sql = "SELECT rowid, data FROM records"
+            sql = "SELECT rowid, data, revision FROM records"
             params: list[object] = []
             if after is not None:
                 sql += " WHERE rowid > ?"
                 params.append(after)
             sql += " ORDER BY rowid LIMIT ?"
             params.append(limit)
-            return [(int(rowid), str(data)) for rowid, data in conn.execute(sql, params)]
+            return [
+                (int(rowid), str(data), int(revision))
+                for rowid, data, revision in conn.execute(sql, params)
+            ]
 
     @staticmethod
     def _issued_through(conn: sqlite3.Connection) -> int:
@@ -1825,19 +2060,19 @@ class SqliteMemoryStore:
         """
         async with self._lock:
             rows = await _run_to_completion(self._export_sync, self._now_micros())
-        return [self._decode(data) for data in rows]
+        return [self._decoded_at(data, revision) for data, revision in rows]
 
-    def _export_sync(self, now: int) -> list[str]:
+    def _export_sync(self, now: int) -> list[tuple[str, int]]:
         try:
             rows = self._conn.execute(
-                "SELECT data FROM records "
+                "SELECT data, revision FROM records "
                 "WHERE expires_at IS NULL OR expires_at > ? ORDER BY rowid",
                 (now,),
             ).fetchall()
         except sqlite3.Error as exc:
             msg = f"failed to export memories: {exc}"
             raise MemoryStoreError(msg) from exc
-        return [row[0] for row in rows]
+        return [(str(row[0]), int(row[1])) for row in rows]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""

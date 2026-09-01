@@ -401,6 +401,25 @@ def _at_or_after_f() -> datetime:
     return _AT_OR_AFTER_F
 
 
+def _unstamped(record: MemoryRecord) -> MemoryRecord:
+    """``record`` with its store-authored ``revision`` back at the default.
+
+    A record a store returned never equals the record a case constructed, because
+    ADR-0219 §1 makes ``revision`` store-authored: the store issues one for the write
+    that stored the row and discards whatever the submitted record carried. The cases
+    below compare *whole* records deliberately — an id-only check would pass a write
+    that committed the wrong row — so the one store-authored field is stripped rather
+    than the comparison weakened. What the writer does with the stamp is ADR-0219 §5's
+    second change and is asserted there, not here.
+    """
+    return record.model_copy(update={"revision": 0})
+
+
+def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
+    """:func:`_unstamped`, for a read whose answer may legitimately be ``None``."""
+    return None if record is None else _unstamped(record)
+
+
 def _episodic(record_id: str, content: str) -> MemoryRecord:
     """A live record of a *different kind* from the preference under test.
 
@@ -1283,7 +1302,7 @@ class MemoryWriterContract:
         # Nothing written, and nothing re-minted around the collision: the id is the
         # producer's, so a writer that minted another would edit a record the
         # producer made and report an id nobody proposed (ADR-0081 §9).
-        assert list(await store.export()) == [standing]
+        assert [_unstamped(r) for r in await store.export()] == [standing]
 
     @pytest.mark.parametrize(
         "kind", [MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER], ids=str
@@ -1396,7 +1415,7 @@ class MemoryWriterContract:
         # reset to open, which the proposal already had), at an id that named no
         # record before — so it overwrote nothing.
         stored = await store.get("corrected")
-        assert stored == proposed.model_copy(update={"id": "corrected"})
+        assert _unstamped_or_none(stored) == proposed.model_copy(update={"id": "corrected"})
         # The proposal's own id is discarded, never written at.
         assert await store.get("new") is None
 
@@ -1697,7 +1716,7 @@ class MemoryWriterContract:
 
         assert result.record_id == "corrected"
         # The record at the proposal's id is untouched — not clobbered.
-        assert await store.get("new") == occupant
+        assert _unstamped_or_none(await store.get("new")) == occupant
         # Target retired, correction live at the minted id.
         assert await store.get("existing") is None
         live = await store.get("corrected")
@@ -3219,7 +3238,7 @@ class MemoryWriterContract:
 
         assert result.decision.kind is kind
         assert result.record_id is None
-        assert await store.get("new") == occupant  # the cited record is untouched
+        assert _unstamped_or_none(await store.get("new")) == occupant  # untouched
 
     async def test_an_unresolvable_second_citation_still_refuses_with_the_evidence_error(
         self, make_writer: WriterFactory
@@ -3525,7 +3544,7 @@ class MemoryWriterContract:
         assert result.record_id == "corrected"
         written = await store.get("corrected")
         assert written is not None
-        assert written == ruled_on.proposed.model_copy(
+        assert _unstamped(written) == ruled_on.proposed.model_copy(
             update={"id": "corrected", "validity": Validity()}
         ), _TORN_PROPOSAL
         # The belief retired is the one that contradicted what was actually stored.

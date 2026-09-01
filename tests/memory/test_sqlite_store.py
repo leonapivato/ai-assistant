@@ -746,7 +746,7 @@ async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> Non
             # the competing write after chunk 1 has already read `a` and before
             # chunk 2 reads `b` — the boundary, and nowhere else.
             nonlocal seen
-            if not statement.lstrip().upper().startswith("SELECT DATA FROM RECORDS"):
+            if not statement.lstrip().upper().startswith("SELECT DATA, REVISION FROM RECORDS"):
                 return
             seen += 1
             if seen != 2:

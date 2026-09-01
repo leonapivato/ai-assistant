@@ -24,11 +24,15 @@ hold.
 
 **It reads content, never the old vectors**, which is why no source embedder is
 constructed anywhere here — and therefore why a deployment can migrate *off* an
-embedder it can no longer build at all. It also reads only the four columns that
-have existed since the schema's first version, deriving the rest from each
-record's stored JSON, so a store the current build has never opened migrates
-without its schema being brought forward first — which would mean writing to the
-live store, and ADR-0104 §1 forbids that.
+embedder it can no longer build at all. It reads the four columns that have
+existed since the schema's first version and derives the rest from each record's
+stored JSON, so a store the current build has never opened migrates without its
+schema being brought forward first — which would mean writing to the live store,
+and ADR-0104 §1 forbids that. The one exception is a record's ``revision``, which
+is store-authored and deliberately outside the payload (ADR-0219 §1) and so cannot
+be derived from anything: it is carried across verbatim where the source has it,
+issued from the work store's own issuer where the source predates the column, and
+the source's issuer is carried with it (§10).
 
 Nothing here takes the instance lock or decides whether the target embedder is an
 acceptable one. Both belong to the entry point and the composition root
@@ -113,9 +117,23 @@ _CHANGE_COUNTER_START: Final = 24
 _CHANGE_COUNTER_END: Final = 28
 
 #: The columns that have existed in ``records`` since the schema's first version,
-#: and therefore the only ones this migration reads from the live store
-#: (ADR-0104 §1).
-_SOURCE_COLUMNS: Final = "rowid, id, kind, data"
+#: plus the one column this migration cannot re-derive: a record's ``revision`` is
+#: store-authored and is deliberately **not** in its payload (ADR-0219 §1), so a
+#: rebuild that read only the blob would drop every stamp at the swap and start the
+#: swapped store on a fresh issuer — reissuing every value the old store had handed
+#: out, through an ordinary operational migration rather than through any write
+#: (§10).
+_SOURCE_COLUMNS: Final = "rowid, id, kind, data, revision"
+
+#: The same read against a store written before that column existed. ``NULL`` in the
+#: stamp's place is how "this row has no stamp to carry" is spelled, and
+#: :func:`_insert` issues one from the work store's own issuer for it — which is
+#: sound precisely because the work store is a *new* store whose issuer has issued
+#: nothing, so §1's never-reissued clause is satisfied by construction.
+_LEGACY_SOURCE_COLUMNS: Final = "rowid, id, kind, data, NULL"
+
+#: Where the stamp sits in a source row read through either of the two above.
+_REVISION_IN_ROW: Final = 4
 
 #: One row as ``sqlite3`` hands it over. The driver types every column ``Any``, so
 #: naming that here keeps the alias honest rather than asserting a shape the
@@ -596,9 +614,10 @@ class Reembedder:
         try:
             work = _connect(self._work)
             try:
-                embedded = await self._copy(source, work, cursor, plan, progress)
-                self._finalise(work)
-                _verify(source, work, plan, self._embedder)
+                columns = _source_columns(source, self._store)
+                embedded = await self._copy(source, work, cursor, plan, progress, columns)
+                self._finalise(source, work)
+                _verify(source, work, plan, self._embedder, columns)
             finally:
                 work.close()
         finally:
@@ -645,21 +664,22 @@ class Reembedder:
             conn.close()
         return None
 
-    async def _copy(
+    async def _copy(  # noqa: PLR0913 — one argument per collaborator this loop needs
         self,
         source: sqlite3.Connection,
         work: sqlite3.Connection,
         cursor: int | None,
         plan: ReembedPlan,
         progress: Callable[[int, int], None] | None,
+        columns: str,
     ) -> int:
         """Copy every record past ``cursor``, one committed chunk at a time."""
         embedded = 0
         while True:
-            rows = _chunk(source, cursor, self._batch_size)
+            rows = _chunk(source, cursor, self._batch_size, columns)
             if not rows:
                 return embedded
-            records = [_decode(str(data), row_id) for _, row_id, _, data in rows]
+            records = [_decode(str(row[3]), row[1]) for row in rows]
             vectors = await self._embed([record.content for record in records])
             cursor = int(rows[-1][0])
             with transaction(work, "copy a re-embedded chunk", error=MemoryStoreError):
@@ -716,12 +736,31 @@ class Reembedder:
             raise MemoryStoreError(msg) from exc
         return vectors
 
-    def _finalise(self, work: sqlite3.Connection) -> None:
-        """Delete the migration scaffolding, so the swapped-in store carries none."""
+    def _finalise(self, source: sqlite3.Connection, work: sqlite3.Connection) -> None:
+        """Delete the migration scaffolding and carry the revision issuer across.
+
+        The scaffolding goes so the swapped-in store carries none. The **issuer**
+        comes with it because ADR-0219 §1 scopes "never reissued" to the life of the
+        data a durable store holds, and a build-and-swap does not end that life: the
+        swapped store holds the same records, so it must not hand out a stamp the
+        replaced store already did. Copying the rows carries every stamp that is
+        *present*; the issuer is what records the ones that are not — the values
+        deleted rows took — and reconstructing it from the rows present is precisely
+        what §1 forbids.
+
+        Raised to the source's mark rather than set to it, so the work store's own
+        issuing (a legacy source, whose rows are stamped here) is never walked back.
+        A source with no issuer at all is a store written before this column existed
+        and has none to carry.
+        """
         with transaction(work, "finish a re-embedding", error=MemoryStoreError):
             work.execute(
                 "DELETE FROM meta WHERE key IN (?, ?)",
                 (_CURSOR_KEY, _SOURCE_KEY),
+            )
+            work.execute(
+                "UPDATE revision_issuer SET issued = MAX(issued, ?) WHERE singleton = 0",
+                (_issued_through(source),),
             )
 
     def _swap(self, started: str) -> bool:
@@ -831,7 +870,49 @@ class Reembedder:
             raise MemoryStoreError(msg) from exc
 
 
-def _chunk(source: sqlite3.Connection, cursor: int | None, size: int) -> list[_Row]:
+def _source_columns(source: sqlite3.Connection, store: Path) -> str:
+    """Which read this source supports: with its stamps, or without.
+
+    A live store written before ADR-0219 has no ``revision`` column at all — this
+    module never opens the live store through :class:`SqliteMemoryStore`, so nothing
+    has migrated it — and selecting a column that is not there would fail the run
+    with ``no such column`` rather than migrating it. So the shape is probed once
+    per run, exactly as the store's own migrations shape-sniff through
+    ``PRAGMA table_info``, and a source without the column is read with ``NULL`` in
+    the stamp's place.
+
+    Raises:
+        MemoryStoreError: If the table's shape cannot be read.
+    """
+    try:
+        names = {str(row[1]) for row in source.execute("PRAGMA table_info(records)")}
+    except sqlite3.Error as exc:
+        msg = f"failed to read the shape of the records table in {store}: {exc}"
+        raise MemoryStoreError(msg) from exc
+    return _SOURCE_COLUMNS if "revision" in names else _LEGACY_SOURCE_COLUMNS
+
+
+def _issued_through(conn: sqlite3.Connection) -> int:
+    """The largest revision this store's issuer has handed out, or ``0``.
+
+    ``0`` for a store written before the issuer existed, which is the right answer
+    rather than a fallback: such a store issued no stamps, so there is nothing for a
+    successor's issuer to stay above.
+
+    Raises:
+        MemoryStoreError: If the issuer exists but cannot be read.
+    """
+    try:
+        row = conn.execute("SELECT issued FROM revision_issuer WHERE singleton = 0").fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    except sqlite3.Error as exc:
+        msg = f"failed to read the revision issuer: {exc}"
+        raise MemoryStoreError(msg) from exc
+    return 0 if row is None else int(row[0])
+
+
+def _chunk(source: sqlite3.Connection, cursor: int | None, size: int, columns: str) -> list[_Row]:
     """Read the next ``size`` source rows past ``cursor``, in ``rowid`` order.
 
     ``cursor is None`` means nothing has been copied yet and is answered with an
@@ -847,7 +928,7 @@ def _chunk(source: sqlite3.Connection, cursor: int | None, size: int) -> list[_R
     """
     where = "" if cursor is None else "WHERE rowid > ?"
     params: tuple[object, ...] = (size,) if cursor is None else (cursor, size)
-    sql = f"SELECT {_SOURCE_COLUMNS} FROM records {where} ORDER BY rowid LIMIT ?"  # noqa: S608 — module-level literals, never caller data
+    sql = f"SELECT {columns} FROM records {where} ORDER BY rowid LIMIT ?"  # noqa: S608 — module-level literals, never caller data
     try:
         return [tuple(row) for row in source.execute(sql, params)]
     except sqlite3.Error as exc:
@@ -861,14 +942,30 @@ def _insert(
     record: MemoryRecord,
     vector: Embedding,
 ) -> None:
-    """Write one copied row and its recomputed vector into the open transaction."""
-    rowid, record_id, kind, data = row
+    """Write one copied row and its recomputed vector into the open transaction.
+
+    **The stamp is carried, not recomputed** (ADR-0219 §10): a re-embedding changes
+    the vectors and nothing else a caller can observe, so a record's ``revision``
+    must be the same on both sides of the swap or every conditional write a caller
+    was holding across the migration would be refused for a change that never
+    happened. Only a source row that has *no* stamp — a store written before the
+    column existed — takes one here, from the work store's own issuer.
+    """
+    rowid, record_id, kind, data = row[:4]
+    stamp = row[_REVISION_IN_ROW]
+    # ``None`` is a source with no column at all; ``0`` is a row within one that no
+    # store's write path ever wrote — ADR-0219 §1 reserves that value for a record no
+    # store has stored, so in both cases there is no stamp to carry and one is
+    # issued. Issuing can never lose a real stamp, because ``0`` is never one.
+    if stamp is None or int(stamp) == 0:
+        work.execute("UPDATE revision_issuer SET issued = issued + 1 WHERE singleton = 0")
+        (stamp,) = work.execute("SELECT issued FROM revision_issuer WHERE singleton = 0").fetchone()
     expires, valid_until, valid_from, about_person = _derived(record)
     work.execute(
         "INSERT INTO records"
-        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (rowid, record_id, kind, data, expires, valid_until, valid_from, about_person),
+        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (rowid, record_id, kind, data, expires, valid_until, valid_from, about_person, stamp),
     )
     work.execute(
         "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
@@ -916,11 +1013,64 @@ def _fail(detail: str) -> NoReturn:
     raise MemoryStoreError(msg)
 
 
+def _verified_stamp(left: _Row, right: _Row) -> int:
+    """Check one copied row's revision against the live store's, returning it.
+
+    Checked here rather than left to the store, because the stamp is the one column
+    a rebuild cannot re-derive from the blob (ADR-0219 §1) and so the one whose loss
+    no later read would report: a swapped-in store whose rows all read back at the
+    reserved ``0`` would answer every conditional write with a refusal, and one
+    whose rows were re-stamped would refuse a write that is not stale.
+
+    A source stamp of ``None`` or ``0`` is not compared, because it is not a stamp:
+    the first is a store with no such column and the second is the value §1 reserves
+    for a record no store has stored. :func:`_insert` issues for both, and this asks
+    only that the issued value is one a store issues.
+
+    Raises:
+        MemoryStoreError: If the copied stamp is not one a store issues, or differs
+            from the one the live store holds for that row.
+    """
+    stamp = int(right[8])
+    if stamp <= 0:
+        _fail(f"row {right[0]!r} carries revision {stamp}, which no store issues")
+    carried = left[_REVISION_IN_ROW]
+    if carried is not None and int(carried) != 0 and int(carried) != stamp:
+        _fail(
+            f"row {right[0]!r} was re-stamped at revision {stamp}, "
+            f"where the live store holds {int(carried)}"
+        )
+    return stamp
+
+
+def _verify_issuer(source: sqlite3.Connection, work: sqlite3.Connection, highest: int) -> None:
+    """Check the built store's issuer stands above everything already issued.
+
+    Above every stamp the store *holds*, and above every stamp the store being
+    replaced ever *issued* — including the ones its deleted rows took, which is
+    exactly what no surviving row records and why ADR-0219 §1 forbids rebuilding an
+    issuer from the rows present.
+
+    Raises:
+        MemoryStoreError: If the issuer stands below either.
+    """
+    issued = _issued_through(work)
+    if issued < highest:
+        _fail(f"its revision issuer stands at {issued}, below the {highest} it holds")
+    already = _issued_through(source)
+    if issued < already:
+        _fail(
+            f"its revision issuer stands at {issued}, below the {already} "
+            f"the live store has already issued"
+        )
+
+
 def _verify(
     source: sqlite3.Connection,
     work: sqlite3.Connection,
     plan: ReembedPlan,
     embedder: Embedder,
+    columns: str,
 ) -> None:
     """Check the built store against the live one, before anything is moved (ADR-0104 §3).
 
@@ -946,15 +1096,20 @@ def _verify(
     if meta.get("dimensions") != str(embedder.dimensions):
         _fail(f"it is {meta.get('dimensions')}-dimensional, expected {embedder.dimensions}")
 
-    destination = "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person"
-    for left, right in zip_longest(_rows(source, _SOURCE_COLUMNS), _rows(work, destination)):
+    destination = (
+        "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision"
+    )
+    highest = 0
+    for left, right in zip_longest(_rows(source, columns), _rows(work, destination)):
         if left is None or right is None:
             _fail("it holds a different number of records")
-        if left != right[:4]:
+        if left[:4] != right[:4]:
             _fail(f"row {right[0]!r} differs from the live store's row {left[0]!r}")
         record = _decode(str(right[3]), right[1])
-        if tuple(right[4:]) != _derived(record):
+        if tuple(right[4:8]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
+        highest = max(highest, _verified_stamp(left, right))
+    _verify_issuer(source, work, highest)
 
     record_rowids = _rowids(work, "records", str(plan.work))
     vector_rowids = _rowids(work, "vec_records", str(plan.work))

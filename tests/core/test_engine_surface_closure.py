@@ -771,6 +771,25 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``next_notification`` "is not one" of those and ADR-0206 §2 keeps it that way.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
+    **ADR-0219 §6 is under the first limb alone**, and moves only the version, to 22
+    against the same forty methods — the first entry here whose ground is an **error
+    class** rather than a method, an argument or a result. ``core/errors.py`` gains
+    :class:`~ai_assistant.core.errors.MemoryStoreStaleError`, which
+    ``AssistantEngine.learn`` can emit under the ``MemoryStoreError`` it already
+    declares (ADR-0219 §5); ``wire/errors.py`` renders a code as the exception type's
+    own *concrete* class name, never flattened to a declared base, because doing so
+    would hand a client "a classification the server did not make" (ADR-0077 §3); and
+    the decode side resolves that code with ``getattr(core_errors, code, None)``,
+    raising ``ProtocolError`` when it cannot. So a version 22 hub emits a frame a
+    version 21 peer refuses, one-directionally, which is all §9 asks. The **field**
+    beside it is deliberately *not* a ground, and ADR-0219 §6 runs the test on it
+    separately: ``MemoryBase.revision`` is additive and defaulted on a type that does
+    not set ``extra="forbid"``, which is ADR-0213 §11's ruling on the same envelope,
+    and the reverse direction does not exist because no ``AssistantEngine`` method
+    takes a ``MemoryRecord`` as an argument. The **second** limb is not met: no
+    wire-carried type is minted and ADR-0087 §2c's scalar table gains no row.
+
+    **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
     moment a lane touching either has to read that rule rather than discover it
@@ -778,7 +797,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 21), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 22), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
