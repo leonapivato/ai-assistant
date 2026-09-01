@@ -132,33 +132,37 @@ def _placed(proposal: MemoryUpdateProposal, act: Placement | None) -> MemoryUpda
     and a fake that could be configured out of its own contract is the thing its
     constructor already refuses for a blank proposal.
 
-    **The act does not simply overwrite**, it takes ADR-0217 §3's same-act
-    precedence: "Where more than one setter would write in one act, the narrower
-    reach stands. Where two would write the same reach, the recorded setter is
-    decided by one total order, strongest first: ``DERIVED``, then ``OWNER_ACT``,
-    then ``PROPOSED``." That arithmetic is :meth:`Placement.narrowest_of`'s, and
-    it is called rather than restated for ``_meet``'s own reason — a meet stated
-    in two places is a meet that can drift between them. What it buys is the one
-    case an overwrite would get wrong: a script whose record already carries a
-    ``DERIVED`` narrowing keeps it, because ADR-0217 §10 pins that "a record the
-    derivation and an owner's act both place ``OWNER`` records setter
-    ``DERIVED``" — an act does not lift a derivation, and it does not launder one
-    into an ``OWNER_ACT`` stamp either.
+    **The act is written outright, and ADR-0217 §3's same-act precedence is not
+    reached at this seam.** §7 states the obligation unconditionally — "where it
+    is ``True`` every record that event produces is written with reach ``OWNER``
+    and setter ``OWNER_ACT``" — and only one setter can write here: a
+    ``FeedbackProcessor`` mints a *fresh* record from an explicit user act, and
+    the other two setters are elsewhere by construction. ADR-0204 §2's derivation
+    is `orchestration`'s at capture, downstream of this call; a model's proposal
+    is ``Observer``'s (§4), and it "never runs on a record already in the store"
+    nor on one this producer built. So no pipeline can hand this seam a record
+    already carrying a narrowing for an act to weigh against.
+
+    Resolving the act against a placement a *script* happens to carry was tried
+    and is wrong twice over. It admits a state the shared contract forbids — a
+    scripted ``DERIVED`` placement would survive a guarded event and fail
+    ``FeedbackProcessorContract``'s guarded arm, making the fake configurable out
+    of its own contract, which is what its constructor already refuses for a blank
+    proposal. And it answers a question the seam does not pose, since the
+    precedence clause it reaches for is about setters that in fact wrote, not
+    about a fixture's initial value.
 
     Args:
         proposal: The proposal about to be returned.
         act: The act's placement, or ``None`` where the event carried no act.
 
     Returns:
-        ``proposal`` unchanged where there is no act or the act writes nothing,
-        and a copy carrying the resolved placement otherwise.
+        ``proposal`` unchanged where there is no act, and a copy carrying the
+        act's placement otherwise.
     """
     if act is None:
         return proposal
-    placement = Placement.narrowest_of((proposal.proposed.placement, act))
-    if placement == proposal.proposed.placement:
-        return proposal
-    record = proposal.proposed.model_copy(update={"placement": placement})
+    record = proposal.proposed.model_copy(update={"placement": act})
     return proposal.model_copy(update={"proposed": record})
 
 
