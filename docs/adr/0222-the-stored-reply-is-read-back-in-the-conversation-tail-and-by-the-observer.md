@@ -233,10 +233,11 @@ reply, and it is as mechanical as it was.
 
 ### 4. The budget: one ceiling, one number, three sites
 
-> **Normative.** A reply rendered under §1 or §3 is rendered to at most **600
-> characters of the reply's own text**. Where the reply is longer, the first 600
-> characters are rendered and §5's elision applies. The ceiling is counted on the
-> `outcome` string as stored, before `_quoted_span` is applied.
+> **Normative.** A reply rendered under §1 or §3 is rendered as the **longest prefix
+> of the reply whose quoted rendering is at most 640 characters**. The ceiling is
+> counted on the *output* of `_quoted_span`, delimiters included; the cut is taken on
+> the reply's own text, so no escape sequence is ever split. Where the whole reply's
+> quoted rendering fits, it is rendered whole; otherwise §5's elision applies.
 
 > **Normative.** The ceiling is written out as a module constant at each of the three
 > sites and is not shared between them, for the reason ADR-0221 §3 gives for the
@@ -249,28 +250,43 @@ reply, and it is as mechanical as it was.
 > `observation_batch_size` and `observation_max_proposals` are all unmoved.
 
 **The arithmetic, stated because a budget that is not is not a budget.** Twenty tail
-turns at the ceiling is 12,000 characters of reply text; the observation batch is the
-same twenty. Ordinary replies are far under it — 600 characters is about a hundred
-words, which is a substantial paragraph — so the common case renders whole and the
-ceiling is a bound on the tail of the distribution rather than a routine cut.
+turns at the ceiling is 12,800 characters of assembled prompt, and the observation
+batch is the same twenty. That figure is a true worst case for *any* reply text, which
+is the whole reason the ceiling is counted on the quoted rendering rather than on the
+source: `json.dumps` expansion is not uniform, and a source-character ceiling bounds
+the wrong quantity.
 
-**No measurement stands behind 600, and this ADR says so rather than implying one.**
+**The expansion is uneven, and getting it wrong is how a budget stops being one.**
+Measured on this tree's Python: with `ensure_ascii=True`, a newline becomes two
+characters, a Latin-1 or BMP code point such as `é` or `中` becomes six, and an
+**astral** code point such as an emoji becomes *twelve* — two `\uXXXX` surrogate
+escapes, not one. So `json.dumps("😀" * 600)` is 7,202 characters, where a naive
+six-per-code-point reading predicts 3,602. A ceiling on source characters would
+therefore admit twenty replies of about 144,000 characters while claiming to admit
+72,000. Counting the ceiling on the output removes the whole class of error: whatever
+the text is made of, the rendered span is at most 640 characters.
+
+**What 640 buys, in the units a reader cares about.** Ordinary prose escapes to about
+its own length, so 640 admits roughly 630 characters of English — about a hundred
+words, a substantial paragraph — and the common reply renders whole. Text that is
+entirely CJK admits about 105 code points and text that is entirely emoji about 53.
+That degradation is correct rather than unfortunate: those replies cost the prompt the
+same 640 characters, and a budget that let them cost six or twelve times more would be
+measuring the wrong thing.
+
+**The cut is taken on the source text even though the ceiling is measured on the
+output.** Slicing the quoted form could split a `\uXXXX` escape or a surrogate pair and
+produce something that is not valid JSON, so the prefix is chosen over the reply's own
+characters and measured by rendering it. §5's marker then reports source characters,
+which is the unit a human can check against the stored reply.
+
+**No measurement stands behind 640, and this ADR says so rather than implying one.**
 The corpus's own precedent for an unmeasured bound is `DEFAULT_OBSERVATION_MAX_PROPOSALS`,
 where the number is defended by a probe and the instrument that would revise it is
 named. There is no probe of reply lengths in this system, and inventing a figure to
 justify one would be worse than admitting the gap. What makes the number revisable is
-§5's counter: a high share of elided renders says the ceiling is wrong, and the
-implementing lane's counter is what makes that readable.
-
-**`json.dumps` expands, and the ceiling is deliberately not counted on the expansion.**
-A newline becomes two characters and a non-ASCII code point becomes six, so the quoted
-rendering of a 600-character reply is 600-ish characters for ordinary prose and up to
-about 3,600 for text that is entirely non-ASCII. The ceiling is counted on the source
-text anyway, for two reasons: it is the number §5's elision message can honestly report
-to a reader, and slicing the source before quoting cannot produce a broken escape
-sequence, where slicing the quoted form could. The expansion is a known and bounded
-consequence, recorded here so a later lane meets it as a decision rather than a
-surprise.
+§5's counter pair: a high **share** of elided renders says the ceiling is wrong, and it
+is a share rather than a count precisely because a bare numerator cannot say it.
 
 ### 5. The elision is legible, it is held data, and it is counted
 
@@ -286,10 +302,25 @@ surprise.
 > text, in order, with nothing removed from the middle and nothing joined. No site
 > renders a head-and-tail composite.
 
-> **Normative.** Each site counts the renders at which the ceiling bound. The counter
-> is readable without a model call and without re-running a prompt; where a site has
-> no surface for one, the implementing lane adds it. A count is owed because §4's
-> number is unmeasured and this is the instrument that revises it.
+> **Normative.** Each site emits, once per assembly, **two** counts: the number of
+> records that were eligible to render a reply under §1 or §3, and how many of those
+> §4's ceiling bound on. The pair is the denominator and the numerator of the elision
+> share, and neither is owed without the other.
+
+> **Normative.** The pair rides **one statement**, so the two are observed together and
+> lost together (ADR-0141 §6's rule for the duplicate share). The statement carries the
+> two integers and **no reply text**, elided or whole, so §8's eleventh assertion is
+> unaffected and ADR-0119's rule that a trace never contains Tier 0/1 content is not
+> approached.
+
+> **Normative.** The counts are of one assembly and are not durable totals; a rate is a
+> sum over a window, as ADR-0120 §1 computes every measure. The lane emits the pair on
+> a carrier each site already has and that needs no `core` type, no new field on a
+> returned value and no `core/protocols.py` change — a structured log event satisfies
+> this. Where the pair is also visible to an `OPERATION` trace mapper, as the
+> observer's is under §9's hook, the lane puts it there as well, a trace being
+> queryable where a log is not. The carrier is otherwise the lane's choice, subject to
+> the one-statement rule and the no-content rule above.
 
 **Outside the span, because inside it is forgeable.** ADR-0098 §2 rules that a span's
 attribution must not be forgeable from inside the span, and `_outcome_lines` states the
@@ -309,7 +340,7 @@ destroys the rest; a render budget spends one prompt and the whole reply stays i
 store for the next pass, which is exactly ADR-0086 §4's distinction — *"An elision says
 it stood here and we stopped carrying the reference … a surface must not render the
 two alike."* And a **legible** prefix does not assert what a silent one does: a model
-told it is seeing the first 600 of 1,283 characters knows it has not been given the
+told it is seeing the first 612 of 1,283 characters knows it has not been given the
 ending, which is the difference between an incomplete answer and a wrong one.
 
 **A prefix rather than a middle-out cut, and the observer's own caution is why the
@@ -431,28 +462,40 @@ out whether the boundary holds in practice rather than only on paper.
    `    how it turned out:` for the assemblers — renders as one line and writes no
    second entry and no second continuation line, at all three sites. This is ADR-0098
    §9's regression shape applied to the new span.
-4. **The ceiling binds where it should and not before.** A reply of exactly the
-   ceiling's length renders whole and unmarked; one a single character longer renders
-   its first N characters with §5's marker; and the marker's length figure is the
-   reply's full length.
-5. **The elision marker is unforgeable.** A reply whose own text contains this
+4. **The ceiling binds where it should and not before.** A reply whose quoted
+   rendering is exactly the ceiling renders whole and unmarked; one whose quoted
+   rendering is a single character over renders a prefix with §5's marker; and the
+   marker's length figure is the reply's full length in its own characters.
+5. **The ceiling holds against expansion, and this is the case the arithmetic got
+   wrong once.** A reply of astral code points — emoji — renders a quoted span of at
+   most the ceiling, as does one of CJK characters and one of newlines. The test
+   asserts the rendered length, not the source length, at all three sites, and it is
+   what would have caught the twelve-characters-per-emoji error §4 records.
+6. **The prefix is valid.** The rendered span is decodable as JSON for every input
+   above: no cut splits an escape sequence or a surrogate pair.
+7. **The elision marker is unforgeable.** A reply whose own text contains this
    system's elision wording, and which is under the ceiling, renders unmarked — the
    marker appearing only outside the quoted span, in held data.
-6. **The counter counts.** A batch or tail mixing elided and unelided replies reports
-   exactly the number the ceiling bound on.
+8. **Both counters count, and they are emitted together.** An assembly mixing elided
+   and unelided replies reports the eligible count and the elided count on one
+   statement, with the second no greater than the first; an assembly with eligible
+   replies and no elision reports a non-zero denominator and a zero numerator; and an
+   assembly with no eligible record at all reports zero and zero rather than omitting
+   the statement, so a missing pair is distinguishable from an empty one. No such
+   statement carries reply text.
 
 **The negative assertions that remain — where the reply still must not appear.**
 
-7. **The retrieved group carries no reply**, at either request assembler, for a record
+9. **The retrieved group carries no reply**, at either request assembler, for a record
    carrying a `disposition`. A distinctive span in such a record's reply occurs
    nowhere in either assembled prompt. This is test 4's shape, retained over the
    population §2 keeps phrase-only, and it is why test 4's deletion is a narrowing
    rather than an abandonment.
-8. **The benchmark harness renders no reply.** `render_context` over records built as
+10. **The benchmark harness renders no reply.** `render_context` over records built as
    `benchmarks/memory/ingest.py`'s `exchanges_of` builds them is byte-identical to
    today's, and `_render_record` called directly on a record carrying both fields
    emits no reply line.
-9. **No log carries the reply.** ADR-0221 §11's test 14 is untouched and is restated
+11. **No log carries the reply.** ADR-0221 §11's test 14 is untouched and is restated
    here because this is the change that would most easily break it: the capture path,
    the observation path and the three render sites emit no log event whose payload
    contains the reply's text, elided or whole. ADR-0004 §5 names *"message bodies"* a
@@ -600,7 +643,7 @@ the same cut ADR-0221 §12 made for its own Lane D over the same three sites.
 4. The elision counter §5's fourth clause requires, at each site.
 5. §9's counting hook: a metrics mapper for the `"observe"` seam in
    `orchestration/engine.py`, mirroring `_observed_due`'s for the scheduled run.
-6. §8's nine assertions, and the deletion of ADR-0221 §11's test 4 with the narrowing
+6. §8's eleven assertions, and the deletion of ADR-0221 §11's test 4 with the narrowing
    of its test 5.
 
 > **Normative.** A lane implementing the above and also embedding the reply, adding a
@@ -623,8 +666,8 @@ the same cut ADR-0221 §12 made for its own Lane D over the same three sites.
 - **The source archive and its retention** — #1843 and milestone 21 of #1318.
   Untouched.
 - **Promoting §4's ceiling to a `Settings` field.** Declined here as machinery ahead of
-  evidence; fired by §5's counter showing the number binds at a rate a deployment would
-  want to tune.
+  evidence; fired by §5's counter pair showing the ceiling binds at a share a
+  deployment would want to tune.
 
 ### 13. Scope
 
@@ -672,13 +715,13 @@ user-facing rights are unchanged — `assistant beliefs --kind episodic`,
   harness is untouched for two independent reasons rather than one, so no published
   number moves.
 - **Every prompt on the turn path gets longer**, bounded by §4 and typically by much
-  less. That is the cost, it is paid on every turn, and §5's counter is what tells a
-  later lane whether the bound was set right.
+  less. That is the cost, it is paid on every turn, and §5's counter pair is what
+  tells a later lane whether the bound was set right.
 - **A reply is now model prose reaching a model prompt**, so `_quoted_span` and the
   deferred origin mark stop being a theoretical control and become the live one. ADR-0221
   §6's gap is unchanged in size and larger in consequence.
-- **What would trigger revisiting this.** §5's counter showing the ceiling binds on a
-  large share of renders; §9's measure coming back near zero, which would say the
+- **What would trigger revisiting this.** §5's counter pair showing the ceiling binds
+  on a large share of renders; §9's measure coming back near zero, which would say the
   observer door was not worth its prompt; a measured need for the retrieved group to
   carry replies, which would be a different decision on different evidence; or #1844's
   envelope being opened, which would supply a better mechanism for the far-past case §2
@@ -709,8 +752,8 @@ user-facing rights are unchanged — `assistant beliefs --kind episodic`,
 - **Make the ceiling a `Settings` field.** Deferred in §12 rather than rejected. Three
   render sites would each need the value plumbed to them, which is machinery ahead of
   the evidence that any deployment wants a different number; the module constant
-  follows the phrase tables' precedent and §5's counter is what would justify promoting
-  it.
+  follows the phrase tables' precedent and §5's counter pair is what would justify
+  promoting it.
 - **Add a field marking a proposal as an act-record, and count that.** Rejected in §9.
   It would make the measurement cheap by building, as an instrument, the typed-act
   surface #1842's fifth requirement and ADR-0221 §13 both defer to their own decision —
