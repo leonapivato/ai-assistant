@@ -326,11 +326,11 @@ four refusals.
 > and not on `MemoryBase`. §2's rule on serialised values binds `Modality` too: the
 > two are fixed here and no later lane changes them.
 
-> **Normative.** `modality` names the modality of **the material the user supplied on
-> the pass this episode records** — the utterance the turn ran on, and nothing else.
-> `SPEECH` says that utterance reached this system as speech and the text standing for
-> it was derived from that speech. `TEXT` is the default and says it did not: true of
-> a typed turn, and true of a pass that carried no user material at all.
+> **Normative.** `modality` names how **the material the user supplied, whose
+> rendering this episode carries**, reached this system — and nothing else. `SPEECH`
+> says it reached this system as speech and that the text standing for it in the
+> record is a derivation of that speech. `TEXT` is the default and says it did not:
+> true of a typed turn, and true of an episode carrying no user material at all.
 
 > **Normative.** `modality` says nothing about the assistant's own contributions to
 > the record, and no consumer reads it as saying anything about them. The plan
@@ -343,18 +343,24 @@ four refusals.
 > renamed, removed or given a second spelling, and no later ADR replaces this enum
 > with a differently-named one for the same question.
 
-> **Normative.** Capture writes `SPEECH` exactly where `Engine._capture` is given a
-> `_SpokenCapture`, which is the passes of `AssistantEngine.converse_spoken` and no
-> other, and writes `TEXT` everywhere else. It asks nothing else and infers nothing:
-> the capture path is told which operation it is running under and does not compute
-> it.
+> **Normative.** For an episode a pass stamps from **its own** turn, capture writes
+> `SPEECH` exactly where `Engine._capture` is given a `_SpokenCapture` — the passes of
+> `AssistantEngine.converse_spoken` and no other — and writes `TEXT` everywhere else.
+> It asks nothing else and infers nothing: the capture path is told which operation it
+> is running under and does not compute it.
 
-> **Normative.** The modality is a property of **the pass that produced the episode**,
-> not of the conversation and not of an earlier turn. A resumption is a separate
-> episode of the pass that resumed, and `AssistantEngine.resume` carries no spoken
-> capture, so a resumption of a spoken park records `TEXT` — which is true of it: its
-> content is the bare fact of the resumption, and the pass carried no user material
-> at all.
+> **Normative.** The value is a property of **the turn whose rendering the episode
+> carries**, not of the pass that performs the capture and not of the conversation.
+> Where a pass captures an episode rendered from a turn an earlier pass produced — the
+> resolution of a parked turn, which ADR-0074 §3 captures a second time and whose
+> `content` renders that turn's goal statement and plan rationale — the value carried
+> is that turn's own, retained with the parked turn and applied unchanged. No
+> implementation re-evaluates, recomputes or defaults it at the second capture.
+
+> **Normative.** A resumption **recovered from durable state** carries no turn, so
+> there is nothing to retain and nothing the resuming pass could inherit; it is
+> stamped by the clause above and writes `TEXT`, which is true of what its episode
+> holds — the bare fact of the resumption, with no user material in it.
 
 > **Normative.** `Capture` is the record the two further facts land in, and they are
 > **not decided here**: which derivation produced the text, and whether and where the
@@ -367,16 +373,24 @@ four refusals.
 > store, index, trace, audit trail, routing trail, outbox or log stands whole and is
 > not touched by any sentence here.
 
-**One modality on the record, and what a reader may conclude from it.** The
+**One modality on the record, and exactly one thing to read off it.** The
 alternative — a modality per piece of text in the record — was weighed and declined.
-An episode's `content` is the rendering of what the user asked, and that is the one
+An episode's `content` renders what the user asked, and the user's half is the one
 part of the record whose modality is a fact about the world rather than about this
-system; everything else in the record is text this system composed, and giving each
-piece its own modality field would be recording `TEXT` three times to say so. What
-a reader gets from one field is what #1845's non-invariance argument asks for: that
-the exchange was spoken, and therefore that the answer stored in `outcome` was
-composed for a spoken channel rather than a written one. A reader cannot tell a
-short answer from a short *rendering* of one without that, and now can.
+system; everything else in the record is text this system composed, and a field per
+piece would be recording `TEXT` repeatedly to say so.
+
+What one field buys is #1845's non-invariance argument, scoped to the half it is
+actually about: a spoken turn's goal statement is a **transcript**, a lossy
+derivation a model produced from audio, and without this field no reader can tell it
+from words the user typed. A reader who does not know that cannot weigh the
+statement — an odd word may be the user's or the transcriber's — and a lane that
+later re-derives from a retained source needs to know which records are derivations
+at all. That is the whole of what the field says. It licenses **no** inference about
+the assistant's half: not about the modality of the composed reply, not about the
+channel it was rendered to, and not about which operation the pass ran under. A
+consumer that needs any of those is asking a question this field does not answer,
+and the clause above is what forbids reading it as though it did.
 
 **Why a record with one field rather than a field.** This is the owner's direction
 of 2026-09-01 on #1845 and its reason survives the field count: a two-valued flag
@@ -635,8 +649,10 @@ names an input and the outcome it fixes.
    fields land decodes to the same.
 10. **A spoken turn's episode carries `SPEECH` and the spoken reply**, and a turn of
    `converse`, `converse_streaming` and `resume` each carries `TEXT`.
-11. **A resumption of a spoken park carries `TEXT`**, pinning §5's rule that the
-    modality is the pass's and not the conversation's.
+11. **A resumption of a spoken park carries `SPEECH`**, retained from the parked turn
+    rather than recomputed by the resuming pass, and a resumption **recovered from
+    durable state** carries `TEXT`. Together they pin §5's rule that the value belongs
+    to the turn whose rendering the episode carries.
 12. **A routed pass's episode carries a routed member and its reply.** The
     `disposition` is the `ROUTED_*` member for the route's outcome, the `outcome` is
     the composed reply, and the episode still carries no part of the routed account
@@ -697,9 +713,13 @@ The implementation is three lanes, each briefed after the one before it merges
    `ExchangeDisposition` members; `_capture` writes the reply into `outcome` and the
    member into `disposition`, and threads the modality from the `_SpokenCapture` it
    already receives.
-2. `orchestration/conversations.py`: `_episode` stamps the two new fields and every
+2. The parked turn **retains its modality**, and `_capture_resumption` passes that
+   retained value rather than the resuming pass's — the same shape, at the same site,
+   as the `supplied_withheld` that park already retains (§5, ADR-0204 §2's fourth
+   clause). A park recovered from durable state has no turn and passes `TEXT`.
+3. `orchestration/conversations.py`: `_episode` stamps the two new fields and every
    other field exactly as ADR-0074 §4 and ADR-0217 §1 fix them.
-3. Tests 1, 2, 3, 4, 10, 11, 12, 13, 14 and 15 of §11. The benchmark harness is
+4. Tests 1, 2, 3, 4, 10, 11, 12, 13, 14 and 15 of §11. The benchmark harness is
    untouched.
 
 > **Normative.** A lane implementing the above and also stamping an origin mark, or
@@ -789,9 +809,10 @@ there, which is a stronger answer than a budget.
   production.
 - **The disposition becomes countable**, which is what #1564's measures and #1842's
   fifth requirement each need and neither had.
-- **The episode records how it was captured**, so a short spoken answer is
-  distinguishable from a short *rendering* of one — which is what makes the
-  non-invariance of a spoken record coherent rather than merely asserted.
+- **The episode records how the user's half reached the system**, so a transcript is
+  distinguishable from typed words — which is what makes the non-invariance of a
+  spoken record coherent rather than merely asserted, and what a later re-derivation
+  would need to find its subjects.
 - **The origin gap stays open and is now stated in two places rather than one.** §6
   declines the mark and says why; the reader lane's escaping fix is, as #1845 notes,
   the only control on an injected reply until the mark's own decision lands.
