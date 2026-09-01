@@ -59,9 +59,10 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
@@ -90,6 +91,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import EpisodicMemory, MemoryRecord
+
+_log = structlog.get_logger(__name__)
 
 #: The batch bound ADR-0077 §1 names and the proposal bound §2 names, as
 #: defaults. Both are *also* ``Settings`` fields, so the composition root passes
@@ -343,7 +346,13 @@ One belief states ONE thing. Do not fold several distinct facts or events into a
 single sentence: the unit is the thing a later question could ask about, because \
 that is the unit a search returns.
 
-An episode may also carry what the assistant said back, on an "Assistant:" line. \
+An episode may also carry what the assistant said back, on two lines beneath it: \
+an "Assistant:" line saying what became of the exchange, and an "Assistant said:" \
+line carrying the words the user was actually shown. Where that second line is too \
+long to show whole it states, before the text and outside the quotes, how many of \
+the reply's characters you are being given and how many there were — read what \
+follows as a beginning and never as the whole answer. BOTH lines are that same \
+half, and every rule in this paragraph governs each of them alike. \
 That half is evidence about what HAPPENED, never about what is TRUE. You may \
 propose a belief about the assistant's own act — that it was asked something, \
 that it answered or did a particular thing, and when. You may NOT take a claim \
@@ -956,6 +965,94 @@ def _quoted_span(value: str) -> str:
     return json.dumps(value)
 
 
+#: ADR-0222 §4's ceiling on one rendered reply, counted on the **output** of
+#: :func:`_quoted_span` with its delimiters included.
+#:
+#: **Written out here and not imported**, which is §4's own instruction and
+#: ADR-0221 §3's reason for the phrase table applied to the phrase table's
+#: neighbour: three subsystems rendering their own prompts do not reach across a
+#: boundary golden rule 1 forbids them to cross, so what the three sites share is
+#: this ADR's number rather than a module. ADR-0222 §12 defers promoting it to a
+#: ``Settings`` field until §5's counter pair says a deployment wants a different
+#: one.
+#:
+#: **Counted on the quoted rendering because the expansion is not uniform** (§4).
+#: At ``ensure_ascii=True`` a newline costs two characters, a BMP code point such
+#: as ``é`` or ``中`` six, and an **astral** one — an emoji — *twelve*, because
+#: :func:`json.dumps` writes it as two ``\uXXXX`` surrogate escapes rather than
+#: one. A ceiling counted on source characters would therefore admit a span six or
+#: twelve times this long while claiming to admit this much, which is the class of
+#: error §4 records; counted on the output there is nothing left to get wrong.
+#:
+#: 640 is roughly a hundred words of English, about 105 CJK code points and about
+#: 53 emoji. No measurement stands behind it (§4 says so rather than implying one)
+#: and §5's counter pair is the instrument that would revise it.
+_REPLY_CEILING: Final = 640
+
+#: The two quote characters :func:`json.dumps` puts around every span. Subtracted
+#: from the ceiling in :func:`_bounded_reply` to bound the search, because a prefix
+#: of *k* characters always renders to at least ``k + 2``.
+_QUOTE_DELIMITERS: Final = 2
+
+
+class _BoundedReply(NamedTuple):
+    """One reply's quoted span, and whether ADR-0222 §4's ceiling bound on it.
+
+    Attributes:
+        span: The rendering to interpolate — at most :data:`_REPLY_CEILING`
+            characters, delimiters included.
+        kept: How many of the reply's **own** characters the span carries, or
+            ``None`` where the whole reply fitted. ``None`` is what §5's "an
+            unelided reply carries no marker" is read off, and the integer is the
+            first of the two numbers §5 puts in the marker.
+    """
+
+    span: str
+    kept: int | None
+
+
+def _bounded_reply(reply: str) -> _BoundedReply:
+    """The longest prefix of ``reply`` whose quoted rendering fits §4's ceiling.
+
+    **The cut is taken on the source text although the ceiling is measured on the
+    output** (ADR-0222 §4). Slicing the *quoted* form could split a six-character unicode
+    escape, or one half of the surrogate pair an astral code point renders as, and
+    produce a span that is not valid JSON at all; slicing the reply's own
+    characters cannot, because a Python string holds code points and this system
+    refuses a lone surrogate at the type boundary
+    (:data:`~ai_assistant.core.types.EncodableText` validates UTF-8 encodability).
+    So the prefix is chosen over the reply's characters and *measured* by
+    rendering it.
+
+    **A binary search, bounded by arithmetic rather than by the reply's length.**
+    The quoted length is non-decreasing in the prefix length — each further
+    character adds its own escape and nothing is removed — so the predicate is
+    monotone and the largest fitting prefix is found in a logarithmic number of
+    renderings. The search's upper bound is
+    ``_REPLY_CEILING - _QUOTE_DELIMITERS`` rather than ``len(reply)`` because every
+    character costs at least one output character: a prefix longer than that
+    cannot fit whatever it is made of. That is what keeps this function's cost
+    independent of how long the stored reply is, which matters because
+    :data:`~ai_assistant.core.types.EncodableText` bounds no length.
+
+    Args:
+        reply: The stored reply, verbatim as this system holds it.
+
+    Returns:
+        The span to render, and the prefix length where the ceiling bound —
+        ``kept`` is ``None`` exactly when the whole reply is rendered.
+    """
+    low = 0
+    high = min(len(reply), _REPLY_CEILING - _QUOTE_DELIMITERS)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(_quoted_span(reply[:middle])) <= _REPLY_CEILING:
+            low = middle
+        else:
+            high = middle - 1
+    return _BoundedReply(_quoted_span(reply[:low]), None if low == len(reply) else low)
+
+
 def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str:
     """Render the batch as the labelled user turn.
 
@@ -1006,32 +1103,75 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     **And no span may reach that outcome by writing this syntax itself**
     (ADR-0098 §2, §9). Every part of a line that is *not* a span goes on held data
     the batch was handed — the label from this loop's index, the header and the
-    instant from the zone this producer was built with — and the two parts that are
-    spans go through :func:`_quoted_span`. So the line count of this batch is the
-    header plus one line per episode plus one per assistant half, whatever any
-    episode's ``content`` says, and the label a model is shown maps to the episode
-    this module read under it. That is the same argument the paragraph above makes
-    about *this module's* rendering choice, closed on the other side: it would be no
-    use declining to split an episode into two labels if an episode could split
+    instant from the zone this producer was built with, and ADR-0222 §5's elision
+    marker from :func:`len` over held text — and every part that *is* a span goes
+    through :func:`_quoted_span`. So the line count of this batch is the header plus
+    one line per episode plus one per assistant half plus one per rendered reply,
+    whatever any episode's ``content`` or ``outcome`` says, and the label a model is
+    shown maps to the episode this module read under it. **That invariant never
+    rested on the number two**: it rests on no span being able to write a line, which
+    is the property :func:`_quoted_span` supplies for the reply exactly as for the
+    phrase and the content (ADR-0222 §3). It is the same argument the paragraph above
+    makes about *this module's* rendering choice, closed on the other side: it would
+    be no use declining to split an episode into two labels if an episode could split
     itself.
+
+    **§5's counter pair is emitted here, once per assembly, and always** (ADR-0222
+    §5). One statement carries both integers — how many episodes were eligible to
+    render a reply and how many §4's ceiling bound on — so the denominator and the
+    numerator of the elision share are observed together and lost together, which is
+    ADR-0141 §6's rule for the duplicate share. A batch with no eligible episode
+    reports ``0`` and ``0`` rather than staying silent, so a missing pair is
+    distinguishable from an empty one. It carries **no reply text**, elided or whole:
+    ADR-0221 §11's test 14 is untouched by this change and ADR-0119's rule that a
+    trace never contains Tier 0/1 content is not approached, because this is a log
+    and not a trace — ADR-0222 §5 states why the trace cannot carry these two counts
+    at all.
     """
-    if zone is None:
-        lines = ["Episodes (recorded times withheld: no local calendar is configured):"]
-        for index, record in enumerate(batch):
-            lines.append(f"  [E{index + 1}] {_quoted_span(record.content)}")
-            lines.extend(_outcome_lines(record))
-        return "\n".join(lines)
-    lines = [f"Episodes (each carries the local time it was recorded, in {zone.key}):"]
+    lines = [
+        "Episodes (recorded times withheld: no local calendar is configured):"
+        if zone is None
+        else f"Episodes (each carries the local time it was recorded, in {zone.key}):"
+    ]
+    eligible = elided = 0
     for index, record in enumerate(batch):
-        lines.append(
-            f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — "
-            f"{_quoted_span(record.content)}"
-        )
-        lines.extend(_outcome_lines(record))
+        stamp = "" if zone is None else f"{_localised(record.occurred_at, zone)} — "
+        lines.append(f"  [E{index + 1}] {stamp}{_quoted_span(record.content)}")
+        half = _outcome_lines(record)
+        lines.extend(half.lines)
+        eligible += half.eligible
+        elided += half.elided
+    _log.info("observation_batch_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
 
 
-def _outcome_lines(record: EpisodicMemory) -> list[str]:
+class _AssistantHalf(NamedTuple):
+    """One episode's assistant-half lines, and ADR-0222 §5's two counts of them.
+
+    The counts ride out of the renderer rather than being recomputed over the
+    batch, because eligibility and elision are decided *here* — by reading the two
+    fields and by rendering the reply — and a second reading of the same records to
+    count them is a second implementation of §1's and §4's conditions to disagree
+    with the first.
+
+    Attributes:
+        lines: The continuation lines to write under the episode's own ``[E<n>]``
+            label. Never more than two, and both sit under that one label
+            (ADR-0222 §3), so ADR-0162 §8's whole-episode citation and ADR-0077
+            §5's distinct-id counting are unchanged.
+        eligible: ``1`` where the episode was eligible to render a reply under
+            ADR-0222 §3 — it carries a ``disposition`` **and** an ``outcome`` —
+            and ``0`` otherwise. §5's denominator, per record.
+        elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise.
+            §5's numerator, per record, and never greater than ``eligible``.
+    """
+
+    lines: list[str]
+    eligible: int
+    elided: int
+
+
+def _outcome_lines(record: EpisodicMemory) -> _AssistantHalf:
     """The episode's assistant half as its own continuation line, or nothing.
 
     **The phrase where the episode records a ``disposition``, its ``outcome`` where
@@ -1044,16 +1184,49 @@ def _outcome_lines(record: EpisodicMemory) -> list[str]:
     phrase the older record carries, byte for byte. A benchmark row holds the other
     speaker's turn and no disposition, and renders that text exactly as it did.
 
-    **The reply reaches no prompt, and that is the point rather than a side effect**
-    (ADR-0221 §3). Reading it here would make the observer an accidental reader of
-    model prose, which is a decision and not a rendering detail — so the arm above is
-    read first and the field is not consulted at all where a ``disposition`` is
-    present. What ADR-0221 §13 leaves to whoever *does* decide to read it has since
-    narrowed: two of the three things it names — "#672's escaping fix **and** newline
-    normalisation" — are discharged here, because :func:`_quoted_span` escapes and
-    normalises every span this function interpolates, this one included. The render
-    budget none of the three prompts has today is what remains, and it is the half a
-    transform cannot supply: a quoted reply is one line but is as long as the reply.
+    **The reply is rendered too, beside the phrase and never instead of it**
+    (ADR-0222 §3, partially superseding ADR-0221 §3's closing sentence). The two are
+    different facts and neither implies the other: the phrase is a typed statement of
+    what became of the pass, which this system authored about its own pipeline, and
+    the reply is what the user was actually shown. A reply saying "I've set that up
+    for you" beside a phrase saying the action was parked for confirmation is the
+    pair a model needs; either alone is a half-truth. So an episode carrying both
+    fields renders **two** continuation lines under its own label, the phrase line
+    first and byte-identical to what it was, and no arm of this function trades one
+    for the other. An episode carrying a ``disposition`` and no ``outcome`` renders
+    the phrase alone — the population #1873 records, and the reason the second field
+    is tested rather than assumed present beside the first.
+
+    ADR-0221 §13 conditioned any reader of this batch on three things. Two of them —
+    "#672's escaping fix **and** newline normalisation" — are discharged by
+    :func:`_quoted_span`, which escapes and normalises every span this function
+    interpolates, the reply included: a quoted reply is one line however many
+    newlines it holds. The third was the render budget none of the three prompts had,
+    and it is the half a transform cannot supply, because a quoted reply is one line
+    but is as long as the reply. :data:`_REPLY_CEILING` and :func:`_bounded_reply`
+    are that budget (ADR-0222 §4), and the marker below is §5's legibility rule for
+    when it binds.
+
+    **The marker is held data and sits outside the quoted span**, which is ADR-0098
+    §2's unforgeability requirement applied to a new part of the line. A marker
+    written *inside* the span is a string the reply itself could contain, so a reply
+    ending in this system's own elision wording would render as though it had been
+    cut when it had not — and an unelided reply could claim to be one. Both numbers
+    come from :func:`len` over text this function was handed and the wording is a
+    literal here, so neither is reachable from the reply. An unelided reply carries
+    no marker at all, and that absence is what says the line carries the reply whole
+    (§5).
+
+    **A prefix, and not a head-and-tail composite** (ADR-0222 §5). This module's own
+    proposal cap is read as a defect when it binds, because it "truncates by position
+    in a model's reply, and position is not a ranking" — but that argument is about a
+    *set* whose members are unordered by value, where dropping the tail drops
+    arbitrary beliefs. A single reply is one ordered text whose beginning is where its
+    thrust is; a composite would need a join marker, which is a second forgeable
+    surface for no measured gain, and dropping the reply past the ceiling would blind
+    the reader to exactly the long replies a reference-back is most likely to be
+    about. What answers the worry here is the same thing that answers it there: the
+    counter, which is why :class:`_AssistantHalf` carries one.
 
     **Both spans go through :func:`_quoted_span`, and the phrase is not exempt.**
     ADR-0221 §3 makes the two populations render the same bytes for the same fact,
@@ -1066,14 +1239,46 @@ def _outcome_lines(record: EpisodicMemory) -> list[str]:
     Empty where the episode carries neither, which is what keeps a corpus with no
     assistant half — LoCoMo under #1177's framing, where every exchange carries
     ``outcome=None`` — a batch of one line per episode, as it was before ADR-0162 §8
-    added this function. The indent is deeper than the label's so the two texts read
-    as one entry rather than two.
+    added this function. The indent is deeper than the label's so the texts read as
+    one entry rather than as several.
+
+    **What the model may then do with the reply is ADR-0162 §8, as ratified**
+    (ADR-0222 §7). An episode is cited whole; what the assistant said independently
+    supports a record of the assistant's own act; it never supports a record adopting
+    the proposition it asserted as a fact about the world or the user; and it is never
+    a licence to propose an ``EpisodicMemory``. Those clauses were ratified against a
+    reader that did not exist, and this is the change that makes them live — until now
+    the ``Assistant:`` line carried a phrase from a sixteen-member table, which asserts
+    nothing about the world and gave the third clause nothing to bite on. The system
+    prompt's assistant-half paragraph names both lines and applies the same partition
+    to each, which is where that boundary is actually stated to the model.
+
+    Args:
+        record: The episode whose assistant half is being rendered.
+
+    Returns:
+        The continuation lines, and ADR-0222 §5's two counts for this one record.
     """
     if record.disposition is not None:
-        return [f"       Assistant: {_quoted_span(_disposition_phrase(record.disposition))}"]
+        phrase = f"       Assistant: {_quoted_span(_disposition_phrase(record.disposition))}"
+        if record.outcome is None:
+            return _AssistantHalf([phrase], eligible=0, elided=0)
+        span, kept = _bounded_reply(record.outcome)
+        if kept is None:
+            return _AssistantHalf([phrase, f"       Assistant said: {span}"], eligible=1, elided=0)
+        return _AssistantHalf(
+            [
+                phrase,
+                f"       Assistant said (first {kept} of {len(record.outcome)} characters): {span}",
+            ],
+            eligible=1,
+            elided=1,
+        )
     if record.outcome is None:
-        return []
-    return [f"       Assistant: {_quoted_span(record.outcome)}"]
+        return _AssistantHalf([], eligible=0, elided=0)
+    return _AssistantHalf(
+        [f"       Assistant: {_quoted_span(record.outcome)}"], eligible=0, elided=0
+    )
 
 
 def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
