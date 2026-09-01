@@ -173,29 +173,45 @@ every one of them. What the reader lost is not repaired by the store losing it t
 > two members onto one.
 
 > **Normative.** The members are named so that which vocabulary a member came from is
-> legible in the member itself, and the sixteen are:
+> legible in the member itself; each member's **serialised value** is fixed here and
+> not left to the implementing lane; and the sixteen are:
 >
-> | from | member | the phrase it stands for |
-> | --- | --- | --- |
-> | no step | `NO_ACTION_NEEDED` | `no action was needed` |
-> | `Disposition.EXECUTED` | `STEP_EXECUTED` | `the selected tool ran` |
-> | `Disposition.DENIED` | `STEP_DENIED` | `the action was refused by the permission policy` |
-> | `Disposition.AWAITING_CONFIRMATION` | `STEP_AWAITING_CONFIRMATION` | `the action was parked for the user to confirm` |
-> | `Disposition.NO_CAPABLE_TOOL` | `STEP_NO_CAPABLE_TOOL` | `no tool advertised the capability the step needed` |
-> | `Disposition.AMBIGUOUS_CAPABILITY` | `STEP_AMBIGUOUS_CAPABILITY` | `several tools advertised the capability, so none was chosen` |
-> | `Disposition.INVALID_PARAMETERS` | `STEP_INVALID_PARAMETERS` | `the step's arguments did not fit the declared schema of any capable tool` |
-> | `Disposition.EGRESS_UNBINDABLE` | `STEP_EGRESS_UNBINDABLE` | `the outbound call could not be described, so nothing was asked or sent` |
-> | `RouteOutcome.PERFORMED` | `ROUTED_PERFORMED` | `the assistant performed the operation the user asked for` |
-> | `RouteOutcome.AWAITING_CONFIRMATION` | `ROUTED_AWAITING_CONFIRMATION` | `the operation was parked for the user to confirm` |
-> | `RouteOutcome.REFUSED` | `ROUTED_REFUSED` | `the user declined, so the operation was not performed` |
-> | `RouteOutcome.AMBIGUOUS` | `ROUTED_AMBIGUOUS` | `more than one record matched, so nothing was performed` |
-> | `RouteOutcome.AMBIGUOUS_TRUNCATED` | `ROUTED_AMBIGUOUS_TRUNCATED` | `more records matched than could be shown, so nothing was performed` |
-> | `RouteOutcome.NOT_FOUND` | `ROUTED_NOT_FOUND` | `nothing matched, so nothing was performed` |
-> | `RouteOutcome.UNRECORDED` | `ROUTED_UNRECORDED` | `the decision could not be recorded, so nothing was performed` |
-> | `RouteOutcome.FAILED` | `ROUTED_FAILED` | `the operation was attempted and failed` |
+> | from | member | value | the phrase it stands for |
+> | --- | --- | --- | --- |
+> | no step | `NO_ACTION_NEEDED` | `no_action_needed` | `no action was needed` |
+> | `Disposition.EXECUTED` | `STEP_EXECUTED` | `step_executed` | `the selected tool ran` |
+> | `Disposition.DENIED` | `STEP_DENIED` | `step_denied` | `the action was refused by the permission policy` |
+> | `Disposition.AWAITING_CONFIRMATION` | `STEP_AWAITING_CONFIRMATION` | `step_awaiting_confirmation` | `the action was parked for the user to confirm` |
+> | `Disposition.NO_CAPABLE_TOOL` | `STEP_NO_CAPABLE_TOOL` | `step_no_capable_tool` | `no tool advertised the capability the step needed` |
+> | `Disposition.AMBIGUOUS_CAPABILITY` | `STEP_AMBIGUOUS_CAPABILITY` | `step_ambiguous_capability` | `several tools advertised the capability, so none was chosen` |
+> | `Disposition.INVALID_PARAMETERS` | `STEP_INVALID_PARAMETERS` | `step_invalid_parameters` | `the step's arguments did not fit the declared schema of any capable tool` |
+> | `Disposition.EGRESS_UNBINDABLE` | `STEP_EGRESS_UNBINDABLE` | `step_egress_unbindable` | `the outbound call could not be described, so nothing was asked or sent` |
+> | `RouteOutcome.PERFORMED` | `ROUTED_PERFORMED` | `routed_performed` | `the assistant performed the operation the user asked for` |
+> | `RouteOutcome.AWAITING_CONFIRMATION` | `ROUTED_AWAITING_CONFIRMATION` | `routed_awaiting_confirmation` | `the operation was parked for the user to confirm` |
+> | `RouteOutcome.REFUSED` | `ROUTED_REFUSED` | `routed_refused` | `the user declined, so the operation was not performed` |
+> | `RouteOutcome.AMBIGUOUS` | `ROUTED_AMBIGUOUS` | `routed_ambiguous` | `more than one record matched, so nothing was performed` |
+> | `RouteOutcome.AMBIGUOUS_TRUNCATED` | `ROUTED_AMBIGUOUS_TRUNCATED` | `routed_ambiguous_truncated` | `more records matched than could be shown, so nothing was performed` |
+> | `RouteOutcome.NOT_FOUND` | `ROUTED_NOT_FOUND` | `routed_not_found` | `nothing matched, so nothing was performed` |
+> | `RouteOutcome.UNRECORDED` | `ROUTED_UNRECORDED` | `routed_unrecorded` | `the decision could not be recorded, so nothing was performed` |
+> | `RouteOutcome.FAILED` | `ROUTED_FAILED` | `routed_failed` | `the operation was attempted and failed` |
 >
 > The phrase column is the phrase `_outcome_of` and `_routed_outcome_of` return
 > today, byte for byte, and §3 is what obliges a render site to produce it.
+
+> **Normative.** No implementation, migration or later lane changes a member's
+> serialised value once this ADR merges. A member added later takes a value of the
+> same form — the member name lower-cased — and no member is given a second spelling,
+> an alias or a numeric encoding.
+
+**Why the values are fixed here rather than left to the lane.** A `StrEnum`
+serialises its *value*, not its member name, and `EpisodicMemory` is wire-carried
+(§8) as well as persisted. Two conforming implementations of the member list above
+could therefore emit `step_executed` and `STEP_EXECUTED` for one fact, and every
+record written under the loser would be undecodable — a compatibility break §8's
+no-bump reasoning assumes cannot happen, on a field §8 makes the migration's
+discriminator. `Disposition` and `RouteOutcome` already carry lower-cased values of
+exactly this form, so the rule is the corpus's own and the table above simply writes
+it down.
 
 > **Normative.** `orchestration/engine.py`'s `_outcome_of` and `_routed_outcome_of`
 > return members of this enum in place of prose, and each keeps its `assert_never`
@@ -301,16 +317,24 @@ four refusals.
 ### 5. How the turn was captured: a record on the episode, carrying its modality
 
 > **Normative.** `core/types.py` gains one frozen model, `Capture`, and one `StrEnum`,
-> `Modality`, with two members — `TEXT` and `SPEECH`. `Capture` carries one field as
-> this ADR ships it, `modality: Modality`, defaulting to `TEXT`. `EpisodicMemory`
-> gains one field, `capture: Capture`, defaulting to a `Capture` with every field at
-> its default. `Capture` is on `EpisodicMemory` alone and not on `MemoryBase`.
+> `Modality`, with two members — `TEXT`, valued `text`, and `SPEECH`, valued `speech`.
+> `Capture` carries one field as this ADR ships it, `modality: Modality`, defaulting
+> to `TEXT`. `EpisodicMemory` gains one field, `capture: Capture`, defaulting to a
+> `Capture` with every field at its default. `Capture` is on `EpisodicMemory` alone
+> and not on `MemoryBase`. §2's rule on serialised values binds `Modality` too: the
+> two are fixed here and no later lane changes them.
 
-> **Normative.** `modality` names the modality of the **source material the episode's
-> text was derived from**. `SPEECH` says the text is a derivation of speech this
-> system was given; `TEXT` says the text is not a derivation of non-text material,
-> which is true both of a typed turn and of a rendering this system composed for
-> itself.
+> **Normative.** `modality` names the modality of **the material the user supplied on
+> the pass this episode records** — the utterance the turn ran on, and nothing else.
+> `SPEECH` says that utterance reached this system as speech and the text standing for
+> it was derived from that speech. `TEXT` is the default and says it did not: true of
+> a typed turn, and true of a pass that carried no user material at all.
+
+> **Normative.** `modality` says nothing about the assistant's own contributions to
+> the record, and no consumer reads it as saying anything about them. The plan
+> rationale rendered into `content` and the composed reply in `outcome` are text this
+> system produced on every pass, whatever the utterance's modality, and this ADR
+> records no modality for either.
 
 > **Normative.** `Modality` is a vocabulary that is **added to and never renamed**. A
 > later decision admitting a further input modality adds a member; no member of it is
@@ -339,6 +363,17 @@ four refusals.
 > or is cited toward doing so. ADR-0200 §8's clause that no audio is written to any
 > store, index, trace, audit trail, routing trail, outbox or log stands whole and is
 > not touched by any sentence here.
+
+**One modality on the record, and what a reader may conclude from it.** The
+alternative — a modality per piece of text in the record — was weighed and declined.
+An episode's `content` is the rendering of what the user asked, and that is the one
+part of the record whose modality is a fact about the world rather than about this
+system; everything else in the record is text this system composed, and giving each
+piece its own modality field would be recording `TEXT` three times to say so. What
+a reader gets from one field is what #1845's non-invariance argument asks for: that
+the exchange was spoken, and therefore that the answer stored in `outcome` was
+composed for a spoken channel rather than a written one. A reader cannot tell a
+short answer from a short *rendering* of one without that, and now can.
 
 **Why a record with one field rather than a field.** This is the owner's direction
 of 2026-09-01 on #1845 and its reason survives the field count: a two-valued flag
@@ -587,25 +622,30 @@ names an input and the outcome it fixes.
 7. **A harness row renders its assistant text.** A record built as
    `benchmarks/memory/ingest.py`'s `exchanges_of` builds one — assistant text in
    `outcome`, no `disposition` — renders that text at all three sites.
-8. **A record constructed with neither new field** carries `disposition` of `None` and
+8. **Every enum value is pinned.** Each of `ExchangeDisposition`'s sixteen members
+   and each of `Modality`'s two serialises to the exact string §2 and §5 name, and a
+   record round-trips through serialisation carrying the same member back — asserted
+   over the whole membership, so a member added later without a value of the stated
+   form fails rather than passing silently.
+9. **A record constructed with neither new field** carries `disposition` of `None` and
    a `capture` whose `modality` is `TEXT`, and a serialised record written before the
    fields land decodes to the same.
-9. **A spoken turn's episode carries `SPEECH` and the spoken reply**, and a turn of
+10. **A spoken turn's episode carries `SPEECH` and the spoken reply**, and a turn of
    `converse`, `converse_streaming` and `resume` each carries `TEXT`.
-10. **A resumption of a spoken park carries `TEXT`**, pinning §5's rule that the
+11. **A resumption of a spoken park carries `TEXT`**, pinning §5's rule that the
     modality is the pass's and not the conversation's.
-11. **A routed pass's episode carries a routed member and its reply.** The
+12. **A routed pass's episode carries a routed member and its reply.** The
     `disposition` is the `ROUTED_*` member for the route's outcome, the `outcome` is
     the composed reply, and the episode still carries no part of the routed account
     (ADR-0197 §10) — no listing, no display subject, no scalar argument, no candidate.
-12. **The Tier 0 reliance is asserted at the seam it rests on**: the values the
+13. **The Tier 0 reliance is asserted at the seam it rests on**: the values the
     composing stage is supplied on a turn — records, facets, plan and step account —
     are enumerated in a test that fails if a future field admits a `SecretStore` value
     into any of them.
-13. **No log carries the reply.** The capture and observation paths emit no log event
+14. **No log carries the reply.** The capture and observation paths emit no log event
     whose payload contains the captured reply's text (ADR-0004 §5 names *"message
     bodies"* a redaction target).
-14. **`derived_from_external` is unmoved.** A captured episode's provenance carries
+15. **`derived_from_external` is unmoved.** A captured episode's provenance carries
     `False`, pinning §6 so a later lane changes it deliberately.
 
 ### 12. What the implementing lanes owe
@@ -633,7 +673,7 @@ The implementation is three lanes, each briefed after the one before it merges
    carry both fields, and the `MemoryStore` conformance suite pinning their
    round-trip so no implementation silently drops them. **`core/protocols.py` is not
    edited, no Protocol is added and no member is added to one, so no triad is owed.**
-6. Tests 8 and 14 of §11.
+6. Tests 8 and 9 of §11.
 
 **Lane D — the three render sites.** After C merges.
 
@@ -653,7 +693,8 @@ The implementation is three lanes, each briefed after the one before it merges
    already receives.
 2. `orchestration/conversations.py`: `_episode` stamps the two new fields and every
    other field exactly as ADR-0074 §4 and ADR-0217 §1 fix them.
-3. Tests 1, 2, 3, 4, 9, 10, 11, 12 and 13 of §11. The benchmark harness is untouched.
+3. Tests 1, 2, 3, 4, 10, 11, 12, 13, 14 and 15 of §11. The benchmark harness is
+   untouched.
 
 > **Normative.** A lane implementing the above and also stamping an origin mark, or
 > reading the reply into any prompt, or adding a render budget, or touching
