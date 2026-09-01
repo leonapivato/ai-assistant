@@ -79,18 +79,21 @@ async def _drive(scheduler: Scheduler, *, until: asyncio.Event) -> None:
 async def test_the_job_table_is_the_adr_s_enabled_defaults_in_the_adr_s_order(
     tmp_path: Path,
 ) -> None:
-    """§7's table, built over a real engine, with observation disabled by default.
+    """§7's table, built over a real engine, with observation **armed** by default.
 
     A real ``Engine`` rather than a stand-in, because the claim being made is about
     *which methods the jobs are bound to* — and a fake with the right attribute
     names would satisfy that assertion while proving nothing about the façade the
     hub actually holds.
 
-    **Three enabled by default, and the third's default is minutes** (ADR-0130 §5):
-    the reconsideration job ships enabled because "with no producers it rules
-    nothing, and a held record whose window has passed is the one thing this ADR
-    cannot leave to a later act", and it is the one job here whose latency a user
-    can feel.
+    **Four enabled by default now**, and the third of them is the one this asserts
+    hardest. ADR-0218 §5 moves ``observation_interval`` from ``None`` to fifteen
+    minutes, so a hub that configures nothing distils beliefs on a cadence — the
+    whole point of the pair, and the shipped default is pinned here as a **value**
+    rather than asserted in prose (§10). The reconsideration job's own default is
+    minutes for ADR-0130 §5's reason: "with no producers it rules nothing, and a
+    held record whose window has passed is the one thing this ADR cannot leave to a
+    later act".
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -99,13 +102,19 @@ async def test_the_job_table_is_the_adr_s_enabled_defaults_in_the_adr_s_order(
         assert [job.name for job in jobs] == [
             "retention_purge",
             "conversation_sweep",
+            "observation",
             "notification_reconsider",
         ]
         assert [job.interval for job in jobs] == [
             timedelta(hours=1),
             timedelta(hours=1),
+            timedelta(minutes=15),
             timedelta(minutes=5),
         ]
+        # The row calls the **run** and not the pass ``assistant observe`` calls
+        # (ADR-0218 §3), asserted by identity rather than by name: a job left bound
+        # to ``observe`` would still be called "observation" and would still tick.
+        assert jobs[2].run == engine.observe_due
     finally:
         await engine.aclose()
 
@@ -187,7 +196,10 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
 
     ``hub_ready``'s ``jobs`` field is read by an operator as "these are running", so
     a disabled job that stayed in the table and was skipped each tick would make
-    that line a lie. Enabling observation is the other direction of the same claim.
+    that line a lie. **Disabling observation is now the direction that has to be
+    checked**: ADR-0218 §5 arms it by default and keeps ``None`` as the only
+    spelling of "off", so the escape an operator is promised is exactly this one —
+    "an operator who wants the job off sets the variable to the disable sentinel".
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -196,19 +208,23 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
             Settings(
                 retention_purge_interval=None,
                 conversation_sweep_interval=None,
+                observation_interval=None,
                 notification_reconsider_interval=None,
             ),
         )
         assert none_at_all == ()
 
-        with_observation = jobs_for(engine, Settings(observation_interval=timedelta(hours=6)))
-        assert [job.name for job in with_observation] == [
+        without_observation = jobs_for(engine, Settings(observation_interval=None))
+        assert [job.name for job in without_observation] == [
             "retention_purge",
             "conversation_sweep",
-            "observation",
             "notification_reconsider",
         ]
-        assert with_observation[2].run == engine.observe
+
+        retimed = jobs_for(engine, Settings(observation_interval=timedelta(hours=6)))
+        assert retimed[2].name == "observation"
+        assert retimed[2].interval == timedelta(hours=6)
+        assert retimed[2].run == engine.observe_due
     finally:
         await engine.aclose()
 
@@ -238,8 +254,12 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
     default said so — not that anything technical is missing" — so a fresh
     deployment arms nothing. §6 then says the reason observation ships disabled
     "is specific to observation and does not transfer": §9's gate is ADR-0092,
-    which is ratified, so an operator who sets an interval gets a job that runs,
-    where arming observation would still buy repeated cost and no new coverage.
+    which is ratified, so an operator who sets an interval gets a job that runs.
+    Observation's own reason has since been spent and its job is armed (ADR-0218
+    §5), which is that clause read the other way and changes nothing here — this
+    default is a **grant** decision over a file the assistant does not own, and
+    there is no such decision to make by omission for a job that reads the user's
+    own turns with this assistant.
     """
     settings = _reader_settings(tmp_path, interval=None)
     engine = build_engine(settings, data_dir=tmp_path)
@@ -248,6 +268,7 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
         assert [job.name for job in unarmed] == [
             "retention_purge",
             "conversation_sweep",
+            "observation",
             "notification_reconsider",
         ]
 
@@ -256,14 +277,15 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
         assert [job.name for job in armed] == [
             "retention_purge",
             "conversation_sweep",
+            "observation",
             "calendar_reader",
             "notification_reconsider",
         ]
-        assert armed[2].interval == timedelta(hours=6)
+        assert armed[3].interval == timedelta(hours=6)
         # The body is a **public ``Engine`` call**, by identity and not by name: a
         # job that held a reader, a store or a subsystem import would be the shape
         # ADR-0083 §8 forbids and ADR-0093 §6 restates.
-        assert armed[2].run == engine.ingest_calendar
+        assert armed[3].run == engine.ingest_calendar
     finally:
         await engine.aclose()
 
@@ -969,6 +991,7 @@ async def test_the_consolidation_job_is_absent_until_an_operator_arms_it(
         assert [job.name for job in armed] == [
             "retention_purge",
             "conversation_sweep",
+            "observation",
             "notification_reconsider",
             "consolidation",
         ]

@@ -1054,19 +1054,99 @@ class Settings(BaseSettings):
             "job; never 0."
         ),
     )
-    # Ships **disabled**, and §7 argues the default rather than assuming it:
-    # ADR-0077 §8 leaves observation with no durable cursor, so a periodic run
-    # re-reads the same recent window and spends a model call each time while
-    # never reaching the turns the window has already passed. Enabling it on a
-    # timer before the cursor exists (ADR-0083 §13) buys repeated cost and no new
-    # coverage. The field exists so that enabling it is configuration.
+    # **Ships armed, at fifteen minutes** (ADR-0218 §5, §7), which partially
+    # supersedes ADR-0083 §7's job-table row in its **Default** cell. The disabled
+    # default had one stated reason and ADR-0212 spent it: "Enabling it on a timer
+    # before the cursor exists buys repeated cost and no new coverage". With the
+    # watermark, a tick with nothing unobserved reads one bounded listing, calls no
+    # model and reports nothing observed, and a pass strictly advances rather than
+    # re-reading the window it read last time. What the disabled default left is a
+    # hub whose user model does not accumulate at all unless somebody remembers to
+    # run a command, which is #1737.
+    #
+    # **`None` is still the spelling of "off"**, and still the only one (ADR-0083
+    # §7's convention, unchanged): an operator who wants the job off sets the
+    # disable sentinel and one who wants a different cadence sets a duration.
+    # Neither is new surface, and neither is a `0`.
+    #
+    # **Fifteen minutes is bought against the serial loop rather than against
+    # cost** (ADR-0218 §7). The tick decides latency, not spend — a tick with no due
+    # candidate performs one bounded read and returns — so asking more often costs
+    # almost nothing, and what it does cost is ADR-0083 §7's serial loop. Against
+    # `scheduler_run_budget`'s five minutes this holds the job's share of that loop
+    # to about a third of its own period, leaving the hourly purge and sweep the
+    # rest. The user-visible figure it buys is one quiet window plus one interval —
+    # twenty-five minutes at these defaults — to the first run that reaches a
+    # conversation with nothing queued ahead of it.
     observation_interval: _OptionalDuration = Field(
-        default=None,
+        default=timedelta(minutes=15),
         gt=timedelta(0),
         description=(
-            "How often the hub distils beliefs from the most recently active "
-            "conversation. Disabled by default until the observation cursor lands "
-            "(ADR-0083 §7, §13); set a duration to enable it."
+            "How often the hub looks for a conversation whose turns are due to be "
+            "distilled into beliefs (ADR-0218 §5). Armed by default; set it to "
+            "'none' to disable the job, never 0."
+        ),
+    )
+    # ADR-0218 §2's due test, in two durations. A candidate is **due** when it is
+    # quiet, **or** aged, **or** full, and a scheduled pass is performed only
+    # against a due candidate. The third arm gets **no field of its own**: its
+    # threshold is `observation_batch_size`, because the condition it tests is
+    # exactly "a whole page is available to read", and a second count would let the
+    # two disagree about what a page is (§7).
+    #
+    # **Ten minutes for the quiet window, and it is measured on `last_active_at`**
+    # (§1) — the instant a turn *begins*, never the instant one was recorded, so a
+    # conversation whose next turn is in flight is not called quiet. Long enough
+    # that a pause to read, to think or to fetch a coffee does not end the
+    # exchange; short enough that a conversation finished before lunch is a belief
+    # by lunch. It is the figure most likely to be tuned by a deployment, which is
+    # why it is a field.
+    #
+    # **Two hours for the max age, and three constraints fix it** (§7). It is well
+    # above the quiet window, so a conversation with any ordinary pause is served
+    # by the quiet arm and the backstop stays the exception. It is far below
+    # `episode_retention`'s 30 days, so a continuously-active conversation's oldest
+    # unobserved turns are distilled long before they can expire. And it is below
+    # the time the full-page arm takes in the regime this backstop is for — a
+    # conversation trickling one recorded turn per quiet window, which is
+    # `observation_batch_size` quiet windows, 200 minutes at these figures — so the
+    # arm binds rather than being a field that never fires.
+    #
+    # **Neither is nullable, and ADR-0084 §3's departure is the precedent** (§7).
+    # "The job is off" is a coherent deployment and is spelled once, on the
+    # interval above. A quiet window of `None` would have to mean "observe
+    # mid-conversation", which is a *policy* §1 ruled against rather than a way of
+    # turning anything off; a max age of `None` would leave the full-page arm alone
+    # to bound a trickling conversation, which it does not — a conversation
+    # receiving one turn an hour is never quiet and takes twenty hours to fill a
+    # page. One field means off, so a reader does not have to work out which of
+    # three nulls disabled the job.
+    #
+    # **No cross-field refusal**, between these two or against `episode_retention`
+    # (§7). A max age at or below the quiet window makes every candidate aged
+    # before it is quiet and the job a pure age trigger — a policy an operator can
+    # state, and refusing it at load would reject a configuration that behaves
+    # exactly as its author asked. A rule against `episode_retention` is worse: that
+    # field is nullable and `None` means "keep forever", so the comparison has a
+    # branch that means nothing, and the setting it would police is the user's
+    # deliberate choice. Both interactions are named in ADR-0218's Consequences
+    # instead, which is where a figure an operator should think about belongs when
+    # refusing it would be wrong.
+    observation_quiet_window: _DurationSetting = Field(
+        default=timedelta(minutes=10),
+        gt=timedelta(0),
+        description=(
+            "How long a conversation must have been inactive before a scheduled "
+            "observation reads it (ADR-0218 §1). Positive and finite."
+        ),
+    )
+    observation_max_unobserved_age: _DurationSetting = Field(
+        default=timedelta(hours=2),
+        gt=timedelta(0),
+        description=(
+            "How long a conversation's oldest unobserved turn may wait before a "
+            "scheduled observation reads it whether or not the conversation has gone "
+            "quiet (ADR-0218 §2). Positive and finite."
         ),
     )
     # **Leg 7's consolidation job, and the precondition its absence used to

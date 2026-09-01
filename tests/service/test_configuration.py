@@ -228,7 +228,12 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         RETENTION_PURGE_SECONDS: timedelta(hours=1).total_seconds(),
         CONVERSATION_SWEEP_ARMED: True,
         CONVERSATION_SWEEP_SECONDS: timedelta(hours=1).total_seconds(),
-        OBSERVATION_ARMED: False,
+        # Armed on a fresh install since ADR-0218 §5, and recorded with its cadence
+        # — which is what makes the upgrade that moved this default a
+        # ``CONFIGURATION`` diff ADR-0120 §8 partitions on, rather than a step in
+        # every measure over the accumulation that nothing dates.
+        OBSERVATION_ARMED: True,
+        OBSERVATION_SECONDS: timedelta(minutes=15).total_seconds(),
         CALENDAR_READER_ARMED: False,
         EMAIL_READER_ARMED: False,
         # Off on a fresh install (ADR-0083 §7, ADR-0111 §11), and recorded as off
@@ -374,23 +379,29 @@ async def test_arming_email_ingestion_moves_the_mapping_as_arming_the_calendar_d
 
 
 async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None:
-    """#829's requirement, in the shape this seam gives it.
+    """#829's requirement, in the shape this seam gives it — now in both directions.
 
-    ADR-0119 §9 is #829 requirement 2's carrier — "the arming moment is stamped
-    somewhere telemetry can see" — and observation is one of the two jobs on §7's
-    table that ships disabled. A restart after arming therefore writes a trace
-    that differs from the previous one in exactly the two keys that moved, which
-    is what makes the before/after datable by diffing consecutive configuration
-    traces.
+    ADR-0119 §9 is #829 requirement 2's carrier: "the arming moment is stamped
+    somewhere telemetry can see". Observation **ships armed** since ADR-0218 §5, so
+    the act this pair dates is usually the upgrade that moved the default rather
+    than an operator — and §5 relies on exactly that: "arming changes the
+    ``CONFIGURATION`` trace the hub emits at startup, and ADR-0120 §8 partitions at
+    a ``CONFIGURATION`` trace diff". The direction an operator can still take is
+    disarming, which has to be datable for the same reason, so the disabled reading
+    is asserted from the disable sentinel rather than from the default.
 
-    The other one is consolidation, and it is the arming §9's prose names; the
-    test below is this one with that field's name in it. Both are kept, because
-    the property is per field: a pair that reached the list and a ``_pair`` call
-    that was never made look identical from any deployment that does not arm the
-    field in question.
+    Consolidation is the arming §9's prose names, and the test below is this one
+    with that field's name in it. Both are kept, because the property is per field:
+    a pair that reached the list and a ``_pair`` call that was never made look
+    identical from any deployment that does not move the field in question.
     """
-    before = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
-    after = dict(
+    armed = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+    disarmed = dict(
+        (
+            await _recorded(Settings(data_dir=tmp_path / "hub-data", observation_interval=None))
+        ).metrics
+    )
+    retimed = dict(
         (
             await _recorded(
                 Settings(data_dir=tmp_path / "hub-data", observation_interval=timedelta(hours=6))
@@ -398,10 +409,12 @@ async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None
         ).metrics
     )
 
-    assert before[OBSERVATION_ARMED] is False
-    assert OBSERVATION_SECONDS not in before
-    assert after[OBSERVATION_ARMED] is True
-    assert after[OBSERVATION_SECONDS] == timedelta(hours=6).total_seconds()
+    assert armed[OBSERVATION_ARMED] is True
+    assert armed[OBSERVATION_SECONDS] == timedelta(minutes=15).total_seconds()
+    assert disarmed[OBSERVATION_ARMED] is False
+    assert OBSERVATION_SECONDS not in disarmed
+    assert retimed[OBSERVATION_ARMED] is True
+    assert retimed[OBSERVATION_SECONDS] == timedelta(hours=6).total_seconds()
 
 
 async def test_an_armed_consolidation_job_dates_the_arming_9_was_written_for(

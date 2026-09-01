@@ -252,7 +252,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
-    from ai_assistant.orchestration.observation import ObservationStage
+    from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recovery import RecoveryScan
     from ai_assistant.orchestration.routing import RoutedRoute
@@ -742,6 +742,49 @@ def _consolidated(report: ConsolidationReport) -> Observation:
             "discarded_over_limit": report.discarded_over_limit,
             "refused_self_citing": report.refused_self_citing,
             "exhausted": report.exhausted,
+        },
+    )
+
+
+def _observed_due(report: ObservationRunReport) -> Observation:
+    """Read one scheduled observation run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    **Always ``OK``, and there is no fourth outcome to reach here.** ADR-0218 §3
+    gives a returning run exactly two terminal reasons — the listing it last read
+    held no due candidate, or the budget was spent — and §9 makes both *successful*:
+    "A run whose passes all complete but which observed nothing […] is a
+    **successful** run." The third disposition a reader might look for does not
+    exist as a return value at all: a run whose pass raises propagates and returns
+    no report, so it reaches this projection never and ``_tracked``'s fault path
+    always.
+
+    ``budget_spent`` is carried as a metric rather than as an outcome for exactly
+    that reason. It is not ``ConsolidationReport.halted``'s analogue — a halt is a
+    chunk that could not be recorded, where this is a bound working as designed —
+    so recording it as ``INCOMPLETE`` would report a job doing its job as a job that
+    stopped short.
+
+    Args:
+        report: What the run performed, read and ruled.
+
+    Returns:
+        The run's counters, and ``OK``.
+    """
+    return Observation(
+        outcome=TraceOutcome.OK,
+        metrics={
+            "passes": report.passes,
+            "conversations": report.conversations,
+            "episodes_read": report.episodes_read,
+            "model_calls": report.model_calls,
+            "proposed": report.proposed,
+            "committed": report.committed,
+            "deferred": report.deferred,
+            "rejected": report.rejected,
+            "dropped_unsupported": report.dropped_unsupported,
+            "discarded_unusable": report.discarded_unusable,
+            "discarded_over_limit": report.discarded_over_limit,
+            "budget_spent": report.budget_spent,
         },
     )
 
@@ -3955,6 +3998,60 @@ class Engine:
         )
         check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
         return await self._tracked(self._observation.observe(selected), "observe", checked=True)
+
+    async def observe_due(self) -> ObservationRunReport:
+        """Observe every conversation that is due, one bounded run (ADR-0218 §3).
+
+        The **maintenance surface**'s fourth scheduled operation, and the scheduled
+        trigger ADR-0083 §7's observation row now calls. ADR-0083 §8 settled that
+        this kind of method is "new *concrete* surface on a class in
+        ``orchestration``, not ``core`` contract surface", and :meth:`consolidate`
+        is the standing precedent in each respect: it is **not** on the
+        ``AssistantEngine`` Protocol, **not** a wire operation, and **not** a reason
+        to move ``PROTOCOL_VERSION``.
+
+        **A new operation rather than an argument on :meth:`observe`, and the reason
+        is not taste** (§3). ``observe`` is a wire operation that
+        ``core/protocols.py`` declares, so an argument on it moves
+        ``PROTOCOL_VERSION`` under ADR-0124 §9 — a protocol bump bought to express a
+        cadence. The second reason is stronger: ADR-0120 §3 attributes a write by
+        the seam of the operation that caused it, so one seam serving both callers
+        would make an armed job's writes indistinguishable from a user's deliberate
+        ones. The third is the return shape — ``ObservationReport`` describes one
+        pass and a run performs many. :meth:`observe` is untouched by this method
+        existing: same signature, same seam, same behaviour.
+
+        **Takes no argument, deliberately**, which is what makes it a legal
+        ``JobBody`` and keeps the due test, the candidate listing and the passes
+        behind this façade. The scheduler holds an ``Engine`` and nothing else, and
+        learns nothing about watermarks, quiet windows or spans.
+
+        **Its seam is ``observe_due`` and it is in ADR-0120 §3's machine set**, which
+        is what stops every measure over the user set stepping on the day this job is
+        armed — the precise confound §3 exists to prevent, produced by the precise
+        act it was written about. Every pass a run performs happens inside *this*
+        call's :meth:`_tracked` scope and is never a nested :meth:`observe`, so every
+        trace a run emits carries the run's correlation and attributes to this seam.
+
+        Returns:
+            What the run did, in Tier 2 counts and one disposition. Every count zero
+            is a **successful** run over a listing that held nothing due, and no
+            caller may read it as a failure.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8).
+            ConversationStoreError: If the candidate listing, a page or an advance
+                could not be read or written.
+            MemoryStoreError: If an episode could not be read, or the write path
+                failed.
+            ModelError: Propagated unwrapped from a pass's provider, its
+                classification intact (ADR-0013 §5). The run halts; ADR-0111 §6
+                retries the job at its next due instant with no backoff.
+            DeferralStoreError: If a deferred question could not be parked.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._observation.run(), "observe_due", _observed_due)
 
     async def beliefs(
         self,

@@ -125,8 +125,18 @@ USER_SEAMS: Final = frozenset({"converse", "resume", "observe", "learn", "answer
 #: which fails safe and fails silently — so a third source's lane owes this set a
 #: member, and #1076 records that ADR-0142 §5's own cost measurement does not
 #: mention this file.
+#: **``observe_due`` is a member and ``observe`` is not** (ADR-0218 §6). Two of §3's
+#: grounds point in different directions for a scheduled observation — the content
+#: originates with the user, and the run writes on its own initiative — and what
+#: decides between them is the purpose §3 states for the split: "A correction rate
+#: that counted those would rise on the day of the arming, and the rise would be a
+#: fact about the scheduler rather than about the user model." ADR-0218 arms this
+#: job, so if its writes carried the ``observe`` seam every measure over the user set
+#: would step at the moment of arming. The cost is stated rather than buried: §5's
+#: correction rate loses the scheduled population, and #1815 holds whether a fourth
+#: set — writes whose *content* is the user's but whose *cause* is not — is wanted.
 MACHINE_SEAMS: Final = frozenset(
-    {"ingest_calendar", "ingest_email", "consolidate", "purge_expired", "start"}
+    {"ingest_calendar", "ingest_email", "consolidate", "observe_due", "purge_expired", "start"}
 )
 
 #: ADR-0120 §3's **direct** set, a subset of the user set: a user act the user
