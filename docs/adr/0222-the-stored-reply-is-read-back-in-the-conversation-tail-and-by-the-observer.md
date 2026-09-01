@@ -1,6 +1,6 @@
 # 222. The stored reply is read back, in the conversation tail and by the observer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-01
 - **Partially supersedes:**
   [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md)
