@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
@@ -22,6 +22,8 @@ from ai_assistant.core.types import (
     MemorySearchResult,
     MemorySource,
     MemoryUpdateProposal,
+    MemoryWrite,
+    MemoryWriteMode,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -1747,6 +1749,558 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
     assert merged is not None
     assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
     assert merged.provenance.confidence == 0.8
+
+
+# --- ADR-0219 §5: the fold is conditional, and a refusal re-runs the cycle ---
+#
+# The half of issue #248 the mode alone does not close. ADR-0046 §5 scoped the
+# residual to "any two writers not sharing that lock" — a second `MemoryIngestor`
+# over one store, and a second process over one store file — and #262's lock
+# reaches neither. The arms below are the ingestor's own (ADR-0219 §7: the re-run
+# "is `MemoryIngestor`'s own test and not a `MemoryWriterContract` arm", because
+# the property needs a store the test perturbs between the writer's read and its
+# write).
+
+
+class _RecordingStore(InMemoryMemoryStore):
+    """An ``InMemoryMemoryStore`` keeping every batch handed to ``write_atomic``.
+
+    ``add`` does not route through ``write_atomic`` on this store, so what
+    :attr:`batches` holds is exactly what the ingestor dispatched — planted
+    fixtures never appear in it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(now=_fixed_now)
+        self.batches: list[tuple[MemoryWrite, ...]] = []
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Delegate, keeping the batch as it was submitted."""
+        self.batches.append(tuple(writes))
+        return await super().write_atomic(writes)
+
+
+class _ParksTheFirstSearch(_RecordingStore):
+    """A store whose *first* ``search`` holds its result until ``released``.
+
+    Issue #248's window, opened deliberately and closed by the test rather than by
+    the scheduler: the caller is left holding a snapshot **after** the read, which
+    is the moment a second writer can invalidate it. Everything before the read
+    happens normally, so the parked ingest is in exactly the state a fold is in
+    between its search and its write.
+
+    :attr:`parked` is set as the hold begins, so a test can wait for the window to
+    be open instead of assuming an ordering between two tasks.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parked = asyncio.Event()
+        self.released = asyncio.Event()
+        self._pending = True
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        """Delegate, then hold the first search's result until ``released``."""
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        if self._pending:
+            self._pending = False
+            self.parked.set()
+            await self.released.wait()
+        return matches
+
+
+class _MovesTheTargetBeforeAWrite(_RecordingStore):
+    """A store that lands a competing write immediately before the ingestor's own.
+
+    The same window as :class:`_ParksTheFirstSearch` without a second task, so the
+    exhaustion arm can hold it open for *every* attempt: the competitor lands after
+    the ingest has searched and ruled, and before its write reaches the store.
+
+    Args:
+        competitor: Called for each perturbation; whatever it returns is stored
+            through ``add``, which issues a fresh ``revision`` for the row
+            (ADR-0219 §1) whether or not the content changed.
+        limit: How many of the ingestor's writes to perturb. ``1`` refuses the
+            first attempt and lets the re-run land; a larger number refuses both.
+    """
+
+    def __init__(self, *, competitor: Callable[[], MemoryRecord], limit: int) -> None:
+        super().__init__()
+        self._competitor = competitor
+        self._limit = limit
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Let the competitor land first, then delegate."""
+        if len(self.batches) < self._limit:
+            await self.add(self._competitor())
+        return await super().write_atomic(writes)
+
+
+class _RefusesEveryWrite(_RecordingStore):
+    """A store that records each batch and then fails it — never as *stale*.
+
+    The other half of the branch: a refusal a second identical attempt could not
+    fix.
+    """
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Record the attempt, then fail with a plain ``MemoryStoreError``."""
+        self.batches.append(tuple(writes))
+        msg = "the store is broken"
+        raise MemoryStoreError(msg)
+
+
+class _CountingPolicy:
+    """``DefaultMemoryPolicy``, counting the rulings it was asked for.
+
+    Structurally a :class:`~ai_assistant.core.protocols.MemoryPolicy`. The count is
+    what says the re-run **re-decided** rather than re-submitting a merge computed
+    over the snapshot the store rejected (ADR-0219 §5).
+    """
+
+    def __init__(self) -> None:
+        self._inner = DefaultMemoryPolicy()
+        self.rulings = 0
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
+    ) -> MemoryDecision:
+        """Count the call and delegate the ruling."""
+        self.rulings += 1
+        return await self._inner.decide(proposal, conflicts=conflicts, relations=relations)
+
+
+def _conditional(batch: tuple[MemoryWrite, ...]) -> dict[str, int | None]:
+    """Every ``IF_UNCHANGED`` element in ``batch``, as id to expectation."""
+    return {
+        write.record.id: write.expected_revision
+        for write in batch
+        if write.mode is MemoryWriteMode.IF_UNCHANGED
+    }
+
+
+async def test_a_reinforce_folds_conditionally_on_the_revision_it_read() -> None:
+    """ADR-0219 §5's first call site, pinned at the batch the store is handed.
+
+    The expectation must be the revision of the *target conflict detection
+    returned*, and never one read off the merged record: ``_merge`` builds a record
+    this ingestor constructs, and ADR-0219 §2 rules that reading an expectation off
+    a built record is the fail-open mistake the separate field exists to make
+    unreachable — it would carry ``MemoryBase.revision``'s default of ``0`` and
+    silently mean "never rewritten". So the arm asserts the value, not merely that
+    the mode is conditional.
+    """
+    store = _RecordingStore()
+    await _plant_episodes(store, "ev1", "ev2")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    target = await store.get("e")
+    assert target is not None
+
+    result = await _ingestor(store).ingest(
+        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert len(store.batches) == 1
+    (write,) = store.batches[0]
+    assert write.mode is MemoryWriteMode.IF_UNCHANGED
+    assert write.expected_revision == target.revision
+    # Not the default a built record would have carried (ADR-0219 §1 reserves 0 for
+    # a record no store has stored), so a regression that read the expectation off
+    # `write.record` fails here rather than passing on a coincidence.
+    assert write.expected_revision != 0
+
+
+async def test_a_supersede_closes_every_window_conditionally_and_installs_unconditionally() -> None:
+    """ADR-0219 §5's second call site, over a retirement set of three.
+
+    Each close carries **its own** target's revision, which is why the set has
+    three members at three distinct revisions: a pairing that zipped the closes
+    against the wrong targets, or that took one revision for all of them, passes on
+    a single-target case and fails here.
+
+    The correction's element is left exactly as ADR-0045 §4 and ADR-0046 §2 shape
+    it — ``INSERT_IF_ABSENT`` carrying no expectation, since it names an id that
+    must be *absent* and that is the opposite condition — so the batch stays the
+    two kinds of element those sections describe.
+    """
+    store = _RecordingStore()
+    for stale_id in ("morning", "early", "dawn"):
+        await store.add(
+            _preference(
+                stale_id,
+                "user prefers morning meetings",
+                confidence=0.6,
+                source=MemorySource.INFERRED,
+            )
+        )
+    stored = {record.id: record for record in await store.export()}
+    revisions = {stale_id: stored[stale_id].revision for stale_id in ("morning", "early", "dawn")}
+    # Three rows, three stamps: ADR-0219 §1's "two records carry equal revisions
+    # only where they are the same stored row", which is what makes the pairing
+    # below observable at all.
+    assert len(set(revisions.values())) == 3
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert len(store.batches) == 1
+    batch = store.batches[0]
+    assert _conditional(batch) == revisions
+    installs = [write for write in batch if write.mode is MemoryWriteMode.INSERT_IF_ABSENT]
+    assert [write.record.id for write in installs] == ["corrected"]
+    assert installs[0].expected_revision is None
+    assert len(batch) == len(revisions) + 1
+
+
+async def test_two_ingestors_folding_into_one_target_do_not_lose_a_write() -> None:
+    """ADR-0046 §5's first residual, closed: two ingestors, two locks, one store.
+
+    #262's ``asyncio.Lock`` is per instance, so these two serialise against nothing
+    — "two ``MemoryIngestor`` instances over one store hold different locks and
+    race exactly as before". The first ingestor is parked holding a snapshot the
+    second then invalidates, which before ADR-0219 §5 meant the first's fold
+    overwrote the second's landed write while both callers were handed a healthy
+    ``MemoryIngestResult``.
+
+    The assertion is that *nothing* is lost — the survivor carries both proposals'
+    evidence and the higher confidence — and that it was **earned**: three write
+    attempts for two ingests is the refusal and the re-run, so a store that had
+    silently accepted the stale fold would fail the count as well as the content.
+    """
+    store = _ParksTheFirstSearch()
+    await _plant_episodes(store, "ev1", "evA", "evB")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    first = _ingestor(store)
+    second = _ingestor(store)
+
+    parked = asyncio.create_task(
+        first.ingest(
+            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
+        )
+    )
+    # Ordered by the harness and not by the scheduler: the window is open before
+    # the second ingestor runs, and stays open until its write has landed.
+    await store.parked.wait()
+    result_b = await second.ingest(
+        _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+    )
+    store.released.set()
+    result_a = await parked
+
+    assert result_a.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result_b.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result_a.record_id == result_b.record_id == "e"
+    assert len(store.batches) == 3
+    merged = await store.get("e")
+    assert merged is not None
+    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
+    assert merged.provenance.confidence == 0.8
+
+
+class _ParksTheFirstDurableSearch(SqliteMemoryStore):
+    """:class:`_ParksTheFirstSearch`'s window, opened over the durable store.
+
+    Its own class rather than a shared mixin, because the two stores share no base
+    and the harness is six lines; what is shared is the discipline, not the code.
+    """
+
+    def __init__(self, *, path: Path) -> None:
+        super().__init__(
+            traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=32)
+        )
+        self.parked = asyncio.Event()
+        self.released = asyncio.Event()
+        self.writes = 0
+        self._pending = True
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        """Delegate, then hold the first search's result until ``released``."""
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        if self._pending:
+            self._pending = False
+            self.parked.set()
+            await self.released.wait()
+        return matches
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Count the attempt and delegate."""
+        self.writes += 1
+        return await super().write_atomic(writes)
+
+
+async def test_two_ingestors_folding_into_one_durable_store_do_not_lose_a_write(
+    tmp_path: Path,
+) -> None:
+    """The same residual over the backend that actually ships.
+
+    Run here as well as over the in-memory store because the two satisfy ADR-0219
+    §3's indivisibility clause by different means: the in-memory store validates
+    the whole batch up front against one synchronous snapshot, where nothing can
+    interleave for free, while ``SqliteMemoryStore`` has to hold the comparison and
+    the write inside the ``BEGIN IMMEDIATE`` its ``_transaction`` takes. Only the
+    second is the shape that also excludes another *process*, which is the half of
+    ADR-0046 §5's residual no in-process test can reach — and the fold is the
+    consumer that has to meet it correctly, not merely the store.
+    """
+    store = _ParksTheFirstDurableSearch(path=tmp_path / "memory.db")
+    try:
+        await _plant_episodes(store, "ev1", "evA", "evB")
+        await store.add(
+            _preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",))
+        )
+        first = _ingestor(store)
+        second = _ingestor(store)
+
+        parked = asyncio.create_task(
+            first.ingest(
+                _proposal(
+                    _preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",))
+                )
+            )
+        )
+        await store.parked.wait()
+        result_b = await second.ingest(
+            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+        )
+        store.released.set()
+        result_a = await parked
+
+        assert result_a.decision.kind is MemoryDecisionKind.REINFORCE
+        assert result_b.decision.kind is MemoryDecisionKind.REINFORCE
+        assert result_a.record_id == result_b.record_id == "e"
+        assert store.writes == 3  # the second's, the first's refusal, the re-run
+        merged = await store.get("e")
+        assert merged is not None
+        assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
+        assert merged.provenance.confidence == 0.8
+    finally:
+        store.close()
+
+
+async def test_the_re_run_re_derives_the_fold_and_never_re_applies_the_rejected_merge() -> None:
+    """ADR-0219 §5's "a re-run and not a re-submit", asserted on the content.
+
+    A fold folds a proposal into a *snapshot*. An implementation that met the
+    refusal, re-read only the revision, and resubmitted the merge it had already
+    computed would be "the lost update wearing a conditional write's clothes" —
+    and it would pass a test that only checked the proposal's own contribution
+    survived. So the competing write contributes something of its own, and the
+    survivor has to carry it: ``evX`` is in the store only because the re-run
+    merged against the record as it then stood.
+
+    The ruling count is the same property from the other side: the policy is asked
+    twice, because §5 has the re-run re-ask it — "the only way the ruling stays
+    derived from the state the write lands on".
+    """
+
+    def competitor() -> MemoryRecord:
+        # What a second writer's own fold would have left: the target's evidence
+        # plus its own, at its own higher confidence.
+        return _preference("e", "prefers concise emails", confidence=0.9, evidence=("ev1", "evX"))
+
+    store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=1)
+    await _plant_episodes(store, "ev1", "ev2", "evX")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    policy = _CountingPolicy()
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=policy, now=_fixed_now
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "e"
+    assert len(store.batches) == 2  # the refused attempt, then the re-run's
+    assert policy.rulings == 2
+    merged = await store.get("e")
+    assert merged is not None
+    # `evX` is the competing writer's; it survives only under a re-run.
+    assert set(merged.provenance.evidence) == {"ev1", "ev2", "evX"}
+    assert merged.provenance.confidence == 0.9  # the competitor's, the higher
+
+
+async def test_a_second_stale_refusal_propagates_and_is_not_a_healthy_result() -> None:
+    """ADR-0219 §5's bound: two attempts in all, and the second refusal propagates.
+
+    Held open for every attempt, so the re-run meets the same window the first
+    attempt did. What must *not* happen is either half of the failure the mode
+    exists to remove: an unbounded retry loop, or a refusal quietly converted into
+    a ``MemoryIngestResult`` the caller reads as success.
+
+    The error stays a ``MemoryStoreError``, which is what keeps ADR-0028 §5's
+    one-error seam unmoved and ``MemoryWriter.ingest``'s ``Raises`` list where it
+    was (ADR-0219 §3).
+    """
+
+    def competitor() -> MemoryRecord:
+        return _preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",))
+
+    store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=99)
+    await _plant_episodes(store, "ev1", "ev2")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+
+    with pytest.raises(MemoryStoreStaleError) as refusal:
+        await _ingestor(store).ingest(
+            _proposal(
+                _preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",))
+            )
+        )
+
+    assert isinstance(refusal.value, MemoryStoreError)
+    assert len(store.batches) == 2  # bounded, and bounded at two
+    # Nothing of this ingest's is in the store: neither the fold's contribution at
+    # the target nor the proposal beside it (ADR-0219 §3's all-or-nothing).
+    survivor = await store.get("e")
+    assert survivor is not None
+    assert set(survivor.provenance.evidence) == {"ev1"}
+    assert await store.get("new") is None
+
+
+async def test_a_stale_supersede_re_runs_and_retires_the_target_it_re_read() -> None:
+    """The re-run covers the ``SUPERSEDE`` call site too, not only the merge.
+
+    Its batch is the one whose closes are conditional, so a refusal there has to
+    reach the same cycle-level re-run — and must not be absorbed by
+    ``_apply_supersede``'s own bounded re-mint loop, which answers a *collision on
+    the minted id* and re-mints without re-reading anything. ``MemoryStoreStaleError``
+    is deliberately not a ``MemoryStoreConflictError`` (ADR-0219 §3) precisely so
+    that loop does not catch it.
+    """
+
+    def competitor() -> MemoryRecord:
+        return _preference(
+            "morning",
+            "user prefers morning meetings",
+            confidence=0.7,
+            source=MemorySource.INFERRED,
+        )
+
+    store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=1)
+    await store.add(
+        _preference(
+            "morning",
+            "user prefers morning meetings",
+            confidence=0.6,
+            source=MemorySource.INFERRED,
+        )
+    )
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert result.record_id == "corrected"
+    assert len(store.batches) == 2
+    # The re-run's close was computed from the record the competitor left, and
+    # landed on it: the target is retained and off the read path.
+    assert await store.get("morning") is None
+    retired = {record.id: record for record in await store.export()}["morning"]
+    assert retired.validity.valid_until == _fixed_now()
+    assert retired.provenance.confidence == 0.7  # the competitor's record, retired
+    assert await store.get("corrected") is not None
+
+
+async def test_only_a_stale_refusal_earns_the_re_run() -> None:
+    """A store failure that is not a stale refusal is not retried.
+
+    §5's re-run answers one refusal and no other. A cross-kind collision — ADR-0108
+    §4's backstop, which the conditional mode inherits unchanged (ADR-0219 §4) — is
+    a caller error that a second identical attempt cannot fix, so re-running would
+    buy nothing and would double every genuine failure's cost.
+    """
+    store = _RefusesEveryWrite()
+    await _plant_episodes(store, "ev1", "ev2")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+
+    with pytest.raises(MemoryStoreError, match="the store is broken"):
+        await _ingestor(store).ingest(
+            _proposal(
+                _preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",))
+            )
+        )
+
+    assert len(store.batches) == 1
+
+
+async def test_one_ingestors_concurrent_folds_never_reach_the_retry_path() -> None:
+    """ADR-0219 §5 keeps #262's lock, and this is what keeping it buys.
+
+    The lock is "the only thing serialising the injected policy's ``decide`` within
+    one ingestor, and it keeps the common case off the retry path entirely". Two
+    ingests through **one** ingestor therefore cost one write each: the second
+    searches after the first has written, so its expectation is fresh and no
+    refusal happens. A lane that removed the lock on the ground that the
+    conditional write had made it redundant would still pass every arm above and
+    would fail this one.
+    """
+    store = _ParksTheFirstSearch()
+    await _plant_episodes(store, "ev1", "evA", "evB")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    ingestor = _ingestor(store)
+
+    async def first() -> MemoryIngestResult:
+        return await ingestor.ingest(
+            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
+        )
+
+    async def second() -> MemoryIngestResult:
+        # Released *outside* `ingest`, so the lock cannot withhold it and a
+        # serialised run drains rather than deadlocking — the discipline the
+        # existing #248 arm above is built on. Nothing here orders the two: the
+        # lock does, which is the whole assertion.
+        store.released.set()
+        return await ingestor.ingest(
+            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+        )
+
+    result_a, result_b = await asyncio.gather(first(), second())
+
+    assert result_a.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result_b.decision.kind is MemoryDecisionKind.REINFORCE
+    assert len(store.batches) == 2  # one write per ingest, no re-run
+    merged = await store.get("e")
+    assert merged is not None
+    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
 
 
 # --- ADR-0121: an agreeing restatement, end to end --------------------------
