@@ -8,8 +8,8 @@ result, by prompting an injected
 distilling that text into :class:`~ai_assistant.core.types.MemoryUpdateProposal`\ s.
 
 It lives in `learning` because that is the subsystem ADR-0005 §3 gives the
-observations-to-proposals job, and it is the placement ADR-0077 §9.5 names. Four
-boundaries shape the module:
+observations-to-proposals job, and it is the placement ADR-0077 §9.5 names.
+These boundaries shape the module:
 
 - **It holds no store and no writer.** Episodes in, proposals out; the scope of
   observation is a property of the seam rather than of this code (ADR-0077 §1),
@@ -34,6 +34,14 @@ boundaries shape the module:
   no value the model can emit makes a record *more* speakable, an unusable value
   leaves ADR-0217 §6's default standing, and the owner lifts the narrowing in one
   act (§7).
+- **The prompt is a rendering target, and no span may write its syntax**
+  (ADR-0098 §2). Every span a record controls — its ``content``, and the
+  assistant half of the exchange — goes through :func:`_quoted_span` before it
+  reaches a line of the batch, so no episode can open a second ``[E<n>]`` entry,
+  reopen the header, or write an ``Assistant:`` line of its own. The attribution
+  the batch expresses is therefore a function of the batch this module was
+  handed and of nothing inside it — which is what the distinct-support count of
+  the bullet above actually rests on.
 - **A malformed response degrades; a model failure propagates.** Entries that
   cannot be used are discarded and *counted* rather than repaired, invented, or
   re-prompted for: an observation has nothing waiting on it, so the cheap remedy
@@ -896,6 +904,58 @@ def _localised(instant: datetime, zone: ZoneInfo) -> str:
         return _INSTANT_UNAVAILABLE
 
 
+def _quoted_span(value: str) -> str:
+    """Render one held string so it cannot write this assembler's own syntax.
+
+    ADR-0098 §2 rules that a span's attribution is "not forgeable from inside the
+    span", and that "an assembler that embeds a span in a syntax the serialised span
+    can itself produce does not conform, whatever labels it emits". This batch's
+    syntax is line-oriented — a header line, a two-space ``[E<n>]`` label per
+    episode, and a deeper-indented ``Assistant:`` continuation line — and the spans
+    reaching it are :data:`~ai_assistant.core.types.EncodableText`, which validates
+    UTF-8 encodability and permits every newline and bracket in between.
+
+    **Here the forgery is worse than cosmetic, which is why ADR-0098 §2 names this
+    assembler as well as the planner's.** :func:`_resolve` maps a cited label back to
+    the id of an episode this module actually read, so a label naming nothing in the
+    batch is dropped; what that mapping cannot see is one episode's text presenting
+    itself as several. Left raw, an episode whose ``content`` carried a newline and a
+    well-formed ``[E2]`` wrote a second entry under a label that *maps* — to a real
+    id, of an episode that said no such thing — and ADR-0077 §5's ``INFERRED`` floor
+    counts distinct cited ids. The two distinct supports that floor exists to require
+    could then both come from one episode's own span, and the floor would be
+    satisfied by an episode corroborating itself. **The ``INFERRED`` support count
+    rests on this function**, which is what ADR-0098 §9's second bullet asks this
+    lane to record.
+
+    :func:`json.dumps` is the deterministic transform §2 admits — §2 removed the
+    unguessable-terminator alternative in terms, so there is one admissible
+    construction and this is it — and it is used at its default
+    ``ensure_ascii=True``: the result is single-line printable ASCII, delimited by
+    quotes the value can no longer close. Single-line is not a bonus but the *second*
+    thing ADR-0221 §13 asks of a reader of this batch — "#672's escaping fix **and**
+    newline normalisation" — because a newline inside a span becomes the
+    two-character escape JSON writes for it rather than a line boundary; the two
+    halves are discharged by one transform rather than by two mechanisms. The ASCII
+    part is load-bearing for the same reason: ``ensure_ascii=False`` emits U+2028 and
+    U+2029 literally, which JSON does not escape and which ``str.splitlines`` treats
+    as line boundaries, so a span carrying one could still open a line.
+
+    **This is ``planning._quoted_span``'s transform and deliberately not its
+    function.** Golden rule 1 keeps two subsystems assembling their own prompts out of
+    one another's modules; what they share is ADR-0098 §2's admitted construction,
+    exactly as ADR-0221 §3 has three render sites hold three copies of one phrase
+    table rather than import one.
+
+    Args:
+        value: The held string, verbatim as this system carries it.
+
+    Returns:
+        The quoted, escaped span to interpolate into a line of the batch.
+    """
+    return json.dumps(value)
+
+
 def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str:
     """Render the batch as the labelled user turn.
 
@@ -941,17 +1001,32 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     the failure ADR-0077 §5's distinct-id counting exists to prevent. The line is
     prefixed ``Assistant:`` because the system prompt names that word when it
     partitions what the half supports, and an episode carrying neither a
-    ``disposition`` nor an ``outcome`` renders exactly as it did.
+    ``disposition`` nor an ``outcome`` grows no such line at all.
+
+    **And no span may reach that outcome by writing this syntax itself**
+    (ADR-0098 §2, §9). Every part of a line that is *not* a span goes on held data
+    the batch was handed — the label from this loop's index, the header and the
+    instant from the zone this producer was built with — and the two parts that are
+    spans go through :func:`_quoted_span`. So the line count of this batch is the
+    header plus one line per episode plus one per assistant half, whatever any
+    episode's ``content`` says, and the label a model is shown maps to the episode
+    this module read under it. That is the same argument the paragraph above makes
+    about *this module's* rendering choice, closed on the other side: it would be no
+    use declining to split an episode into two labels if an episode could split
+    itself.
     """
     if zone is None:
         lines = ["Episodes (recorded times withheld: no local calendar is configured):"]
         for index, record in enumerate(batch):
-            lines.append(f"  [E{index + 1}] {record.content}")
+            lines.append(f"  [E{index + 1}] {_quoted_span(record.content)}")
             lines.extend(_outcome_lines(record))
         return "\n".join(lines)
     lines = [f"Episodes (each carries the local time it was recorded, in {zone.key}):"]
     for index, record in enumerate(batch):
-        lines.append(f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — {record.content}")
+        lines.append(
+            f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — "
+            f"{_quoted_span(record.content)}"
+        )
         lines.extend(_outcome_lines(record))
     return "\n".join(lines)
 
@@ -970,23 +1045,35 @@ def _outcome_lines(record: EpisodicMemory) -> list[str]:
     speaker's turn and no disposition, and renders that text exactly as it did.
 
     **The reply reaches no prompt, and that is the point rather than a side effect**
-    (ADR-0221 §3). The interpolation below is the one unescaped prompt span in this
-    system (#672), and this batch's syntax is one line per half, so a composed reply
-    rendered here would both make the observer an accidental reader of model prose
-    and break the batch's structure on ordinary non-adversarial replies. Whoever
-    first *reads* the reply owes the escaping fix, newline normalisation and the
-    render budget none of the three prompts has today; until then the reply is
-    stored and rendered nowhere.
+    (ADR-0221 §3). Reading it here would make the observer an accidental reader of
+    model prose, which is a decision and not a rendering detail — so the arm above is
+    read first and the field is not consulted at all where a ``disposition`` is
+    present. What ADR-0221 §13 leaves to whoever *does* decide to read it has since
+    narrowed: two of the three things it names — "#672's escaping fix **and** newline
+    normalisation" — are discharged here, because :func:`_quoted_span` escapes and
+    normalises every span this function interpolates, this one included. The render
+    budget none of the three prompts has today is what remains, and it is the half a
+    transform cannot supply: a quoted reply is one line but is as long as the reply.
 
-    Empty where the episode carries neither, which keeps a batch of outcome-less
-    episodes rendering byte for byte as it did before ADR-0162 §8. The indent is
-    deeper than the label's so the two texts read as one entry rather than two.
+    **Both spans go through :func:`_quoted_span`, and the phrase is not exempt.**
+    ADR-0221 §3 makes the two populations render the same bytes for the same fact,
+    and a phrase interpolated raw beside an ``outcome`` interpolated quoted would
+    break that identity for every one of the sixteen members. The phrase is this
+    system's own text and could not forge anything; it is quoted because the
+    *identity* is the clause, which is the same reason ``planning._render_record``
+    quotes it.
+
+    Empty where the episode carries neither, which is what keeps a corpus with no
+    assistant half — LoCoMo under #1177's framing, where every exchange carries
+    ``outcome=None`` — a batch of one line per episode, as it was before ADR-0162 §8
+    added this function. The indent is deeper than the label's so the two texts read
+    as one entry rather than two.
     """
     if record.disposition is not None:
-        return [f"       Assistant: {_disposition_phrase(record.disposition)}"]
+        return [f"       Assistant: {_quoted_span(_disposition_phrase(record.disposition))}"]
     if record.outcome is None:
         return []
-    return [f"       Assistant: {record.outcome}"]
+    return [f"       Assistant: {_quoted_span(record.outcome)}"]
 
 
 def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
