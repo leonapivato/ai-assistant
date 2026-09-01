@@ -184,20 +184,20 @@ _TURN_SELECT = (
 #: is a refusal to serve over a watermark arriving through the schema.
 _OBSERVED_COLUMN: Final = "observed_through INTEGER"
 
-#: **The seven columns every conversation read selects**, written out at each of the
-#: five reads that needs them rather than held in a name here — :data:`_TURN_SELECT`'s
-#: reason one table down, that ruff's ``S608`` reads a query assembled from a name as a
-#: possible injection vector whatever the name holds, and a literal at the call site is
-#: the cheaper answer than a suppression on each of them. The seven are the five stored
-#: columns, ``observed_through``, and the conversation's **highest turn ordinal**
-#: derived beside them as
-#: ``(SELECT MAX(t.ordinal) FROM turns t WHERE t.conversation_id = c.id)``.
-#:
-#: The derived column is not decoration. ADR-0212 §7 discards a watermark "above the
-#: highest ordinal the conversation holds", and that judgement is **the store's**, made
-#: where the record is built — so every read that builds a :class:`Conversation` has to
-#: have the figure in hand or it cannot make it. What keeps the five in step is
-#: :meth:`SqliteConversationStore._decode_conversation`, which every one of them feeds.
+# **The seven columns every conversation read selects.** An ordinary comment and not
+# a ``#:`` attribute block, because there is deliberately no name here to attach one
+# to: the list is written out at each of the five reads that needs it — ``_TURN_SELECT``'s
+# reason one table down, that ruff's ``S608`` reads a query assembled from a name as a
+# possible injection vector whatever the name holds, and a literal at the call site is
+# the cheaper answer than a suppression on each of them. The seven are the five stored
+# columns, ``observed_through``, and the conversation's **highest turn ordinal** derived
+# beside them as ``(SELECT MAX(t.ordinal) FROM turns t WHERE t.conversation_id = c.id)``.
+#
+# The derived column is not decoration. ADR-0212 §7 discards a watermark "above the
+# highest ordinal the conversation holds", and that judgement is **the store's**, made
+# where the record is built — so every read that builds a ``Conversation`` has to have
+# the figure in hand or it cannot make it. What keeps the five in step is
+# ``SqliteConversationStore._decode_conversation``, which every one of them feeds.
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -956,7 +956,7 @@ class SqliteConversationStore:
     def _decode_conversation(row: Sequence[Any]) -> Conversation:
         """Rebuild a :class:`Conversation` from its row, surfacing corruption.
 
-        The row is the seven columns :data:`_CONVERSATION_SELECT` names — the five
+        The row is the seven columns every conversation read selects — the five
         stored ones, the raw watermark, and the conversation's highest turn ordinal
         — because ADR-0212 §7 makes discarding an unusable watermark **the store's**
         act, made where the record is built, and the judgement needs the last of the
