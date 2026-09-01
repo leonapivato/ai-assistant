@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -48,6 +49,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     MemoryWriteStage,
+    ObservationRunReport,
     ObservationStage,
 )
 from ai_assistant.testing import (
@@ -65,7 +67,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryWriter, Observer
-    from ai_assistant.core.types import Conversation, MemoryIngestResult, SourceReading
+    from ai_assistant.core.types import (
+        Conversation,
+        ConversationTurn,
+        MemoryIngestResult,
+        SourceReading,
+    )
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
@@ -74,6 +81,34 @@ AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 ROUTE = "anthropic:claude-opus-4-8"
 
 BATCH = 20
+
+#: ADR-0218 §7's three run figures, at their shipped defaults so a case reads
+#: against the values an unconfigured hub actually runs.
+QUIET = timedelta(minutes=10)
+MAX_AGE = timedelta(hours=2)
+RUN_BUDGET = timedelta(minutes=5)
+
+#: The instant a scheduled run's clock reads, unless a case says otherwise. An hour
+#: past :data:`AT`, so a conversation whose activity was stamped at ``AT`` is quiet
+#: by a wide margin and one stamped at ``RUN`` is not quiet at all.
+RUN = AT + timedelta(hours=1)
+
+
+class _Clock:
+    """A store clock a case sets by hand.
+
+    ``last_active_at`` and ``last_turn_at`` are what ADR-0218 §1 turns on, and both
+    come from the store's clock rather than the caller's — so a case that wants a
+    conversation *active* at one instant and *recorded* at another has to move this
+    between the calls, which the harness's second-per-reading clock cannot express.
+    """
+
+    def __init__(self, at: datetime = AT) -> None:
+        self.at = at
+
+    def __call__(self) -> datetime:
+        return self.at
+
 
 #: Spelled once: an ``INFERRED`` belief needs two distinct supports (ADR-0077 §5).
 INFERRED = MemorySource.INFERRED
@@ -198,6 +233,12 @@ class _WatchedConversations(FakeConversationStore):
         #: When set, the conversation is stamped deleted immediately before the
         #: advance — §6's deletion race, which no fake produces on its own.
         self.stamp_before_advance = False
+        #: Every ``turns_after`` and every ``turns`` this store was asked for, in
+        #: call order. ADR-0218 §2 rules that "the page read to decide is the page
+        #: the pass reads: no turn is read twice", which is a claim about *calls*
+        #: and is unobservable from any report.
+        self.pages_read: list[tuple[str, int | None]] = []
+        self.tails_read: list[str] = []
 
     def plant_watermark(self, conversation_id: str, ordinal: int) -> None:
         """Write a watermark the contract itself has no way to write (ADR-0212 §7).
@@ -224,6 +265,24 @@ class _WatchedConversations(FakeConversationStore):
         """
         return self._conversations[conversation_id].observed_through
 
+    async def turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after_ordinal: int | None = None,
+        limit: int | None = None,
+    ) -> list[ConversationTurn]:
+        """Read the page above a position, recording that the read happened."""
+        self.pages_read.append((conversation_id, after_ordinal))
+        return await super().turns_after(conversation_id, after_ordinal=after_ordinal, limit=limit)
+
+    async def turns(
+        self, conversation_id: str, *, limit: int | None = None, before_ordinal: int | None = None
+    ) -> list[ConversationTurn]:
+        """Read the tail, recording that the read happened."""
+        self.tails_read.append(conversation_id)
+        return await super().turns(conversation_id, limit=limit, before_ordinal=before_ordinal)
+
     async def record_observed(
         self, conversation_id: str, *, through_ordinal: int
     ) -> Conversation | None:
@@ -248,7 +307,7 @@ class _WatchedConversations(FakeConversationStore):
 class Harness:
     """A wired :class:`ObservationStage` and the fakes behind it, for assertions."""
 
-    def __init__(  # noqa: PLR0913 — one keyword per injected collaborator the stage takes
+    def __init__(  # noqa: PLR0913 — one keyword per injected collaborator the stage takes, plus ADR-0218 §7's three run figures and the run's own clock
         self,
         *,
         observer: Observer | None = None,
@@ -257,8 +316,15 @@ class Harness:
         batch_size: int = BATCH,
         now: Callable[[], datetime] | None = None,
         new_id: Callable[[], str] | None = None,
+        quiet_window: timedelta = QUIET,
+        max_unobserved_age: timedelta = MAX_AGE,
+        run_budget: timedelta = RUN_BUDGET,
+        run_now: Callable[[], datetime] | None = None,
     ) -> None:
         self._tick = 0
+        #: The store's clock where a case supplied a settable one, so a helper can
+        #: move it between ``start`` and ``append``.
+        self.store_clock = now if isinstance(now, _Clock) else None
         self.memory = FakeMemoryStore(now=lambda: AT)
         self.conversations = _WatchedConversations(
             now=self._advancing if now is None else now, new_id=new_id
@@ -280,6 +346,13 @@ class Harness:
             writes=self.writes,
             batch_size=batch_size,
             route=ROUTE,
+            # ADR-0218 §7's figures reach the **scheduled run** and nothing else:
+            # `observe` applies no due test, so every case above this section is
+            # unaffected by what they are.
+            quiet_window=quiet_window,
+            max_unobserved_age=max_unobserved_age,
+            run_budget=run_budget,
+            now=run_now if run_now is not None else (lambda: RUN),
         )
 
     def swap_writer(self, writer: MemoryWriter) -> None:
@@ -370,6 +443,41 @@ class Harness:
             turn = await self.conversations.append(conversation_id, occurred_at=AT)
             if captured:
                 await self.memory.add(_episode(turn.episode_id))
+
+    async def conversation_stamped(
+        self,
+        *,
+        active_at: datetime,
+        stamps: Sequence[datetime],
+        captured: bool = True,
+    ) -> str:
+        """Start a conversation *active* at one instant, with turns stamped at others.
+
+        The two instants ADR-0218 §1 turns on come from different clocks and this is
+        what lets a case separate them: ``active_at`` is the store's, read by
+        ``start``, and each of ``stamps`` is the **caller's** ``occurred_at``, which
+        also sets ``last_turn_at``. A case wanting a conversation whose activity is
+        recent and whose turns are old — or the reverse — sets them apart here.
+        """
+        assert self.store_clock is not None, "a case building stamped turns needs a _Clock"
+        self.store_clock.at = active_at
+        conversation = await self.conversations.start()
+        for stamp in stamps:
+            turn = await self.conversations.append(conversation.id, occurred_at=stamp)
+            if captured:
+                await self.memory.add(_episode(turn.episode_id))
+        return conversation.id
+
+    async def mark_active_at(self, conversation_id: str, at: datetime) -> None:
+        """Record that a turn *began* at ``at``, recording no turn (ADR-0074 §3).
+
+        ``mark_active`` "Record[s] that a turn has begun" and is called before the
+        work, so "a turn that never completes still says the user was here" — which
+        is the beat that makes ADR-0218 §2's residual reachable at all.
+        """
+        assert self.store_clock is not None, "a case moving the activity instant needs a _Clock"
+        self.store_clock.at = at
+        await self.conversations.mark_active(conversation_id)
 
     async def land(self, conversation_id: str, ordinal: int) -> None:
         """Write the episode a recorded turn names, as a late capture would."""
@@ -1683,3 +1791,478 @@ async def test_a_producer_that_forgets_the_marker_does_not_launder_the_warrant()
     await harness.stage.observe(conversation)
 
     assert (await _only_belief(harness)).provenance.supplied_withheld_content is True
+
+
+# --- the scheduled run: when a conversation is due (ADR-0218) ----------------
+
+
+async def test_quiet_is_decided_on_the_activity_instant_and_never_on_the_recorded_turn() -> None:
+    """ADR-0218 §1, in both directions, because either alone passes for the wrong reason.
+
+    ``last_active_at`` is "refreshed whenever a turn *begins*"; ``last_turn_at`` is
+    set "by the append that writes a turn into the index". Between those two moments
+    the user is mid-exchange, which is precisely the state a quiet window exists to
+    stay out of — so measuring on the recorded turn "would call a conversation quiet
+    while its next turn is in flight".
+
+    The two conversations here are each other's mirror. ``ended`` was active an hour
+    ago and its turns are stamped *now*: quiet on the ratified field, busy on the
+    field that looks like it means the same thing. ``mid_exchange`` is the reverse.
+    An implementation reading ``last_turn_at`` serves the second and skips the first,
+    which is the exact inversion of what §1 rules — so each is asserted with the
+    other absent, and neither run can pass by serving whatever it found.
+    """
+    ended = Harness(now=_Clock())
+    quiet = await ended.conversation_stamped(active_at=AT, stamps=[RUN, RUN])
+
+    ended_report = await ended.stage.run()
+
+    assert ended_report.passes == 1
+    assert ended.conversations.advances == [(quiet, 2)]
+
+    mid = Harness(now=_Clock())
+    busy = await mid.conversation_stamped(active_at=AT, stamps=[AT, AT])
+    await mid.mark_active_at(busy, RUN)
+
+    mid_report = await mid.stage.run()
+
+    assert mid_report.passes == 0
+    assert mid.conversations.advances == []
+    assert mid.fake.call_count == 0
+
+
+async def test_the_age_arm_is_decided_on_the_unobserved_page_s_first_turn() -> None:
+    """ADR-0218 §2's span begins at the page's *oldest* turn, not its newest.
+
+    "The question the age arm asks is 'has material been waiting too long', and the
+    material is the turns above the watermark. […] Measuring on the *newest*
+    unobserved turn would do the same thing one turn later. The oldest is the only
+    one of the three that ages."
+
+    Both conversations here hold the same two stamps in opposite orders, and neither
+    is quiet or full — so the *only* thing that can separate them is which end of the
+    page the arm reads. An implementation reading the last turn serves ``recent_first``
+    and skips ``old_first``, which is the assertion pair below.
+    """
+    aging = Harness(now=_Clock())
+    old_first = await aging.conversation_stamped(
+        active_at=RUN, stamps=[RUN - timedelta(hours=3), RUN]
+    )
+
+    assert (await aging.stage.run()).passes == 1
+    assert aging.conversations.advances == [(old_first, 2)]
+
+    fresh = Harness(now=_Clock())
+    await fresh.conversation_stamped(active_at=RUN, stamps=[RUN, RUN - timedelta(hours=3)])
+
+    assert (await fresh.stage.run()).passes == 0
+    assert fresh.conversations.advances == []
+
+
+async def test_the_full_arm_fires_on_a_page_of_exactly_the_batch_size() -> None:
+    """ADR-0218 §2's third arm: "a whole page is available to read", and no field of its own.
+
+    §7 refuses the arm a threshold of its own — "its threshold is
+    ``observation_batch_size``, because the condition it tests is exactly 'a whole
+    page is available to read', and a second count would let the two disagree about
+    what a page is" — so the boundary is asserted *at* the batch size and one turn
+    below it, over a conversation that is neither quiet nor aged.
+    """
+    short = Harness(batch_size=3, now=_Clock())
+    await short.conversation_stamped(active_at=RUN, stamps=[RUN, RUN])
+
+    assert (await short.stage.run()).passes == 0
+    assert short.conversations.advances == []
+
+    whole = Harness(batch_size=3, now=_Clock())
+    page = await whole.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
+
+    report = await whole.stage.run()
+
+    assert report.passes == 1
+    assert report.episodes_read == 3
+    assert whole.conversations.advances == [(page, 3)]
+
+
+async def test_a_turn_stamped_ahead_of_the_run_s_clock_is_still_reached() -> None:
+    """ADR-0218 §2's full arm is the one that rests on no instant at all.
+
+    ``append`` takes ``occurred_at`` "from the caller's injected clock" and this
+    project "never promises [the clock] is monotonic", so a turn stamped *ahead* of
+    the store's clock "has an unobserved span whose age is negative and stays
+    negative until the store's clock catches up". For a conversation that also never
+    goes quiet the age arm would then be the only arm and would never fire.
+
+    So the reach is asserted **deterministically and through the full arm alone**:
+    the same conversation, at the same forward stamps and the same activity instant,
+    is due at a whole page and not due one turn short. Nothing here waits for a clock
+    to catch up, because ordinals are the store's own.
+    """
+    ahead = RUN + timedelta(hours=1)
+
+    short = Harness(batch_size=3, now=_Clock())
+    await short.conversation_stamped(active_at=RUN, stamps=[ahead, ahead])
+
+    assert (await short.stage.run()).passes == 0
+
+    whole = Harness(batch_size=3, now=_Clock())
+    forward = await whole.conversation_stamped(active_at=RUN, stamps=[ahead, ahead, ahead])
+
+    report = await whole.stage.run()
+
+    assert report.passes == 1
+    assert whole.conversations.advances == [(forward, 3)]
+
+
+async def test_a_conversation_kept_out_of_quiet_by_turns_that_never_complete_is_due_on_no_arm() -> (
+    None
+):
+    """ADR-0218 §2's residual, pinned as a recorded decision rather than a surprise.
+
+    ``mark_active`` moves at the rate turns **begin** and the full arm advances at
+    the rate they are **recorded**, so "a client that begins a turn inside every
+    quiet window, each turn's work outlasting the window its beginning refreshed,
+    stays out of quiet for as long as it keeps that up while adding rows more slowly
+    than it adds activity. Turns that never complete are the limit of that."
+
+    Such a conversation, holding one unobserved turn stamped ahead of the store's
+    clock, "is quiet on no reading, aged on no reading and full on no reading". §2
+    accepts and names that on four grounds — it needs three ordinary events
+    suppressed at once, its duration is bounded by the size of the clock error, at
+    most ``observation_batch_size - 1`` turns are *delayed* rather than lost, and
+    both closures a reviewer would reach for are ruled out by ratified text. This
+    case is what makes the acceptance visible: nothing is read, nothing is written,
+    and the material stays exactly where it was.
+    """
+    harness = Harness(now=_Clock())
+    stalled = await harness.conversation_stamped(active_at=AT, stamps=[RUN + timedelta(hours=1)])
+    await harness.mark_active_at(stalled, RUN)
+
+    report = await harness.stage.run()
+
+    assert report == ObservationRunReport()
+    assert harness.conversations.advances == []
+    assert harness.fake.call_count == 0
+    assert await harness.watermark(stalled) is None
+
+
+async def test_a_run_takes_the_first_due_candidate_and_not_merely_the_first() -> None:
+    """ADR-0218 §2's selection clause, which a "head of the listing" run fails.
+
+    "The due test is evaluated by walking the candidate listing in ADR-0212 §3's
+    order and taking the **first** candidate that is due." The head here is not due
+    on any arm — recently active, one turn, stamped now — while the candidate behind
+    it holds a whole page and is. A run that served the head would read a fragment
+    mid-conversation, which is #1737 item 1's own failure.
+
+    The head is genuinely first: ADR-0212 §3 orders on ``last_active_at`` ascending,
+    and this one was active a second earlier. That ordering is also why the two arms
+    that can separate them are the aged and the full ones — §1's monotonicity means
+    a non-quiet head implies no candidate anywhere is quiet.
+    """
+    harness = Harness(batch_size=3, now=_Clock())
+    head = await harness.conversation_stamped(active_at=RUN - timedelta(seconds=1), stamps=[RUN])
+    behind = await harness.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
+
+    report = await harness.stage.run()
+
+    assert report.passes == 1
+    assert harness.conversations.advances == [(behind, 3)]
+    assert await harness.watermark(head) is None
+
+
+async def test_the_page_read_to_decide_is_the_page_the_pass_reads() -> None:
+    """ADR-0218 §2: "no turn is read twice to decide whether to read it".
+
+    Unobservable from any report, so it is asserted on the store's own call log. The
+    candidate carries a watermark and is due on the full arm, which is the arm that
+    *has* to probe — the quiet arm reads nothing at all — so this is the case where a
+    second read would actually happen if the page were not carried through.
+    """
+    harness = Harness(batch_size=2, now=_Clock())
+    conversation = await harness.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
+    # A watermark a pass really left, through the seam that leaves one: the first
+    # turn is behind it, so the forward page is the next two and the full arm binds.
+    await harness.conversations.record_observed(conversation, through_ordinal=1)
+    harness.conversations.pages_read.clear()
+    harness.conversations.tails_read.clear()
+
+    report = await harness.stage.run()
+
+    assert report.passes == 1
+    assert harness.conversations.pages_read == [(conversation, 1)]
+    assert harness.conversations.tails_read == []
+
+
+async def test_a_first_pass_reads_two_pages_because_the_tail_is_a_different_page() -> None:
+    """The one case ADR-0218 §2 names as reading two pages, and it names it as such.
+
+    "Where the selected candidate has **no** recorded watermark, ADR-0212 §4 governs
+    what the pass reads — 'that conversation's most recent ``observation_batch_size``
+    turns' — which is a different page from the forward one the due test read. That
+    is the one case in which a run reads two pages of one conversation, it happens on
+    that conversation's first pass and never again."
+
+    Asserted as the *tail* being read rather than merely as two calls, because the
+    point is which turns the pass observes: the forward probe decided due-ness, and
+    ADR-0212 §4's tail is still where the first pass begins.
+    """
+    harness = Harness(batch_size=2, now=_Clock())
+    conversation = await harness.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
+
+    report = await harness.stage.run()
+
+    assert report.passes == 1
+    assert harness.conversations.pages_read == [(conversation, None)]
+    assert harness.conversations.tails_read == [conversation]
+    # ADR-0212 §4's tail: the *newest* two turns, so the watermark lands at the top
+    # and the prefix below it is passed over — which this ADR does not change.
+    assert harness.conversations.advances == [(conversation, 3)]
+
+
+# --- the scheduled run: what one run does (ADR-0218 §3, §9) -----------------
+
+
+class _SlowObserver:
+    """A ``FakeObserver`` whose call outlasts a run budget, so a boundary is visible.
+
+    ADR-0111 §4's budget is "checked only at a chunk boundary, so no chunk is
+    abandoned part-way and a run may overrun its budget by at most the duration of
+    one chunk", and ADR-0218 §3 applies that with the pass as the chunk. A pass that
+    returns instantly cannot tell a boundary check from an in-pass one, so this makes
+    the first pass outlast the budget on purpose.
+    """
+
+    def __init__(self, inner: FakeObserver, *, takes: float) -> None:
+        """Wrap ``inner``, parking for ``takes`` seconds on every call."""
+        self._inner = inner
+        self._takes = takes
+
+    async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome:
+        """Park, then answer exactly as the canonical fake would."""
+        await asyncio.sleep(self._takes)
+        return await self._inner.observe(episodes)
+
+
+async def test_a_run_with_nothing_due_performs_no_pass_and_calls_no_model() -> None:
+    """ADR-0218 §2's own words, and the reason arming this job is affordable.
+
+    "A run that finds no due candidate **performs no pass**: it calls no model,
+    writes nothing, and reads no turn *to observe one*." That is what spends
+    ADR-0083 §7's stated reason for the disabled default, so it is asserted rather
+    than assumed — including that the run is a **success** carrying zeroes and not a
+    failure, and that its terminal reason is the listing rather than the budget.
+    """
+    harness = Harness(now=_Clock())
+    await harness.conversation_stamped(active_at=RUN, stamps=[RUN])
+
+    report = await harness.stage.run()
+
+    assert report == ObservationRunReport()
+    assert report.budget_spent is False
+    assert harness.fake.call_count == 0
+    assert harness.conversations.advances == []
+
+
+async def test_the_budget_is_checked_at_a_pass_boundary_and_never_inside_one() -> None:
+    """ADR-0111 §4 with the pass as the chunk (ADR-0218 §3).
+
+    The budget expires *during* the first pass, and the assertion is the pair: that
+    pass completes in full — its advance lands, so nothing was abandoned part-way —
+    and the second due candidate is not begun at all. A run checking the budget
+    inside a pass would leave the first conversation's watermark where it was; one
+    checking it nowhere would serve both.
+
+    ``budget_spent`` is the disposition that separates this run from one that ran dry
+    (§3's two terminal reasons), and it is asserted here because the counts alone
+    cannot tell them apart.
+    """
+    harness = Harness(
+        batch_size=2,
+        now=_Clock(),
+        observer=_SlowObserver(FakeObserver(), takes=0.05),
+        run_budget=timedelta(milliseconds=10),
+    )
+    # Distinct activity instants, because ADR-0212 §3's order breaks a tie on `id`
+    # and a uuid tie-break would make "which one the run served" a coin flip.
+    first = await harness.conversation_stamped(active_at=AT, stamps=[AT, AT])
+    second = await harness.conversation_stamped(
+        active_at=AT + timedelta(seconds=1), stamps=[AT, AT]
+    )
+
+    report = await harness.stage.run()
+
+    assert report.passes == 1
+    assert report.budget_spent is True
+    assert harness.conversations.advances == [(first, 2)]
+    assert await harness.watermark(second) is None
+
+
+async def test_a_conversation_deleted_under_a_run_drops_and_the_run_carries_on() -> None:
+    """ADR-0218 §9, which is the one classification of ADR-0212 §6 it replaces.
+
+    A deletion landing between the listing and the read is "an ordinary act the user
+    performs, not a fault": the listing already excludes stamped conversations and
+    both later calls raise for one, so the error is reachable from exactly one thing.
+    Halting a whole run on it "would let one ordinary act stop a tick, and it would
+    look like a store fault in the log".
+
+    Both candidates are stamped under their own advance here, so the assertion is
+    that the run **reached the second at all** — a run that halted on the first would
+    log one attempt and stop. Nothing propagates, and the report is an ordinary one.
+    """
+    harness = Harness(now=_Clock())
+    harness.conversations.stamp_before_advance = True
+    first = await harness.conversation_stamped(active_at=AT, stamps=[AT])
+    second = await harness.conversation_stamped(active_at=AT + timedelta(seconds=1), stamps=[AT])
+
+    report = await harness.stage.run()
+
+    assert [conversation for conversation, _ in harness.conversations.advances] == [first, second]
+    assert report.passes == 0
+    assert report.budget_spent is False
+
+
+async def test_a_store_fault_at_the_advance_halts_the_run_and_propagates() -> None:
+    """The other half of §9, and what keeps the catch narrow.
+
+    "A pass that raises […] halts the run: no later pass is performed, and the
+    exception **propagates out of** ``observe_due`` rather than being absorbed into a
+    return value." Swallowing it would be the defect: ``Scheduler._run_job`` decides
+    its two dispositions by whether the job body raises, so a run that returned a
+    report saying it failed would be logged as a completed run with the fault's class
+    recorded nowhere.
+
+    This is the same shape as the case above with a different error class, which is
+    exactly the point — the deletion race is caught because of *what it means*, not
+    because a raise at that call is tolerable in general.
+    """
+    harness = Harness(now=_Clock())
+    harness.conversations.advance_raises = True
+    first = await harness.conversation_stamped(active_at=AT, stamps=[AT])
+    await harness.conversation_stamped(active_at=AT + timedelta(seconds=1), stamps=[AT])
+
+    with pytest.raises(ConversationStoreError):
+        await harness.stage.run()
+
+    assert harness.conversations.advances == [(first, 1)]
+
+
+async def test_a_run_returns_counts_and_no_proposal_content_however_many_passes() -> None:
+    """ADR-0218 §3's counts-only rule, asserted structurally rather than by reading fields.
+
+    "**Nothing it returns grows with the number of passes**" — so the report of a
+    three-pass run is checked for holding only numbers and one flag, which is the
+    property a later field carrying an ``ObservedProposal`` would break. §3 argues it
+    rather than asserting it: one report per pass would be "a list whose length is
+    bounded by nothing in this ADR, holding Tier 1 proposal content, retained until
+    the run returns, for a caller that discards it".
+
+    The ruling counts are asserted as a **partition** of what was proposed, because
+    what the gate rules is the policy's business and not this stage's: what this owes
+    is that every proposal is accounted for exactly once.
+    """
+    harness = Harness(now=_Clock())
+    for _ in range(3):
+        await harness.conversation_stamped(active_at=AT, stamps=[AT, AT])
+
+    report = await harness.stage.run()
+
+    assert report.passes == 3
+    assert report.conversations == 3
+    assert report.model_calls == 3
+    assert report.episodes_read == 6
+    assert report.proposed > 0
+    assert (
+        report.committed + report.deferred + report.rejected + report.dropped_unsupported
+        == report.proposed
+    )
+    assert all(isinstance(getattr(report, field.name), int | bool) for field in fields(report)), (
+        "a run report carries counts and one disposition, never proposal content"
+    )
+
+
+async def test_a_run_drains_one_conversation_across_passes_until_it_leaves_the_set() -> None:
+    """ADR-0218 §3's termination argument, and ADR-0212 §3's order working.
+
+    "A candidate with many pages of unobserved turns stays at the head of the
+    ascending order — no new turns, so no new activity instant — and is served pass
+    after pass until it is exhausted or the budget is spent." §3 chose that over
+    spreading the budget because ascending order "serves the material nearest its
+    expiry first", and a run that abandoned a half-drained conversation would serve
+    the material *furthest* from expiry with the same number of model calls.
+
+    Four turns at a batch of two is two passes and then the candidate is gone, which
+    is also the strict-advance half of the argument: each pass names a position
+    strictly above the watermark it read, so the run cannot revisit what it drained.
+    """
+    harness = Harness(batch_size=2, now=_Clock())
+    conversation = await harness.conversation_stamped(active_at=AT, stamps=[AT, AT, AT, AT, AT])
+    # A watermark a pass really left, so the four turns above it are two pages. A
+    # conversation with **no** watermark drains in one pass whatever its length,
+    # because ADR-0212 §4 starts it at the tail and passes over the prefix.
+    await harness.conversations.record_observed(conversation, through_ordinal=1)
+    harness.conversations.advances.clear()
+
+    report = await harness.stage.run()
+
+    assert report.passes == 2
+    assert report.conversations == 1
+    assert harness.conversations.advances == [(conversation, 3), (conversation, 5)]
+    # The third pass is stopped by the **watermark** and not by the listing's bound:
+    # the conversation has left the candidate set because nothing stands above it.
+    assert await harness.watermark(conversation) == 5
+
+
+@pytest.mark.parametrize("figure", ["quiet_window", "max_unobserved_age", "run_budget"])
+@pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1)])
+async def test_a_non_positive_run_figure_is_refused_at_construction(
+    figure: str, bad: timedelta
+) -> None:
+    """ADR-0218 §7's ``gt=timedelta(0)``, guarded at the exported constructor too.
+
+    ``Settings`` refuses these at load, and this class is exported — so a caller
+    wiring it directly would otherwise get behaviour §7 forbids. ``timedelta(0)`` is
+    the value that looks harmless and is not: a zero budget spends itself before the
+    first pass boundary, and a zero quiet window makes **every** candidate quiet,
+    which is the mid-conversation read §1 exists to prevent reached through the field
+    meant to prevent it.
+    """
+    harness = Harness()
+    # Typed loosely on purpose: parametrising over the *keyword* is what makes this
+    # one case rather than three near-copies, and the three fields have different
+    # types from the clock beside them.
+    figures: dict[str, Any] = {figure: bad}
+    with pytest.raises(ValueError, match="strictly positive"):
+        ObservationStage(
+            observer=harness.observer,
+            conversations=harness.conversations,
+            memory=harness.memory,
+            writes=harness.writes,
+            batch_size=BATCH,
+            route=ROUTE,
+            **figures,
+        )
+
+
+@pytest.mark.parametrize("figure", ["quiet_window", "max_unobserved_age", "run_budget"])
+async def test_a_run_figure_that_is_not_a_duration_is_a_type_error(figure: str) -> None:
+    """The other end, and it is not tidiness: a subclass can report infinity.
+
+    ``type(...) is timedelta`` rather than ``isinstance`` closes the case
+    ``core/config.py`` spends ``allow_inf_nan=False`` on one field over — a duration
+    whose ``total_seconds`` is not finite makes a run's deadline unreachable and the
+    run unbounded, which is the state the budget exists to prevent.
+    """
+    harness = Harness()
+    figures: dict[str, Any] = {figure: 600}
+    with pytest.raises(TypeError, match="must be a timedelta"):
+        ObservationStage(
+            observer=harness.observer,
+            conversations=harness.conversations,
+            memory=harness.memory,
+            writes=harness.writes,
+            batch_size=BATCH,
+            route=ROUTE,
+            **figures,
+        )

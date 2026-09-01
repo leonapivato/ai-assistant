@@ -99,6 +99,7 @@ from ai_assistant.orchestration import (
     HeldSource,
     IngestionStage,
     MemoryWriteStage,
+    ObservationRunReport,
     ObservationStage,
     QuestionStage,
     RoutingStage,
@@ -556,6 +557,12 @@ class Harness:
             writes=self.writes,
             batch_size=OBSERVATION_BATCH,
             route=OBSERVER_ROUTE,
+            # ADR-0218 §2's due test reads the run's clock against the store's, and
+            # every instant this harness stamps is `AT` — so a run clock an hour
+            # later makes any candidate quiet, deterministically and without a case
+            # depending on where the wall clock happens to be. It reaches
+            # `observe_due` and nothing else: `observe` applies no due test.
+            now=lambda: AT + timedelta(hours=1),
         )
         # Leg 6's ingestion stage over the *same* write stage (ADR-0093 §6,
         # ADR-0078 §3), and **only when a reader is given**: a reader ships disabled
@@ -4367,6 +4374,71 @@ async def test_observe_with_no_id_selects_the_most_recently_active_conversation(
     report = await harness.engine.observe()
 
     assert report.conversation_id == conversation
+
+
+async def test_a_scheduled_run_carries_its_own_seam_and_never_the_hand_run_pass_s() -> None:
+    """ADR-0218 §6, at the seam that decides every measure's population.
+
+    ADR-0120 §3 attributes a write by "the seam of the operation that caused it", and
+    §6 puts ``observe_due`` in the machine set on the tie-break §3 states for having
+    the split at all: "A correction rate that counted those would rise on the day of
+    the arming, and the rise would be a fact about the scheduler rather than about
+    the user model." So one seam serving both callers would make an armed job's
+    writes indistinguishable from a user's deliberate ones — which is why this is a
+    second operation and not an argument on ``observe``.
+
+    Asserted at the ``Engine`` because that is where the label is fixed: every pass a
+    run performs happens inside the **run's own** ``_tracked`` scope and is never a
+    nested ``observe``, so exactly one ``OPERATION`` trace comes back and its seam is
+    the run's. The metrics are the run's counts, which is §5's one-crossing rule —
+    the detail rides on the operation's own trace rather than on a second record.
+    """
+    harness = Harness()
+    await _one_captured_turn(harness)
+
+    report = await harness.engine.observe_due()
+
+    assert report.passes == 1
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "observe_due"
+    assert trace.outcome is TraceOutcome.OK
+    assert dict(trace.metrics)["passes"] == 1
+    assert dict(trace.metrics)["model_calls"] == 1
+    assert "observe" not in {record.seam for record in harness.trace_sink.recorded}
+
+
+async def test_a_scheduled_run_over_nothing_due_is_a_success_carrying_zeroes() -> None:
+    """ADR-0218 §9: a run that observed nothing is a **successful** run.
+
+    "A run whose passes all complete but which observed nothing — because no
+    candidate was due, or because every due candidate's page resolved to no episode —
+    is a **successful** run. It is not logged as a failure and does not change the
+    job's next due instant." An empty store is the cheapest form of that, and it is
+    the tick an armed job spends most of its life on: one bounded listing read, no
+    model call, and an ``OK`` trace of zeroes.
+    """
+    harness = Harness()
+
+    report = await harness.engine.observe_due()
+
+    assert report == ObservationRunReport()
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "observe_due"
+    assert trace.outcome is TraceOutcome.OK
+    assert dict(trace.metrics)["passes"] == 0
+
+
+async def test_a_scheduled_run_is_refused_once_shutdown_has_begun() -> None:
+    """It is the same admission check every tracked operation takes (ADR-0042 §2).
+
+    The scheduler reads this ``RuntimeError`` as *stop* rather than as a job failure
+    (ADR-0083 §8), which is what makes refusing at the door the right answer for a
+    job that is armed by default and therefore ticking while a hub shuts down.
+    """
+    harness = Harness()
+    await harness.engine.aclose()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await harness.engine.observe_due()
 
 
 async def test_observe_is_refused_once_shutdown_has_begun() -> None:
