@@ -4554,6 +4554,28 @@ class FeedbackEvent(BaseModel):
     ``assistant learn --about-person`` — because a field with no route would leave
     every third-party belief constructing ``about_person=None``, which §3 reads as
     the owner's, making a false record of the exact case the field was added for.
+
+    **``guarded`` is the owner's explicit placement act at write** (ADR-0217 §7),
+    and it is on this event rather than encoded by an adapter because deciding a
+    record's placement is not adapter work: golden rule 3 keeps business logic out
+    of `interfaces/`, and an adapter translating a flag into a :class:`Placement`
+    would be deciding disclosure in the thinnest layer in the system. The adapter
+    sets a field; `learning` reads it. It rides ``AssistantEngine.learn``
+    unchanged — that signature does not move — and the
+    :class:`~ai_assistant.core.protocols.FeedbackProcessor` that builds the record
+    honours it. It is a **narrowing only**, and ``False`` is not an act of any
+    kind: it leaves the record with ADR-0217 §6's default, which is ADR-0199 §3's
+    placement of its class. It is not a widening act, not an unguard, and not a
+    record that the owner considered this belief and declined to guard it.
+
+    **Honouring it is a change to the ``FeedbackProcessor`` Protocol's behavioural
+    contract, not to one implementation** (§7). An implementation that built its
+    normal proposal and ignored this member would be structurally conformant and
+    would silently discard an explicit owner act, so the obligation is pinned by
+    the shared ``FeedbackProcessorContract`` and every implementation bound to that
+    suite — the canonical fake in ``ai_assistant.testing`` included — is held to
+    it. That suite, and not this docstring, is what makes the obligation enforced
+    rather than assumed.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -4586,6 +4608,16 @@ class FeedbackEvent(BaseModel):
         description="Interaction/episode ids supporting this, carried into provenance.",
     )
     created_at: UtcInstant = Field(description="When the feedback was given (tz-aware).")
+    guarded: bool = Field(
+        default=False,
+        description=(
+            "The owner's explicit act placing what this feedback establishes for "
+            "themselves alone (ADR-0217 §7). ``True`` writes every record this event "
+            "produces with reach ``OWNER`` and setter ``OWNER_ACT``; ``False`` — the "
+            "default — is not an act of any kind and leaves ADR-0217 §6's default "
+            "placement. A narrowing only: there is no widening act at write."
+        ),
+    )
 
     @field_validator("content")
     @classmethod

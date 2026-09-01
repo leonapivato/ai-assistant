@@ -729,7 +729,54 @@ from ai_assistant.wire.errors import (
 #: decision giving any client, spoke or gateway a rule keyed on a placement **as
 #: received over the wire** owes ADR-0124 §9's test afresh in its own text and may not
 #: cite this entry as having answered it.
-PROTOCOL_VERSION: Final[int] = 23
+#: **24 since ADR-0217 §7 and §9**, under ADR-0124 §9's **second** limb, and for a
+#: member a **client sets**: :class:`~ai_assistant.core.types.FeedbackEvent` gains
+#: ``guarded``, the owner's explicit act placing what a piece of feedback establishes
+#: for themselves alone. ``AssistantEngine.learn`` takes a whole ``FeedbackEvent`` as
+#: its argument, so this is the argument direction of the second limb rather than the
+#: result direction 23 turned on, and the type does not set ``extra="forbid"``: a
+#: client at 24 sending ``guarded: true`` to a hub at 23 is not refused, it is
+#: **accepted with a different meaning** — the member is ignored, the owner's act is
+#: recorded nowhere, and the record the hub writes is speakable on a channel of
+#: unbounded audience. That is a value one peer emits taken by the other with the
+#: restrictive meaning dropped, which is §9's test exactly.
+#:
+#: **The bump is what makes the fail-open window reachable, and the atomicity clause
+#: is why it is closed on arrival** (ADR-0217 §7). "A ``core`` member a client may set
+#: and a hub may ignore is a fail-open window on the promoted surface … and the version
+#: bump that admits such a caller is what makes it reachable rather than theoretical."
+#: So the member, the ``FeedbackProcessor`` implementations that honour it, the
+#: ``FeedbackProcessorContract`` arm and the canonical fake land in this same change:
+#: no tree accepts ``guarded=True`` without acting on it. What the bump adds is the
+#: handshake that keeps a client carrying the member away from a hub that predates it.
+#:
+#: **It is a different case from ADR-0213 §11's ruling on a defaulted addition**, and
+#: the difference is the *direction*. That section is right that an older peer decoding
+#: a newer hub's **result** ignores a member it does not know and loses nothing — a
+#: ``MemoryRecord``'s ``topics``, nothing acts on it. Here the member travels the other
+#: way, in an argument the client authors and the hub acts on, and the thing ignored is
+#: an instruction rather than an observation. No lane reads this entry as authority for
+#: bumping on a defaulted addition to a *result* type.
+#:
+#: **This is the second of the three bumps ADR-0217 §9 spends**, each on its own ground
+#: and in its own change: 23 for the field move on the second limb, this one for a
+#: member a client sets, and §7's two ``AssistantEngine`` methods on the **first** limb,
+#: in the later change that adds them.
+#:
+#: **The method set does not move**, and stands at forty — ``learn`` already exists and
+#: its signature is unchanged, the member riding the event it already takes (ADR-0217
+#: §9: "``FeedbackProcessor``'s **signature** does not move … but its **behavioural
+#: contract** does"). ADR-0177 §1's browser enumeration does not move either, and stands
+#: at thirty-one. Nothing else under ``wire/`` changes for it: the framing, the connect
+#: exchange, the frame kinds, the codec's dispatch, the error registry and both adapters
+#: are untouched, and ``bool`` is a row ADR-0087 §2c's scalar table already carries.
+#:
+#: **``Placement`` does not cross for this member.** ``guarded`` is a ``bool`` on the
+#: argument; the placement it decides is written by the hub's own processor onto a
+#: record, which is the wire-carried type 23 already accounts for. ADR-0204 §7's
+#: hub-authoritative clause, generalised by ADR-0217 §9, is therefore kept whole: the
+#: placement is still set in the hub and no client sets one.
+PROTOCOL_VERSION: Final[int] = 24
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
