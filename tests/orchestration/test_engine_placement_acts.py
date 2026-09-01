@@ -142,19 +142,38 @@ class _DeletingStore(FakeMemoryStore):
     live, rather than surfacing the store's refusal.
     """
 
-    def __init__(self) -> None:
-        """Create a store that deletes the record after the first read of it."""
+    def __init__(self, *, recreated: Placement | None = None) -> None:
+        """Create a store that destroys the record after the first read of it.
+
+        ``recreated`` is what another writer puts back at the same id before the act's
+        second read, or ``None`` to leave the id empty. It is what makes "the act
+        re-read" **provable** rather than merely counted: with a record there to find,
+        an implementation that returned ``None`` on the first stale refusal answers
+        differently from one that re-reads, so the two are told apart by the value.
+        """
         super().__init__(now=lambda: AT)
-        #: Whether the deletion has landed. A negative control: an act that never
-        #: re-read would leave this ``False`` at the end of a passing assertion.
-        self.destroyed = False
+        self._recreated = recreated
+        #: How many reads this store has served. Asserted at **two** by every case
+        #: below, because §7's bound is a statement about the number of attempts and a
+        #: case that only checked the answer could not see an implementation that
+        #: returned the right value after one attempt or after ten.
+        self.reads = 0
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Read as the fake does, then destroy the record the first time."""
+        """Read as the fake does, then destroy the record on the first read."""
         found = await super().get(record_id)
-        if found is not None and not self.destroyed:
-            self.destroyed = True
+        self.reads += 1
+        if self.reads == 1 and found is not None:
             await self.delete(record_id)
+            if self._recreated is not None:
+                await self.write_atomic(
+                    [
+                        MemoryWrite(
+                            record=_record(self._recreated),
+                            mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                        )
+                    ]
+                )
         return found
 
 
@@ -423,6 +442,33 @@ async def test_an_act_follows_the_stored_placement_and_not_a_rendered_one(
     assert await _standing(store) == _DERIVED
 
 
+async def test_a_record_recreated_inside_the_window_is_re_decided_on_what_is_there_now() -> None:
+    """The re-read proved by its **answer**, which a read count alone cannot do.
+
+    The record is destroyed after the act's read and another writer puts one back at
+    the same id carrying a ``DERIVED`` narrowing. The act meets ADR-0219 §3's stale
+    refusal on a row that is no longer the one it read, re-reads under ADR-0217 §7's
+    bound, and applies §3's precedence to the value the record **now** carries — so it
+    refuses the widening and answers with that placement.
+
+    Three wrong implementations are separated here and by nothing else in this file: one
+    that returns ``None`` on the first stale refusal answers ``None``; one that
+    resubmits the payload it computed over the rejected snapshot writes reach ``ANYONE``
+    over a derivation, which is the laundering §7's gate exists to prevent; and one that
+    retries unboundedly reads more than twice. Only an act that re-reads once and
+    re-decides gives the value asserted below.
+    """
+    store = _DeletingStore(recreated=_DERIVED)
+    async for harness in _engine(store):
+        await _seed(store, Placement())
+
+        answered = await harness.engine.unguard(_RECORD)
+
+        assert store.reads == 2
+        assert answered == _DERIVED
+        assert await _standing(store) == _DERIVED
+
+
 @pytest.mark.parametrize("method", ["guard", "unguard"])
 async def test_a_record_destroyed_inside_the_window_answers_none_after_the_retry(
     method: str,
@@ -445,8 +491,10 @@ async def test_a_record_destroyed_inside_the_window_answers_none_after_the_retry
     async for harness in _engine(store):
         await _seed(store, Placement())
 
-        assert await getattr(harness.engine, method)(_RECORD) is None
-        assert store.destroyed
+        answered = await getattr(harness.engine, method)(_RECORD)
+
+        assert store.reads == 2, "the act must re-read before it answers, never guess"
+        assert answered is None
 
 
 async def test_an_act_on_a_record_the_store_no_longer_holds_answers_none(
