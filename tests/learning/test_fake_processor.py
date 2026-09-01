@@ -302,32 +302,47 @@ async def test_an_unguarded_event_leaves_a_scripted_records_own_placement_alone(
     assert proposal.proposed.placement == scripted
 
 
-async def test_a_guarded_event_does_not_launder_a_derived_narrowing_into_an_act() -> None:
-    """ADR-0217 §3's same-act precedence, at the one place this fake can reach it.
+@pytest.mark.parametrize(
+    "scripted",
+    [
+        Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_WHEN),
+        Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_WHEN),
+    ],
+    ids=["derived", "proposed"],
+)
+async def test_a_guarded_event_writes_the_act_over_whatever_a_script_carried(
+    scripted: Placement,
+) -> None:
+    """ADR-0217 §7 is unconditional, and §3's same-act precedence is not reached here.
 
-    "Where two would write the same reach, the recorded setter is decided by one
-    total order, strongest first: ``DERIVED``, then ``OWNER_ACT``, then
-    ``PROPOSED``", and §10 pins the case: "a record the derivation and an owner's
-    act both place ``OWNER`` records setter ``DERIVED``". The reach is the same
-    either way, so a reach-only assertion would pass on the wrong answer — and the
-    wrong answer matters, because an ``OWNER_ACT`` stamp is one a later ``unguard``
-    may lift and a ``DERIVED`` stamp is one no act may.
+    §7 says "every record that event produces is written with reach ``OWNER`` and
+    setter ``OWNER_ACT``" with no exception in it, and the shared contract asserts
+    exactly that of every implementation. Only one setter can write at this seam: a
+    ``FeedbackProcessor`` mints a fresh record from an explicit user act, ADR-0204
+    §2's derivation is `orchestration`'s at capture downstream of it, and a model's
+    proposal is ``Observer``'s and "never runs on a record already in the store".
+
+    So a placement on a *script* is a fixture's initial value and not a setter that
+    wrote, and resolving the act against it under §3's precedence would admit a
+    state the shared arm forbids — a scripted ``DERIVED`` surviving a guarded event
+    — which is the fake configurable out of its own contract. Both setters §3 ranks
+    against ``OWNER_ACT`` are taken, so neither direction of that mistake can
+    return.
     """
-    derived = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_WHEN)
-    processor = FakeFeedbackProcessor([_proposal(placement=derived)])
+    processor = FakeFeedbackProcessor([_proposal(placement=scripted)])
 
     [proposal] = await processor.process(_event(guarded=True))
 
-    assert proposal.proposed.placement == derived
+    assert proposal.proposed.placement == _ACT
 
 
 async def test_a_guarded_event_narrows_a_record_the_owner_had_unguarded() -> None:
-    """The differing-reach half of the same rule: the narrower reach stands (§3).
+    """The act reaches a script placed ``ANYONE`` by an earlier ``OWNER_ACT`` too.
 
-    A script carrying reach ``ANYONE`` with setter ``OWNER_ACT`` is a record the
-    owner had unguarded. This is a *fresh* write rather than a fold of two stored
-    placements, so nothing here is the eligibility clause: the act simply narrows,
-    and the stamp it leaves is its own.
+    A script carrying reach ``ANYONE`` with setter ``OWNER_ACT`` is what a record
+    the owner had unguarded looks like. This is a *fresh* write rather than a fold
+    of two stored placements, so nothing here is ADR-0217 §3's eligibility clause:
+    the act narrows, and the stamp and instant it leaves are its own.
     """
     unguarded = Placement(
         reach=PlacementReach.ANYONE,
