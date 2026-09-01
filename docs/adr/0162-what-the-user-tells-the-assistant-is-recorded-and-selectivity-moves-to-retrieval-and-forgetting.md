@@ -1,6 +1,6 @@
 # 162. What the user tells the assistant is recorded, and selectivity moves to retrieval and forgetting
 
-- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark)
+- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark) and ADR-0221 (§8's first clause alone — the observation prompt states the phrase for an episode's recorded `disposition` where it records one, and its `outcome` where it does not; §8's four other clauses and every other section stand)
 - Date: 2026-08-19
 - Amended: 2026-08-19 (§7 — its progress-over-overlap sentence names one instance of
   a property that has two). §7 rules that consecutive windows overlap by *k* episodes
@@ -277,6 +277,46 @@
   below is rewritten and §7's clauses stand as written. This note lands in the same change
   as ADR-0220 itself, which is the existence condition ADR-0082 §7 states. Refs #1237,
   #1829, #1782.
+
+- **Partially superseded: 2026-09-01 by ADR-0221 — §8's first clause and no
+  other.** Design note **#1845** asks for the assistant's composed reply to be
+  recorded on the episode, and ADR-0221 §1 puts it in `EpisodicMemory.outcome` — the
+  field this ADR's §8 admitted into the observation payload. §8's first clause reads
+  the field directly, so it can no longer say what it says without putting model prose
+  in front of the observer.
+
+  **Replaced — what the observation prompt states.** *"The observation prompt states an
+  episode's `outcome` where the episode carries one, beside the label, the recorded
+  instant and the `content` that ADR-0077 §3 and ADR-0156 §2 already put there"*
+  becomes: the observation prompt states the phrase for the episode's `disposition`
+  where the episode records one, and its `outcome` where it does not — beside the same
+  label, instant and `content`. ADR-0221 §2 is the enum the phrase comes from, and the
+  fallback is what keeps three populations rendering identically: a record written
+  before ADR-0221 carries its phrase in `outcome` and no disposition, and renders it;
+  a record written after carries the reply in `outcome` and a disposition, and renders
+  the phrase; and a benchmark-harness row, which `benchmarks/memory/ingest.py`'s
+  `exchanges_of` fills with the assistant's text and no disposition, renders that text
+  exactly as it does today.
+
+  **What is untouched.** §8's other four clauses bind unchanged — an episode is cited
+  whole; what the assistant said independently supports a record of its own act; it
+  never supports a record adopting the proposition it asserted; and it is never a
+  licence to propose an `EpisodicMemory`. The third clause's phrase *"which the
+  `outcome` field witnesses"* describes where a fact is stored rather than obliging
+  anything, and ADR-0221 §4 reads it against the new field layout rather than
+  superseding it. §8's widening argument on ADR-0077 §3 and ADR-0156 §2's ground is
+  about the *record* and not the field's contents, so ADR-0077 §3's four refusals are
+  untouched. So are §1's completeness rule, §2's classifier — an episode carrying a
+  reply in `outcome` is still an episode whose `content` is what the user said, so it
+  is a widening within §1's own episodes and not a second class — and every other
+  section.
+
+  **The two pairs on the `Status` line name different scopes** and accumulate under
+  ADR-0070 §4: ADR-0220 reaches §7's window-overlap clauses and this one reaches §8's
+  first clause. No amendment qualifier is on the `Status` line — the `Amended` line is
+  its own — so ADR-0082 §2's move does not arise. Appended note per ADR-0070 §1; no
+  text below is rewritten. This note lands in the same change as ADR-0221 itself, which
+  is the existence condition ADR-0082 §7 states. Refs #1845, #1314, #1866.
 
 ## Context
 
