@@ -107,8 +107,34 @@ _AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
 #: The placement ADR-0217 §3's derivation writes for a record ADR-0204 §2 or §5
 #: would have stamped ``True``: reach ``OWNER``, setter ``DERIVED``, at the instant
-#: of the narrowing. Every fixture below that "carries the stamp" carries this.
+#: of the narrowing. Every *fixture* below that "carries the stamp" carries this.
 _NARROWED: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT)
+
+
+def _derived_at(episode: EpisodicMemory) -> Placement:
+    """What capture owes for a turn ADR-0204 §2's evaluation was ``True`` of.
+
+    Reach ``OWNER`` and setter ``DERIVED``, at **that turn's own instant**. The
+    instant is read off the episode rather than pinned to a constant because the
+    engine harness and the loop harness run on different clocks; what the arm claims
+    is that the narrowing and the record of the turn agree about when the turn
+    happened, which no constant can state for both.
+
+    The setter and the instant are asserted beside the reach because ADR-0217 §1's
+    **producer obligation** lives here and nowhere else: "every derivation this
+    system performs writes the instant of the narrowing it makes", so a capture
+    emitting ``Placement(OWNER, DERIVED)`` with no instant would be indistinguishable
+    from §9's decode of a record written before the field existed — turning §1's
+    *unknown* into a state a producer can reach, and the diagnostic into nothing. A
+    reach-only assertion would let exactly that through.
+    """
+    return Placement(
+        reach=PlacementReach.OWNER,
+        set_by=PlacementSetter.DERIVED,
+        set_at=episode.occurred_at,
+    )
+
+
 _MP4: Final = SpokenAudioFormat.MP4
 _CALENDAR: Final = "calendar"
 _ANSWER: Final = "You went hiking on Tuesday."
@@ -1062,7 +1088,7 @@ async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> N
     assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
-    assert captured[0].placement.reach is PlacementReach.OWNER
+    assert captured[0].placement == _derived_at(captured[0])
     assert _WITHHELD_CONTENT in captured[0].content, (
         "the episode's content is unchanged — the stamp is what withholds it, not a filter"
     )
@@ -1112,7 +1138,7 @@ async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -
     )
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].placement.reach is PlacementReach.OWNER
+    assert captured[0].placement == _derived_at(captured[0])
 
 
 async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode() -> None:
@@ -1231,7 +1257,7 @@ async def test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoke
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].placement.reach is PlacementReach.OWNER
+    assert captured[0].placement == _derived_at(captured[0])
 
     second = await harness.engine.converse_spoken(
         _RECORDING,
@@ -1682,6 +1708,55 @@ async def test_the_inherited_term_fires_from_the_relevance_retrieved_group() -> 
     )
 
 
+async def test_a_record_written_before_the_field_existed_is_withheld_on_its_first_read() -> None:
+    """ADR-0217 §10's decode arm, taken to the end the clause states.
+
+    The arm is "a stored record carrying ``supplied_withheld_content: true`` and no
+    placement decodes to reach ``OWNER``, setter ``DERIVED``, **and is withheld from
+    an unbounded channel on the first read after the upgrade**". The type-level half
+    is in ``tests/core/test_placement.py`` and the persistent-store half in
+    ``tests/memory/test_sqlite_store.py``; this is the consuming half, and without it
+    a build whose supply site stopped consulting the placement would satisfy both of
+    those and speak aloud every record ADR-0204 had narrowed.
+
+    The record is **decoded** from the mapping a store written under ADR-0204 holds,
+    not constructed with a placement, so the decode is what puts it beyond reach.
+    Its class is one ADR-0199 §3 places speakable on its own account — the same
+    fixture shape as the inherited-term cases above — so the decode is the whole of
+    the finding rather than §3 withholding it for a second reason.
+    """
+    legacy = SemanticMemory.model_validate(
+        {
+            "id": "b-1",
+            "kind": "semantic",
+            "content": "the user hikes on Tuesdays",
+            "fact": "the user hikes on Tuesdays",
+            "provenance": {
+                "source": MemorySource.OBSERVED.value,
+                "confidence": 0.6,
+                "last_updated": _AT,
+                "supplied_withheld_content": True,
+            },
+        }
+    )
+    assert legacy.placement == Placement(
+        reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED
+    ), "the decode is the precondition; the subtraction below is the claim"
+
+    turn, supply = await _spoken_supply(await _store(legacy), "hikes")
+
+    assert _ids(turn.memories) == (), "withheld on the first read after the upgrade"
+    assert supply.withheld is True, "and the composing stage is told (ADR-0210 §1)"
+    _, kept, would_withhold = _supply(
+        legacy.model_copy(update={"placement": Placement()}),
+        retrieved_ids=frozenset({"b-1"}),
+    )
+    assert (would_withhold, _ids(kept)) == (False, ("b-1",)), (
+        "ADR-0199 §3 places this class speakable, so the decoded placement is the "
+        "whole of the finding"
+    )
+
+
 async def test_the_inherited_term_fires_from_the_episodic_supplement() -> None:
     """§9's third clause, second placement — and §9's fourth clause's second arm.
 
@@ -1832,7 +1907,7 @@ async def _tail_holding_a_stamped_episode(
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].placement.reach is PlacementReach.OWNER, (
+    assert captured[0].placement == _derived_at(captured[0]), (
         "the tail's episode is stamped — ADR-0204 §2 over the typed turn's own supply"
     )
     return harness, typed.conversation_id, captured[0].id
@@ -1952,7 +2027,7 @@ async def test_a_withheld_record_a_relevance_read_returned_is_told_and_stamped()
     assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0)
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].placement.reach is PlacementReach.OWNER
+    assert captured[0].placement == _derived_at(captured[0])
 
 
 class _FixedContext:
@@ -2019,7 +2094,7 @@ async def test_an_unplaced_facet_fires_both_consequences_over_a_clean_retrieval(
     assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0), "consequence one"
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].placement.reach is PlacementReach.OWNER, "consequence two"
+    assert captured[0].placement == _derived_at(captured[0]), "consequence two"
     assert placed_facet_kinds() == {CalendarFacet, EmailFacet}, (
         "and §3's list is what it was — this ADR places and unplaces nothing"
     )

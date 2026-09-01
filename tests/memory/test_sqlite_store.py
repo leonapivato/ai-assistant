@@ -48,6 +48,9 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -2784,6 +2787,95 @@ async def test_a_blob_written_before_the_field_existed_decodes_as_unknown(
 
     assert got is not None
     assert got.provenance.last_confirmed_at is None
+
+
+# --- ADR-0217 §9: a record already in a store is decoded, never defaulted ----
+
+
+async def test_a_blob_written_under_adr_0204_decodes_narrowed_on_the_first_read(
+    tmp_path: Path, make_store: Callable[..., SqliteMemoryStore]
+) -> None:
+    """§9's decode, at the site §9 itself calls load-bearing: the persistent store.
+
+    "**The load-bearing site is the persistent store**, which holds records written
+    under ADR-0204 and is read on the first turn after the upgrade… Without it every
+    record ADR-0204 narrowed would decode as unnarrowed on the day this landed, which
+    is ADR-0204 §1's fourth clause hazard — a decode default read as a measurement —
+    with a disclosure consequence."
+
+    The blob is put into exactly the shape the **previous release** wrote: the
+    placement key removed and ``supplied_withheld_content`` restored to the
+    provenance, out of band, so this exercises the real read path rather than a model
+    a test constructed. The decoded placement carries **no instant** — nothing timed
+    an act that predates the field (§1) — and that absence is what makes an untimed
+    ``DERIVED`` placement diagnostic of this decode rather than of a producer that
+    forgot to stamp one.
+
+    Its sibling over the same path is the round trip in the shared contract suite:
+    without one, this case passes against a build that never writes the field at all.
+    """
+    database = tmp_path / "memory.db"
+    store = make_store()
+    await store.add(_preference("p1", "prefers concise replies"))
+    store.close()
+
+    raw = sqlite3.connect(str(database))
+    try:
+        (data,) = raw.execute("SELECT data FROM records WHERE id = 'p1'").fetchone()
+        payload = json.loads(data)
+        assert "placement" in payload, "the rewrite below would be vacuous otherwise"
+        del payload["placement"]
+        payload["provenance"]["supplied_withheld_content"] = True
+        raw.execute("UPDATE records SET data = ? WHERE id = 'p1'", (json.dumps(payload),))
+        raw.commit()
+    finally:
+        raw.close()
+
+    got = await make_store().get("p1")
+
+    assert got is not None
+    assert got.placement == Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    assert got.placement.set_at is None
+
+
+async def test_a_blob_the_old_field_left_false_decodes_to_the_default(
+    tmp_path: Path, make_store: Callable[..., SqliteMemoryStore]
+) -> None:
+    """The negative control, and the mapping's one direction (ADR-0217 §9).
+
+    Without it a store that read every legacy row as narrowed would pass the case
+    above and empty ADR-0199 §3's speakable set on the day of the upgrade, which is
+    milestone 19's exit test failing by the other route (ADR-0217 §6). ``false`` and
+    an **absent** member are both taken, because a build older still than ADR-0204
+    wrote neither key.
+    """
+    database = tmp_path / "memory.db"
+    store = make_store()
+    await store.add(_preference("p1", "prefers concise replies"))
+    await store.add(_preference("p2", "prefers a written summary"))
+    store.close()
+
+    raw = sqlite3.connect(str(database))
+    try:
+        for record_id, legacy in (("p1", False), ("p2", None)):
+            (data,) = raw.execute("SELECT data FROM records WHERE id = ?", (record_id,)).fetchone()
+            payload = json.loads(data)
+            del payload["placement"]
+            if legacy is not None:
+                payload["provenance"]["supplied_withheld_content"] = legacy
+            raw.execute(
+                "UPDATE records SET data = ? WHERE id = ?", (json.dumps(payload), record_id)
+            )
+        raw.commit()
+    finally:
+        raw.close()
+
+    reopened = make_store()
+
+    for record_id in ("p1", "p2"):
+        got = await reopened.get(record_id)
+        assert got is not None
+        assert got.placement == Placement()
 
 
 # --- the revision issuer, where its guarantees actually live (ADR-0219 §7) ------
