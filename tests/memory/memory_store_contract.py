@@ -865,6 +865,47 @@ class MemoryStoreContract:
         assert plain.disposition is None
         assert plain.capture == Capture()
 
+    async def test_a_captured_reply_survives_the_round_trip_whole(self, store: MemoryStore) -> None:
+        """ADR-0221 §11's test 1, on the contract rather than on one store.
+
+        §1 gives ``outcome`` the composed reply and writes it **whole**: "No
+        implementation, setting or later lane stores a prefix, a summary, an elision or
+        any other lossy rendering of it there." Until that decision this field held one
+        of sixteen constant phrases — short, single-line, and ASCII — so a backend that
+        clipped at a length, collapsed newlines, or normalised whitespace could have
+        conformed to every arm of this suite while corrupting every reply written after
+        the flip.
+
+        The value is therefore chosen to fail each of those separately: it is several
+        hundred characters, it carries a blank line between paragraphs as well as a bare
+        one inside a paragraph, and it ends on a character rather than on a boundary any
+        truncator would pick. The assertion is byte equality, which is the only one a
+        summariser and a clipper both fail.
+        """
+        reply = (
+            "I would not book that flight, because the fare you quoted is a basic "
+            "economy fare and your bag would cost more than the difference.\n"
+            "\n"
+            "Two things follow from that. The first is that the cheaper itinerary is "
+            "only cheaper if you travel with a personal item alone, which you have not "
+            "done on any of the last four trips.\n"
+            "The second is that the return leg lands after the last train, so the "
+            "saving is spent on the taxi and then some."
+        )
+        await store.add(
+            _episodic("answered", "the user asked whether to book the flight").model_copy(
+                update={
+                    "outcome": reply,
+                    "disposition": ExchangeDisposition.NO_ACTION_NEEDED,
+                }
+            )
+        )
+
+        got = await store.get("answered")
+        assert isinstance(got, EpisodicMemory)
+        assert got.outcome == reply
+        assert got.disposition is ExchangeDisposition.NO_ACTION_NEEDED
+
     async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
         # Upsert is a full replacement, not a merge: re-adding an id must leave no
         # trace of the previous record — not its content, not its subtype fields,

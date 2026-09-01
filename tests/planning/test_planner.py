@@ -728,6 +728,33 @@ async def test_a_typed_disposition_renders_what_the_stored_phrase_used_to(
     assert "Salamander-Kestrel-9" not in "\n".join(typed)
 
 
+async def test_a_member_beside_no_outcome_renders_its_phrase_and_nothing_else() -> None:
+    """Issue #1873: a member beside an ``outcome`` of ``None``, which is a real population.
+
+    ADR-0221 §1 gives ``outcome`` five paths on which the pass produced **no reply** —
+    a step parked for confirmation, a routed park, a resume driven from a recovered
+    park, a classified composition failure, and a stream that published nothing — and
+    capture writes ``None`` there while still recording the member. No record of that
+    shape existed before the capture flip: a pre-change episode always carried a phrase
+    and a harness row always carries assistant text, so every case above it renders a
+    record whose ``outcome`` is a string.
+
+    §3's rule reads ``disposition`` **first**, so the fallback is never consulted and
+    the ``None`` never reaches a formatter. That is what this pins, at this site: the
+    phrase renders exactly as it does beside a reply, and no rendering of the absent
+    outcome appears anywhere in the prompt.
+    """
+    parked = ExchangeDisposition.STEP_AWAITING_CONFIRMATION
+    lines = await _bullets_for(_turn("e1", "Ada: I adopted a dog.", disposition=parked))
+    beside_a_reply = await _bullets_for(
+        _turn("e1", "Ada: I adopted a dog.", outcome=_REPLY, disposition=parked)
+    )
+
+    assert lines == beside_a_reply
+    assert '    how it turned out: "the action was parked for the user to confirm"' in lines
+    assert "None" not in "\n".join(lines)
+
+
 async def test_a_record_written_before_the_decision_renders_its_stored_phrase() -> None:
     """ADR-0221 §11's test 6 at this site: the legacy population is untouched.
 
