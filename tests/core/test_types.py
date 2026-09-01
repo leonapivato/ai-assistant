@@ -834,6 +834,57 @@ def test_memory_write_coerces_a_valid_mode_string_to_the_enum() -> None:
     assert write.mode is MemoryWriteMode.INSERT_IF_ABSENT
 
 
+def test_a_conditional_write_without_an_expectation_is_refused_at_construction() -> None:
+    # ADR-0219 §2's validator, first state. An IF_UNCHANGED element carrying no
+    # expectation reaches write time with nothing to compare — and §1's reservation
+    # of `0` means a store comparing against a *defaulted* one would simply always
+    # refuse, which is a write that mysteriously never lands rather than a caller
+    # mistake anybody can see. Refused where it is made instead.
+    with pytest.raises(ValidationError, match="expected_revision"):
+        MemoryWrite(record=_semantic("1"), mode=MemoryWriteMode.IF_UNCHANGED)
+
+
+@pytest.mark.parametrize(
+    "mode", [MemoryWriteMode.UPSERT, MemoryWriteMode.INSERT_IF_ABSENT], ids=str
+)
+def test_an_expectation_on_a_non_conditional_write_is_refused(mode: MemoryWriteMode) -> None:
+    # ADR-0219 §2's validator, second state: an expectation no mode honours. Taking
+    # it silently would let a caller believe a write was conditional when the store
+    # was never asked to compare anything — the fail-open direction, on the door the
+    # mode exists to close.
+    with pytest.raises(ValidationError, match="expected_revision"):
+        MemoryWrite(record=_semantic("1"), mode=mode, expected_revision=1)
+
+
+def test_a_negative_expectation_is_refused() -> None:
+    # `ge=0` on the field. No store issues a negative stamp, so a negative
+    # expectation is a caller that computed one rather than read one.
+    with pytest.raises(ValidationError):
+        MemoryWrite(record=_semantic("1"), mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=-1)
+
+
+def test_a_conditional_write_carrying_its_expectation_constructs() -> None:
+    # The positive case beside the two refusals, so the validator is shown to admit
+    # the one state it must. `0` is admissible at construction — §1 closes it at the
+    # store, where no row can carry it — and the two closures are deliberately two.
+    write = MemoryWrite(
+        record=_semantic("1"), mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=7
+    )
+    assert write.mode is MemoryWriteMode.IF_UNCHANGED
+    assert write.expected_revision == 7
+
+
+def test_a_record_no_store_has_stored_carries_the_default_revision() -> None:
+    # ADR-0219 §1: `0` is issued by no store and is the field's default, so a record
+    # a caller constructed is distinguishable from every record a store has stored
+    # — and no caller-constructed default can equal a stored value.
+    assert _semantic("1").revision == 0
+    # `ge=0` at construction. `model_copy(update=...)` deliberately bypasses
+    # validation, so the refusal is asserted where a value actually arrives.
+    with pytest.raises(ValidationError):
+        SemanticMemory.model_validate(_semantic("1").model_dump() | {"revision": -1})
+
+
 def test_memory_write_is_frozen_so_mode_cannot_be_reassigned() -> None:
     # Frozen blocks *any* post-construction reassignment of mode. This is what
     # stops a raw-string overwrite (`write.mode = "insert_if_absent"`) from

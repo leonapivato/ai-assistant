@@ -24,12 +24,16 @@ from typing import TYPE_CHECKING, Any, Protocol
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
+    MemoryStoreError,
+    MemoryStoreStaleError,
+)
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.testing.cancellation import SuspendedCall, SuspendedMidWrite
@@ -101,6 +105,30 @@ def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
     instead of quietly comparing ``None`` with ``None`` somewhere else.
     """
     return None if record is None else _unstamped(record)
+
+
+async def _read_one(store: MemoryStore, read: str, record_id: str) -> MemoryRecord | None:
+    """``record_id`` as one *named* record-returning read hands it back, or ``None``.
+
+    Dispatched by name rather than by a lambda per case so the parameter ids in the
+    report are the six read names ADR-0219 §1 enumerates, and so a read added to that
+    clause later fails here by name instead of being silently unasserted.
+    """
+    if read == "get":
+        return await store.get(record_id)
+    if read == "get_many":
+        return (await store.get_many([record_id])).get(record_id)
+    if read == "search":
+        found: Sequence[MemoryRecord] = (await store.search("distinctive", limit=10)).records
+    elif read == "list_beliefs":
+        found = await store.list_beliefs()
+    elif read == "export":
+        found = await store.export()
+    elif read == "walk_records":
+        found = (await store.walk_records("revision-arm", limit=10)).records
+    else:  # pragma: no cover — a name the parametrisation does not produce
+        raise AssertionError(read)
+    return next((record for record in found if record.id == record_id), None)
 
 
 def _provenance(
@@ -2300,6 +2328,504 @@ class MemoryStoreContract:
             )
 
         assert await store.get("dup") is None
+
+    # --- the conditional write and its token (ADR-0219 §7) --------------------
+
+    async def test_a_stale_expectation_is_refused(self, store: MemoryStore) -> None:
+        """ADR-0219 §7's first arm, and the whole point of the mode.
+
+        Read a record, let a second write land at its id, then submit an
+        ``IF_UNCHANGED`` element carrying the *first* read's revision. That is the
+        lost update ``ingest``'s own docstring describes — "two ingests both snapshot
+        the same target before either writes, and the second ``add`` silently
+        discards the first" — arriving at the store rather than being resolved by it.
+        """
+        await store.add(_semantic("t", "the first version"))
+        first = await store.get("t")
+        assert first is not None
+        await store.add(_semantic("t", "the second version"))
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the first version"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+
+        survivor = await store.get("t")
+        assert survivor is not None
+        assert survivor.content == "the second version"  # the write that was not lost
+
+    async def test_a_fresh_expectation_lands_and_moves_the_revision(
+        self, store: MemoryStore
+    ) -> None:
+        # The other half: the mode is a *write*, not merely a refusal. The stamp the
+        # read returned is the one the write is decided against, and the row comes
+        # back at a different one — ADR-0219 §1's inequality, on this door.
+        await store.add(_semantic("t", "the first version"))
+        first = await store.get("t")
+        assert first is not None
+
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic("t", "the second version"),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=first.revision,
+                )
+            ]
+        )
+
+        after = await store.get("t")
+        assert after is not None
+        assert after.content == "the second version"
+        assert after.revision != first.revision
+
+    async def test_a_stale_element_commits_nothing_of_its_batch(self, store: MemoryStore) -> None:
+        # ADR-0046 §4's all-or-nothing kept whole rather than qualified (ADR-0219
+        # §3): one stale element fails the *whole* batch, exactly as an
+        # INSERT_IF_ABSENT collision does, so the otherwise-valid element beside it
+        # is not written either and every read answers as if the batch had not run.
+        await store.add(_semantic("t", "the first version"))
+        first = await store.get("t")
+        assert first is not None
+        await store.add(_semantic("t", "the second version"))
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=_semantic("fresh", "would be written")),
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the first version"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    ),
+                ]
+            )
+
+        assert await store.get("fresh") is None
+        survivor = await store.get("t")
+        assert survivor is not None
+        assert survivor.content == "the second version"
+
+    async def test_an_absent_id_is_refused_as_stale(self, store: MemoryStore) -> None:
+        # ADR-0219 §3: the absent id is the *same* failure and not a different one.
+        # Answering it with a silent no-op, or with a None return, would hand the
+        # caller the healthy result ADR-0046 §5 says the old race handed both.
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("never-stored", "nothing to replace"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=1,
+                    )
+                ]
+            )
+
+        assert await store.get("never-stored") is None
+
+    async def test_a_row_deleted_after_the_read_is_refused_as_stale(
+        self, store: MemoryStore
+    ) -> None:
+        # The same refusal reached the way a caller actually reaches it: the record
+        # was there when it was read and is gone by the time the write arrives.
+        await store.add(_semantic("t", "the first version"))
+        first = await store.get("t")
+        assert first is not None
+        assert await store.delete("t") is True
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over a record that is gone"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+
+        assert await store.get("t") is None  # not resurrected by the refusal
+
+    async def test_a_deleted_and_recreated_id_is_refused_as_stale(self, store: MemoryStore) -> None:
+        """ADR-0219 §1's ABA case, and why the stamp is not a per-id counter.
+
+        ``delete`` is unconditional and ``add`` takes a **producer-owned** id, so a
+        re-sync that deletes a record and stores a new one at the same id through an
+        ordinary ``add`` is an entirely normal sequence. A per-id counter would
+        restart across it and let a conditional write held over the gap land on the
+        replacement it was never decided against. The recreation is made through
+        ``add`` and not ``INSERT_IF_ABSENT`` deliberately: a bound that held only
+        where every other writer opted into one mode is not a store guarantee (§7).
+        """
+        await store.add(_semantic("t", "the record the caller read"))
+        first = await store.get("t")
+        assert first is not None
+        assert await store.delete("t") is True
+        replacement = _semantic("t", "a different record at the same id")
+        await store.add(replacement)
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the destroyed row"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+
+        assert _unstamped_or_none(await store.get("t")) == replacement
+
+    async def test_if_unchanged_at_a_different_kind_is_refused_and_not_as_stale(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0108 §4's refusal at the door §4 did not enumerate (ADR-0219 §4).
+
+        The expectation is the row's **current** revision, which is what makes the
+        arm bite: an implementation that checked staleness alone would let this
+        through on the one input that is not stale. And the error is the plain
+        ``MemoryStoreError`` ADR-0108 §4 gives a cross-kind collision — not the stale
+        error, whose remedy is "re-read and re-decide" and would send the caller
+        round a loop that cannot succeed.
+        """
+        stored = _semantic("collide", "the user drinks coffee")
+        await store.add(stored)
+        current = await store.get("collide")
+        assert current is not None
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_preference("collide", "prefers tea"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=current.revision,
+                    )
+                ]
+            )
+        assert not isinstance(excinfo.value, MemoryStoreStaleError)
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
+
+        assert _unstamped_or_none(await store.get("collide")) == stored
+
+    async def test_if_unchanged_lands_on_a_window_closed_row_at_its_revision(
+        self, store: MemoryStore
+    ) -> None:
+        # Presence is *physical* at this door too (ADR-0219 §4): an expired or
+        # window-closed row is present, so it satisfies IF_UNCHANGED's presence
+        # requirement and its revision is the one compared. That is what lets a
+        # window-close be conditional, which is the write ADR-0045 §4's applier
+        # makes onto a target it read — and it is read through `export`, since
+        # `get` hides the row the write is decided against.
+        await store.add(_semantic("retired", "coffee", validity=Validity(valid_until=_LONG_AGO)))
+        assert await store.get("retired") is None  # invisible to reads...
+        closed = next(r for r in await store.export() if r.id == "retired")  # ...still present
+
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic(
+                        "retired", "coffee, revised", validity=Validity(valid_until=_LONG_AGO)
+                    ),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=closed.revision,
+                )
+            ]
+        )
+
+        rewritten = next(r for r in await store.export() if r.id == "retired")
+        assert rewritten.content == "coffee, revised"
+        assert rewritten.revision != closed.revision
+
+    async def test_an_expired_row_is_present_for_a_conditional_write(
+        self, store: MemoryStore
+    ) -> None:
+        # The other hidden-row axis. An expired row is hidden from `export` as well
+        # as from `get`, so no read can hand a caller its revision and the "lands"
+        # half of ADR-0219 §4's presence clause is unreachable through the contract
+        # — the window-closed case above is where that half is asserted. What is
+        # assertable here is the half that matters for a lost update: the row is
+        # physically present, so a conditional write against its id is judged
+        # against it and refused, rather than being treated as an insert onto an
+        # empty id.
+        await store.add(_semantic("gone", "coffee", expires_at=_LONG_AGO))
+        await store.add(_semantic("probe", "a live record to read a revision from"))
+        probe = await store.get("probe")
+        assert probe is not None
+
+        # Presence, established the way the suite already establishes it.
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("gone", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                    )
+                ]
+            )
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("gone", "new"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=probe.revision,
+                    )
+                ]
+            )
+
+        # Retained rather than deleted by the refusal: a second collision proves the
+        # row survived the first, as the sibling expired-row case does.
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("gone", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                    )
+                ]
+            )
+
+    async def test_a_repeated_id_is_refused_whatever_modes_its_elements_carry(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0046 §3's repeated-id rejection reaches IF_UNCHANGED elements too
+        # (ADR-0219 §4), and it is taken *before* the transaction opens — so it is a
+        # plain MemoryStoreError and not a stale refusal, even though the second
+        # element's expectation could not possibly hold after the first landed.
+        await store.add(_semantic("dup", "the first version"))
+        first = await store.get("dup")
+        assert first is not None
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("dup", "second"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    ),
+                    MemoryWrite(record=_semantic("dup", "third"), mode=MemoryWriteMode.UPSERT),
+                ]
+            )
+        assert not isinstance(excinfo.value, MemoryStoreStaleError)
+
+        unchanged = await store.get("dup")
+        assert unchanged is not None
+        assert unchanged.content == "the first version"
+
+    async def test_the_revision_is_store_authored_and_a_submitted_one_is_discarded(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0219 §1: a submitted `revision` is never persisted. A store that kept
+        # one would let a caller *choose* the token its own next conditional write
+        # would be compared against, which is the guarantee inverted.
+        claimed = _semantic("t", "coffee").model_copy(update={"revision": 999_999})
+        await store.add(claimed)
+
+        stored = await store.get("t")
+        assert stored is not None
+        assert stored.revision != 999_999
+        assert stored.revision > 0
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "revised"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=999_999,
+                    )
+                ]
+            )
+
+    async def test_a_record_no_store_has_stored_carries_the_default(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0219 §1 reserves `0` so a caller-constructed default can never equal a
+        # stored value — which is the second, independent closure of the fail-open
+        # case §2's validator closes at construction.
+        assert _semantic("unstored", "coffee").revision == 0
+        await store.add(_semantic("t", "coffee"))
+        stored = await store.get("t")
+        assert stored is not None
+        assert stored.revision != 0
+
+    async def test_the_revision_moves_on_every_write_path(self, store: MemoryStore) -> None:
+        # ADR-0219 §1's inequality asserted on each of the three doors rather than on
+        # one: a store stamping only `write_atomic`, or only an insert, would pass an
+        # arm taken at a single door while leaving a caller that wrote through
+        # another comparing a token that never moves.
+        await store.add(_semantic("t", "one"))
+        first = await store.get("t")
+        assert first is not None
+
+        await store.add(_semantic("t", "two"))
+        second = await store.get("t")
+        assert second is not None
+        assert second.revision != first.revision
+
+        await store.write_atomic(
+            [MemoryWrite(record=_semantic("t", "three"), mode=MemoryWriteMode.UPSERT)]
+        )
+        third = await store.get("t")
+        assert third is not None
+        assert third.revision not in {first.revision, second.revision}
+
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic("t", "four"),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=third.revision,
+                )
+            ]
+        )
+        fourth = await store.get("t")
+        assert fourth is not None
+        assert fourth.revision not in {first.revision, second.revision, third.revision}
+
+    async def test_two_stored_rows_never_carry_one_revision(self, store: MemoryStore) -> None:
+        """ADR-0219 §7's per-id-counter arm, owed because every other arm is at one id.
+
+        A store issuing from a per-id count — the shape §1's assignment rule refuses
+        in terms, "whatever id it is stored at" and "it is not a per-id count" —
+        passes all of them while holding two rows at one stamp, and §1's operative
+        property, that "two records carry equal revisions only where they are the
+        same stored row", would then hold only *within* an id rather than within the
+        store.
+        """
+        await store.add(_semantic("a", "the first record"))
+        await store.add(_semantic("b", "the second record"))
+        a = await store.get("a")
+        b = await store.get("b")
+        assert a is not None
+        assert b is not None
+        assert a.revision != b.revision
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("b", "written against the wrong row's stamp"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=a.revision,
+                    )
+                ]
+            )
+
+    @pytest.mark.parametrize(
+        "read",
+        ["get", "get_many", "search", "list_beliefs", "export", "walk_records"],
+    )
+    async def test_every_record_returning_read_carries_the_stored_revision(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0219 §1's read clause, over each of the six reads by name (§7).
+
+        Parameterised because the failure it exists to catch is **per-path**: a store
+        holding the revision outside the payload it decodes can overlay it correctly
+        on one read and return the model default on the five that decode the payload
+        directly, and a caller that read through ``search`` would then meet
+        ``MemoryStoreStaleError`` on a write that is not stale. Each read is asserted
+        twice over — the value matches ``get``'s, and a conditional write carrying
+        *that* read's value lands — because a store returning a wrong-but-consistent
+        stamp on every path would satisfy the first alone.
+        """
+        await store.add(_semantic("t", "distinctive coffee content"))
+        await store.add(_semantic("t", "distinctive coffee content, rewritten"))
+        canonical = await store.get("t")
+        assert canonical is not None
+        assert canonical.revision > 0
+
+        found = await _read_one(store, read, "t")
+        assert found is not None, f"{read} did not return the record"
+        assert found.revision == canonical.revision, (
+            f"{read} returned revision {found.revision}, where get returned "
+            f"{canonical.revision} for the same row"
+        )
+
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic("t", "revised against what that read returned"),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=found.revision,
+                )
+            ]
+        )
+        after = await store.get("t")
+        assert after is not None
+        assert after.content == "revised against what that read returned"
+
+    async def test_the_two_refusals_stay_distinguishable(self, store: MemoryStore) -> None:
+        # ADR-0219 §3 and §7: an INSERT_IF_ABSENT collision and a stale IF_UNCHANGED
+        # carry different remedies — "re-mint and retry" against "re-read and
+        # re-decide" — so neither may be catchable as the other. A caller that
+        # re-minted an id here would edit a record the producer made and report an id
+        # nobody proposed; one that re-read on a collision would loop forever.
+        await store.add(_semantic("t", "the first version"))
+        first = await store.get("t")
+        assert first is not None
+        await store.add(_semantic("t", "the second version"))
+
+        with pytest.raises(MemoryStoreConflictError) as collision:
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "would clobber"),
+                        mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                    )
+                ]
+            )
+        assert not isinstance(collision.value, MemoryStoreStaleError)
+
+        with pytest.raises(MemoryStoreStaleError) as stale:
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the first version"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+        assert not isinstance(stale.value, MemoryStoreConflictError)
+        assert isinstance(stale.value, MemoryStoreError)  # ADR-0028 §5's seam is kept
+
+    async def test_the_revision_issuer_survives_clear(self, store: MemoryStore) -> None:
+        """ADR-0219 §1: ``clear`` destroys records and never the issuer.
+
+        Asserted for every binding, durable or not, because the obligation is not a
+        durability one: an issuer reset by ``clear`` reissues within one object's
+        life. That is the ABA hole §1 closes, arriving through a different door.
+        """
+        await store.add(_semantic("t", "before the clear"))
+        before = await store.get("t")
+        assert before is not None
+        assert await store.clear() == 1
+        await store.add(_semantic("t", "after the clear"))
+
+        with pytest.raises(MemoryStoreStaleError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("t", "computed over the cleared row"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=before.revision,
+                    )
+                ]
+            )
+
+        survivor = await store.get("t")
+        assert survivor is not None
+        assert survivor.content == "after the clear"
 
     # --- cancellation (ADR-0060) -------------------------------------------
 

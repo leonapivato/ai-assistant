@@ -899,3 +899,71 @@ async def test_a_backup_path_on_another_inode_is_refused_even_at_the_same_number
         await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
 
     assert backup.read_text() == "a different file that happens to be here"
+
+
+async def test_the_stamps_and_the_issuer_survive_the_swap(tmp_path: Path) -> None:
+    """ADR-0219 §10's re-embedding pin, and it is two assertions for two failures.
+
+    This module copies an **explicit column list** and re-derives the derived
+    columns from each decoded record, so a column it is not told about is dropped at
+    the swap. A record's ``revision`` is store-authored and deliberately outside the
+    payload (§1), so it cannot be re-derived from anything: dropped, the swapped
+    store would start every row at the reserved ``0`` and every conditional write a
+    caller was holding across the migration would be refused for a change that never
+    happened.
+
+    The issuer is the second half and is not implied by the first. Carrying the
+    stamps but not the counter leaves the swapped store issuing from zero, which
+    reissues every value the old store had handed out — §1's hole reopened through
+    an ordinary operational migration rather than through any write. The record is
+    **rewritten** before the migration precisely so its stamp is not the store's
+    first, and a stamp a *deleted* row took is what the surviving rows cannot record.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("kept", "espresso"), _record("doomed", "decaf")])
+
+    live = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=store, embedder=HashingEmbedder(dimensions=_OLD)
+    )
+    try:
+        # "kept" is rewritten so its stamp is not the store's first, and "doomed" is
+        # rewritten after it so the **highest** stamp in the store is the one that is
+        # then destroyed with the row holding it. That is the value no surviving row
+        # records, which is what an issuer rebuilt from the rows present would hand
+        # out again on the very next write.
+        issued: set[int] = {record.revision for record in await live.export()}
+        await live.add(_record("kept", "espresso, revised"))
+        await live.add(_record("doomed", "decaf, revised"))
+        before = await live.get("kept")
+        doomed = await live.get("doomed")
+        assert before is not None
+        assert doomed is not None
+        issued |= {before.revision, doomed.revision}
+        assert len(issued) == 4, f"the four writes did not take four stamps: {sorted(issued)}"
+        await live.delete("doomed")
+    finally:
+        live.close()
+
+    outcome = await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+    assert outcome.swapped
+
+    swapped = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=store, embedder=HashingEmbedder(dimensions=_NEW)
+    )
+    try:
+        after = await swapped.get("kept")
+        assert after is not None
+        assert after.revision == before.revision, (
+            "the swap moved a record's stamp, so a conditional write a caller was "
+            "holding across the migration is refused for a change that never happened"
+        )
+
+        await swapped.add(_record("fresh", "cortado"))
+        stamped = await swapped.get("fresh")
+        assert stamped is not None
+        assert stamped.revision not in issued, (
+            "the first write after the swap took a stamp the replaced store had "
+            "already issued — the issuer was not carried across"
+        )
+    finally:
+        swapped.close()
