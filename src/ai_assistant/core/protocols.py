@@ -173,6 +173,7 @@ if TYPE_CHECKING:
         ParkedBinding,
         PermissionDecision,
         PermissionRuling,
+        Placement,
         PlanExport,
         Question,
         RecipientGrant,
@@ -9246,6 +9247,107 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``record_id`` is blank.
             MemoryStoreError: If reading or writing memory failed.
+        """
+        ...
+
+    # --- the owner's placement acts (ADR-0217 §7) -------------------------
+
+    async def guard(self, record_id: Identifier) -> Placement | None:
+        """Keep the record ``record_id`` names for the owner alone.
+
+        The owner's explicit act **after the fact**, on a record already in the
+        store. It writes reach ``OWNER`` with setter ``OWNER_ACT`` and the instant
+        of the act — but **only where ADR-0217 §3's precedence lets it win, and only
+        where what it would write differs from what the record carries**. So a
+        ``guard`` on a placement whose setter is ``PROPOSED``, or on the default
+        placement, *does* write: it changes the setter from one the owner may lift
+        to one §3 calls final, which is a difference §3 acts on. A ``guard`` on a
+        placement whose setter is ``DERIVED`` changes nothing and is **not an
+        error** — ADR-0204 §5's narrowing already stands, and §3's total order puts
+        ``DERIVED`` above ``OWNER_ACT`` at the same reach — and a second ``guard``
+        on an already-guarded record writes nothing, so the instant does not move.
+
+        **Idempotent in the strict sense**: calling it twice returns exactly what
+        the first call returned, the instant included.
+
+        **The act is a read-modify-write made conditional on the record being
+        unchanged since it read it** (ADR-0219 §2, ADR-0046 §5). A derivation
+        landing between the read and the write would otherwise be overwritten, and
+        what that loses is a *narrowing* rather than a content merge. On a conflict
+        the act re-reads and re-decides against the value the record now carries;
+        the retry is bounded at **two attempts in all**, and a second conflict
+        writes nothing and raises ``MemoryStoreError``, which this method already
+        declares. Nothing here loops unboundedly, and the bound is safe because the
+        act is idempotent: a caller that meant it repeats it.
+
+        **The read discipline stands beside that gate rather than being replaced by
+        it**: the act decides over the record as read in the call that writes it,
+        never over one read earlier for a rendered list or a confirmation prompt.
+        :meth:`forget` carries the same ruling for its own window over the same
+        store, and ADR-0197 §7's confirmation is not a writer's lock.
+
+        **No placement reaches a floor** (ADR-0199 §3, ADR-0217 §3): guarding
+        changes nothing about a Tier 0 value, which is withheld from every channel
+        whatever any placement says.
+
+        Args:
+            record_id: The record's id, taken as opaque.
+
+        Returns:
+            The record's placement **as it stands after the act** — which is the
+            placement it already carried where the act wrote nothing — or ``None``
+            where ``record_id`` named nothing live. ``None`` is not an error, on
+            :meth:`forget`'s own reading of the same case: the user's intent is
+            already satisfied.
+
+        Raises:
+            ValueError: If ``record_id`` is blank.
+            MemoryStoreError: If reading or writing memory failed, including where
+                the bounded retry above was exhausted.
+        """
+        ...
+
+    async def unguard(self, record_id: Identifier) -> Placement | None:
+        """Let the record ``record_id`` names be spoken to anyone again.
+
+        :meth:`guard`'s counterpart, and the *widening* direction of the owner's
+        act. It writes reach ``ANYONE`` with setter ``OWNER_ACT`` and the instant of
+        the act, on the same two conditions: §3's precedence must let it win, and
+        what it would write must differ from what the record carries in reach or in
+        setter.
+
+        **Where the placement's setter is ``DERIVED`` it writes nothing**, and the
+        refusal **raises nothing**: it returns that placement unchanged — reach
+        ``OWNER``, setter ``DERIVED`` — and a surface reads the returned reach and
+        setter to say why nothing moved. ADR-0204 §5's closing prohibition is not
+        lifted by an act, and a raise was rejected for two reasons: it would make an
+        act this system declines on ratified grounds indistinguishable, on
+        ADR-0197's routed path, from an operation that *failed*
+        (``RouteOutcome.FAILED``), and it would make an idempotent act a failure
+        too. The two routes that remain open for such a record are a supersession
+        and a class ruling under ADR-0199 §6; neither is this method's.
+
+        **Widening a record whose ``about_person`` is stated changes nothing about
+        what an unbounded channel carries** (ADR-0199 §3's second clause, ADR-0217
+        §3): the act is accepted and the record stays withheld there on the subject
+        axis, which no placement reaches.
+
+        The conditional write, its bounded two-attempt retry and the read discipline
+        are :meth:`guard`'s, unchanged — and on this method they are what make a
+        **stale** ``unguard`` unable to clear a ``DERIVED`` placement in place,
+        which is the laundering ADR-0217 §7 gates these acts to prevent.
+
+        Args:
+            record_id: The record's id, taken as opaque.
+
+        Returns:
+            The record's placement as it stands after the act, or ``None`` where
+            ``record_id`` named nothing live.
+
+        Raises:
+            ValueError: If ``record_id`` is blank.
+            MemoryStoreError: If reading or writing memory failed, including where
+                the bounded retry above was exhausted.
         """
         ...
 

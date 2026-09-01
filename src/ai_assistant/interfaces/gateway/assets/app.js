@@ -1609,6 +1609,8 @@ const ROUTED_ASKED = {
   forget: "forget one belief",
   revoke: "withdraw the grant on one source",
   forget_question: "forget one deferred question",
+  guard: "keep one belief for you alone",
+  unguard: "let one belief be spoken to anyone again",
 };
 
 // What did **not** happen, for every ending that performed nothing. Phrased per
@@ -1624,15 +1626,27 @@ const ROUTED_UNDONE = {
   forget: "the belief is still held",
   revoke: "the grant still stands",
   forget_question: "the question is still there",
+  guard: "the belief is placed as it was",
+  unguard: "the belief is placed as it was",
 };
 
 // What a confirm-owed operation did, once it has run. Reached only from `performed`,
-// and only for the three members ADR-0197 §3 tags confirm-owed: a read-only
+// and only for the members ADR-0197 §3 tags confirm-owed: a read-only
 // `performed` has a listing to show and shows it.
 const ROUTED_DONE = {
   forget: "Done. That belief is destroyed.",
   revoke: "Done. That grant is withdrawn — I may no longer read that source.",
   forget_question: "Done. That question is destroyed.",
+  guard: "Done. That belief is kept for you alone.",
+  // Hedged where the other four are not, and it is ADR-0217 §7 rather than caution:
+  // an `unguard` whose record carries a `DERIVED` placement writes nothing and
+  // returns that placement unchanged, and a routed pass cannot tell the two apart —
+  // the hub drops the returned value, because ADR-0197 §6 keeps every operation's
+  // result out of the composed reply. `guard` needs no hedge: every branch of §3
+  // leaves the record at reach `OWNER`, the refusal included.
+  unguard:
+    "Done. I acted on that belief. A narrowing I derived myself still stands — an " +
+    "act does not lift one.",
 };
 
 // The sentences a routed confirm card carries around its subject.
@@ -1661,6 +1675,16 @@ const ROUTED_CARD_NOTES = {
     "This destroys the record of having been asked. Nothing I believe changes, and " +
       "you can tell me the same thing again yourself.",
   ],
+  guard: [
+    "This keeps the belief for you alone: I will not put it, or a reply that rests " +
+      "on it, on a channel anyone else can hear.",
+    "It destroys nothing, changes nothing I hold, and you can undo it.",
+  ],
+  unguard: [
+    "This lets the belief be spoken to anyone again.",
+    "Where I narrowed it myself, that narrowing stands — an act does not lift one — " +
+      "and nothing here makes a private detail speakable that was never yours to share.",
+  ],
 };
 
 // Which of ADR-0197 §8's arms each operation lists, read off `operation` and never
@@ -1668,7 +1692,7 @@ const ROUTED_CARD_NOTES = {
 // every arm, so the shape decides nothing on exactly the case a listing is most
 // likely to take".
 //
-// **Total over the nine operations**, so §10's "the listing where one is carried"
+// **Total over ADR-0197 §3's vocabulary**, so §10's "the listing where one is carried"
 // has a renderer for every listing that can arrive. A member added under ADR-0197
 // §3's widening rule renders nothing here until it is added, which is why the
 // omission is a missing key rather than a silent fallback.
@@ -1676,6 +1700,11 @@ const ROUTED_ARM = {
   questions: "question",
   forget_question: "question",
   forget: "belief",
+  // ADR-0217 §7's acts resolve over `forget`'s own candidate set, so they list the
+  // arm it lists: a person choosing which belief to place is judging the same record,
+  // warrant included, that they would be judging to destroy one.
+  guard: "belief",
+  unguard: "belief",
   revoke: "grant",
   standing_grants: "grant",
   recent_reads: "read",
@@ -1847,7 +1876,7 @@ function unreadableRecord(record) {
 // not a claim that nothing ever happened, and saying only the first half would be a
 // stronger claim than the record supports.
 //
-// **Total over ADR-0197 §3's nine operations**, for `ROUTED_ARM`'s reason. The three
+// **Total over ADR-0197 §3's vocabulary**, for `ROUTED_ARM`'s reason. The
 // confirm-owed members and `spend_totals` reach here only through a state their own
 // decisions forbid — §5 reaches an ambiguity on more than one match, and
 // `AssistantOperations.spend_totals` returns "both entries whatever is configured" —
@@ -1880,6 +1909,8 @@ const ROUTED_EMPTY = {
   forget: [ROUTED_EMPTY_UNEXPLAINED],
   revoke: [ROUTED_EMPTY_UNEXPLAINED],
   forget_question: [ROUTED_EMPTY_UNEXPLAINED],
+  guard: [ROUTED_EMPTY_UNEXPLAINED],
+  unguard: [ROUTED_EMPTY_UNEXPLAINED],
 };
 
 // The empty state for one operation, into the listing's own node so that what the

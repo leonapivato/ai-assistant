@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Belief,
         PermissionDecision,
+        Placement,
         Question,
         RecordedInvocation,
         RoutedListing,
@@ -92,6 +93,8 @@ _MATCH_ON: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "content",
     RoutableOperation.FORGET_QUESTION: "content",
     RoutableOperation.REVOKE: "source",
+    RoutableOperation.GUARD: "content",
+    RoutableOperation.UNGUARD: "content",
 }
 
 #: ADR-0197 §5's mapping from a confirm-owed operation to the **scalar identity** read
@@ -100,11 +103,15 @@ _MATCH_ON: Final[Mapping[RoutableOperation, str]] = {
 #: it: ``forget`` takes ``Belief.id``, ``forget_question`` takes ``Question.id``,
 #: ``revoke`` takes ``SourceGrant.source``. A member added under §3's widening rule
 #: states its own mapping in the ADR that adds it, and condition (iii) is not satisfied
-#: without one.
+#: without one. ADR-0217 §7 states its two: ``guard`` and ``unguard`` each resolve
+#: "over the same candidate set a routed ``forget`` enumerates … with the
+#: per-operation mapping being ``MemoryBase.id``".
 ARGUMENT_OF: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "id",
     RoutableOperation.FORGET_QUESTION: "id",
     RoutableOperation.REVOKE: "source",
+    RoutableOperation.GUARD: "id",
+    RoutableOperation.UNGUARD: "id",
 }
 
 #: Which kinds a routed ``forget``'s lookup enumerates (ADR-0201 §1): every
@@ -532,6 +539,14 @@ class RoutedOperations(Protocol):
         """Destroy the deferred question ``question_id`` names."""
         ...
 
+    async def guard(self, record_id: str) -> Placement | None:
+        """Keep the belief ``record_id`` names for the owner alone (ADR-0217 §7)."""
+        ...
+
+    async def unguard(self, record_id: str) -> Placement | None:
+        """Let the belief ``record_id`` names be spoken to anyone again (ADR-0217 §7)."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class Resolved:
@@ -651,6 +666,17 @@ async def resolve(
     )
 
 
+#: The confirm-owed members whose §5 lookup walks the belief listing. Named once
+#: rather than tested member by member, because ADR-0217 §7 put its two acts on
+#: ``forget``'s own candidate set deliberately: a person naming a belief to guard
+#: names it exactly as they would to forget it, and two walks over one store would be
+#: two chances for the candidate a card renders to differ from the candidate the other
+#: door resolves.
+_BELIEF_LOOKUPS: Final[frozenset[RoutableOperation]] = frozenset(
+    {RoutableOperation.FORGET, RoutableOperation.GUARD, RoutableOperation.UNGUARD}
+)
+
+
 async def _candidates(
     operations: RoutedOperations, operation: RoutableOperation, query: str
 ) -> list[Belief] | list[Question] | list[SourceGrant]:
@@ -676,7 +702,11 @@ async def _candidates(
         # reports as `FAILED`.
         grants = await operations.standing_grants()
         return [one for one in grants if _names(wanted, getattr(one, field))][:ceiling]
-    if operation is RoutableOperation.FORGET:
+    if operation in _BELIEF_LOOKUPS:
+        # ADR-0217 §7 puts its two acts on `forget`'s candidate set in terms — "over
+        # the same candidate set a routed `forget` enumerates — live beliefs of every
+        # `MemoryKind` except `EPISODIC` (ADR-0201 §1)" — so they read the one listing
+        # rather than each minting a walk of its own.
         return await _paged(operations.beliefs, field=field, wanted=wanted, ceiling=ceiling)
     if operation is RoutableOperation.FORGET_QUESTION:
         return await _paged(operations.questions, field=field, wanted=wanted, ceiling=ceiling)
@@ -982,23 +1012,30 @@ _FRAMING: Final[frozenset[str]] = frozenset(
 #: (:func:`_wanted`), never the union: "the question about grants" is a question
 #: whose subject is grants, and a ``grants`` borrowed from ``revoke``'s kinds would strip
 #: the query down to nothing and read no store at all.
+_BELIEF_KINDS: Final[frozenset[str]] = frozenset(
+    (
+        "belief",
+        "beliefs",
+        "fact",
+        "facts",
+        "memory",
+        "memories",
+        "note",
+        "notes",
+        "record",
+        "records",
+        "thing",
+        "things",
+    )
+)
+
 _KINDS_OF: Final[Mapping[RoutableOperation, frozenset[str]]] = {
-    RoutableOperation.FORGET: frozenset(
-        (
-            "belief",
-            "beliefs",
-            "fact",
-            "facts",
-            "memory",
-            "memories",
-            "note",
-            "notes",
-            "record",
-            "records",
-            "thing",
-            "things",
-        )
-    ),
+    RoutableOperation.FORGET: _BELIEF_KINDS,
+    # ADR-0217 §7's acts resolve over the belief listing, so they refer to a record
+    # by the same words `forget` does: what changes between the three is the verb the
+    # router read, which is not part of the reference this strips.
+    RoutableOperation.GUARD: _BELIEF_KINDS,
+    RoutableOperation.UNGUARD: _BELIEF_KINDS,
     RoutableOperation.FORGET_QUESTION: frozenset(("question", "questions", "thing", "things")),
     RoutableOperation.REVOKE: frozenset(
         ("source", "sources", "grant", "grants", "thing", "things")
@@ -1040,7 +1077,7 @@ _UNMAPPED = (
 )
 
 
-async def perform(  # noqa: PLR0911 — one return per member of §3's closed vocabulary; collapsing them would hide the totality `assert_never` rests on
+async def perform(  # noqa: C901, PLR0911 — one arm and one return per member of §3's closed vocabulary; both metrics count the vocabulary's size, and collapsing arms to lower them would hide the totality `assert_never` rests on
     operations: RoutedOperations, operation: RoutableOperation, argument: str | None
 ) -> RoutedListing | None:
     """Call the engine's own implementation of ``operation`` (ADR-0197 §2, §5).
@@ -1068,8 +1105,13 @@ async def perform(  # noqa: PLR0911 — one return per member of §3's closed vo
 
     Returns:
         The read-only member's own listing, or ``None`` on a confirm-owed one — whose
-        result is a ``bool`` or a withdrawn grant that §8 gives no arm and that §6
-        keeps out of every prompt in any case.
+        result is a ``bool``, a withdrawn grant or an acted placement that §8 gives no
+        arm and that §6 keeps out of every prompt in any case. ADR-0217 §7's acts
+        **return** the placement the record carries after the act, and it is dropped
+        here for that reason and not because it is uninteresting: a routed pass tells
+        the composing stage the member and the outcome and nothing else, and a
+        surface that wants to say why an ``unguard`` moved nothing reads the placement
+        through the typed door.
 
     Raises:
         Exception: Whatever the operation itself raises. The caller classifies it as
@@ -1098,6 +1140,12 @@ async def perform(  # noqa: PLR0911 — one return per member of §3's closed vo
             return None
         case RoutableOperation.FORGET_QUESTION:
             await operations.forget_question(_required(argument, operation))
+            return None
+        case RoutableOperation.GUARD:
+            await operations.guard(_required(argument, operation))
+            return None
+        case RoutableOperation.UNGUARD:
+            await operations.unguard(_required(argument, operation))
             return None
         case _:  # pragma: no cover — the match is exhaustive over the enum
             assert_never(operation)

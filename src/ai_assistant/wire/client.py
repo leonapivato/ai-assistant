@@ -112,6 +112,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         ObservationReport,
         PermissionDecision,
+        Placement,
         Question,
         RecordedInvocation,
         ReplyChunk,
@@ -559,6 +560,38 @@ class HubClient:
         """
         named = identifier(record_id, name="record_id")
         return await self._call("forget", record_id=named)  # type: ignore[no-any-return]
+
+    async def guard(self, record_id: Identifier) -> Placement | None:
+        """Keep one belief for the owner alone (ADR-0217 §7).
+
+        Args:
+            record_id: Which record.
+
+        Returns:
+            The placement it carries after the act, or ``None`` if nothing is held
+            under that id.
+        """
+        named = identifier(record_id, name="record_id")
+        return await self._call("guard", record_id=named)  # type: ignore[no-any-return]
+
+    async def unguard(self, record_id: Identifier) -> Placement | None:
+        """Let one belief be spoken to anyone again (ADR-0217 §7).
+
+        The placement that comes back is the record's **after** the act, so a hub
+        that declined the widening — the setter is ``DERIVED``, and ADR-0204 §5's
+        closing prohibition is not lifted by an act — answers with that placement
+        rather than with an error, and a surface reads its reach and setter to say
+        why nothing moved.
+
+        Args:
+            record_id: Which record.
+
+        Returns:
+            The placement it carries after the act, or ``None`` if nothing is held
+            under that id.
+        """
+        named = identifier(record_id, name="record_id")
+        return await self._call("unguard", record_id=named)  # type: ignore[no-any-return]
 
     async def questions(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0

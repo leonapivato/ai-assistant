@@ -95,6 +95,8 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
+    MemoryStoreError,
+    MemoryStoreStaleError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -120,10 +122,15 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
+    MemoryWrite,
+    MemoryWriteMode,
     NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
     ParkedBinding,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     QueuedQuestion,
     QueueOutcome,
     ReplyChunk,
@@ -1612,6 +1619,14 @@ class _RoutedSurface:
     async def forget_question(self, question_id: str) -> bool:
         """Relay the promoted ``forget_question``."""
         return await self.engine.forget_question(question_id)
+
+    async def guard(self, record_id: str) -> Placement | None:
+        """Relay the promoted ``guard``."""
+        return await self.engine.guard(record_id)
+
+    async def unguard(self, record_id: str) -> Placement | None:
+        """Relay the promoted ``unguard``."""
+        return await self.engine.unguard(record_id)
 
 
 def _query_of(route: RoutedRoute) -> str:
@@ -4210,6 +4225,160 @@ class Engine:
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         return await self._tracked(self._memory.delete(named), "forget", checked=True)
+
+    async def guard(self, record_id: Identifier) -> Placement | None:
+        """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).
+
+        The narrowing half of the owner's act after the fact. What it writes and
+        when it declines to write are :meth:`_place_once`'s, which is the whole of
+        §3's precedence for both directions in one place — the two members differ in
+        exactly one argument, and writing the rule twice is how the widening
+        direction acquires a clause the narrowing one does not have.
+
+        Args:
+            record_id: The record's id, taken as opaque.
+
+        Returns:
+            The placement the record carries after the act, or ``None`` where the id
+            named nothing live.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If memory cannot be read or written, including where
+                §7's two-attempt bound was exhausted.
+        """
+        self._reject_if_closing()
+        named = identifier(record_id, name="record_id")
+        check_arguments("guard", max_bytes=self._max_payload_bytes, record_id=named)
+        return await self._tracked(self._place(named, PlacementReach.OWNER), "guard", checked=True)
+
+    async def unguard(self, record_id: Identifier) -> Placement | None:
+        """Let the record ``record_id`` names be spoken to anyone again (ADR-0217 §7).
+
+        The widening half, and the one the conditional write below exists for: a
+        stale ``unguard`` writing reach ``ANYONE`` over a ``DERIVED`` placement that
+        landed since the read is the in-place clearing ADR-0204 §5's closing
+        prohibition forbids, and it is a disclosure rather than a lost merge.
+
+        Args:
+            record_id: The record's id, taken as opaque.
+
+        Returns:
+            The placement the record carries after the act — reach ``OWNER``, setter
+            ``DERIVED``, unchanged, where §3 refuses the widening — or ``None`` where
+            the id named nothing live.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If memory cannot be read or written, including where
+                §7's two-attempt bound was exhausted.
+        """
+        self._reject_if_closing()
+        named = identifier(record_id, name="record_id")
+        check_arguments("unguard", max_bytes=self._max_payload_bytes, record_id=named)
+        return await self._tracked(
+            self._place(named, PlacementReach.ANYONE), "unguard", checked=True
+        )
+
+    async def _place(self, record_id: str, reach: PlacementReach) -> Placement | None:
+        """One act's read-modify-write, re-run once if the store moved under it.
+
+        **Two attempts in all** (ADR-0217 §7), written as two statements rather than
+        as a loop so the bound is the code rather than a constant the code consults
+        — the shape ``memory/ingest.py``'s conditional fold already takes for
+        ADR-0219 §5's bound. A second refusal propagates as the
+        ``MemoryStoreError`` it is: the caller is told the store would not take the
+        write, and is never handed a placement no record carries. Raised from inside
+        the first refusal's handler, so the traceback names both.
+
+        **The re-run is the whole decision and never a re-submission.** The record
+        is read again and §3's precedence is applied to the value it *now* carries,
+        so a ``DERIVED`` narrowing that landed in the window is found and the
+        widening is refused on the ordinary ground. Resubmitting the payload
+        computed over the rejected snapshot would be the lost update wearing a
+        conditional write's clothes.
+
+        **Livelock is refused rather than made improbable** (§7). An act that cannot
+        land while another writer rewrites the same record in a tight loop is a
+        failure the caller can see, and the bound is safe because both acts are
+        idempotent: a caller that meant it repeats it.
+        """
+        try:
+            return await self._place_once(record_id, reach)
+        except MemoryStoreStaleError:
+            # Nothing was written — ADR-0219 §3's all-or-nothing — so there is no
+            # partial state to unwind before the decision runs again.
+            return await self._place_once(record_id, reach)
+
+    async def _place_once(self, record_id: str, reach: PlacementReach) -> Placement | None:
+        """Decide ADR-0217 §3's precedence over the record as read, and write once.
+
+        **The read is in the call that writes**, never one read earlier (§7): the act
+        follows the stored value and not the one a rendered list or a confirmation
+        card showed, so a ``guard`` offered against a ``PROPOSED`` placement and
+        performed on a record the derivation has since placed ``DERIVED`` leaves
+        ``DERIVED`` and writes nothing.
+
+        Two refusals and nothing else, both returning the placement the record
+        already carries rather than raising:
+
+        - **the setter is ``DERIVED``.** §3's closing clause is not lifted by an act
+          in either direction. Widening is the case that clause is about; narrowing
+          is refused for a different reason and with the same effect — §3's total
+          order puts ``DERIVED`` above ``OWNER_ACT`` at the same reach, so a
+          ``guard`` here would write a setter *weaker* than the one that in fact
+          made the narrowing, which no implementation may record;
+        - **the act would change neither the reach nor the setter.** This is what
+          makes both operations idempotent in the strict sense: nothing is written,
+          so the instant does not move and the second call returns exactly what the
+          first returned.
+
+        Everything else writes, including the two cases a reader is most likely to
+        expect to be no-ops: a ``guard`` on reach ``OWNER`` with setter ``PROPOSED``
+        writes, because it changes the setter from one the owner may lift to one §3
+        calls final; and an ``unguard`` on the default placement writes, because it
+        records reach ``ANYONE`` as an **act** — which is what makes the record an
+        ineligible side against a later proposal in §3's fold, rather than a
+        placement a model may narrow by duplication.
+        """
+        record = await self._memory.get(record_id)
+        if record is None:
+            return None
+        standing = record.placement
+        if standing.set_by is PlacementSetter.DERIVED:
+            return standing
+        if standing.reach is reach and standing.set_by is PlacementSetter.OWNER_ACT:
+            return standing
+        acted = Placement(reach=reach, set_by=PlacementSetter.OWNER_ACT, set_at=self._placed_at())
+        await self._memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=record.model_copy(update={"placement": acted}),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=record.revision,
+                )
+            ]
+        )
+        return acted
+
+    def _placed_at(self) -> datetime:
+        """The clock's reading for an act's stamp, as the error of the write it rides.
+
+        :meth:`_now`'s translation one stage over, on ADR-0026 §4's own rule that
+        "each subsystem translates at its own boundary" and the reading takes "the
+        error of the stage that read the clock". This reading exists only to stamp a
+        placement being written to memory, and ADR-0217 §7 declares exactly two
+        errors for the acts that carry it, so a non-conforming reading has to arrive
+        as one of them or the exhaustive ``Raises`` list is false.
+
+        Raises:
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     async def questions(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0

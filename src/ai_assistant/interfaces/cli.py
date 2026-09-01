@@ -5652,6 +5652,8 @@ _ROUTED_ASKED: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "forget one belief",
     RoutableOperation.REVOKE: "withdraw the grant on one source",
     RoutableOperation.FORGET_QUESTION: "forget one deferred question",
+    RoutableOperation.GUARD: "keep one belief for you alone",
+    RoutableOperation.UNGUARD: "let one belief be spoken to anyone again",
 }
 
 #: What did **not** happen, for every ending that performed nothing. Total for the
@@ -5667,15 +5669,53 @@ _ROUTED_UNDONE: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "the belief is still held",
     RoutableOperation.REVOKE: "the grant still stands",
     RoutableOperation.FORGET_QUESTION: "the question is still there",
+    RoutableOperation.GUARD: "the belief is placed as it was",
+    RoutableOperation.UNGUARD: "the belief is placed as it was",
 }
 
-#: What a confirm-owed operation did, once it has run. Total over the three members
+#: What a confirm-owed operation did, once it has run. Total over the members
 #: ADR-0197 §3 tags confirm-owed, and reached only from :attr:`RouteOutcome.PERFORMED`
 #: — a read-only ``PERFORMED`` renders its listing instead, and has one to render.
+#:
+#: **``unguard``'s sentence is hedged and the other four are not**, which is ADR-0217
+#: §7 rather than caution: an ``unguard`` whose record carries a ``DERIVED`` placement
+#: writes nothing and returns that placement unchanged, and a routed pass has no way to
+#: tell the two apart — ``perform`` drops the returned value, because §6 keeps every
+#: operation's result out of the composed reply. Claiming the belief is now speakable
+#: would therefore be a claim this surface cannot check, on the one axis where the
+#: meaning lost is the restrictive one. ``guard`` needs no hedge: every branch of §3
+#: leaves the record at reach ``OWNER``, the refusal included.
 _ROUTED_DONE: Final[Mapping[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "That belief is destroyed.",
     RoutableOperation.REVOKE: "That grant is withdrawn — I may no longer read that source.",
     RoutableOperation.FORGET_QUESTION: "That question is destroyed.",
+    RoutableOperation.GUARD: "That belief is kept for you alone.",
+    RoutableOperation.UNGUARD: (
+        "I acted on that belief. A narrowing I derived myself still stands — an act "
+        "does not lift one."
+    ),
+}
+
+#: What ADR-0217 §7's two acts carry on their confirmation card, beside the belief.
+#: Keyed on the member for :data:`_ROUTED_ASKED`'s reason — every word around the
+#: subject is this adapter's own and none of it is the router's — and holding exactly
+#: the two acts, which is also what :func:`_render_operation_confirmation` tests
+#: membership of to pick its branch.
+#:
+#: Each says what the act does **and** what it does not, because the second half is
+#: what a person cannot see from the belief on screen: guarding destroys nothing, and
+#: unguarding does not lift a narrowing this system derived (ADR-0204 §5, ADR-0217 §3).
+_PLACEMENT_ACT_NOTE: Final[Mapping[RoutableOperation, str]] = {
+    RoutableOperation.GUARD: (
+        "\n  This keeps the belief for you alone: I will not put it, or a reply that "
+        "rests on it, on a channel anyone else can hear. It destroys nothing, changes "
+        "nothing I hold, and you can undo it."
+    ),
+    RoutableOperation.UNGUARD: (
+        "\n  This lets the belief be spoken to anyone again. Where I narrowed it "
+        "myself, that narrowing stands — an act does not lift one — and nothing here "
+        "makes a private detail speakable that was never yours to share."
+    ),
 }
 
 #: The two endings on which this system failed to do what was asked, which is what
@@ -5889,7 +5929,11 @@ def _render_routed_candidates(operation: RoutableOperation, listing: RoutedListi
     destroy, and the citations are the warrant they are judging.
     """
     match operation:
-        case RoutableOperation.FORGET:
+        case RoutableOperation.FORGET | RoutableOperation.GUARD | RoutableOperation.UNGUARD:
+            # ADR-0217 §7's acts resolve over `forget`'s own candidate set, so they
+            # render through its arm: the user is choosing among beliefs, and the
+            # warrant is as much a part of judging which one to place as it is of
+            # judging which one to destroy.
             for belief in _routed_records(operation, listing, Belief):
                 _render_belief(belief)
         case RoutableOperation.FORGET_QUESTION:
@@ -5943,6 +5987,15 @@ def _render_operation_confirmation(card: OperationConfirmation) -> None:
             _render_forget_prompt(belief)
         return
     console.print(f"\n[bold yellow]About to {_ROUTED_ASKED[card.operation]}[/]")
+    if card.operation in _PLACEMENT_ACT_NOTE:
+        # The belief without ADR-0073 §5's destruction ceremony, which would be false
+        # here: an act changes who may receive the record and destroys nothing. What
+        # the reader is judging is still the belief, warrant included, because that is
+        # what they are about to change the audience of.
+        for belief in _routed_records(card.operation, card.subject, Belief):
+            _render_belief(belief)
+        console.print(_PLACEMENT_ACT_NOTE[card.operation])
+        return
     if card.operation is RoutableOperation.REVOKE:
         for grant in _routed_records(card.operation, card.subject, SourceGrant):
             console.print(f"\n  [bold cyan]{_safe(grant.source)}[/]")

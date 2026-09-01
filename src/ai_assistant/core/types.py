@@ -12910,8 +12910,11 @@ class AnswerOutcome(BaseModel):
 class RoutableOperation(StrEnum):
     """The operations an ask may be routed to (ADR-0197 §3).
 
-    Nine members, each named for the ``AssistantEngine`` operation it routes to, and
-    the vocabulary is **closed at the boundary**: an ``operation`` value the router
+    One member per ``AssistantEngine`` operation it routes to — the roster is pinned
+    by ``tests/core/test_routed_types.py`` rather than counted here, because a
+    numeral in this docstring goes stale on the next widening while the roster cannot
+    (`CONTRIBUTING.md` -> "No state claims in living documents"). The vocabulary is
+    **closed at the boundary**: an ``operation`` value the router
     produces that is not one of these is unclassified output and the pass declines to
     route, with no near-match, prefix, alias or case-fold resolving it onto a member
     (§4; contrast ADR-0053's alias layer, which exists for the planner's deliberately
@@ -12938,6 +12941,18 @@ class RoutableOperation(StrEnum):
     adding one **states in its own ADR** which of the five each added member
     satisfies and how; adding a member silently does not satisfy that clause, and
     neither does citing ADR-0197 in place of the statement.
+
+    **``guard`` and ``unguard`` were added under that rule by ADR-0217 §7**, which
+    states each of the five in its own text: both are members of the promoted
+    surface; neither reaches an egress boundary — no ``ToolRegistry``, no
+    ``ToolInvoker``, no ``EgressDestination``, no credential; each takes exactly one
+    argument, resolved by §5's deterministic lookup over the same candidate set a
+    routed ``forget`` enumerates, with :attr:`Belief.id` as the per-operation
+    mapping; each writes durably and is therefore confirm-owed by
+    :attr:`confirm_owed`'s own test; and condition (v) does not apply, both being
+    confirm-owed rather than read-only. They are **two members and not one with a
+    mode** for §3's second clause: a single operation taking a placement would take
+    "a second varying argument", which is outside this vocabulary.
 
     **``beliefs`` and ``learn`` are deliberately absent**, and so are ``grant`` and
     ``answer``. "What do you know about me?" is milestone 17's ruled exit test and is
@@ -12982,6 +12997,14 @@ class RoutableOperation(StrEnum):
     """Destroy one deferred question. Confirm-owed: it takes a
     :attr:`Question.id`."""
 
+    GUARD = "guard"
+    """Keep one belief for the owner alone. Confirm-owed: it takes a
+    :attr:`Belief.id` (ADR-0217 §7)."""
+
+    UNGUARD = "unguard"
+    """Let one belief be spoken to anyone again. Confirm-owed: it takes a
+    :attr:`Belief.id` (ADR-0217 §7)."""
+
     @property
     def confirm_owed(self) -> bool:
         """Whether §7's confirmation is owed before this operation is performed.
@@ -13017,6 +13040,8 @@ _CONFIRM_OWED_OPERATIONS: Final[frozenset[RoutableOperation]] = frozenset(
         RoutableOperation.FORGET,
         RoutableOperation.REVOKE,
         RoutableOperation.FORGET_QUESTION,
+        RoutableOperation.GUARD,
+        RoutableOperation.UNGUARD,
     }
 )
 
@@ -13157,10 +13182,12 @@ carries.
 #: below state "every element is of the arm ``operation`` names" without a second
 #: field a caller could set to disagree.
 #:
-#: The three confirm-owed members map to the type of their **display subject** — the
+#: The confirm-owed members map to the type of their **display subject** — the
 #: typed record §7's card renders and an ``AMBIGUOUS`` listing carries — rather than
 #: to anything the façade call returns, because a person judges the belief and not
-#: its id (ADR-0197 §5).
+#: its id (ADR-0197 §5). ADR-0217 §7's two acts are ``Belief`` for that reason and
+#: not because they *return* a :class:`Placement`: what a person judges before
+#: answering the card is the belief whose audience is about to change.
 _ROUTED_LISTING_ARM: Final[Mapping[RoutableOperation, type[BaseModel]]] = {
     RoutableOperation.QUESTIONS: Question,
     RoutableOperation.RECENT_READS: SourceReadRecord,
@@ -13171,6 +13198,8 @@ _ROUTED_LISTING_ARM: Final[Mapping[RoutableOperation, type[BaseModel]]] = {
     RoutableOperation.FORGET: Belief,
     RoutableOperation.REVOKE: SourceGrant,
     RoutableOperation.FORGET_QUESTION: Question,
+    RoutableOperation.GUARD: Belief,
+    RoutableOperation.UNGUARD: Belief,
 }
 
 
