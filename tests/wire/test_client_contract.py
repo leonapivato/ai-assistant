@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, ClassVar
@@ -71,6 +71,7 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
@@ -97,6 +98,9 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     GrantScope,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     RoutableOperation,
 )
 from ai_assistant.testing import FakeAssistantEngine
@@ -455,6 +459,29 @@ class TestHubEngineClientContract(AssistantEngineContract):
             yield RoutedParkSubject(
                 engine=client, token=ContinuationToken(handle="routed-1"), belief_id=held.id
             )
+
+    @pytest.fixture
+    async def derived_placement(self, tmp_path: Path) -> AsyncIterator[DerivedPlacementSubject]:
+        """A client of a hub holding a belief the derivation placed (ADR-0217 §3).
+
+        Arranged hub-side and acted on over the wire, which is what this binding adds:
+        the refusal ADR-0217 §7 states is a **returned placement** rather than an error,
+        so it has to survive the round trip as a value. An implementation that reduced
+        it to an error at the boundary would leave a client unable to tell a declined
+        act from a failed one, which is the outcome §7 rejects a raise for.
+        """
+        backing = FakeAssistantEngine()
+        held = backing.hold(
+            "rec-derived",
+            content="the user's consultant said the merger is off",
+            placement=Placement(
+                reach=PlacementReach.OWNER,
+                set_by=PlacementSetter.DERIVED,
+                set_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            ),
+        )
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield DerivedPlacementSubject(engine=client, record_id=held.id)
 
     @pytest.fixture
     async def parked_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

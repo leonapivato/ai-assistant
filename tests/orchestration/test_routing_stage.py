@@ -1383,10 +1383,66 @@ async def test_a_confirm_owed_member_returns_no_listing(
 ) -> None:
     """A destruction or a withdrawal has no listing to show (ADR-0197 §8).
 
-    ``forget`` and ``forget_question`` answer a ``bool`` and ``revoke`` a withdrawn
-    grant, none of which §8 gives an arm — and §6 keeps all three out of every prompt in
-    any case.
+    ``forget`` and ``forget_question`` answer a ``bool``, ``revoke`` a withdrawn grant,
+    and ADR-0217 §7's two acts the placement the record carries after the act — none of
+    which §8 gives an arm, and §6 keeps every one of them out of every prompt in any
+    case.
+
+    The acts are the reason to say it of the **result** rather than of the operation:
+    theirs is a ``core`` model a reader might expect to travel, and §6's second clause
+    is what stops it. A surface that wants to say why an ``unguard`` moved nothing reads
+    the placement through the typed door instead.
     """
     operations = Operations()
 
     assert await perform(operations, operation, "subject-1") is None
+
+
+@pytest.mark.parametrize("operation", [RoutableOperation.GUARD, RoutableOperation.UNGUARD])
+async def test_an_act_is_performed_by_calling_the_engine_s_own_operation(
+    operation: RoutableOperation,
+) -> None:
+    """ADR-0197 §2's third clause, over ADR-0217 §7's two members.
+
+    "It performs the routed operation by calling the engine's own implementation of the
+    named operation" — the alternative reading, *doing what the façade method does*,
+    would put a second read-modify-write over ``MemoryStore`` behind a different set of
+    preconditions, which is how two doors to one operation stop behaving the same way.
+    Here that would be a second implementation of §3's precedence and of §7's
+    conditional write, which is precisely the pair a reviewer cannot check twice.
+
+    The **scalar identity** is asserted, not the record: §5 maps both acts to
+    ``Belief.id``, and no confirm-owed member's signature accepts a record.
+    """
+    operations = Operations()
+
+    await perform(operations, operation, "rec-1")
+
+    assert operations.calls == [(operation.value, ("rec-1",), {})]
+
+
+@pytest.mark.parametrize("operation", [RoutableOperation.GUARD, RoutableOperation.UNGUARD])
+async def test_an_act_resolves_over_the_beliefs_a_routed_forget_enumerates(
+    operation: RoutableOperation,
+) -> None:
+    """ADR-0217 §7 puts both acts on ``forget``'s own candidate set, in terms.
+
+    "over the same candidate set a routed ``forget`` enumerates — live beliefs of every
+    ``MemoryKind`` except ``EPISODIC`` (ADR-0201 §1) — with the per-operation mapping
+    being ``MemoryBase.id``". So the lookup reads the **belief** listing and not the
+    question one, and the argument it resolves is the belief's id.
+
+    The negative half is what makes this worth a case of its own: an implementation
+    that reached for ``questions`` — the listing the member beside ``forget`` in the
+    confirm-owed half uses — would resolve nothing, end the route in ``NOT_FOUND``, and
+    look to a user exactly like a belief that is not held.
+    """
+    held = belief("rec-1", "the user likes jazz")
+    operations = Operations(beliefs_held=(held,), questions_held=(question("q-1", "jazz?"),))
+
+    resolved = await resolve(operations, operation, "jazz")
+
+    assert isinstance(resolved, Resolved)
+    assert resolved.argument == "rec-1"
+    assert resolved.subject == (held,)
+    assert "questions" not in operations.called

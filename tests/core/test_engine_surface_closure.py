@@ -525,8 +525,20 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
+
+    ADR-0217 §7's two take it to forty-two: ``guard`` and ``unguard``, the owner's
+    explicit placement act on a record already in the store. **Two members and not one
+    with a mode**, which ADR-0197 §3's second clause requires of anything in the routed
+    vocabulary — an operation taking "a second varying argument … a scope, a mode" is
+    outside it — and which §7 states rather than leaves to be inferred: "no lane
+    collapses them into one taking a placement". No ``MemoryStore``, ``MemoryWriter``,
+    ``ContextProvider``, ``Planner`` or ``NotificationPolicy`` member joins them: §7 is
+    explicit that whether the store needs an operation to perform the write "is an
+    implementation question inside ``memory/`` that this ADR does not settle", and
+    ADR-0219 settled it one door over. Neither is a browser operation, by ADR-0177 §1's
+    own closed enumeration, so its thirty-one is unmoved.
     """
-    assert len(_method_names()) == 40
+    assert len(_method_names()) == 42
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -822,6 +834,23 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     riding the event the Protocol already takes — and ADR-0087 §2c's scalar table
     gains no row, ``bool`` being a shape ``project`` already carries.
 
+    **ADR-0217 §7's two acts are under the first limb**, and they are the first
+    change since ADR-0200 §3 to move the method set: ``guard`` and ``unguard`` take it
+    to **forty-two** and the version to 25. ADR-0210 §8 names that limb in terms —
+    "§9's reach is the frame — its encoding, the validity of a wire-carried ``core``
+    type, and **the promoted surface's method set**" — and ``wire.surface.METHODS`` is
+    derived from the Protocol, so a peer at 25 naming ``guard`` reaches a hub at 24
+    that does not serve it. It is the **third and last** of the three bumps ADR-0217
+    §9 spends, each on its own ground and in its own change, and the only one of them
+    under this limb.
+
+    **The return type is deliberately not the ground**, and the distinction is worth
+    stating because it is a ``core`` model: ``Placement`` has crossed the wire since
+    23, inside ``MemoryBase.placement``, so it is minted here by nothing and ADR-0087
+    §2c's scalar table gains no row. What is new is a *method* that returns it. A
+    member added to ``Placement`` itself would be the second limb again and would owe
+    the test afresh.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -830,7 +859,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 24), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (42, 25), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

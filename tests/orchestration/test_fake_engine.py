@@ -40,6 +40,7 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    DerivedPlacementSubject,
     InvocationSubject,
     ReadSubject,
     RoutedParkSubject,
@@ -75,6 +76,9 @@ from ai_assistant.core.types import (
     EgressSpan,
     GrantScope,
     MemoryKind,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     QuestionState,
     RoutableOperation,
     TurnOutcome,
@@ -242,6 +246,26 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         return RoutedParkSubject(
             engine=engine, token=ContinuationToken(handle="routed-1"), belief_id=held.id
         )
+
+    @pytest.fixture
+    def derived_placement(self) -> DerivedPlacementSubject:
+        """One fake engine holding a belief the derivation placed (ADR-0217 §3).
+
+        Seeded through ``hold``'s ``placement`` knob, which exists for exactly this: no
+        call on the promoted surface writes a ``DERIVED`` placement, so a consumer
+        testing an act against the refusal has to be able to arrange one.
+        """
+        engine = FakeAssistantEngine()
+        held = engine.hold(
+            "rec-derived",
+            content="the user's consultant said the merger is off",
+            placement=Placement(
+                reach=PlacementReach.OWNER,
+                set_by=PlacementSetter.DERIVED,
+                set_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            ),
+        )
+        return DerivedPlacementSubject(engine=engine, record_id=held.id)
 
     @pytest.fixture
     def parked_engine(self) -> AssistantEngine:

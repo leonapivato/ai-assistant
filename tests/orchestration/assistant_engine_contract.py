@@ -123,6 +123,8 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     ProvisioningState,
     RecordedInvocation,
@@ -396,14 +398,49 @@ async def _outcome_of(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> TurnOu
     return terminal
 
 
-def _feedback(content: str) -> FeedbackEvent:
-    """One piece of feedback, as an adapter hands it over."""
+def _feedback(content: str, *, guarded: bool = False) -> FeedbackEvent:
+    """One piece of feedback, as an adapter hands it over.
+
+    ``guarded`` is ADR-0217 §7's write-time act, and it is the one route by which a
+    case below reaches a placement the owner set **through the surface**: every record
+    the event produces is then written with reach ``OWNER`` and setter ``OWNER_ACT``.
+    Defaulted ``False``, which "is not an act of any kind", so every other case in this
+    suite drives the same event it always did.
+    """
     return FeedbackEvent(
         kind=FeedbackKind.CORRECTION,
         memory_kind=MemoryKind.SEMANTIC,
         content=content,
         created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+        guarded=guarded,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedPlacementSubject:
+    """An engine holding one belief the **derivation** placed (ADR-0217 §3).
+
+    **A subject rather than a bare engine, because the state is unreachable from this
+    surface and its identity is what every case asks about.** Nothing on the promoted
+    surface derives a placement: ADR-0204 §2's evaluation runs between retrieval and
+    planning inside a turn, and ADR-0217 §4's proposer is a producer's, so a record
+    carrying setter ``DERIVED`` has to be handed to the suite exactly as a routed park
+    or a defective source is. It is also the state the acts' most load-bearing clause is
+    about — "``unguard`` writes **nothing**; §3's closing clause is not lifted by an
+    act" — so a suite without it would hold three implementations to the easy half of
+    §7 only.
+
+    Attributes:
+        engine: The subject under test.
+        record_id: The belief whose placement is reach ``OWNER`` with setter
+            ``DERIVED``. It must be **held**, so ``None`` from an act means the refusal
+            and never a missing record; and it must carry an instant, because §1 admits
+            an untimed ``DERIVED`` placement for §9's decode alone and a producer that
+            narrowed would have stamped one.
+    """
+
+    engine: AssistantEngine
+    record_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1489,6 +1526,20 @@ class AssistantEngineContract(ABC):
         The belief the park is about must be **held** by the subject, so a case can ask
         the surface whether the destruction ran. The subject must have recorded no
         permission decision for the park, so ``export_decisions`` is a usable control.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def derived_placement(self) -> DerivedPlacementSubject:
+        """A subject holding **exactly one** belief the derivation placed (ADR-0217 §3).
+
+        A fixture for :attr:`routed_park`'s reason: no call on this surface writes a
+        ``DERIVED`` placement — ADR-0204 §2's evaluation runs inside a turn and
+        ADR-0217 §4's proposal is a producer's — so an implementation has to be handed
+        to the suite already holding one.
+
+        The belief must be **held and readable**, so that a ``None`` from an act is
+        unambiguously §7's refusal rather than a record that was never there.
         """
 
     @pytest.fixture
@@ -3138,6 +3189,187 @@ class AssistantEngineContract(ABC):
         """An optional getter answers ``None``; it does not invent a record."""
         assert await engine.belief("no-such-record") is None
         assert await engine.conversation("no-such-conversation") is None
+
+    # --- ADR-0217 §7: the owner's placement acts ----------------------------
+
+    async def test_an_act_on_an_id_naming_nothing_live_answers_none_rather_than_raising(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§7 reads the case ``forget`` reads: the user's intent is already satisfied.
+
+        ``None`` and not an error, and not a placement invented for a record that is
+        not there — which is the failure the alternative invites, since ``Placement``'s
+        own default is a legal value and would read as "nothing has narrowed this".
+        """
+        assert await engine.guard("no-such-record") is None
+        assert await engine.unguard("no-such-record") is None
+
+    @pytest.mark.parametrize("method", ["guard", "unguard"])
+    async def test_a_blank_id_is_refused_by_both_acts(
+        self, engine: AssistantEngine, method: str
+    ) -> None:
+        """§7's ``ValueError``, and §3c's refusal reaching two more members.
+
+        Locally rather than at the store, so an implementation that would have written
+        is stopped before it reads anything at all.
+        """
+        with pytest.raises(self.refuses_a_malformed_argument_with, match=r"\w"):
+            await getattr(engine, method)("   ")
+
+    @pytest.mark.parametrize("method", ["guard", "unguard"])
+    async def test_an_oversized_id_is_refused_by_both_acts(
+        self, tiny_engine: AssistantEngine, method: str
+    ) -> None:
+        """§7's inherited bound, stated because §7's ``Raises`` list is exhaustive.
+
+        ``OversizedValueError`` is "**inherited, not exempted**": the surface declares
+        it of every method and does not repeat it, on the ground that ``Identifier``
+        carries no maximum length, "so even ``forget`` can be handed an oversized
+        argument". These two are no different, and the exhaustive list is not read as
+        an exemption from ADR-0085 §8's bound.
+        """
+        with pytest.raises(OversizedValueError, match=r"\w"):
+            await getattr(tiny_engine, method)("z" * (_TINY_LIMIT * 4))
+
+    async def test_a_guard_places_a_record_for_the_owner_and_stamps_the_act(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§7's narrowing act on a record carrying §6's default.
+
+        The default placement's setter is ``None``, and §7 rules that a ``guard``
+        there **does** write "because it changes the setter from one the owner may lift
+        to one this ADR calls final". The instant is asserted present rather than
+        equal to anything: §1's table makes it *required* beside ``OWNER_ACT``, and an
+        implementation that wrote the act with no stamp would be refused by the type
+        rather than caught here — so what this pins is that the act ran at all and
+        recorded who made it.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston"))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+
+        placed = await engine.guard(record_id)
+
+        assert placed is not None
+        assert placed.reach is PlacementReach.OWNER
+        assert placed.set_by is PlacementSetter.OWNER_ACT
+        assert placed.set_at is not None
+
+    async def test_a_second_guard_returns_the_first_s_value_and_moves_no_instant(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§7's idempotence "in the strict sense that the second call returns exactly
+        what the first returned".
+
+        The **instant** is the half that matters and the half a weaker assertion would
+        miss: an implementation that rewrote the placement on every call would return
+        the right reach and the right setter every time, and the only observable
+        difference is a stamp that moved. So the two values are compared whole.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston"))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+
+        first = await engine.guard(record_id)
+        second = await engine.guard(record_id)
+
+        assert first is not None
+        assert first == second
+
+    async def test_an_unguard_lifts_the_owner_s_own_write_time_guard(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§7's two acts composing: the write-time flag, then the act after the fact.
+
+        The only placement this suite can reach through the surface in **both**
+        directions, because ``guarded=True`` is the one setter a client drives
+        (§7's write-time act) and ``unguard`` is the one that widens it. §3 is explicit
+        that an act "may widen one whose setter is ``PROPOSED`` or ``OWNER_ACT``", so a
+        record the owner guarded when they taught it is one the owner can release.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston", guarded=True))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+
+        standing = await engine.guard(record_id)
+        assert standing is not None
+        assert standing.reach is PlacementReach.OWNER
+        assert standing.set_by is PlacementSetter.OWNER_ACT
+
+        lifted = await engine.unguard(record_id)
+
+        assert lifted is not None
+        assert lifted.reach is PlacementReach.ANYONE
+        assert lifted.set_by is PlacementSetter.OWNER_ACT
+        assert await engine.unguard(record_id) == lifted
+
+    async def test_an_unguard_on_a_derived_placement_returns_it_unchanged_rather_than_raising(
+        self, derived_placement: DerivedPlacementSubject
+    ) -> None:
+        """§7's refusal, which is a **return** and not an error.
+
+        "``unguard`` on a placement whose setter is ``DERIVED`` returns that placement
+        unchanged — reach ``OWNER``, setter ``DERIVED`` — and a surface reads the
+        returned reach and setter to say why nothing moved." A raise was rejected
+        because it would make an act the system declines on ratified grounds
+        indistinguishable, on ADR-0197's routed path, from an operation that failed.
+
+        The **instant is asserted unmoved** as well as the reach and the setter,
+        because an implementation that rewrote the placement with the same reach and
+        setter would satisfy every other half of this clause while restamping a
+        narrowing nobody made.
+        """
+        before = await derived_placement.engine.guard(derived_placement.record_id)
+        assert before is not None
+        assert before.set_by is PlacementSetter.DERIVED
+
+        after = await derived_placement.engine.unguard(derived_placement.record_id)
+
+        assert after is not None
+        assert after.reach is PlacementReach.OWNER
+        assert after.set_by is PlacementSetter.DERIVED
+        assert after == before
+
+    async def test_a_guard_on_a_derived_placement_changes_nothing_and_is_not_an_error(
+        self, derived_placement: DerivedPlacementSubject
+    ) -> None:
+        """§10's arm, and it is the *narrowing* direction of the same refusal.
+
+        A reader expects this one to write, since guarding is what the record already
+        is — and §3's total order is why it must not: ``DERIVED`` is stronger than
+        ``OWNER_ACT`` at the same reach, so writing here would record a setter weaker
+        than the one that in fact made the narrowing, which "no implementation records".
+        The observable consequence is the case below.
+        """
+        first = await derived_placement.engine.guard(derived_placement.record_id)
+        second = await derived_placement.engine.guard(derived_placement.record_id)
+
+        assert first is not None
+        assert first.reach is PlacementReach.OWNER
+        assert first.set_by is PlacementSetter.DERIVED
+        assert first == second
+
+    async def test_a_guard_and_unguard_pair_cannot_launder_a_derived_placement(
+        self, derived_placement: DerivedPlacementSubject
+    ) -> None:
+        """§10 in terms: the two refusals composed, which is what they are *for*.
+
+        "An ``unguard`` on a ``DERIVED`` placement leaves the setter ``DERIVED``, so a
+        later ``guard`` and ``unguard`` pair cannot launder it to ``OWNER_ACT`` and
+        then to ``ANYONE``." Each refusal alone is checkable above; only together do
+        they close the route, and an implementation that let the ``guard`` write would
+        pass both of those cases and fail this one — with a record ADR-0204 §5 narrowed
+        left speakable to anyone.
+        """
+        engine = derived_placement.engine
+        await engine.guard(derived_placement.record_id)
+        await engine.unguard(derived_placement.record_id)
+
+        standing = await engine.guard(derived_placement.record_id)
+
+        assert standing is not None
+        assert standing.reach is PlacementReach.OWNER
+        assert standing.set_by is PlacementSetter.DERIVED
 
     # --- clause 6: an error's structured state survives (§10a) --------------
 
