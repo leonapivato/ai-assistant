@@ -42,12 +42,15 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    Capture,
     ConversationDigest,
     EpisodicMemory,
+    ExchangeDisposition,
     MemoryKind,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    Modality,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -336,14 +339,16 @@ class ConversationLifecycle:
 
     # --- capture (§3, §4, §8) ------------------------------------------------
 
-    async def capture(  # noqa: PLR0913 — the conversation, the rendering, its outcome, the binding a park recorded, the turn's disclosure evaluation and its delivery; every one is a distinct fact about the turn being recorded
+    async def capture(  # noqa: PLR0913 — the conversation, the rendering, the reply, what became of the pass, the binding a park recorded, the turn's disclosure evaluation, how its user material reached this system, and its delivery; every one is a distinct fact about the turn being recorded
         self,
         conversation_id: str,
         *,
         content: str,
         outcome: str | None = None,
+        disposition: ExchangeDisposition | None = None,
         parked: ParkedBinding | None = None,
         supplied_withheld: bool = False,
+        modality: Modality = Modality.TEXT,
         delivery: SpokenDelivery | None = None,
     ) -> CaptureReport:
         """Record one turn: the index entry first, then its episode (§3).
@@ -388,7 +393,20 @@ class ConversationLifecycle:
             conversation_id: The conversation to record the turn in.
             content: The canonical text rendering of the exchange — what was asked
                 and how it turned out (ADR-0005 §1).
-            outcome: How the exchange turned out, as the episode's own ``outcome``.
+            outcome: **What the assistant said** — the composed reply, whole, as the
+                episode's own ``outcome`` (ADR-0221 §1). ``None`` where the pass
+                produced no reply, which is the five paths §1 enumerates; the caller
+                passes what its composing stage produced, and this method stores it
+                without inspecting it, truncating it or summarising it. Until ADR-0221
+                this field carried one of sixteen constant phrases and the reply was
+                stored nowhere; ``disposition`` is where that fact went.
+            disposition: What became of the pass, as a member of a closed vocabulary
+                (ADR-0221 §2). **Handed to capture, not computed here** — capture
+                judges nothing (§4), and which member a pass reached is the engine's
+                to say. ``None`` only where a caller records an exchange this system
+                did not drive; the three render sites read this field first and fall
+                back to ``outcome``, so a record carrying a member has its ``outcome``
+                rendered into no model prompt (§3).
             parked: The binding this turn parked on, where it parked, so a
                 recovered resumption can find its way back to this conversation.
             supplied_withheld: Whether content ADR-0199 §3 withholds from a
@@ -403,6 +421,15 @@ class ConversationLifecycle:
                 and a resumption recovered from durable state each carry no goal
                 statement and no plan rationale of any turn, so there is nothing in
                 their episode for a narrowing to be about.
+            modality: How the user material this episode renders reached this system
+                (ADR-0221 §5). **Handed to capture, not computed here**, for
+                ``supplied_withheld``'s own reason and at the same sites: the value
+                "belongs to the user material the episode renders, not to the pass
+                that performs the capture and not to the conversation", so the
+                resolution of a parked step carries the *parked* turn's value and this
+                method can no more derive it than it can derive ``content``. It says
+                nothing about the assistant's own contributions to the record — not
+                the plan rationale in ``content``, not the reply in ``outcome``.
             delivery: What is known about this turn's spoken answer having been
                 played, written onto the index row this allocates (ADR-0205 §4).
                 ``converse_spoken`` supplies ``SpokenDelivery(state=UNKNOWN)`` —
@@ -442,8 +469,10 @@ class ConversationLifecycle:
             turn,
             content=content,
             outcome=outcome,
+            disposition=disposition,
             now=turn.occurred_at,
             supplied_withheld=supplied_withheld,
+            modality=modality,
         )
         try:
             await self._memory.write_atomic(
@@ -544,14 +573,16 @@ class ConversationLifecycle:
             _log.warning("conversation_capture_compensation_failed", exc_info=True)
         return CaptureReport(conversation_id=turn.conversation_id, degraded=True)
 
-    def _episode(
+    def _episode(  # noqa: PLR0913 — the turn, the rendering, the reply, what became of the pass, the instant both writes share, the disclosure evaluation and the modality; every one is a distinct fact about the turn being recorded
         self,
         turn: ConversationTurn,
         *,
         content: str,
         outcome: str | None,
+        disposition: ExchangeDisposition | None,
         now: datetime,
         supplied_withheld: bool,
+        modality: Modality,
     ) -> EpisodicMemory:
         """Build the one ``EpisodicMemory`` a turn deposits (§4).
 
@@ -580,14 +611,38 @@ class ConversationLifecycle:
         not a question about it. Writing ``occurred_at`` into the field instead
         would make every episode in the store claim a currency it has no use for.
 
-        **``placement`` is the one field this method neither defaults nor decides**
-        (ADR-0204 §2, ADR-0217 §1). It is stamped from the value the pipeline
-        evaluated between retrieval and planning and carried here, so "capture judges
-        nothing" holds exactly as it does for ``content``: this method reads no
-        record, no supply and no channel, and every other field ADR-0074 §4 fixes is
-        stamped as it always was. What it writes is ADR-0217 §3's **derivation** —
-        reach ``OWNER``, setter ``DERIVED`` — and never an act or a proposal, neither
-        of which this producer can make.
+        **``placement``, ``disposition`` and ``capture`` are the three fields this
+        method neither defaults nor decides** (ADR-0204 §2, ADR-0217 §1, ADR-0221 §2
+        and §5). Each is stamped from a value the pipeline computed and carried here,
+        so "capture judges nothing" holds exactly as it does for ``content``: this
+        method reads no record, no supply and no channel, and every other field
+        ADR-0074 §4 fixes is stamped as it always was. What ``placement`` writes is
+        ADR-0217 §3's **derivation** — reach ``OWNER``, setter ``DERIVED`` — and never
+        an act or a proposal, neither of which this producer can make.
+
+        **``outcome`` now carries the composed reply and ``disposition`` carries what
+        became of the pass** (ADR-0221 §1, §2). Both are the caller's values, written
+        here unexamined: this method does not inspect the reply for a Tier 0 value and
+        no implementation adds such an inspection on this path (§7), because the
+        reliance is residency — Tier 0 secrets live in the OS keyring, are read
+        through ``SecretStore`` by ``models/`` and ``tools/`` alone, and are in no
+        record, facet, plan or step account the composing stage is given (ADR-0004
+        §3).
+
+        **``capture`` is built here from the modality the pipeline passed**, exactly as
+        ``placement`` is built from its boolean. What ADR-0221 §5 fixes is that the
+        value belongs to the user material the episode renders — so a resolution
+        carries the parked turn's, and this method is handed the answer rather than
+        deriving one.
+
+        **``provenance.derived_from_external`` stays at its ``False`` default**
+        (ADR-0221 §6). Capture stamps no origin mark, threads no origin value to this
+        point, and changes no value any component computes for that field. The mark is
+        owed and is owed its own decision: stamping it would change the composing
+        prompt's origin phrase and would remove ADR-0181 §5's automatic ``ALLOW`` for
+        later turns' egress calls, and neither is a memory-record question. No lane
+        cites ADR-0221 as authority that this episode's origin is recorded, or that
+        ADR-0098 §5's recorded-origin gap is narrower than that section states.
 
         **The instant is this turn's own**, which is ADR-0217 §1's producer
         obligation discharged at the one site that can: "every derivation this system
@@ -602,6 +657,8 @@ class ConversationLifecycle:
             content=content,
             occurred_at=turn.occurred_at,
             outcome=outcome,
+            disposition=disposition,
+            capture=Capture(modality=modality),
             expires_at=None if self._retention is None else now + self._retention,
             provenance=Provenance(
                 source=MemorySource.OBSERVED,
