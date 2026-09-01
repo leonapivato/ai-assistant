@@ -1,6 +1,6 @@
 # 221. An episode carries the reply, a typed disposition, and how the turn was captured
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-01
 - **Partially supersedes:**
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
