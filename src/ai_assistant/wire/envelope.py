@@ -776,7 +776,55 @@ from ai_assistant.wire.errors import (
 #: record, which is the wire-carried type 23 already accounts for. ADR-0204 §7's
 #: hub-authoritative clause, generalised by ADR-0217 §9, is therefore kept whole: the
 #: placement is still set in the hub and no client sets one.
-PROTOCOL_VERSION: Final[int] = 24
+#: **25 since ADR-0217 §7 and §9**, under ADR-0124 §9's **first** limb, and for the
+#: promoted surface's **method set**: :class:`~ai_assistant.core.protocols.AssistantEngine`
+#: gains ``guard`` and ``unguard``, the owner's explicit placement act on a record
+#: already in the store. ADR-0210 §8 names that limb of §9's reach in terms — "§9's
+#: reach is the frame — its encoding, the validity of a wire-carried ``core`` type,
+#: and **the promoted surface's method set**" — and a frame a peer at 25 may send
+#: names an operation a peer at 24 does not serve. ``wire.surface.METHODS`` is derived
+#: from the Protocol, so a hub at 24 answers such a frame with a method it does not
+#: know rather than performing it, and the handshake is what keeps the two apart.
+#:
+#: **This is the third and last of the bumps ADR-0217 §9 spends**, each on its own
+#: ground and in its own change: 23 for the field move on the second limb, 24 for a
+#: member a client sets, and this one for the two methods on the first. "Three entries
+#: in ``wire/envelope.py``'s log, each naming its own reason, is what that file's own
+#: practice requires; collapsing them would leave a released version whose log entry
+#: does not describe it."
+#:
+#: **The ground is the method set and not the return type**, and the distinction is
+#: worth stating because the return type is a ``core`` model. ``Placement`` has crossed
+#: the wire since 23 — ``MemoryBase.placement``, inside ``TurnResult.memories`` — so it
+#: mints no second declaration here and ADR-0087 §2c's scalar table gains no row: what
+#: is new is a *method* returning it, which is the first limb's own case. A member
+#: added to ``Placement`` itself would be the second limb again and would owe its own
+#: test.
+#:
+#: **ADR-0204 §7's hub-authoritative clause survives these two methods**, and it is
+#: checked rather than assumed. The acts are performed **in the hub** — the engine
+#: holds the ``MemoryStore``, decides ADR-0217 §3's precedence over the record it read,
+#: and makes the write conditional on ADR-0219 §2's revision. What crosses to a client
+#: is the placement the record carries *after* the act, and no client sets one, derives
+#: one, or reads one off a wire-received record to decide anything: a surface renders
+#: the returned reach and setter to say what happened, which is a rendering rather than
+#: a rule. A later decision that gives a client, spoke or gateway a **rule** keyed on a
+#: placement as received owes ADR-0124 §9's test afresh and may not cite this entry.
+#:
+#: **The error registry is untouched.** ADR-0217 §7 declares an exhaustive two errors
+#: for both methods — ``ValueError`` and ``MemoryStoreError``, with
+#: ``OversizedValueError`` inherited from the surface's own clause — and the
+#: ``MemoryStoreStaleError`` an exhausted retry could raise is the class 22 already
+#: registered. Nothing else under ``wire/`` changes for this bump either: the framing,
+#: the connect exchange, the frame kinds, the codec's dispatch and both adapters are
+#: derived from the Protocol or unaffected by it.
+#:
+#: **The method set moves to forty-two**, which is what this entry is *for*;
+#: ``tests/core/test_engine_surface_closure.py`` pins it beside this constant, so the
+#: two cannot drift. ADR-0177 §1's browser enumeration does **not** move and stands at
+#: thirty-one: ADR-0217 §7 adds no gateway route and obliges no surface to render a
+#: placement.
+PROTOCOL_VERSION: Final[int] = 25
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

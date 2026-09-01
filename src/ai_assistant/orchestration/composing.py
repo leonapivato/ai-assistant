@@ -866,6 +866,8 @@ _OPERATION_PHRASE: Final[dict[RoutableOperation, str]] = {
     RoutableOperation.FORGET: "destroy one thing the assistant believed about the user",
     RoutableOperation.REVOKE: "withdraw the user's grant on one source",
     RoutableOperation.FORGET_QUESTION: "destroy one question the assistant was waiting on",
+    RoutableOperation.GUARD: "keep one belief about the user for the user alone",
+    RoutableOperation.UNGUARD: "let one belief about the user be spoken to anyone again",
 }
 
 _OUTCOME_PHRASE: Final[dict[RouteOutcome, str]] = {

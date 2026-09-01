@@ -77,6 +77,9 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     ObservationReport,
     OperationConfirmation,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     Question,
     QuestionState,
@@ -290,6 +293,26 @@ class FakeAssistantEngine:
         self.notification_store = FakeNotificationStore()
         self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
+        #: The placement each held belief carries (ADR-0217 §1), by record id. Held
+        #: **beside** the beliefs rather than on them, because
+        #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
+        #: obliges no surface to render one, so the inspection projection is unmoved
+        #: and this table is what :meth:`guard` and :meth:`unguard` act on.
+        #:
+        #: An id absent here carries §6's default, which is what a fresh belief has.
+        #: A consumer that wants an act refused seeds the entry a producer would have
+        #: written — a ``DERIVED`` placement — because nothing on this surface derives
+        #: one, there being no producer here.
+        self.placements: dict[str, Placement] = {}
+        #: What an act stamps its placement with (ADR-0217 §7). **Strictly
+        #: increasing** by default, unlike :attr:`grant_clock`, because ADR-0217 §10
+        #: pins that a second ``guard`` returns the first's value *instant included*
+        #: — an arm a constant clock passes whether or not the act wrote a second
+        #: time, and which is therefore only a test of the no-write rule while two
+        #: writes would differ. Replaceable, so a consumer that wants a fixed stamp
+        #: can have one.
+        placement_ticks = count(1)
+        self.placement_clock: Callable[[], datetime] = lambda: _AT + _TICK * next(placement_ticks)
         #: The routed parks this engine will resolve, by continuation handle
         #: (ADR-0197 §7). Deliberately a **second** table beside ``parked``: a routed
         #: park and a tool park are answered through one method and one token space,
@@ -1000,7 +1023,56 @@ class FakeAssistantEngine:
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("forget", {"record_id": named}))
+        # The placement goes with the record: `forget` destroys rather than retires,
+        # so leaving the entry would let a later belief minted at a recycled id
+        # inherit a placement nobody set on it.
+        self.placements.pop(named, None)
         return self._checked(self.beliefs_held.pop(named, None) is not None, "forget")
+
+    # --- the owner's placement acts (ADR-0217 §7) --------------------------
+
+    async def guard(self, record_id: Identifier) -> Placement | None:
+        """Keep one belief for the owner alone, or report that nothing is held."""
+        return await self._place("guard", record_id, PlacementReach.OWNER)
+
+    async def unguard(self, record_id: Identifier) -> Placement | None:
+        """Let one belief be spoken to anyone again, or report that nothing is held."""
+        return await self._place("unguard", record_id, PlacementReach.ANYONE)
+
+    async def _place(
+        self, method: str, record_id: Identifier, reach: PlacementReach
+    ) -> Placement | None:
+        """ADR-0217 §3's precedence over the placement this engine holds.
+
+        The same two refusals the real engine makes, and for the same reasons: a
+        ``DERIVED`` setter is not lifted by an act in either direction (§3's closing
+        clause and its total order), and an act that would change neither the reach
+        nor the setter writes nothing — which is what makes both operations
+        idempotent in the strict sense that the second call returns exactly the
+        first's value, the instant included.
+
+        **There is no conditional write here and none is owed.** ADR-0219 §2's mode
+        closes a window between two writers on one store; this engine is a dict and
+        has one. What the fake owes is the *decision*, which is what every consumer
+        of this surface tests against, and the interleaving arm ADR-0217 §10 pins is
+        taken over a store's conditional write rather than over a fake that cannot
+        have the window.
+        """
+        named = identifier(record_id, name="record_id")
+        check_arguments(method, max_bytes=self._max_payload_bytes, record_id=named)
+        self.calls.append((method, {"record_id": named}))
+        if named not in self.beliefs_held:
+            return self._checked(None, method)
+        standing = self.placements.get(named, Placement())
+        if standing.set_by is PlacementSetter.DERIVED:
+            return self._checked(standing, method)
+        if standing.reach is reach and standing.set_by is PlacementSetter.OWNER_ACT:
+            return self._checked(standing, method)
+        acted = Placement(
+            reach=reach, set_by=PlacementSetter.OWNER_ACT, set_at=self.placement_clock()
+        )
+        self.placements[named] = acted
+        return self._checked(acted, method)
 
     # --- the deferred-question surface ------------------------------------
 
@@ -2198,6 +2270,10 @@ class FakeAssistantEngine:
                 await self.forget_question(cast("Question", subject).id)
             case RoutableOperation.REVOKE:
                 await self.revoke(cast("SourceGrant", subject).source)
+            case RoutableOperation.GUARD:
+                await self.guard(cast("Belief", subject).id)
+            case RoutableOperation.UNGUARD:
+                await self.unguard(cast("Belief", subject).id)
             case _:  # pragma: no cover — `OperationConfirmation` admits no read-only member
                 msg = f"{card.operation.value} is read-only and is never confirmed"
                 raise AssertionError(msg)
