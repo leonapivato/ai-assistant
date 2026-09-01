@@ -249,12 +249,20 @@ reply, and it is as mechanical as it was.
 > tail depth, the retrieved group's size, `EPISODIC_SUPPLEMENT_LIMIT`,
 > `observation_batch_size` and `observation_max_proposals` are all unmoved.
 
-**The arithmetic, stated because a budget that is not is not a budget.** Twenty tail
-turns at the ceiling is 12,800 characters of assembled prompt, and the observation
-batch is the same twenty. That figure is a true worst case for *any* reply text, which
-is the whole reason the ceiling is counted on the quoted rendering rather than on the
-source: `json.dumps` expansion is not uniform, and a source-character ceiling bounds
-the wrong quantity.
+> **Normative.** The **framing** of a reply line — its indent, its label, and §5's
+> elision marker with the two numbers in it — is at most **96 characters**, so one
+> rendered reply line is at most 736 characters whole. The lane's wording is its own
+> choice within that bound.
+
+**The arithmetic, stated because a budget that is not is not a budget.** One reply line
+is at most 640 characters of quoted span plus at most 96 of framing: 736. Twenty tail
+turns is therefore at most **14,720 characters** of added prompt, and the observation
+batch is the same twenty. The quoted spans alone account for 12,800 of it; the rest is
+the label and the marker, which are counted here rather than left out because a bound
+that excludes the mandatory parts of the line it bounds is not a bound. That total is a
+true worst case for *any* reply text, which is the whole reason the ceiling is counted
+on the quoted rendering rather than on the source: `json.dumps` expansion is not
+uniform, and a source-character ceiling bounds the wrong quantity.
 
 **The expansion is uneven, and getting it wrong is how a budget stops being one.**
 Measured on this tree's Python: with `ensure_ascii=True`, a newline becomes two
@@ -309,18 +317,41 @@ is a share rather than a count precisely because a bare numerator cannot say it.
 
 > **Normative.** The pair rides **one statement**, so the two are observed together and
 > lost together (ADR-0141 §6's rule for the duplicate share). The statement carries the
-> two integers and **no reply text**, elided or whole, so §8's eleventh assertion is
+> two integers and **no reply text**, elided or whole, so §8's twelfth assertion is
 > unaffected and ADR-0119's rule that a trace never contains Tier 0/1 content is not
 > approached.
 
 > **Normative.** The counts are of one assembly and are not durable totals; a rate is a
-> sum over a window, as ADR-0120 §1 computes every measure. The lane emits the pair on
-> a carrier each site already has and that needs no `core` type, no new field on a
-> returned value and no `core/protocols.py` change — a structured log event satisfies
-> this. Where the pair is also visible to an `OPERATION` trace mapper, as the
-> observer's is under §9's hook, the lane puts it there as well, a trace being
-> queryable where a log is not. The carrier is otherwise the lane's choice, subject to
-> the one-statement rule and the no-content rule above.
+> sum over a window, as ADR-0120 §1 computes every measure.
+
+> **Normative.** The carrier is a **structured log event at the rendering site**, and
+> this ADR places the pair on no other surface. No count required by this section
+> reaches an `OPERATION` trace, and no implementation adds a field to a `core` type, a
+> member to a Protocol, or a side channel between a render site and the engine in
+> order to make one.
+
+**The trace is not available to these counts, and saying so is cheaper than a
+mechanism.** ADR-0119 §8's mapper is the engine boundary and it can project only the
+operation's own result value: `_tracked` takes a `Callable[[_T], Observation]`, and
+for an observation pass `_T` is `ObservationReport`, which lives in `core/types.py`
+and carries no render counts. §13 forbids adding one. Two passes over one episode can
+return identical reports while one elided a long reply and the other did not, so a
+mapper of that result cannot distinguish them however it is written — and the ways
+round it are worse than the gap: a second operation trace emitted from `learning`
+would put a second crossing where ADR-0119 §5 has one, re-reading the store could
+select a different batch, and a shared "last counts" slot races concurrent passes. So
+the pair stays in the log, where the site that computed it can state it directly.
+
+**A log is the right weight for what this is.** The pair exists to tell a later lane
+whether §4's unmeasured number was set right, which is a question asked during a QA
+pass and not by a resident query — the same reading #1081 performed for the
+notification instrument. §9's figures are read the same way and for the same reason,
+so neither instrument in this ADR is a member of ADR-0120's measure set.
+
+> **Normative.** §9's counting hook is a *different* obligation and is unaffected by
+> this section: it puts on the `"observe"` seam's trace only counts
+> `ObservationReport` already carries, which is why it is lawful where these counts
+> are not.
 
 **Outside the span, because inside it is forgeable.** ADR-0098 §2 rules that a span's
 attribution must not be forgeable from inside the span, and `_outcome_lines` states the
@@ -473,10 +504,15 @@ out whether the boundary holds in practice rather than only on paper.
    what would have caught the twelve-characters-per-emoji error §4 records.
 6. **The prefix is valid.** The rendered span is decodable as JSON for every input
    above: no cut splits an escape sequence or a surrogate pair.
-7. **The elision marker is unforgeable.** A reply whose own text contains this
+7. **The whole line is bounded, framing included.** For every input above, the
+   complete rendered reply line — indent, label, quoted span and, where it elides,
+   §5's marker — is at most 736 characters, which is §4's per-line bound. The
+   longest marker the lane's wording can produce is exercised, with the largest
+   length figures a reply can carry.
+8. **The elision marker is unforgeable.** A reply whose own text contains this
    system's elision wording, and which is under the ceiling, renders unmarked — the
    marker appearing only outside the quoted span, in held data.
-8. **Both counters count, and they are emitted together.** An assembly mixing elided
+9. **Both counters count, and they are emitted together.** An assembly mixing elided
    and unelided replies reports the eligible count and the elided count on one
    statement, with the second no greater than the first; an assembly with eligible
    replies and no elision reports a non-zero denominator and a zero numerator; and an
@@ -486,16 +522,16 @@ out whether the boundary holds in practice rather than only on paper.
 
 **The negative assertions that remain — where the reply still must not appear.**
 
-9. **The retrieved group carries no reply**, at either request assembler, for a record
+10. **The retrieved group carries no reply**, at either request assembler, for a record
    carrying a `disposition`. A distinctive span in such a record's reply occurs
    nowhere in either assembled prompt. This is test 4's shape, retained over the
    population §2 keeps phrase-only, and it is why test 4's deletion is a narrowing
    rather than an abandonment.
-10. **The benchmark harness renders no reply.** `render_context` over records built as
+11. **The benchmark harness renders no reply.** `render_context` over records built as
    `benchmarks/memory/ingest.py`'s `exchanges_of` builds them is byte-identical to
    today's, and `_render_record` called directly on a record carrying both fields
    emits no reply line.
-11. **No log carries the reply.** ADR-0221 §11's test 14 is untouched and is restated
+12. **No log carries the reply.** ADR-0221 §11's test 14 is untouched and is restated
    here because this is the change that would most easily break it: the capture path,
    the observation path and the three render sites emit no log event whose payload
    contains the reply's text, elided or whole. ADR-0004 §5 names *"message bodies"* a
@@ -643,7 +679,7 @@ the same cut ADR-0221 §12 made for its own Lane D over the same three sites.
 4. The elision counter §5's fourth clause requires, at each site.
 5. §9's counting hook: a metrics mapper for the `"observe"` seam in
    `orchestration/engine.py`, mirroring `_observed_due`'s for the scheduled run.
-6. §8's eleven assertions, and the deletion of ADR-0221 §11's test 4 with the narrowing
+6. §8's twelve assertions, and the deletion of ADR-0221 §11's test 4 with the narrowing
    of its test 5.
 
 > **Normative.** A lane implementing the above and also embedding the reply, adding a
