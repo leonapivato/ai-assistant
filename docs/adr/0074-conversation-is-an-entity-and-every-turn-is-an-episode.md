@@ -333,9 +333,10 @@
   turned out"*, which ADR-0221 does not change; §7's retention horizon, which is what
   bounds the stored reply's life; §8's deletion; §9's contract surface; and §11's
   deferrals, of which the cross-device-presence bullet is **discharged in part rather
-  than superseded** — ADR-0221 §5 records the modality of the source material an
-  episode's text was derived from, which needs none of the device identity §11 names
-  as the reason for waiting, and §11's device-identity half stays open and unstarted.
+  than superseded** — ADR-0221 §5 records how the material the user supplied on the
+  pass an episode records reached this system, and nothing about the assistant's own
+  contributions to that record. That needs none of the device identity §11 names as
+  the reason for waiting, and §11's device-identity half stays open and unstarted.
 
   **The six pairs on the `Status` line name different scopes** and accumulate under
   ADR-0070 §4; this one reaches §3 alone, which no earlier pair names. No amendment
