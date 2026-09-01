@@ -112,8 +112,10 @@ ADR-0203 §4 each declined to add the field. The owner's direction of 2026-09-01
 #1845 reframes it: not a `spoken | typed` flag, which a second modality would have
 to *supersede*, but a record the archive decision can grow. ADR-0094 §7 is already
 modality-neutral — it rules over *"source material"* rather than over audio — and
-ADR-0094 §8 keeps the episode textual. So what the episode is missing is not "was
-this spoken" but "what was this text derived from".
+ADR-0094 §8 keeps the episode textual. So what the episode is missing is not a
+`spoken | typed` flag on the record but a statement of how the material the user
+supplied reached this system, in a shape a later modality extends rather than
+replaces.
 
 ## Decision
 
@@ -351,7 +353,8 @@ four refusals.
 > not of the conversation and not of an earlier turn. A resumption is a separate
 > episode of the pass that resumed, and `AssistantEngine.resume` carries no spoken
 > capture, so a resumption of a spoken park records `TEXT` — which is true of it: its
-> content is the bare fact of the resumption, derived from no source material at all.
+> content is the bare fact of the resumption, and the pass carried no user material
+> at all.
 
 > **Normative.** `Capture` is the record the two further facts land in, and they are
 > **not decided here**: which derivation produced the text, and whether and where the
@@ -407,8 +410,8 @@ supersession.** ADR-0074 §11 defers *"Cross-device presence — which device is
 a conversation"*, observing that *"nothing on a turn records where it came from"* and
 that recording it *"would require a device identity, whose enrolment and revocation
 the later arc owns"*. That rationale is exact for device identity and does not reach
-modality: naming what an episode's text was derived from needs no enrolment, no
-revocation and no identity of any kind. §11 is a "what this ADR does not decide"
+modality: naming how the material the user supplied on a pass reached this system
+needs no enrolment, no revocation and no identity of any kind. §11 is a "what this ADR does not decide"
 section and says of this bullet that it is *"Not foreclosed, and deliberately not
 started"* and that *"adding it later is additive"*, so deciding it is what the bullet
 invites. The deferral is **discharged in part**, not superseded: its device-identity
@@ -658,10 +661,13 @@ The implementation is three lanes, each briefed after the one before it merges
 
 1. `ExchangeDisposition` with §2's sixteen members and their values, documented in
    place with what each denotes and which source vocabulary it mirrors.
-2. `Modality` with `TEXT` and `SPEECH`, and `Capture` as a frozen model carrying
-   `modality` alone, documented with §5's "modality of the source material this text
-   was derived from" reading and with the note that it is the record two further
-   facts land in.
+2. `Modality` with `TEXT` and `SPEECH` and the values §5 fixes, and `Capture` as a
+   frozen model carrying `modality` alone. `Capture` and its field are documented in
+   §5's terms and in no wider ones: `modality` records how **the material the user
+   supplied on the pass this episode records** reached this system, and says nothing
+   about the plan rationale in `content` or the composed reply in `outcome`, which
+   are text this system produced whatever the utterance was. The docstring also
+   records that `Capture` is the record §5's two deferred facts land in.
 3. `EpisodicMemory.disposition: ExchangeDisposition | None = None` and
    `EpisodicMemory.capture: Capture`, defaulted as §5 states.
 4. A rewritten description on `EpisodicMemory.outcome` saying what it now carries,
