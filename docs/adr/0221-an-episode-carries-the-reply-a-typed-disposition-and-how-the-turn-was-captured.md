@@ -343,24 +343,33 @@ four refusals.
 > renamed, removed or given a second spelling, and no later ADR replaces this enum
 > with a differently-named one for the same question.
 
-> **Normative.** For an episode a pass stamps from **its own** turn, capture writes
-> `SPEECH` exactly where `Engine._capture` is given a `_SpokenCapture` — the passes of
-> `AssistantEngine.converse_spoken` and no other — and writes `TEXT` everywhere else.
-> It asks nothing else and infers nothing: the capture path is told which operation it
-> is running under and does not compute it.
+> **Normative.** The value belongs to **the user material the episode renders**, not
+> to the pass that performs the capture and not to the conversation. Every capture
+> site falls in exactly one of the three cases below, and no implementation, setting
+> or later lane adds a fourth without the ADR that decides it.
 
-> **Normative.** The value is a property of **the turn whose rendering the episode
-> carries**, not of the pass that performs the capture and not of the conversation.
-> Where a pass captures an episode rendered from a turn an earlier pass produced — the
-> resolution of a parked turn, which ADR-0074 §3 captures a second time and whose
-> `content` renders that turn's goal statement and plan rationale — the value carried
-> is that turn's own, retained with the parked turn and applied unchanged. No
-> implementation re-evaluates, recomputes or defaults it at the second capture.
+> **Normative.** **The episode renders the capturing pass's own user material** — a
+> turn that pass produced, or the utterance a routed pass threads to the capture point
+> (ADR-0197 §10). Capture writes `SPEECH` exactly where `Engine._capture` is given a
+> `_SpokenCapture` — the passes of `AssistantEngine.converse_spoken` and no other,
+> whether or not that pass routed — and `TEXT` otherwise. It asks nothing else and
+> infers nothing: the capture path is told which operation it is running under and
+> does not compute it.
 
-> **Normative.** A resumption **recovered from durable state** carries no turn, so
-> there is nothing to retain and nothing the resuming pass could inherit; it is
-> stamped by the clause above and writes `TEXT`, which is true of what its episode
-> holds — the bare fact of the resumption, with no user material in it.
+> **Normative.** **The episode renders user material an earlier pass received** — the
+> resolution of a parked step, which ADR-0074 §3 captures a second time and whose
+> `content` renders that turn's goal statement and plan rationale. The value carried is
+> that turn's own, retained with the parked turn and applied unchanged. No
+> implementation re-evaluates, recomputes or defaults it at the second capture. This is
+> ADR-0204 §2's fourth clause applied to a second field, for that clause's own reason.
+
+> **Normative.** **The episode renders no user material at all.** Capture writes
+> `TEXT`, and it is true of what the episode holds rather than a default it falls back
+> on. Two passes are in this case: a resumption **recovered from durable state**, which
+> has no turn to retain from, and the resolution of a **routed** park, whose episode
+> carries neither a turn nor an utterance and renders the bare fact of the resumption
+> alone. It is the same partition, at the same sites, that ADR-0204 §2's fifth clause
+> already draws for the withholding stamp.
 
 > **Normative.** `Capture` is the record the two further facts land in, and they are
 > **not decided here**: which derivation produced the text, and whether and where the
@@ -644,15 +653,19 @@ names an input and the outcome it fixes.
    record round-trips through serialisation carrying the same member back — asserted
    over the whole membership, so a member added later without a value of the stated
    form fails rather than passing silently.
-9. **A record constructed with neither new field** carries `disposition` of `None` and
-   a `capture` whose `modality` is `TEXT`, and a serialised record written before the
-   fields land decodes to the same.
-10. **A spoken turn's episode carries `SPEECH` and the spoken reply**, and a turn of
-   `converse`, `converse_streaming` and `resume` each carries `TEXT`.
-11. **A resumption of a spoken park carries `SPEECH`**, retained from the parked turn
-    rather than recomputed by the resuming pass, and a resumption **recovered from
-    durable state** carries `TEXT`. Together they pin §5's rule that the value belongs
-    to the turn whose rendering the episode carries.
+9. **A record constructed with neither new field** carries `disposition` of `None`
+   and a `capture` whose `modality` is `TEXT`, and a serialised record written before
+   the fields land decodes to the same.
+10. **A spoken turn's episode carries `SPEECH` and the spoken reply**, and so does a
+    pass of `converse_spoken` that routed; a turn of `converse` and one of
+    `converse_streaming` each carry `TEXT`.
+11. **The three resumption shapes are each pinned.** The resolution of a **step**
+    park of a spoken turn carries `SPEECH`, retained from the parked turn rather than
+    recomputed by the resuming pass; the resolution of a **routed** park carries
+    `TEXT`, including where the pass that parked it was spoken; and a resumption
+    **recovered from durable state** carries `TEXT`. Together they pin §5's partition,
+    and the routed arm is the one that separates "the pass was spoken" from "the
+    episode renders spoken material".
 12. **A routed pass's episode carries a routed member and its reply.** The
     `disposition` is the `ROUTED_*` member for the route's outcome, the `outcome` is
     the composed reply, and the episode still carries no part of the routed account
@@ -713,10 +726,13 @@ The implementation is three lanes, each briefed after the one before it merges
    `ExchangeDisposition` members; `_capture` writes the reply into `outcome` and the
    member into `disposition`, and threads the modality from the `_SpokenCapture` it
    already receives.
-2. The parked turn **retains its modality**, and `_capture_resumption` passes that
-   retained value rather than the resuming pass's — the same shape, at the same site,
-   as the `supplied_withheld` that park already retains (§5, ADR-0204 §2's fourth
-   clause). A park recovered from durable state has no turn and passes `TEXT`.
+2. §5's three cases at the sites that realise them: `_run_turn` and `_finish_route`
+   stamp from their own pass's `_SpokenCapture`; the parked turn **retains its
+   modality** and `_capture_resumption` passes that retained value rather than the
+   resuming pass's — the same shape, at the same site, as the `supplied_withheld` that
+   park already retains (ADR-0204 §2's fourth clause); and
+   `_compose_and_capture_routed`, together with a park recovered from durable state,
+   passes `TEXT`, exactly where each already passes `supplied_withheld=False`.
 3. `orchestration/conversations.py`: `_episode` stamps the two new fields and every
    other field exactly as ADR-0074 §4 and ADR-0217 §1 fix them.
 4. Tests 1, 2, 3, 4, 10, 11, 12, 13, 14 and 15 of §11. The benchmark harness is
