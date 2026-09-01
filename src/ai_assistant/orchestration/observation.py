@@ -745,7 +745,12 @@ class ObservationStage:
         surface and so a contract ADR of its own.
 
         **The budget is checked only at a pass boundary**, so a run overruns it by at
-        most one pass — ADR-0111 §4 with the pass as the chunk. It is measured on the
+        most one pass — ADR-0111 §4 with the pass as the chunk. That boundary is read
+        twice per iteration, before the due test and again once it has selected,
+        because the due test is itself awaited work: a run that checked only before
+        it could begin a pass on a budget the *probes* had already spent, and overrun
+        by the due test as well as by the pass. Neither reading abandons anything
+        part-way, which is the clause's actual requirement. It is measured on the
         event loop's **monotonic** clock and never on the injected one, for the reason
         :meth:`~ai_assistant.orchestration.consolidation.ConsolidationStage.run`
         gives at length: a civil clock moved backwards by NTP or an operator would
@@ -809,6 +814,19 @@ class ObservationStage:
                 break
             selected = await self._due()
             if selected is None:
+                break
+            # **The same boundary, read a second time, and it is still a boundary.**
+            # Answering §2's due test can itself cost a listing and up to fifty
+            # bounded page probes, and beginning a pass on a budget those already
+            # spent would overrun by the due test *and* a pass where §3 allows one
+            # pass. Nothing is abandoned part-way — no pass has begun, no model has
+            # been called and nothing has been written — which is what ADR-0111 §4's
+            # clause actually requires, and the page this discards is re-read by the
+            # next run rather than lost. What no check can bound is the due test's
+            # own duration: those are local store calls, which §8 narrows out of §4's
+            # deadline clause and #1817 holds.
+            if loop.time() >= deadline:
+                budget_spent = True
                 break
             target, probed = selected
             try:
