@@ -79,6 +79,30 @@ _RELEASED_EARLY = (
 )
 
 
+def _unstamped(record: MemoryRecord) -> MemoryRecord:
+    """``record`` with its store-authored ``revision`` back at the default.
+
+    Every case here that compares a record the store *returned* against one the case
+    *constructed* has to strip this one field, and it is the field being right that
+    makes them differ: ADR-0219 §1 makes ``revision`` store-authored, so a stored row
+    never equals its own input. Stripping it keeps those cases asserting what they
+    were written to assert — that the *whole* record round-trips, not merely its id —
+    while the stamp is asserted by the arms that exist for it, never by an equality
+    that would pass just as well if the store had returned the default.
+    """
+    return record.model_copy(update={"revision": 0})
+
+
+def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
+    """:func:`_unstamped`, for a read whose answer may legitimately be ``None``.
+
+    Separate rather than a permissive ``None``-tolerant :func:`_unstamped`, so a case
+    comparing a read against a constructed record still *fails* on a missing row
+    instead of quietly comparing ``None`` with ``None`` somewhere else.
+    """
+    return None if record is None else _unstamped(record)
+
+
 def _provenance(
     *,
     source: MemorySource = MemorySource.OBSERVED,
@@ -378,13 +402,13 @@ class _WriteAtomicOp:
         ADR-0056 shape — would slip past an id-only check.
         """
         by_id = {record.id: record for record in await store.export()}
-        assert by_id.get("wa-2a") == _semantic("wa-2a", "bravo one")
-        assert by_id.get("wa-2b") == _semantic("wa-2b", "bravo two")
+        assert _unstamped_or_none(by_id.get("wa-2a")) == _semantic("wa-2a", "bravo one")
+        assert _unstamped_or_none(by_id.get("wa-2b")) == _semantic("wa-2b", "bravo two")
         cancelled = {"wa-1a", "wa-1b"} & by_id.keys()
         assert cancelled in ({"wa-1a", "wa-1b"}, set()), _TORN_ATOMIC
         for record_id, content in (("wa-1a", "alpha one"), ("wa-1b", "alpha two")):
             if record_id in by_id:
-                assert by_id[record_id] == _semantic(record_id, content), _TORN_ATOMIC
+                assert _unstamped(by_id[record_id]) == _semantic(record_id, content), _TORN_ATOMIC
 
 
 class _DeleteOp:
@@ -482,7 +506,9 @@ class _ReadOp:
 
     async def verify(self, store: MemoryStore) -> None:
         """A read cancelled mid-flight leaves the store whole and still readable."""
-        assert await store.get("read-a") == _semantic("read-a", "alpha alpha alpha")
+        assert _unstamped_or_none(await store.get("read-a")) == _semantic(
+            "read-a", "alpha alpha alpha"
+        )
         assert {record.id for record in await store.export()} == {"read-a", "read-b"}
 
 
@@ -761,7 +787,9 @@ class MemoryStoreContract:
 
         got = await store.get("1")
         assert got is not None
-        assert got == replacement  # the whole record equals the second input
+        # Every field but the store-authored stamp: ADR-0219 §1 puts `revision` on
+        # the store rather than on the input, so a stored row never equals its input.
+        assert _unstamped(got) == replacement
         assert got.expires_at is None  # the old deadline is gone, not merged
         assert got.validity.valid_until is None  # and so is the old window
         assert got.provenance.last_updated == _LONG_AGO
@@ -784,7 +812,7 @@ class MemoryStoreContract:
             await store.add(_preference("1", "prefers tea"))
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
-        assert await store.get("1") == stored  # nothing was written
+        assert _unstamped_or_none(await store.get("1")) == stored  # nothing was written
 
     async def test_add_at_a_different_kind_collides_on_physical_presence(
         self, store: MemoryStore
@@ -803,7 +831,7 @@ class MemoryStoreContract:
             await store.add(_preference("1", "prefers tea"))
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
-        assert list(await store.export()) == [retired]  # retained and unchanged
+        assert [_unstamped(r) for r in await store.export()] == [retired]  # unchanged
 
     async def test_upsert_at_a_different_kind_collides_on_physical_presence(
         self, store: MemoryStore
@@ -828,7 +856,7 @@ class MemoryStoreContract:
             )
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
-        assert list(await store.export()) == [retired]  # retained and unchanged
+        assert [_unstamped(r) for r in await store.export()] == [retired]  # unchanged
 
     @pytest.mark.parametrize("through_batch", [False, True], ids=["add", "write_atomic"])
     async def test_an_expired_row_still_occupies_its_id_against_a_cross_kind_write(
@@ -2065,7 +2093,7 @@ class MemoryStoreContract:
 
         got = await store.get("1")
         assert got is not None
-        assert got == replacement
+        assert _unstamped(got) == replacement
         assert got.expires_at is None
         assert got.validity.valid_until is None
 
@@ -2094,7 +2122,7 @@ class MemoryStoreContract:
             )
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
-        assert await store.get("collide") == stored
+        assert _unstamped_or_none(await store.get("collide")) == stored
         assert await store.get("fresh") is None  # nothing in the batch landed
 
     async def test_write_atomic_insert_if_absent_at_a_different_kind_is_still_a_conflict(
@@ -2118,7 +2146,7 @@ class MemoryStoreContract:
                 ]
             )
 
-        assert await store.get("1") == stored
+        assert _unstamped_or_none(await store.get("1")) == stored
 
     async def test_write_atomic_upsert_window_close_is_kept_by_export_not_get(
         self, store: MemoryStore, now: datetime
@@ -2519,7 +2547,7 @@ class MemoryStoreContract:
             assert stored is not None, (
                 f"add returned {returned!r}, which names no readable row. {_TORN_INPUT}"
             )
-            assert stored == record, _TORN_INPUT  # the one and only version
+            assert _unstamped(stored) == record, _TORN_INPUT  # the one and only version
             assert {r.id for r in await subject.export()} == {returned}, _TORN_INPUT
             await _assert_indexed_from_the_content_it_carries(
                 subject, returned, rejected_content="bravo bravo bravo"

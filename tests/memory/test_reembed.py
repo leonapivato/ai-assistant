@@ -739,8 +739,9 @@ async def test_a_source_written_after_verification_is_not_swapped_over(
         work: sqlite3.Connection,
         plan: ReembedPlan,
         embedder: Embedder,
+        columns: str,
     ) -> None:
-        verify(source, work, plan, embedder)
+        verify(source, work, plan, embedder, columns)
         late = _record("late", "written behind the lock's back")
         interloper = sqlite3.connect(str(store))
         try:
@@ -780,8 +781,9 @@ async def test_a_same_sized_write_after_verification_is_still_caught(
         work: sqlite3.Connection,
         plan: ReembedPlan,
         embedder: Embedder,
+        columns: str,
     ) -> None:
-        verify(source, work, plan, embedder)
+        verify(source, work, plan, embedder, columns)
         before = store.stat()
         interloper = sqlite3.connect(str(store))
         try:

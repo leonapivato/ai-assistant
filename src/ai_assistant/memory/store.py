@@ -18,7 +18,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
+    MemoryStoreError,
+    MemoryStoreStaleError,
+)
 from ai_assistant.core.types import (
     MemorySearchResult,
     MemoryWriteMode,
@@ -128,6 +132,13 @@ class InMemoryMemoryStore:
         # a later one and a walk that has passed it cannot skip that record.
         self._keys: dict[str, int] = {}
         self._sequence = 0
+        # The concurrency token's issuer (ADR-0219 §1). Never-reissued within the
+        # store, which for a non-durable one is the life of this object: `delete`,
+        # `purge_expired` and `clear` all drop records and none of them touches it,
+        # so a stamp a destroyed row held is never handed to a later one and an
+        # `IF_UNCHANGED` held across a delete-and-recreate is refused. Counting is
+        # the *mechanism*; §1 forbids any caller reading the order or the difference.
+        self._revisions = 0
         # Recorded as text, as the persistent store records it, so "a position this
         # build cannot use" is the same shape in both and ADR-0114 §4's
         # discard-and-restart is one behaviour rather than two.
@@ -179,9 +190,22 @@ class InMemoryMemoryStore:
         # Deep copy so a caller mutating the record (including nested fields like
         # validity, which drives read filtering) after add cannot reach stored
         # state — matching FakeMemoryStore and the serialised persistent store.
-        self._records[record.id] = record.model_copy(deep=True)
+        self._records[record.id] = self._stamped(record)
         self._issue_key(record.id)
         return record.id
+
+    def _stamped(self, record: MemoryRecord) -> MemoryRecord:
+        """The detached copy to store, carrying a freshly issued ``revision``.
+
+        ADR-0219 §1's assignment rule, applied on every door that stores a row: the
+        submitted ``revision`` is discarded rather than persisted, and the value
+        written is one this store has never issued and will never issue again —
+        whatever id it is stored at and whatever was stored there before. That is
+        what makes a delete-and-recreate a *changed* record rather than a resumed
+        per-id count, which is the ABA hole §1 closes by name.
+        """
+        self._revisions += 1
+        return record.model_copy(deep=True, update={"revision": self._revisions})
 
     def _issue_key(self, record_id: str) -> None:
         """Give a newly stored record its walk position, or leave an upsert's alone.
@@ -231,13 +255,21 @@ class InMemoryMemoryStore:
         (ADR-0046 §4, in-call all-or-nothing). This is the whole guarantee a
         non-durable store owes; crash atomicity is vacuous for it.
 
+        An ``IF_UNCHANGED`` element is validated in that same up-front pass and
+        against that same pre-batch state (ADR-0219 §3): the comparison and the
+        write are indivisible here for free, since nothing can interleave with a
+        synchronous body on one event loop.
+
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
-            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
-                different ``kind`` (ADR-0108 §4), or the batch names the same id
-                twice (ADR-0046 §3). Nothing is written.
+            MemoryStoreStaleError: an ``IF_UNCHANGED`` element's id names a stored
+                row at a different ``revision``, or names no stored row at all
+                (ADR-0219 §3). Nothing is written.
+            MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), or
+                the batch names the same id twice (ADR-0046 §3). Nothing is written.
         """
         self._reject_repeated_ids(writes)
         # Stage first: validate every element against the *pre-batch* state, then
@@ -248,17 +280,50 @@ class InMemoryMemoryStore:
             if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
                 msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
                 raise MemoryStoreConflictError(msg)
+            if write.mode is MemoryWriteMode.IF_UNCHANGED:
+                self._refuse_stale(write)
             # An INSERT_IF_ABSENT element never reaches here with a collision of
-            # any kind, so this only ever judges an UPSERT — the door ADR-0108 §4
-            # exists to close, and the one `add` shares.
+            # any kind, so this only ever judges an UPSERT or an IF_UNCHANGED — the
+            # doors ADR-0108 §4 and ADR-0219 §4 close, and the one `add` shares.
             self._refuse_cross_kind(write.record)
             # Deep copy so a caller mutating the record after the call cannot reach
-            # stored state, matching ``add``.
-            staged.append(write.record.model_copy(deep=True))
+            # stored state, matching ``add``; and stamped, since every element that
+            # stores a row takes a fresh revision (ADR-0219 §1).
+            staged.append(self._stamped(write.record))
         for record in staged:
             self._records[record.id] = record
             self._issue_key(record.id)
         return [record.id for record in staged]
+
+    def _refuse_stale(self, write: MemoryWrite) -> None:
+        """Refuse a conditional write whose expectation the store does not meet.
+
+        ADR-0219 §3, on the pre-batch state. Presence is *physical*, matching every
+        other door here: an expired or window-closed row is present and its revision
+        is the one compared, which is what lets a window-close be conditional (§4).
+        An absent id is the same refusal and not a different one — a row deleted
+        between the caller's read and its write is a lost update of the starkest
+        kind, and a silent no-op would hand the caller the healthy result the race
+        used to hand both writers.
+
+        Raises:
+            MemoryStoreStaleError: The id names no stored row, or names one at a
+                different ``revision``.
+        """
+        stored = self._records.get(write.record.id)
+        if stored is None:
+            msg = (
+                f"cannot write {write.record.id!r} at revision "
+                f"{write.expected_revision}: no record is stored under that id"
+            )
+            raise MemoryStoreStaleError(msg)
+        if stored.revision != write.expected_revision:
+            msg = (
+                f"cannot write {write.record.id!r} at revision "
+                f"{write.expected_revision}: the stored record is at "
+                f"revision {stored.revision}"
+            )
+            raise MemoryStoreStaleError(msg)
 
     @staticmethod
     def _reject_repeated_ids(writes: Sequence[MemoryWrite]) -> None:
@@ -456,6 +521,12 @@ class InMemoryMemoryStore:
         discarded here, which is harmless only because every record added
         afterwards is issued a key above it. Resetting would leave that stale
         position sitting above live records no walk would read again.
+
+        It does not reset the revision issuer either, and that one is a contract
+        obligation rather than a local invariant (ADR-0219 §1): ``clear`` destroys
+        records and never the issuer, because an issuer reset by it would reissue
+        every stamp it had already handed out — the ABA hole the never-reissued
+        clause closes, arriving through a different door.
         """
         count = len(self._records)
         self._records.clear()

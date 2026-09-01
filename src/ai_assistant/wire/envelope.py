@@ -626,7 +626,47 @@ from ai_assistant.wire.errors import (
 #: connect exchange, the frame kinds and the error registry are untouched, and
 #: ``METHODS``, ``STREAMING_METHODS`` and both adapters are derived from the
 #: Protocol.
-PROTOCOL_VERSION: Final[int] = 21
+#: **22 since ADR-0219 §6**, under ADR-0124 §9's **first** limb, and for the new
+#: error's *code* rather than for the field beside it. ``core/errors.py`` gains
+#: :class:`~ai_assistant.core.errors.MemoryStoreStaleError`, a failure a
+#: promoted-surface method can emit: ``AssistantEngine.learn`` declares
+#: ``MemoryStoreError: If reading or writing memory failed.`` and ADR-0219 §5 has
+#: the ingestor's exhausted retry propagate as the ``MemoryStoreError`` it is, so
+#: the class reaches that method. ``wire/errors.py`` renders an error's ``code`` as
+#: **the exception type's own class name** — "one code per *concrete* type, never
+#: flattened to a declared base", because encoding a subclass as its base would hand
+#: a client "a classification the server did not make" (ADR-0077 §3) — and the
+#: decode side resolves that code with ``getattr(core_errors, code, None)``, raising
+#: ``ProtocolError`` when it cannot. So a hub at 22 emits a frame a peer at 21
+#: refuses, which is §9's first limb exactly. Reducing the subclass at the boundary
+#: was weighed and is barred by that same ADR-0077 §3 sentence.
+#:
+#: **The bump and the class are the same change** (ADR-0219 §6), which is what lets
+#: the ingestor change that follows owe no second bump: no tree exists in which a
+#: peer carries version 22 and not the class, so a peer that may be handed the code
+#: has it defined and resolves it, and a peer that does not is at 21, where the
+#: handshake refuses it outright. Bumping at the change that *adds* a wire-renderable
+#: error rather than at the one that first *emits* it is the conservative direction
+#: of §9's test and never a laxer one.
+#:
+#: **``MemoryBase.revision`` is not a ground and is not cited as one** (§6). The
+#: field is additive and defaulted on a type that does not set ``extra="forbid"``,
+#: so ADR-0213 §11's ruling on the same envelope governs it: an older peer decoding
+#: a newer hub's ``MemoryRecord`` ignores a member it does not know, and the reverse
+#: direction does not exist — no ``AssistantEngine`` method takes a ``MemoryRecord``
+#: as an argument, and ``wire.surface.METHODS`` is derived from that Protocol. A new
+#: peer decoding an old hub's record reads the default ``0`` and nothing acts on it:
+#: a conditional write is a ``MemoryStore`` operation, ``MemoryStore`` is not the
+#: promoted surface, and no client holds a store. No lane reads this entry as
+#: authority for bumping on a defaulted addition to a wire-carried ``core`` type.
+#:
+#: **The method set does not move**, and stands at forty; ADR-0177 §1's browser
+#: enumeration does not move either, and stands at thirty-one. Nothing else under
+#: ``wire/`` changes for it: the framing, the connect exchange, the frame kinds, the
+#: codec's dispatch, ADR-0087 §2c's scalar table, the error registry (a code is
+#: resolved by class name, so a new subclass registers nothing) and both adapters
+#: are untouched.
+PROTOCOL_VERSION: Final[int] = 22
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

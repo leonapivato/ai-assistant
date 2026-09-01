@@ -959,6 +959,14 @@ class MemoryStore(Protocol):
         the way around it. "Names a stored record" is physical presence, in
         ``write_atomic``'s sense: an expired or window-closed row still collides.
 
+        **It stamps a fresh ``revision``, as every write that stores a row does**
+        (ADR-0219 §1). The rule is stated once, on :meth:`write_atomic`, and binds
+        this door identically: the value is store-authored, a submitted one is
+        discarded, and the stamp is one the store has never issued and will never
+        issue again. ``add`` itself stays **unconditional** — a conditional single
+        write would be a second spelling of a one-element batch, and one door for the
+        conditional write is what keeps the two doors from disagreeing (ADR-0219 §2).
+
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind`` — nothing is written — or the write fails.
@@ -988,14 +996,45 @@ class MemoryStore(Protocol):
         ``MemoryStoreConflictError`` on that standing ground with the narrower
         "re-mint and retry" remedy intact.
 
+        **An ``IF_UNCHANGED`` element is a conditional replacement** (ADR-0219 §2).
+        It is applied only where its id names a stored row whose ``revision`` equals
+        the element's ``expected_revision``; otherwise the whole batch fails with
+        ``MemoryStoreStaleError`` and nothing is committed — including where the id
+        names no stored row at all, since a row deleted between the caller's read
+        and its write is a lost update and not a no-op (§3). The comparison and the
+        write are **one indivisible step** inside the batch's transaction, and on a
+        durable backend that transaction excludes a concurrent writer — one in
+        another process included — for the whole of it; a store that read the stored
+        revision, released, and then wrote would reproduce the very window the mode
+        closes, one layer down. "Names a stored row" is physical presence in the
+        sense above, so an expired or window-closed row satisfies the presence
+        requirement and its revision is the one compared, and the cross-kind refusal
+        binds this door exactly as it binds ``UPSERT`` (§4). The remedy for a
+        refusal is **re-read and re-decide**, never re-apply, and every retry is
+        bounded by a fixed number of attempts the caller states.
+
+        **Every write that stores a row stamps it with a fresh ``revision``**
+        (ADR-0219 §1): a value the store has never issued and will never issue
+        again, whatever id it is stored at and whatever was stored there before. It
+        is store-authored — a submitted ``revision`` is discarded and never
+        persisted — always positive, never ``0``, and returned by every read that
+        returns a record. A durable store's issuer survives a close, a restart and a
+        crash; ``clear`` destroys records and never the issuer. Callers compare two
+        revisions for equality only: nothing may be derived from their order, their
+        difference, or a count.
+
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id already
                 names a stored record. Nothing is written; the caller may re-mint
                 and retry.
-            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
-                different ``kind`` (ADR-0108 §4), any other backend failure, or a
-                malformed batch (two writes to the same id, ADR-0046 §3). Nothing
-                is written.
+            MemoryStoreStaleError: an ``IF_UNCHANGED`` element's id names a stored
+                row at a different ``revision``, or names no stored row at all
+                (ADR-0219 §3). Nothing is written; the caller re-reads and
+                re-decides.
+            MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4),
+                any other backend failure, or a malformed batch (two writes to the
+                same id, ADR-0046 §3). Nothing is written.
         """
         ...
 

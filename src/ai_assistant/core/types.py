@@ -1986,6 +1986,39 @@ class MemoryBase(BaseModel):
       no disclosure consequence, and no read here filters on it. Each is stated as
       a prohibition rather than left as an omission because each is a plausible next
       step a lane could take without noticing it was a decision.
+
+    **``revision`` is the store's concurrency token** (ADR-0219 §1), and it is the
+    one field on this envelope no producer authors. A store issues it for the write
+    that stored the row; a submitted value is discarded and never persisted, so a
+    record a caller constructed carries the default ``0`` and a record a store
+    returned carries the stamp that row held when the read observed it. Four rules
+    govern it:
+
+    * **Store-authored, never producer-set** (§1). ``add`` and every
+      :class:`MemoryWrite` element discard whatever ``revision`` the record they are
+      handed carries. No producer, applier, policy, writer or client sets one, and
+      no implementation reads a submitted one for any purpose.
+    * **Never reissued within the store** (§1). Every write that stores a row —
+      ``add`` and each of ``write_atomic``'s modes alike — stamps it with a value
+      that store has never issued and will never issue again, whatever id it is
+      stored at and whatever was stored there before. It is not a per-id count, and
+      a row stored again at a deleted id takes a fresh stamp rather than resuming
+      one. ``0`` is issued by no store and every issued value is positive, so a
+      caller-constructed default can never equal a stored value.
+    * **Compared, never ordered** (§1). The operative property is *inequality*: two
+      records carry equal revisions only where they are the same stored row,
+      unrewritten, between the two reads that observed them. No caller compares two
+      with ``<``, infers an interval, an age or a count from them, or derives which
+      of two writes happened first. That an implementation reaches never-reissued by
+      counting is mechanism, not promise.
+    * **Read back from every record-returning read** (§1). ``get``, ``get_many``,
+      ``search``, ``list_beliefs``, ``export`` and ``walk_records`` all return the
+      revision the store holds for the row.
+
+    **Placed here rather than on** :class:`Provenance`, by ADR-0045 §2's own rule:
+    ``Provenance``'s every field is set by the *producer* of the belief, and this is
+    a property of the record's life in the store. It is the mirror image of
+    ``score`` — supplied by the machinery on one path, meaningless on the other.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -2031,6 +2064,16 @@ class MemoryBase(BaseModel):
             "MAX_TOPICS_PER_RECORD labels; the bound is enforced at the "
             "MemoryWriter seam and not here, so a longer tuple is admissible and "
             "a record stored with one stays readable (§1)."
+        ),
+    )
+    revision: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "The store's concurrency token for this row: the stamp issued for the "
+            "write that stored it (ADR-0219 §1). Store-authored — a submitted value "
+            "is discarded — never reissued within a store, and 0 on a record no "
+            "store has stored. Compared for equality only, never ordered."
         ),
     )
 
@@ -2121,10 +2164,17 @@ class MemorySearchResult(BaseModel):
 class MemoryWriteMode(StrEnum):
     """How one write in an atomic batch treats a colliding id (ADR-0046 §2).
 
-    The two modes are exactly the two the supersession applier needs and no more:
+    Two of the three are exactly what the supersession applier needs and no more:
     an ``UPSERT`` window-close of the retained target, and an
     ``INSERT_IF_ABSENT`` of the freshly-minted correction whose probabilistic id
     must not clobber an existing record (ADR-0045 §4).
+
+    The third is the **conditional replacement** ADR-0219 §2 adds: ``IF_UNCHANGED``
+    applies its record only where the id names a stored row still carrying the
+    revision the caller read. Three modes and not a fourth — ``IF_UNCHANGED``
+    requires the row present, ``INSERT_IF_ABSENT`` requires it absent and
+    ``UPSERT`` requires nothing, so there is no gap an "insert-or-swap" would fill
+    and no consumer that wants one (§2).
     """
 
     UPSERT = "upsert"
@@ -2152,6 +2202,24 @@ class MemoryWriteMode(StrEnum):
     blocks the insert even when expired or window-closed (ADR-0046 §3).
     """
 
+    IF_UNCHANGED = "if_unchanged"
+    """Replace the stored record only if its ``revision`` is the one expected.
+
+    A conditional replacement (ADR-0219 §2). The element carries the expectation on
+    :attr:`MemoryWrite.expected_revision` — never read off the record's own
+    ``revision`` — and it is applied only where the id names a stored row whose
+    revision equals it. Otherwise the **whole batch** fails with
+    :class:`~ai_assistant.core.errors.MemoryStoreStaleError` and nothing is
+    committed, including where the id names **no** stored row at all: a row deleted
+    between the caller's read and its write is a lost update, not a silent no-op
+    (§3).
+
+    "Names a stored row" is *physical presence*, in ``INSERT_IF_ABSENT``'s sense: an
+    expired or window-closed row is present and its revision is the one compared, so
+    a window-close can be made conditional (§4). The cross-kind refusal binds this
+    door as it binds the other two (ADR-0108 §4).
+    """
+
 
 class MemoryWrite(BaseModel):
     """One write within an atomic ``MemoryStore`` batch (ADR-0046 §2).
@@ -2168,12 +2236,57 @@ class MemoryWrite(BaseModel):
     downgrading an insert-if-absent to an upsert that clobbers a colliding record
     — the exact loss ADR-0046 §3 and §4 exist to prevent. Freezing keeps ``mode`` an
     enum member (pydantic coerces a valid string at construction, then locks it).
+    It now governs a second field whose absence changes the write's meaning
+    (ADR-0219 §2), which is the same reason applied twice.
+
+    **The expectation rides the element, not the record** (ADR-0219 §2). A caller
+    assembling an ``IF_UNCHANGED`` write from a record it *built* — which is what a
+    fold does — would carry :attr:`MemoryBase.revision`'s default of ``0`` and
+    silently expect "never rewritten", a fail-open expectation on the exact path
+    this mode guards. A separate field a validator requires makes that unreachable,
+    and it is the ratified shape:
+    :class:`~ai_assistant.core.types.ExecutionState` carries ``version`` and
+    :class:`~ai_assistant.core.types.StepTransition` carries ``expected_version``
+    for this reason.
     """
 
     model_config = ConfigDict(frozen=True)
 
     record: MemoryRecord
     mode: MemoryWriteMode = MemoryWriteMode.UPSERT
+    expected_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The revision of the record the caller read and computed this write "
+            "against (ADR-0219 §2). Required in IF_UNCHANGED mode and refused in "
+            "every other; None everywhere else."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _expectation_matches_the_mode(self) -> Self:
+        """Refuse the two states neither of which is answerable at write time.
+
+        An ``IF_UNCHANGED`` element with no expectation reaches a store with nothing
+        to compare; a non-``IF_UNCHANGED`` element carrying one states a condition no
+        mode honours. ADR-0219 §2 makes both construction-time refusals so the
+        caller's mistake is diagnosable where it is made, rather than at a write that
+        mysteriously always refuses — §1's reservation of ``0`` closes the first case
+        a second time from the other side, and the two are stated as two because
+        neither should be the only one.
+
+        Raises:
+            ValueError: If the mode and the expectation disagree.
+        """
+        conditional = self.mode is MemoryWriteMode.IF_UNCHANGED
+        if conditional and self.expected_revision is None:
+            msg = "an IF_UNCHANGED write must carry the expected_revision it was computed against"
+            raise ValueError(msg)
+        if not conditional and self.expected_revision is not None:
+            msg = f"a {self.mode.value} write must not carry an expected_revision"
+            raise ValueError(msg)
+        return self
 
 
 # --- memory: the resumable walk's position and its chunk (ADR-0114 §2) -------

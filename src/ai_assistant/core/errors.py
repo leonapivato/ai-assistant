@@ -462,6 +462,41 @@ class MemoryStoreConflictError(MemoryStoreError):
     """
 
 
+class MemoryStoreStaleError(MemoryStoreError):
+    """An ``IF_UNCHANGED`` write's expectation did not match the store (ADR-0219 §3).
+
+    The batch was rolled back — nothing was written, overwritten or removed. Raised
+    where the element's id names a stored row whose ``revision`` differs from the
+    element's ``expected_revision``, **and** where its id names no stored row at
+    all: a row deleted between the caller's read and its write is a lost update of
+    the starkest kind, and answering it with a silent no-op would hand the caller
+    exactly the healthy result the race used to hand both writers. The message names
+    the record id, the expectation, and what the store found — the stored revision,
+    or that the id named nothing.
+
+    **The remedy is re-read and re-decide, never re-apply.** A caller that meets
+    this reads the record again and derives its write from the value the record now
+    carries; it never resubmits a payload computed over the snapshot the store just
+    rejected. Every retry is bounded by a fixed number of attempts the caller
+    states, and no implementation loops unboundedly.
+
+    **Deliberately not a** :class:`MemoryStoreConflictError`, and no implementation
+    raises that for a stale conditional write. That class's documented remedy is
+    "re-mint and retry", which is precisely what a caller must *not* do here: the id
+    is the one thing about this write that is right. ADR-0108 §4 declined a new
+    class for a cross-kind collision because there was no second branch for a caller
+    to take; both halves of that test come out the other way here, because ADR-0217
+    §7's acts branch on "the record moved, re-read" against "the store is broken,
+    abort".
+
+    Subclasses :class:`MemoryStoreError` so every existing ``except
+    MemoryStoreError`` still catches it and ADR-0028 §5's "``MemoryStoreError`` is
+    the only error that crosses this seam" stays true as written — load-bearing
+    rather than conventional here: ADR-0217 §7's exhaustive ``Raises`` list is
+    unmoved only while this error is one.
+    """
+
+
 class UnresolvedEvidenceError(MemoryStoreError):
     """A ``DERIVED`` proposal cited a record the store does not hold (ADR-0077 §5).
 
