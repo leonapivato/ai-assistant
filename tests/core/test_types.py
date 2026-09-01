@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    MemoryBase,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -35,6 +36,9 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Message,
     ObservationOutcome,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -1633,66 +1637,51 @@ def test_there_is_no_expired_deferral_state() -> None:
     assert "EXPIRED" not in DeferralState.__members__
 
 
-# --- ADR-0204 §1: what a record's warrant held ------------------------------
+# --- ADR-0217 §1: the question ADR-0204 put on the warrant moved ------------
 
 
-def test_a_provenance_stored_before_the_field_existed_decodes_false() -> None:
-    """ADR-0204 §8 case 8: §1's fourth clause and §6's first clause, pinned together.
+def test_the_warrant_no_longer_carries_who_may_receive_the_record() -> None:
+    """ADR-0217 §1: the field is removed from :class:`Provenance`, not kept beside.
 
-    Validated from the **mapping** a store written before this decision
-    deserialises from — rather than merely constructed without it, because the
-    claim is about the *read* path. The record decodes rather than failing, and its
-    ``False`` is a decode default and not a measurement: no producer recorded an
-    answer, so where the producing turn's supply in fact held withheld content that
-    ``False`` is wrong about it, and nothing cites it as evidence about the record
-    carrying it. No supply site is given a second test either — ADR-0204 §3's is
-    the whole of what one applies, to every record alike, because nothing in the
-    data distinguishes the two cases.
+    ADR-0204 §1 placed ``supplied_withheld_content`` here correctly, under
+    :class:`MemoryBase`'s own placement rule — *what material stood in front of the
+    producer* is this class's question. What moved is the question: two further
+    setters now write the slot, so it asks *who may receive this record*, which is
+    the envelope's. Keeping a boolean warrant fact beside the placement would put two
+    recorded values in front of one read, and "a supply site that consulted the
+    placement and not the mark would speak a record ADR-0204 withholds, and the
+    mistake is silent".
+
+    The arms this replaces — the decode default, the round trip, and the band-blind
+    construction — are taken over :class:`Placement` in
+    ``tests/core/test_placement.py``, which is where the answer now lives.
     """
-    stored = {"source": MemorySource.OBSERVED.value, "confidence": 0.6, "last_updated": _WHEN}
-
-    prov = Provenance.model_validate(stored)
-
-    assert prov.supplied_withheld_content is False
+    assert "supplied_withheld_content" not in Provenance.model_fields
+    assert "placement" in MemoryBase.model_fields
 
 
-def test_the_stamp_survives_a_json_round_trip() -> None:
-    """It is durable state on a stored record, not a transient of the write path.
-
-    The supply-side test ADR-0204 §3 states runs over records read back out of a
-    store, so a field that did not survive the encoding would leave every stamped
-    record speakable one restart later.
-    """
-    prov = Provenance(
-        source=MemorySource.OBSERVED,
-        confidence=0.6,
-        last_updated=_WHEN,
-        supplied_withheld_content=True,
-    )
-
-    restored = Provenance.model_validate_json(prov.model_dump_json())
-
-    assert restored.supplied_withheld_content is True
-    assert restored == prov
-
-
-@pytest.mark.parametrize("stamped", [True, False])
 @pytest.mark.parametrize("source", list(MemorySource), ids=str)
-def test_no_validator_conditions_the_stamp_on_the_band(source: MemorySource, stamped: bool) -> None:
-    """Every band constructs both ways, because the question is about supply.
+def test_no_validator_conditions_a_placement_on_the_band(source: MemorySource) -> None:
+    """Every band carries a narrowed record, because the question is about supply.
 
-    ADR-0204 §1 asks what stood in a record's warrant, and that question has an
-    answer for a record of any band — an episode capture stamps, a belief a
-    producer derived inherits, and a calendar import writes ``False`` because its
-    producer's inputs are not records of this store. Stated over the whole enum so
-    a ``MemorySource`` added later is covered without an edit here.
+    ADR-0204 §1's arm, restated over reach ``OWNER`` in place of ``True`` (ADR-0217
+    §10's equivalence). The question has an answer for a record of any band — an
+    episode capture narrows, a belief a producer derived inherits, and a calendar
+    import carries the default because its producer's inputs are not records of this
+    store. Stated over the whole enum so a ``MemorySource`` added later is covered
+    without an edit here.
     """
-    prov = Provenance(
-        source=source,
-        confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-        last_updated=_WHEN,
-        attestation=_attestation_for(source),
-        supplied_withheld_content=stamped,
+    record = SemanticMemory(
+        id="s1",
+        content="a fact",
+        fact="a fact",
+        provenance=Provenance(
+            source=source,
+            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
+            last_updated=_WHEN,
+            attestation=_attestation_for(source),
+        ),
+        placement=Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED),
     )
 
-    assert prov.supplied_withheld_content is stamped
+    assert record.placement.reach is PlacementReach.OWNER

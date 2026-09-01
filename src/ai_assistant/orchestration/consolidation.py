@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Message,
+    Placement,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -714,13 +715,22 @@ class ConsolidationStage:
         # is fail-open against exactly the second-order consolidation ADR-0106 §4's
         # monotonicity exists to stop.
         tainted = any(rests_on_recorded_external_content(record.provenance) for record in records)
-        # ADR-0204 §5's derivation rule, computed in the same place and for the same
-        # reason: a consolidation is a record derived from records of this store, so
-        # its value is the disjunction over **every record this stage was supplied**
-        # — never over the subset the model happened to cite, because
-        # `Provenance.evidence` is not the input set and folding over it would let
-        # one uncited stamped input launder the whole warrant.
-        supplied_withheld = any(record.provenance.supplied_withheld_content for record in records)
+        # ADR-0204 §5's derivation rule as ADR-0217 §3 generalises it, computed in the
+        # same place and for the same reason: a consolidation is a record derived from
+        # records of this store, so its placement is the narrowest over **every record
+        # this stage was supplied** — never over the subset the model happened to
+        # cite, because `Provenance.evidence` is not the input set and folding over it
+        # would let one uncited narrowed input launder the whole warrant.
+        #
+        # `narrowest_of` rather than a pairwise `folded_with`, and the difference is
+        # the one ADR-0217 §3 states: the fold's eligibility clause is bounded to two
+        # placements of **one belief**, and these are placements of different records.
+        # The derived record carries no act of the owner's for a proposal to override,
+        # so discarding a `PROPOSED` input here would protect nothing and would
+        # launder an `OWNER` input — a consolidation supplied a record placed reach
+        # ANYONE setter OWNER_ACT *and* one placed reach OWNER setter PROPOSED derives
+        # reach OWNER, not ANYONE.
+        derived_placement = Placement.narrowest_of(record.placement for record in records)
         now = self._clock()
         labels = {f"R{index + 1}": record.id for index, record in enumerate(records)}
         confirmed = {
@@ -747,7 +757,7 @@ class ConsolidationStage:
         return await self._route(
             proposals,
             tainted=tainted,
-            supplied_withheld=supplied_withheld,
+            placement=derived_placement,
             unusable=unusable,
             over_limit=over_limit,
         )
@@ -757,7 +767,7 @@ class ConsolidationStage:
         proposals: Sequence[MemoryUpdateProposal],
         *,
         tainted: bool,
-        supplied_withheld: bool,
+        placement: Placement,
         unusable: int,
         over_limit: int,
     ) -> _ChunkOutcome:
@@ -775,7 +785,7 @@ class ConsolidationStage:
         for proposal in proposals:
             try:
                 written = await self._writes.write(
-                    self._marked(proposal, tainted=tainted, supplied_withheld=supplied_withheld)
+                    self._marked(proposal, tainted=tainted, placement=placement)
                 )
             except FoldOntoCitedRecordError:
                 # The generalisation landed on one of the records it cites, and the
@@ -811,7 +821,7 @@ class ConsolidationStage:
         return outcome
 
     def _marked(
-        self, proposal: MemoryUpdateProposal, *, tainted: bool, supplied_withheld: bool
+        self, proposal: MemoryUpdateProposal, *, tainted: bool, placement: Placement
     ) -> MemoryUpdateProposal:
         """Stamp the two computed markers on ``proposal``, discarding the producer's.
 
@@ -824,20 +834,26 @@ class ConsolidationStage:
         is not evidence of the standing it claims" with the sign flipped, and
         flipping the sign does not restore the guarantee.
 
-        **``supplied_withheld_content`` is assigned on the same terms** (ADR-0204
-        §5). It is this stage's disjunction over the chunk it selected rather than a
-        value the model proposed, so the sentence above holds of it word for word: no
-        code path exists in which the producer's claim about its own warrant has an
-        effect.
+        **``placement`` is assigned on the same terms** (ADR-0204 §5, ADR-0217 §3).
+        It is this stage's meet over the chunk it selected rather than a value the
+        model proposed, so the sentence above holds of it word for word: no code path
+        exists in which the producer's claim about who may receive what it wrote has
+        an effect. This stage proposes **no** placement of its own and is named in
+        ADR-0217 §4 as the model-backed producer that does not — what it produces is
+        derived from records of this store, so §3's inheritance already gives it the
+        narrowest reach over everything it consolidated, and a second narrowing keyed
+        on the consolidated text would be a model re-judging material another model
+        has already judged.
         """
         provenance = proposal.proposed.provenance.model_copy(
-            update={
-                "derived_from_external": tainted,
-                "supplied_withheld_content": supplied_withheld,
-            }
+            update={"derived_from_external": tainted}
         )
         return proposal.model_copy(
-            update={"proposed": proposal.proposed.model_copy(update={"provenance": provenance})}
+            update={
+                "proposed": proposal.proposed.model_copy(
+                    update={"provenance": provenance, "placement": placement}
+                )
+            }
         )
 
     def _distil(

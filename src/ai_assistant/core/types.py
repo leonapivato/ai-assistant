@@ -20,7 +20,7 @@ import json
 import re
 import string
 import unicodedata
-from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -1607,69 +1607,19 @@ class Provenance(BaseModel):
     know. Both directions are unavailable for one reason, and the honest position
     is to state what is recorded and name what is not.
 
-    **``supplied_withheld_content`` records what stood in a record's warrant, and
-    never what its text says** (ADR-0204 §1). It is ``True`` by exactly two routes
-    and no third: **directly**, where the supply the turn that produced this record
-    ran over held content ADR-0199 §3 withholds from a channel of unbounded audience
-    — whether or not a subtraction then kept that content from the stages that
-    produced it, and whether or not the produced text drew on it — or **inherited**,
-    where the record was derived from another record whose own field is set
-    (ADR-0204 §5). Deciding "did this text actually use that belief?" would mean
-    reading ``MemoryBase.content`` or asking a model what a passage is about, which
-    ADR-0199 §2 forbids as a decision procedure; this is the one stage upstream that
-    is decidable from recorded origin, and it over-approximates deliberately.
-
-    **One exception, on one class of record** (ADR-0210 §1, §8). On an episode
-    captured from an operation whose **output channel's audience is unbounded**, both
-    routes above range over less than the whole supply: over the members of that
-    turn's supply a relevance read taken with the turn's own goal statement returned
-    — the belief composition and ADR-0158's episodic supplement, ADR-0074 §5's second
-    and third groups — together with the turn's context facets, and never over a
-    member the supply holds only because it stands in ADR-0074 §5's first group, the
-    conversation's own recent turns. Both routes survive and neither is dropped; what
-    narrows is the set they range over, and the test is what a relevance read
-    *returned* rather than which group the composition finally placed the record in.
-    The **withholding is not narrowed with it**: ADR-0204 §3 still removes such a
-    record from that turn's supply wherever in it the record stood, so what a member
-    of the first group loses is the power to set this field and nothing else. On
-    every **other** record — an episode of a bounded-channel turn, a belief, a record
-    written before that decision — this field is exactly what ADR-0204 §1 says.
-
-    **And that exception is why the field stops being monotone** (#1775). A
-    conversation tail is in the supply because it is *the conversation* and not
-    because it answered the question (ADR-0074 §5), so before ADR-0210 one spoken
-    turn's withholding stamped its episode, the next turn's tail carried that
-    episode, ADR-0204 §3 withheld it, and the mark propagated through the episodic
-    record for as long as the conversation ran — on any store, whatever was asked.
-
-    **On this class rather than on :class:`EpisodicMemory`** (ADR-0204 §1), by
-    :class:`MemoryBase`'s own placement rule — a field is placed by which question
-    it answers. What material stood in front of the producer is where a record came
-    from, which is this class's question, and it is the identical question
-    ``derived_from_external`` already answers about a different property of the same
-    material. It also has to live here for the inherited route to be expressible: a
-    belief distilled from a marked episode must be able to carry the mark, and
-    :class:`EpisodicMemory` cannot carry a field for a :class:`SemanticMemory`.
-
-    **``False`` is a measurement on a record written after the field landed, and a
-    decode default on one written before it** (ADR-0204 §1, §6). On the first it
-    states that neither route reached the record, which is true of every record no
-    turn produced and nothing was derived from — a user's own assertion, a calendar
-    import, a reader's proposal. On the second it is not a measurement at all,
-    because no producer recorded an answer, and no lane or later ADR cites it as
-    evidence about the record carrying it. Neither case gives a supply site a second
-    test: ADR-0204 §3's is the whole of what one applies, to every record alike,
-    because nothing in the data distinguishes the two.
-
-    **It never clears** (ADR-0204 §5). No fold, merge, reinforcement or
-    consolidation writes ``False`` over a ``True``; a fold's value is the
-    **disjunction** of both sides, and a producer deriving a record from records of
-    this store takes the disjunction over **every record it was supplied** — never
-    over the subset it cited, so ``evidence`` is not the input set. A ``SUPERSEDE``
-    neither clears nor inherits it: ADR-0040 §5a carries nothing of the target onto
-    the correction, so the correction carries its own producer's value, and the
-    target is retained with a closed validity window (ADR-0045 §4) still carrying
-    its own.
+    **``supplied_withheld_content`` was here and is not any more** (ADR-0217 §1,
+    §9). ADR-0204 §1 placed it on this class correctly, under
+    :class:`MemoryBase`'s own placement rule: *what material stood in front of the
+    producer* is where a record came from, which is this class's question. What
+    changed is not that the answer was wrong but that the **question moved**. Two
+    further setters now write the same slot — the owner's explicit act and a model's
+    proposal — so the slot asks *who may receive this record*, of which the
+    derivation's answer is one input, and that question is the envelope's rather than
+    this class's. The field is therefore removed rather than kept beside a second
+    one: :attr:`MemoryBase.placement` carries it, ``True`` becoming reach ``OWNER``
+    with setter ``DERIVED``, and :class:`Placement` states the whole rule — both
+    routes, ADR-0210 §1's narrowed evaluation set, and the ratchet. Nothing about
+    ADR-0204's evaluation, its site, its producer or its withholding moved with it.
 
     **No validator constrains ``last_confirmed_at``, and that absence is the
     decision** (ADR-0109 §8). Not required, because a required instant would refuse
@@ -1738,23 +1688,6 @@ class Provenance(BaseModel):
             "the latest ``occurred_at`` among the episodes cited (ADR-0103 §9). "
             "``None`` is *unknown*, never stale and never fresh. Not transaction "
             "time: that is ``last_updated`` (ADR-0109 §2)."
-        ),
-    )
-    supplied_withheld_content: bool = Field(
-        default=False,
-        description=(
-            "Whether content ADR-0199 §3 withholds from a channel of unbounded "
-            "audience stood in this record's warrant (ADR-0204 §1) — because the "
-            "supply the turn that produced it ran over held such content, or "
-            "because it was derived from a record whose own field is set. On an "
-            "episode captured from an operation whose own output channel's audience "
-            "is unbounded, that supply is narrowed to what a relevance read taken "
-            "with the turn's goal statement returned, plus the turn's context "
-            "facets, and excludes the conversation's own recent turns (ADR-0210 "
-            "§1); on every other record it is the whole supply. A supply site for a "
-            "channel of unbounded audience withholds a record carrying ``True`` "
-            "(ADR-0204 §3), whichever group of the supply it stood in; a bounded "
-            "channel's supply applies the test to nothing."
         ),
     )
 
@@ -1913,6 +1846,391 @@ class Validity(BaseModel):
         return self.valid_until is None or now < self.valid_until
 
 
+class PlacementReach(StrEnum):
+    """The set of people a record may be received by (ADR-0217 §1).
+
+    A **denotation of a set of people**, and the two members below are the two sets
+    this system can denote today: ``ANYONE`` denotes every person, ``OWNER`` the set
+    whose one member is the owner. The enumeration is *the vocabulary as it stands,
+    not a cardinality* ADR-0217 fixes — a later decision giving it further
+    denotations (named people, circles, #1718) **adds** them under ADR-0082 §1 and
+    changes no clause of §1, because every clause there is written over *a* reach
+    rather than over the pair.
+
+    **Ordered by narrowness, and the order is total today** (§1). ``OWNER`` is the
+    narrower, so the meet of the pair is ``OWNER`` wherever either side carries
+    it — which is ADR-0204 §5's disjunction member for member, so no producer's
+    arithmetic changed when the boolean became this. A later ADR adding denotations
+    **not** totally ordered with these two owes the meet for every pair it makes
+    reachable, and a representation for a meet that is empty, before either can be
+    folded.
+
+    **Never read as a channel placement** (§1's vocabulary clause). ADR-0199 §3
+    *places a class* as speakable **on a channel**; this *places a record* **for a
+    set of people**, and §2's read rule is the conjunction of the two. Neither
+    renames the other and neither is read as the other.
+    """
+
+    ANYONE = "anyone"
+    OWNER = "owner"
+
+
+class PlacementSetter(StrEnum):
+    """Who narrowed a record's placement (ADR-0217 §3).
+
+    **Exactly three, and that enumeration is exhaustive** — unlike
+    :class:`PlacementReach`, whose members are the vocabulary of the day. No
+    implementation or later ADR adds a fourth without superseding §3's first
+    clause.
+
+    They carry a **total order, strongest first: ``DERIVED``, then ``OWNER_ACT``,
+    then ``PROPOSED``** (§3). Where two setters would write the same reach the
+    stronger is recorded, which is what makes the owner's act final over a model's
+    in the same-reach case as well as the differing-reach one, and what keeps a
+    derivation's narrowing — the one §3's closing clause forbids an act to lift —
+    from being laundered into an act's.
+
+    Attributes:
+        OWNER_ACT: The owner said so, at write or after the fact. Final over a
+            model's proposal in both directions; it may narrow a placement whose
+            setter is ``None`` or ``PROPOSED`` and widen one whose setter is
+            ``PROPOSED`` or ``OWNER_ACT``, and it never widens a ``DERIVED`` one.
+        DERIVED: ADR-0204 §2's evaluation or §5's inheritance, unchanged in every
+            respect except what they write into. No user act, configuration,
+            setting or later lane widens one in place; a supersession is the only
+            route by which a live record stops carrying it.
+        PROPOSED: A model's proposal (§4). The weakest: it may only narrow, only
+            where the placement is reach ``ANYONE`` with no setter, and never on a
+            record already in the store.
+    """
+
+    OWNER_ACT = "owner_act"
+    DERIVED = "derived"
+    PROPOSED = "proposed"
+
+
+#: Narrowness order on :class:`PlacementReach` — higher is narrower (ADR-0217 §1).
+#: The meet is the maximum of this, which on the two members shipped is ``OWNER``
+#: wherever either side carries it.
+_REACH_NARROWNESS: Final[dict[PlacementReach, int]] = {
+    PlacementReach.ANYONE: 0,
+    PlacementReach.OWNER: 1,
+}
+
+#: ADR-0217 §3's total order over the setters, strongest first, with the absent
+#: setter weakest of all: a placement nothing narrowed supplies no narrowing, so it
+#: can never out-rank one that did.
+_SETTER_STRENGTH: Final[dict[PlacementSetter | None, int]] = {
+    PlacementSetter.DERIVED: 3,
+    PlacementSetter.OWNER_ACT: 2,
+    PlacementSetter.PROPOSED: 1,
+    None: 0,
+}
+
+#: The two setters ADR-0217 §3 calls final against a proposal: a ``PROPOSED``
+#: placement is not a *side* of a fold against either of them.
+_FINAL_SETTERS: Final[frozenset[PlacementSetter]] = frozenset(
+    {PlacementSetter.OWNER_ACT, PlacementSetter.DERIVED}
+)
+
+
+class Placement(BaseModel):
+    """Who may receive this record, and who narrowed it (ADR-0217 §1).
+
+    ADR-0204 put the question "did content this system may not say aloud stand in
+    this record's warrant?" on a boolean of :class:`Provenance`. ADR-0217 §1 widens
+    that mark rather than adding a second field beside it: the slot now answers *who
+    may receive this record*, of which the derivation's answer is one input, and two
+    further setters may write it. A record ADR-0204 §2 or §5 would have stamped
+    ``True`` carries reach ``OWNER`` with setter ``DERIVED``; one it would have
+    stamped ``False`` carries the default.
+
+    **One field rather than two, which is the safer shape** (§1). Two recorded
+    values in front of one read invite the failure where one is written and the
+    other is not — a supply site consulting the placement and not the mark would
+    speak a record ADR-0204 withholds, silently. One slot, three setters, one read.
+
+    **The derivation records what stood in a record's warrant, and never what its
+    text says** (ADR-0204 §1, ADR-0217 §3). It writes reach ``OWNER`` with setter
+    ``DERIVED`` by exactly two routes and no third: **directly**, where the supply
+    the turn that produced this record ran over held content ADR-0199 §3 withholds
+    from a channel of unbounded audience — whether or not a subtraction then kept
+    that content from the stages that produced it, and whether or not the produced
+    text drew on it — or **inherited**, where the record was derived from a record
+    whose own reach is narrower (ADR-0204 §5). Deciding "did this text actually use
+    that belief?" would mean reading ``MemoryBase.content`` or asking a model what a
+    passage is about, which ADR-0199 §2 forbids as a decision procedure; this is the
+    one stage upstream that is decidable from recorded origin, and it
+    over-approximates deliberately.
+
+    **One exception, on one class of record** (ADR-0210 §1, §8, as ADR-0217 §2
+    carries it forward by field name alone). On an episode captured from an
+    operation whose **output channel's audience is unbounded**, both routes above
+    range over less than the whole supply: over the members of that turn's supply a
+    relevance read taken with the turn's own goal statement returned — the belief
+    composition and ADR-0158's episodic supplement, ADR-0074 §5's second and third
+    groups — together with the turn's context facets, and never over a member the
+    supply holds only because it stands in ADR-0074 §5's first group, the
+    conversation's own recent turns. Both routes survive and neither is dropped;
+    what narrows is the set they range over. The **withholding is not narrowed with
+    it**: an ``OWNER``-placed record is removed from that turn's supply wherever in
+    it it stood, so what a member of the first group loses is the power to narrow a
+    placement and nothing else. On every **other** record — an episode of a
+    bounded-channel turn, a belief, a record written before either decision — the
+    derivation is exactly what ADR-0204 §1 says.
+
+    **And that exception is why the derivation stops being monotone** (#1775). A
+    conversation tail is in the supply because it is *the conversation* and not
+    because it answered the question (ADR-0074 §5), so before ADR-0210 one spoken
+    turn's withholding narrowed its episode, the next turn's tail carried that
+    episode, ADR-0204 §3 withheld it, and the narrowing propagated through the
+    episodic record for as long as the conversation ran — on any store, whatever was
+    asked.
+
+    **A derivation never clears** (ADR-0204 §5, ADR-0217 §3). No fold, merge,
+    reinforcement or consolidation writes a wider reach over a narrower one: a
+    fold's reach is the **meet** of both sides (:meth:`folded_with`), and a producer
+    deriving a record from records of this store takes the narrowest over **every
+    record it was supplied** (:meth:`narrowest_of`) — never over the subset it cited,
+    so ``Provenance.evidence`` is not the input set. No user act, configuration,
+    setting or later lane widens in place a placement whose setter is ``DERIVED``; a
+    supersession is the only route by which a live record stops carrying one, and a
+    ``SUPERSEDE`` neither clears nor inherits it — ADR-0040 §5a carries nothing of
+    the target onto the correction, so the correction carries its own producer's
+    placement and the retained target keeps its own.
+
+    **The legal states are enumerated and refused at construction**, so no producer,
+    decode or later lane can represent a combination ADR-0217 does not mean. The
+    table is total:
+
+    ==============  ====================  ==============
+    ``set_by``      permitted ``reach``   ``set_at``
+    ==============  ====================  ==============
+    ``None``        ``ANYONE`` only       ``None`` only
+    ``DERIVED``     ``OWNER`` only        set, or ``None``
+    ``PROPOSED``    ``OWNER`` only        **required**
+    ``OWNER_ACT``   ``ANYONE`` or ``OWNER``  **required**
+    ==============  ====================  ==============
+
+    **Of the five refusals the two that matter most are the two that are otherwise
+    silent** (§1). ``reach=ANYONE`` with ``set_by=DERIVED`` would be a record the
+    derivation narrowed rendered speakable on a channel of unbounded audience — the
+    laundering ADR-0204 §5 exists to stop, reachable by construction rather than by
+    a mistake in any rule. ``reach=OWNER`` with ``set_by=None`` would be a narrowing
+    no setter is accountable for, which §3's precedence could not rule on. Neither
+    is a state any clause of ADR-0217 produces, so refusing them costs nothing and
+    closes two routes by which a bug elsewhere becomes a disclosure.
+
+    **A ``set_at`` of ``None`` beside a setter is *unknown*, never
+    unrecorded-therefore-recent** (§1). By the table that is a ``DERIVED`` setter
+    and no other, and it **originates** on exactly one path: ADR-0217 §9's decode of
+    a record written before this field existed, which carries no instant for an act
+    nobody timed. It reaches a second record only by a fold carrying it forward,
+    which mints no instant and makes no second narrowing. No consumer reads such a
+    ``None`` as evidence about when the narrowing was made and no surface renders it
+    as one — ADR-0109's reading of ``last_confirmed_at`` and ADR-0204 §1's fourth
+    clause, applied to the one place this type inherits the same gap.
+
+    **The obligation that closes that residue is a *producer* obligation** (§1), and
+    it is stated there rather than here because **a validator cannot see which path
+    constructed the value**: this type carries ``reach``, ``set_by`` and ``set_at``
+    and nothing else, so a decode of a pre-field record and a fresh derivation are
+    indistinguishable to it. Every derivation this system performs writes the
+    instant of the narrowing it makes, so an untimed ``DERIVED`` placement in a
+    store this decision's implementation wrote *descends from* a pre-field record
+    and nothing else.
+
+    **A setter of ``None`` states that nothing has narrowed this record**, and on a
+    record written after this field landed that is a measurement rather than merely
+    a default — exactly as ADR-0204 §1's third clause says of its ``False``. On a
+    record written **before** it landed it is a decode default and not a
+    measurement, which is why §9's decode rule exists.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reach: PlacementReach = Field(
+        default=PlacementReach.ANYONE,
+        description=(
+            "Who may receive this record (ADR-0217 §1). A record is emitted on an "
+            "output channel only if every person who can perceive that channel's "
+            "emission is a member of this set (§2) — which today reduces to "
+            "ADR-0199 §1's two audiences: an ``OWNER`` record is withheld from a "
+            "channel of unbounded audience and nothing is withheld from a bounded "
+            "one. A conjunct beside ADR-0199 §3's placements, never a replacement "
+            "for them: no reach makes speakable anything §3 withholds."
+        ),
+    )
+    set_by: PlacementSetter | None = Field(
+        default=None,
+        description=(
+            "Who narrowed this record, or ``None`` where nothing has (ADR-0217 §3). "
+            "``None`` is a measurement on a record written after this field landed "
+            "and a decode default on one written before it (§1, §9)."
+        ),
+    )
+    set_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the narrowing this placement records was made (ADR-0217 §1), "
+            "tz-aware. ``None`` beside a ``DERIVED`` setter is **unknown** — the "
+            "decode of a record written before this field existed (§9), carried "
+            "forward by a fold that minted no instant — and is never read as "
+            "unrecorded-therefore-recent."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _states_are_enumerated(self) -> Placement:
+        """Refuse every combination outside ADR-0217 §1's table.
+
+        On the type rather than at the producers, because §1 puts it there: "so no
+        producer, decode or later lane can represent a combination this ADR does not
+        mean". A validator runs on *deserialisation* as well as on construction,
+        which is what closes the second route in — and it refuses nothing that
+        already worked (ADR-0086 §3's test), because no store holds this field until
+        the change that adds it and §9's decode maps every legacy record onto a row
+        of the table.
+        """
+        if self.set_by is None:
+            if self.reach is not PlacementReach.ANYONE:
+                msg = (
+                    f"a placement of reach {self.reach.name} carries no setter: a narrowing "
+                    f"nobody is accountable for is a state ADR-0217 §3's precedence cannot "
+                    f"rule on (ADR-0217 §1)"
+                )
+                raise ValueError(msg)
+            if self.set_at is not None:
+                msg = (
+                    "a placement carries an instant with no setter: the instant names when a "
+                    "narrowing was made, and nothing narrowed this record (ADR-0217 §1)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.reach is PlacementReach.ANYONE and self.set_by is not PlacementSetter.OWNER_ACT:
+            msg = (
+                f"a placement set by {self.set_by.name} carries reach ANYONE: a record the "
+                f"derivation or a model narrowed would be speakable on a channel of unbounded "
+                f"audience, which is the laundering ADR-0204 §5 exists to stop (ADR-0217 §1)"
+            )
+            raise ValueError(msg)
+        if self.set_at is None and self.set_by is not PlacementSetter.DERIVED:
+            msg = (
+                f"a placement set by {self.set_by.name} carries no instant: only a DERIVED "
+                f"placement may, and only as ADR-0217 §9's decode of a record written before "
+                f"the field existed (ADR-0217 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+    def folded_with(self, other: Placement) -> Placement:
+        """ADR-0217 §3's meet over two placements **of one belief**.
+
+        The survivor's reach is the narrower of the eligible sides'; its setter is
+        the strongest, in :class:`PlacementSetter`'s order, among the eligible sides
+        that carry that reach — a side whose reach is wider supplies no setter,
+        having supplied none of the narrowing — and its instant is that side's,
+        never the instant of the fold, because the stamp names when the placement
+        was set and not when a duplicate was merged.
+
+        **Eligibility is decided before the meet** (§3): a placement whose setter is
+        ``PROPOSED`` is **not a side** of a meet against one whose setter is
+        ``OWNER_ACT`` or ``DERIVED``. It is discarded before the arithmetic runs
+        rather than weighed in it, because §4 already forbids a proposal to overwrite
+        either — and weighing it here would let a model undo an owner's act by
+        duplication, §3's finality defeated without ever writing to the owner's
+        record. Nothing else is ever discarded.
+
+        **This filter is bounded to the fold and does not reach a derivation.** A
+        derivation's inputs are *different records*, the derived record carries no
+        act of the owner's for a proposal to override, and an ``OWNER`` input
+        discarded there is an ``OWNER`` input laundered — so
+        :meth:`narrowest_of` takes every supplied placement as a side, whatever its
+        setter.
+
+        **Ties are broken on the instant deterministically** (§3). Where two eligible
+        sides carry the same reach *and* the same setter the survivor carries the
+        **earlier** instant, and where either carries none it carries none. That rule
+        is total, commutative and associative — an absent instant absorbs, a known
+        one takes the minimum — so a fold's result does not depend on which side an
+        implementation calls the stored one, nor on the order three duplicates are
+        merged in. An absent instant is §9's decoded legacy placement, and keeping it
+        unknown is better than adopting a known instant that would assert a first
+        narrowing this system cannot vouch for.
+
+        Args:
+            other: The placement being folded in.
+
+        Returns:
+            The survivor's placement.
+        """
+        if self.set_by is PlacementSetter.PROPOSED and other.set_by in _FINAL_SETTERS:
+            return other
+        if other.set_by is PlacementSetter.PROPOSED and self.set_by in _FINAL_SETTERS:
+            return self
+        return _meet((self, other))
+
+    @classmethod
+    def narrowest_of(cls, placements: Iterable[Placement]) -> Placement:
+        """ADR-0217 §3's meet over the placements a derivation was **supplied**.
+
+        A producer deriving a record from records of this store writes the narrowest
+        reach over **every record it was supplied** — never over the subset it cited,
+        selected, ranked or judged relevant — which is ADR-0204 §5's
+        all-inputs rule generalised from a disjunction to a meet. The derived
+        record's setter follows :class:`PlacementSetter`'s order over the supplied
+        placements that carry the surviving reach, and its instant follows the same
+        rule the fold's does, so a narrowing that **only** a ``PROPOSED`` placement
+        supplied is recorded ``PROPOSED`` and the owner still lifts in one act what a
+        model proposed.
+
+        **No supplied placement is discarded on this path** (§3), which is the one
+        way it differs from :meth:`folded_with`: the eligibility clause is about two
+        placements of one belief and what it protects is an act on that belief. A
+        consolidation supplied a record placed reach ``ANYONE`` setter ``OWNER_ACT``
+        **and** one placed reach ``OWNER`` setter ``PROPOSED`` therefore derives
+        reach ``OWNER``, not ``ANYONE``.
+
+        **It is not ADR-0204 §2's own evaluation and does not stand in for it** (§3).
+        Where that disjunction is ``True`` of *this* record's production the record
+        is reach ``OWNER`` setter ``DERIVED`` on that ground alone, whatever its
+        inputs carried — a fact about this record's warrant rather than an
+        inheritance of another record's stamp.
+
+        Args:
+            placements: The placement of every record the producer was supplied.
+
+        Returns:
+            The meet over all of them; the default placement over none.
+        """
+        return _meet(tuple(placements))
+
+
+def _meet(sides: Sequence[Placement]) -> Placement:
+    """ADR-0217 §3's meet over already-eligible sides, in one place.
+
+    The narrowest reach; among the sides carrying it, the strongest setter; among
+    those, the earliest instant with an absent one absorbing. Written once and
+    called by both :meth:`Placement.folded_with` and :meth:`Placement.narrowest_of`,
+    because a meet stated in two places is a meet that can drift between them.
+
+    Args:
+        sides: The eligible placements. Empty yields the default.
+
+    Returns:
+        The meet.
+    """
+    if not sides:
+        return Placement()
+    reach = max((side.reach for side in sides), key=_REACH_NARROWNESS.__getitem__)
+    narrowing = [side for side in sides if side.reach is reach]
+    setter = max((side.set_by for side in narrowing), key=_SETTER_STRENGTH.__getitem__)
+    winners = [side for side in narrowing if side.set_by is setter]
+    instants = [side.set_at for side in winners]
+    set_at = None if any(instant is None for instant in instants) else min(filter(None, instants))
+    return Placement(reach=reach, set_by=setter, set_at=set_at)
+
+
 class MemoryBase(BaseModel):
     """Fields shared by every memory record, regardless of kind.
 
@@ -2019,6 +2337,34 @@ class MemoryBase(BaseModel):
     ``Provenance``'s every field is set by the *producer* of the belief, and this is
     a property of the record's life in the store. It is the mirror image of
     ``score`` — supplied by the machinery on one path, meaningless on the other.
+
+    **``placement`` is the *to whom* axis** (ADR-0217 §1), and it lands here by the
+    same ADR-0100 §2 test the two above land by. *Who may receive this record* is
+    not a fact about the material the producer saw — which is what
+    :class:`Provenance` answers — but a fact about the record's disposition, and it
+    belongs to the family this envelope already holds: **about whom**
+    (``about_person``), **about what** (``topics``), **for how long**
+    (``expires_at``, ``validity``), and now **to whom**. ADR-0045 §2's authorship
+    argument agrees, and where the question test and the authorship test agree the
+    placement is not close: a placement the owner revises after the fact, on a
+    record already in the store, is exactly the shape that section put ``validity``
+    here for.
+
+    **It carries the question ADR-0204 put on ``Provenance``, widened rather than
+    replaced** (ADR-0217 §1). ``Provenance.supplied_withheld_content`` is removed and
+    this field answers what it answered: a record ADR-0204 §2's evaluation or §5's
+    inheritance would have stamped ``True`` is written reach ``OWNER`` with setter
+    ``DERIVED``, and one it would have stamped ``False`` carries the default. Every
+    record ADR-0204 caused to be withheld is withheld after ADR-0217, on the same
+    evidence, at the same site, by the same producer; what changed is that two
+    further setters may write the same slot and that the slot is no longer a
+    boolean. ADR-0210 §1's narrowed evaluation set is untouched by the move.
+
+    **A record already in a store is decoded, never defaulted**
+    (:meth:`_decode_legacy_withheld_mark`, ADR-0217 §9). Without that mapping every
+    record ADR-0204 narrowed would decode as unnarrowed on the day the field landed
+    — ADR-0204 §1's fourth clause hazard, a decode default read as a measurement,
+    with a disclosure consequence.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -2076,6 +2422,59 @@ class MemoryBase(BaseModel):
             "store has stored. Compared for equality only, never ordered."
         ),
     )
+    placement: Placement = Field(
+        default_factory=Placement,
+        description=(
+            "Who may receive this record (ADR-0217 §1), and who narrowed it. "
+            "Defaults to reach ANYONE with no setter, which is ADR-0199 §3's own "
+            "placement of the record's class and subtracts nothing (§6). A record "
+            "whose reach is OWNER is withheld from a channel of unbounded audience "
+            "wherever in a turn's supply it stood, and from a bounded channel "
+            "nothing is withheld on this field's account (§2)."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decode_legacy_withheld_mark(cls, data: Any) -> Any:
+        """Decode a record written before ``placement`` existed (ADR-0217 §9).
+
+        ``provenance.supplied_withheld_content`` of ``true``, on a record carrying no
+        placement of its own, decodes to reach ``OWNER`` with setter ``DERIVED`` and
+        **no** ``set_at`` — nothing timed an act that predates the field, and §1
+        reads that absence as *unknown* rather than as recent. ``false`` or absent
+        decodes to the default. The mapping is **total and one-directional**: it
+        never writes the legacy member back, never widens a placement a record
+        already carries, and never maps a ``false`` onto anything.
+
+        **Here rather than in a migration pass**, because §9 puts it "wherever a
+        record carrying the legacy member is decoded" and names the load-bearing site
+        as the persistent store, which holds records written under ADR-0204 and is
+        read on the first turn after the upgrade. A validator on this envelope is
+        that site and the wire both, in one place, with no store rewritten before it
+        is read. :class:`Provenance` does not set ``extra="forbid"``, so the member
+        itself is dropped by the decode that follows.
+
+        Args:
+            data: Whatever is being validated — a mapping on the decode path, and
+                anything else (a constructed model, most often) on the paths this
+                rule has nothing to say about.
+
+        Returns:
+            ``data``, with the decoded placement added where the legacy member
+            called for one.
+        """
+        if not isinstance(data, Mapping) or "placement" in data:
+            return data
+        provenance = data.get("provenance")
+        if not isinstance(provenance, Mapping) or not provenance.get(
+            "supplied_withheld_content", False
+        ):
+            return data
+        return {
+            **data,
+            "placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED),
+        }
 
 
 class EpisodicMemory(MemoryBase):

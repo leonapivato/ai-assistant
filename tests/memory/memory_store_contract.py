@@ -49,6 +49,9 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -70,6 +73,9 @@ _ONE_MINUTE = timedelta(minutes=1)
 #: The transaction stamp every fixture record carries unless a case varies it —
 #: comfortably before ``_STORE_NOW``, so nothing is accidentally not-yet-live.
 _REVISED = datetime(2026, 1, 1, tzinfo=UTC)
+#: When the narrowing a placement records was made (ADR-0217 §1). Every derivation
+#: this system performs writes one, so the round-trip arm pins one too.
+_NARROWED_AT = datetime(2026, 2, 1, tzinfo=UTC)
 #: ``list_beliefs``'s default page size (ADR-0073 §2), and the number of extra
 #: records the default-limit case seeds beyond it so the default is really tested.
 _DEFAULT_PAGE = 50
@@ -732,35 +738,35 @@ class MemoryStoreContract:
     async def test_a_records_disclosure_stamp_survives_the_round_trip(
         self, store: MemoryStore
     ) -> None:
-        # ADR-0204 §9's first obligation, on the contract rather than on one store.
-        # `Provenance.supplied_withheld_content` is what a supply site for a channel
-        # of unbounded audience reads to decide whether a record reaches that
-        # channel's turn at all (§3), and it reads it off a record the store handed
-        # back. So an implementation that dropped the field — a backend indexing the
-        # columns it knows and rebuilding the rest, say — would answer `False` for a
-        # stamped record on every read after the first, and the whole ruling would
-        # hold only until the process that wrote the record went away. Both values
-        # are pinned: one that returned `True` for everything would empty ADR-0199
-        # §3's speakable set instead, which fails milestone 19's exit test by the
-        # other route (§1's third clause).
-        stamped = _preference("stamped", "prefers concise replies")
-        await store.add(
-            stamped.model_copy(
-                update={
-                    "provenance": stamped.provenance.model_copy(
-                        update={"supplied_withheld_content": True}
-                    )
-                }
-            )
+        # ADR-0204 §9's first obligation, restated over the field ADR-0217 §1 moved
+        # it to, on the contract rather than on one store. `MemoryBase.placement` is
+        # what a supply site for a channel of unbounded audience reads to decide
+        # whether a record reaches that channel's turn at all (ADR-0217 §2), and it
+        # reads it off a record the store handed back. So an implementation that
+        # dropped the field — a backend indexing the columns it knows and rebuilding
+        # the rest, say — would answer "reach ANYONE" for a narrowed record on every
+        # read after the first, and the whole ruling would hold only until the process
+        # that wrote the record went away. Both values are pinned: one that returned
+        # reach OWNER for everything would empty ADR-0199 §3's speakable set instead,
+        # which fails milestone 19's exit test by the other route (ADR-0217 §6).
+        #
+        # The **setter and the instant** are pinned beside the reach, because they are
+        # what a later act reads: an implementation that kept the reach and dropped
+        # the setter would leave `unguard` unable to tell a derivation it may not lift
+        # from a proposal it may (ADR-0217 §3, §7).
+        narrowed = Placement(
+            reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_NARROWED_AT
         )
+        stamped = _preference("stamped", "prefers concise replies")
+        await store.add(stamped.model_copy(update={"placement": narrowed}))
         await store.add(_preference("unstamped", "prefers a written summary"))
 
         got = await store.get("stamped")
         assert got is not None
-        assert got.provenance.supplied_withheld_content is True
+        assert got.placement == narrowed
         plain = await store.get("unstamped")
         assert plain is not None
-        assert plain.provenance.supplied_withheld_content is False
+        assert plain.placement == Placement()
 
     async def test_a_records_topics_survive_the_round_trip(self, store: MemoryStore) -> None:
         """ADR-0213 §12.1, on the contract rather than on one store.

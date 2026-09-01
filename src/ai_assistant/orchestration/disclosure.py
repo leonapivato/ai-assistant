@@ -22,19 +22,22 @@ listener "cannot distinguish from a complete one".
 (ADR-0199 §2). For a record that is :attr:`~ai_assistant.core.types.MemoryBase.about_person`,
 :attr:`~ai_assistant.core.types.Provenance.source` and — where the band is
 ``ATTESTED`` — :attr:`~ai_assistant.core.types.Attestation.reported_by`, and since
-ADR-0204 §3 a **fourth** recorded field of the same provenance,
-:attr:`~ai_assistant.core.types.Provenance.supplied_withheld_content`. For a
+ADR-0204 §3 a **fourth** recorded field, which ADR-0217 §1 moved onto the envelope
+and widened: :attr:`~ai_assistant.core.types.MemoryBase.placement`. For a
 context facet it is the facet's own **kind**. No content is read: not
 ``MemoryBase.content``, not a facet's rendered text, not a keyword, not a
 pattern, not a classifier, and not a model asked what a passage is about.
 
-**The fourth read is a second reason to withhold, not a fifth placement**
-(ADR-0204 §3, §11). ADR-0199 §3's placements are computed exactly as they were —
-no class becomes speakable or unspeakable here — and a record whose warrant held
-content §3 withholds from this channel is withheld whatever §3's third clause
-would otherwise place it as. That closes the two paths #1703 and #1708 record: a
-withholding turn's own question, and a bounded channel's turn laundering a model
-rationale through capture into a record §3 places speakable.
+**The fourth read is a second reason to withhold, not a fifth class placement**
+(ADR-0204 §3, §11; ADR-0217 §2). ADR-0199 §3's placements are computed exactly as
+they were — no class becomes speakable or unspeakable here — and a record whose
+own placement does not admit this channel's audience is withheld whatever §3's
+third clause would otherwise place it as. That closes the two paths #1703 and
+#1708 record: a withholding turn's own question, and a bounded channel's turn
+laundering a model rationale through capture into a record §3 places speakable.
+Since ADR-0217 §1 the record's reach is narrowed by the owner's own act and by a
+model's proposal as well as by that derivation, and this read is unmoved by which
+of the three wrote it: it is a **conjunct**, so it can only subtract.
 
 **The evaluation is also made on a channel whose audience is bounded, where
 nothing is subtracted** (ADR-0204 §2, §4). :class:`BoundedAudienceSupply` runs the
@@ -124,6 +127,7 @@ from ai_assistant.core.types import (
     DataTier,
     EmailFacet,
     MemorySource,
+    PlacementReach,
     band_of,
 )
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
@@ -218,8 +222,8 @@ def supply_for_unbounded_audience(
         what it was. It is also ADR-0204 §2's disjunction as ADR-0210 §1 narrows it,
         over this one evaluation and with no second pass over the supply — its first
         term because a record of that set or a facet was unplaced, and its second
-        because :func:`_speakable` refuses a record already carrying
-        ``supplied_withheld_content``, so a supply whose *retrieved* groups hold one
+        because :func:`_speakable` refuses a record whose ``placement`` is already
+        narrowed (ADR-0217 §1), so a supply whose *retrieved* groups hold one
         cannot come back as "nothing was withheld". A record withheld from the
         conversation's own recent turns and from nowhere else is subtracted and
         leaves this value ``False``, which is the whole of §1.
@@ -443,14 +447,25 @@ def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[st
     ADR-0199 §3 does not name, an attested record with no attestation at all — is
     unplaced and therefore withheld.
 
-    **And a fourth read, before any placement is reached** (ADR-0204 §3): a record
-    whose ``supplied_withheld_content`` is set is withheld from this channel however
-    §3's third clause would place it. It is read first among the provenance fields
-    because it is not a placement at all — §3 places the record exactly as it always
-    did, and this is a separate reason the record does not reach the channel, over a
-    separate recorded field. A record carrying ``False`` is placed by the three
-    reads below with nothing added, which is what keeps ADR-0199 §3's speakable set
-    the size it was.
+    **And a fourth read, before any class placement is reached**: the record's own
+    ``placement`` (ADR-0217 §1, §2, widening ADR-0204 §3's mark). A record whose
+    reach does not admit this channel's audience is withheld however ADR-0199 §3's
+    third clause would place its class. That is ADR-0217 §2's read rule — a record
+    is emitted only if **every person who can perceive the channel's emission is a
+    member of the record's placement** — reduced to today's two audiences: what an
+    unbounded channel emits "reaches whoever is within range of the device with no
+    act of theirs" (ADR-0199 §1), so only reach ``ANYONE`` admits them.
+
+    **Two senses of "placement", and they are never read for each other** (ADR-0217
+    §1's vocabulary clause). ADR-0199 §3 *places a class* as speakable **on a
+    channel**; the field read here *places a record* **for a set of people**. This
+    predicate is the conjunction of the two, and the field read is a **conjunct
+    beside** §3 rather than a replacement for it: the three reads below compute §3's
+    placements exactly as they always did, no class becomes speakable, and nothing
+    here can add a record to a channel — only remove one. That is what keeps the
+    fail-closed property of §3's fourth clause on the day the field landed, and what
+    makes ADR-0217 §6's default true: a record carrying the default placement is
+    placed exactly as §3 places its class.
 
     Args:
         record: The record being placed.
@@ -461,9 +476,9 @@ def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[st
     """
     if record.about_person is not None:
         return False
-    provenance = record.provenance
-    if provenance.supplied_withheld_content:
+    if record.placement.reach is not PlacementReach.ANYONE:
         return False
+    provenance = record.provenance
     if provenance.source in _PLACED_SOURCES:
         return True
     attestation = provenance.attestation

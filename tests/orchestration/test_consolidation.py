@@ -40,6 +40,9 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     SemanticMemory,
     Validity,
@@ -86,6 +89,13 @@ class _UnboundedDuration(timedelta):
 
 #: The instant every fake clock in this module reads.
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
+
+#: The three narrowed placements the ADR-0217 §3 cases below are built out of
+#: (ADR-0217 §1's table). ``_UNGUARDED`` is a record the owner widened by an act,
+#: which is the one row that carries reach ANYONE beside a setter.
+_DERIVED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT)
+_PROPOSED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_AT)
+_UNGUARDED = Placement(reach=PlacementReach.ANYONE, set_by=PlacementSetter.OWNER_ACT, set_at=_AT)
 
 #: A reply proposing one ``observed`` belief citing two records — the floor an
 #: ``observed`` consolidation must clear, so every case below that wants a proposal
@@ -139,7 +149,6 @@ def _provenance(
     *,
     source: MemorySource = MemorySource.OBSERVED,
     tainted: bool = False,
-    supplied_withheld: bool = False,
 ) -> Provenance:
     """Provenance in whichever band ``source`` places it.
 
@@ -153,7 +162,6 @@ def _provenance(
         confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
         last_updated=_AT,
         derived_from_external=tainted,
-        supplied_withheld_content=supplied_withheld,
         attestation=(
             Attestation(reported_by="a-connected-source", reported_at=_AT) if attested else None
         ),
@@ -166,7 +174,7 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
     *,
     source: MemorySource = MemorySource.OBSERVED,
     tainted: bool = False,
-    supplied_withheld: bool = False,
+    placement: Placement | None = None,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
     topics: tuple[str, ...] = (),
@@ -175,10 +183,11 @@ def _record(  # noqa: PLR0913 — one keyword per record axis a case may need to
         id=record_id,
         content=content,
         fact=content,
-        provenance=_provenance(source=source, tainted=tainted, supplied_withheld=supplied_withheld),
+        provenance=_provenance(source=source, tainted=tainted),
         expires_at=expires_at,
         validity=validity or Validity(),
         topics=topics,
+        placement=placement or Placement(),
     )
 
 
@@ -366,7 +375,7 @@ async def test_a_tainted_proposal_citing_no_evidence_is_rejected_rather_than_que
         fact="a belief resting on nothing",
         provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_AT),
     )
-    proposal = stage._marked(_proposal(bare), tainted=True, supplied_withheld=False)
+    proposal = stage._marked(_proposal(bare), tainted=True, placement=Placement())
 
     outcome = await writes.write(proposal)
 
@@ -1516,10 +1525,10 @@ async def test_an_envelope_behind_exactly_the_miss_budget_is_still_found() -> No
     assert report.discarded_unusable == 0
 
 
-# --- ADR-0204 §5: the derivation rule at this producer too -------------------
+# --- ADR-0204 §5, as ADR-0217 §3 generalises it: the derivation at this producer
 
 
-async def test_a_stamped_input_stamps_the_proposal_though_the_producer_omitted_it() -> None:
+async def test_a_narrowed_input_narrows_the_proposal_though_the_producer_omitted_it() -> None:
     """§5's second clause, computed by the stage that selected the chunk.
 
     The same shape ADR-0106 §10's first case gives the sibling marker, and for the
@@ -1527,24 +1536,49 @@ async def test_a_stamped_input_stamps_the_proposal_though_the_producer_omitted_i
     find nothing there and write a consolidation ADR-0199 §3 places speakable over
     material a channel of unbounded audience may not be told.
     """
-    store = await _seeded([_record("r1", supplied_withheld=True), _record("r2")])
+    store = await _seeded([_record("r1", placement=_DERIVED), _record("r2")])
     writes, _ = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
     assert len(writes.proposals) == 1
-    assert writes.proposals[0].proposed.provenance.supplied_withheld_content is True
+    assert writes.proposals[0].proposed.placement == _DERIVED
 
 
-async def test_a_chunk_holding_nothing_stamped_leaves_the_proposal_unstamped() -> None:
-    """The negative control: the disjunction is over the chunk, not a constant."""
+async def test_a_chunk_holding_nothing_narrowed_leaves_the_proposal_unnarrowed() -> None:
+    """The negative control: the meet is over the chunk, not a constant."""
     store = await _seeded([_record("r1"), _record("r2")])
     writes, _ = _gated(store)
 
     await _stage(store=store, writes=writes).run()
 
     assert len(writes.proposals) == 1
-    assert writes.proposals[0].proposed.provenance.supplied_withheld_content is False
+    assert writes.proposals[0].proposed.placement == Placement()
+
+
+async def test_a_derivation_meets_every_supplied_placement_proposed_included() -> None:
+    """ADR-0217 §10's multi-record arm, on the consolidation path.
+
+    Every fold arm in ``tests/memory/test_placement_fold.py`` is a two-placement
+    merge of **one belief**, and none of them reaches this path. §3's eligibility
+    clause is bounded to that case: here the placements belong to *different
+    records*, the derived record carries no act of the owner's for a proposal to
+    override, and an ``OWNER`` input discarded is an ``OWNER`` input **laundered**.
+
+    So a chunk holding a record the owner **unguarded** and a record a model
+    **proposed** narrowing derives reach ``OWNER`` with setter ``PROPOSED``, carrying
+    that input's instant — not reach ``ANYONE``. An implementation reading §3's
+    eligibility as general would pass every fold arm while laundering here. The
+    setter matters as much as the reach: recorded ``PROPOSED``, the owner still lifts
+    in one act what a model proposed (§7's ``unguard``, which §11 orders later).
+    """
+    store = await _seeded([_record("r1", placement=_UNGUARDED), _record("r2", placement=_PROPOSED)])
+    writes, _ = _gated(store)
+
+    await _stage(store=store, writes=writes).run()
+
+    assert len(writes.proposals) == 1
+    assert writes.proposals[0].proposed.placement == _PROPOSED
 
 
 # --- ADR-0213 §5: the run-scoped vocabulary, and §4's topics entry ----------

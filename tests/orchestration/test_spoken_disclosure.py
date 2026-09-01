@@ -61,6 +61,9 @@ from ai_assistant.core.types import (
     Goal,
     MemoryRecord,
     MemorySource,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PlanStep,
     Provenance,
     Role,
@@ -101,6 +104,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryWrite, TurnResult
 
 _AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+
+#: The placement ADR-0217 §3's derivation writes for a record ADR-0204 §2 or §5
+#: would have stamped ``True``: reach ``OWNER``, setter ``DERIVED``, at the instant
+#: of the narrowing. Every fixture below that "carries the stamp" carries this.
+_NARROWED: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT)
 _MP4: Final = SpokenAudioFormat.MP4
 _CALENDAR: Final = "calendar"
 _ANSWER: Final = "You went hiking on Tuesday."
@@ -1024,8 +1032,8 @@ async def test_the_bounded_channel_still_plans_over_its_whole_supply() -> None:
 
 
 def _stamped(records: Sequence[MemoryRecord]) -> set[str]:
-    """The ids among ``records`` whose provenance carries ADR-0204 §1's field."""
-    return {one.id for one in records if one.provenance.supplied_withheld_content}
+    """The ids among ``records`` whose placement is narrowed (ADR-0217 §1)."""
+    return {one.id for one in records if one.placement.reach is not PlacementReach.ANYONE}
 
 
 async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
@@ -1054,7 +1062,7 @@ async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> N
     assert _WITHHELD_CONTENT in (outcome.turn.plan.rationale or "")
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
-    assert captured[0].provenance.supplied_withheld_content is True
+    assert captured[0].placement.reach is PlacementReach.OWNER
     assert _WITHHELD_CONTENT in captured[0].content, (
         "the episode's content is unchanged — the stamp is what withholds it, not a filter"
     )
@@ -1104,7 +1112,7 @@ async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -
     )
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is True
+    assert captured[0].placement.reach is PlacementReach.OWNER
 
 
 async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode() -> None:
@@ -1125,7 +1133,7 @@ async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is False
+    assert captured[0].placement == Placement()
 
 
 async def test_the_typed_turns_stamped_episode_is_withheld_from_a_later_spoken_turn() -> None:
@@ -1223,7 +1231,7 @@ async def test_a_deflecting_spoken_turns_episode_is_withheld_from_the_next_spoke
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is True
+    assert captured[0].placement.reach is PlacementReach.OWNER
 
     second = await harness.engine.converse_spoken(
         _RECORDING,
@@ -1313,7 +1321,7 @@ async def test_milestone_19s_exit_test_is_unaffected() -> None:
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is False
+    assert captured[0].placement == Placement()
 
     second = await harness.engine.converse_spoken(
         _RECORDING,
@@ -1414,7 +1422,7 @@ async def test_a_recovered_resumption_and_a_routed_pass_carry_false() -> None:
     assert recovered.turn is None, "a recovered park has no live turn (ADR-0052 §3)"
 
     resumption = _episodes(await harness.memory.export())[-1]
-    assert resumption.provenance.supplied_withheld_content is False
+    assert resumption.placement == Placement()
     assert "The user asked:" not in resumption.content
     assert "The assistant's plan:" not in resumption.content
 
@@ -1434,7 +1442,7 @@ async def test_a_recovered_resumption_and_a_routed_pass_carry_false() -> None:
 
     assert routed.routed is not None
     episode = _episodes(await routed_harness.memory.export())[-1]
-    assert episode.provenance.supplied_withheld_content is False
+    assert episode.placement == Placement()
     assert episode.content == "The user asked: forget what I said", (
         "no goal statement and no plan rationale of any turn — there was no turn"
     )
@@ -1557,7 +1565,7 @@ def _stamped_belief(record_id: str, content: str) -> SemanticMemory:
 
     ``about_person`` unset and a placed ``Provenance.source``, so §3's third clause
     places it and the *first* term of ADR-0204 §2's disjunction is false of it. What
-    withholds it is ``supplied_withheld_content`` alone — §5's inherited route,
+    withholds it is its own **placement** alone (ADR-0217 §2) — §5's inherited route,
     which is the term §9's third clause requires pinned separately. A fixture §3
     withholds on its own account would fire the first term and prove nothing about
     the second.
@@ -1570,8 +1578,8 @@ def _stamped_belief(record_id: str, content: str) -> SemanticMemory:
             source=MemorySource.OBSERVED,
             confidence=0.6,
             last_updated=_AT,
-            supplied_withheld_content=True,
         ),
+        placement=_NARROWED,
     )
 
 
@@ -1587,7 +1595,8 @@ def _episode(
     ``OBSERVED``, which ``band_of`` maps to ``DERIVED`` — the band ADR-0158 §3 pins
     the episodic supplement to, and the band every episode this system writes lands
     in. ``about_person`` is the knob that makes §3 withhold it on its own account;
-    ``stamped`` is the knob that makes ADR-0204 §3 withhold it while §3's third
+    ``stamped`` is the knob that narrows its **placement**, which ADR-0217 §2
+    withholds while §3's third
     clause still places it speakable.
     """
     return EpisodicMemory(
@@ -1599,8 +1608,8 @@ def _episode(
             source=MemorySource.OBSERVED,
             confidence=0.6,
             last_updated=_AT,
-            supplied_withheld_content=stamped,
         ),
+        placement=_NARROWED if stamped else Placement(),
     )
 
 
@@ -1823,7 +1832,7 @@ async def _tail_holding_a_stamped_episode(
 
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is True, (
+    assert captured[0].placement.reach is PlacementReach.OWNER, (
         "the tail's episode is stamped — ADR-0204 §2 over the typed turn's own supply"
     )
     return harness, typed.conversation_id, captured[0].id
@@ -1943,7 +1952,7 @@ async def test_a_withheld_record_a_relevance_read_returned_is_told_and_stamped()
     assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0)
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is True
+    assert captured[0].placement.reach is PlacementReach.OWNER
 
 
 class _FixedContext:
@@ -2010,7 +2019,7 @@ async def test_an_unplaced_facet_fires_both_consequences_over_a_clean_retrieval(
     assert "NOT AVAILABLE ON THIS CHANNEL" in _prompt(model, 0), "consequence one"
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1
-    assert captured[0].provenance.supplied_withheld_content is True, "consequence two"
+    assert captured[0].placement.reach is PlacementReach.OWNER, "consequence two"
     assert placed_facet_kinds() == {CalendarFacet, EmailFacet}, (
         "and §3's list is what it was — this ADR places and unplaces nothing"
     )

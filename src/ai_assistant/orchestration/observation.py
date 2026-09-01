@@ -10,8 +10,8 @@ holds both durable stores by injection (ADR-0074 §9). This stage:
   or the first candidate by least recent activity (ADR-0212 §3);
 * **hands** the resolved :class:`~ai_assistant.core.types.EpisodicMemory` values
   to the injected :class:`~ai_assistant.core.protocols.Observer`;
-* **marks** each returned proposal with ADR-0204 §5's derivation value — the
-  disjunction of ``supplied_withheld_content`` over the episodes it supplied,
+* **marks** each returned proposal with ADR-0204 §5's derivation value — since
+  ADR-0217 §1 the **narrowest ``placement``** over the episodes it supplied,
   assigned rather than merged, exactly as ADR-0106 §3 has the consolidation stage
   mark its sibling field;
 * **ingests** each returned proposal through
@@ -78,6 +78,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     ObservationReport,
     ObservedProposal,
+    Placement,
     describe_untrusted,
 )
 from ai_assistant.orchestration.engine import learn_decision
@@ -310,28 +311,32 @@ def _check_citations(
         raise ValueError(msg)
 
 
-def _marked(proposal: MemoryUpdateProposal, *, supplied_withheld: bool) -> MemoryUpdateProposal:
+def _marked(proposal: MemoryUpdateProposal, *, placement: Placement) -> MemoryUpdateProposal:
     """Stamp ADR-0204 §5's derivation marker on one proposal, discarding the producer's.
 
-    **Assignment, never a disjunction with what the observer emitted**, which is the
+    **Assignment, never a meet with what the observer emitted**, which is the
     discipline ADR-0106 §3 fixes for the sibling marker and the reason it is stated:
     a merge would leave a code path in which a producer's claim about its own warrant
     reached the field, and the marker exists precisely because such a claim is not
     evidence of the standing it claims (ADR-0094 §5). The value this stage computes
     is a fact about the batch it selected, so it is written over whatever arrived.
 
+    **This is §3's derivation and not §4's proposal.** ADR-0217 §4 names ``Observer``
+    as the one producer that proposes a placement of its own; that proposal is a
+    change of its own, ordered after §7's two acts, and this assignment is not it.
+    What is written here is the narrowest reach over the batch — a fact about the
+    material the observer was handed, which is exactly what a producer's own claim
+    may not decide.
+
     Args:
         proposal: What the observer proposed.
-        supplied_withheld: The disjunction over the episodes this pass supplied it.
+        placement: The meet over the episodes this pass supplied it.
 
     Returns:
         The proposal, with the marker its stage computed.
     """
-    provenance = proposal.proposed.provenance.model_copy(
-        update={"supplied_withheld_content": supplied_withheld}
-    )
     return proposal.model_copy(
-        update={"proposed": proposal.proposed.model_copy(update={"provenance": provenance})}
+        update={"proposed": proposal.proposed.model_copy(update={"placement": placement})}
     )
 
 
@@ -688,22 +693,20 @@ class ObservationStage:
         # with the writes and a partial write to lose — and it mirrors the producer's
         # own validate-then-apply ordering (§4).
         _check_citations(outcome.proposals, batch=batch)
-        # ADR-0204 §5's derivation rule, computed from the batch this stage selected
-        # and before anything is written — the shape ADR-0106 §3 already gives the
-        # sibling marker on the consolidation path. The disjunction ranges over every
-        # episode the producer was **supplied**, never over the subset it cited: an
-        # observer that read a stamped episode and cited only clean ones would
-        # otherwise emit a belief ADR-0199 §3 places speakable, which is #1708's
-        # laundering with one distillation more in it.
-        supplied_withheld = any(
-            episode.provenance.supplied_withheld_content for episode in episodes
-        )
+        # ADR-0204 §5's derivation rule as ADR-0217 §3 generalises it, computed from
+        # the batch this stage selected and before anything is written — the shape
+        # ADR-0106 §3 already gives the sibling marker on the consolidation path. The
+        # meet ranges over every episode the producer was **supplied**, never over the
+        # subset it cited: an observer that read a narrowed episode and cited only
+        # unnarrowed ones would otherwise emit a belief ADR-0199 §3 places speakable,
+        # which is #1708's laundering with one distillation more in it. `narrowest_of`
+        # rather than a pairwise fold, on ADR-0217 §3's own division: these are the
+        # placements of *different records*, so no side is discarded.
+        derived_placement = Placement.narrowest_of(episode.placement for episode in episodes)
         proposals: list[ObservedProposal] = []
         dropped = 0
         for proposal in outcome.proposals:
-            entry = await self._ingest(
-                _marked(proposal, supplied_withheld=supplied_withheld), batch=batch
-            )
+            entry = await self._ingest(_marked(proposal, placement=derived_placement), batch=batch)
             if entry.decision is None:
                 dropped += 1
             proposals.append(entry)
