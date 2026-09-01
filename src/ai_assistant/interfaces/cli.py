@@ -1388,7 +1388,7 @@ def resume(
 
 
 @app.command()
-def learn(
+def learn(  # noqa: PLR0913 — the content plus one flag per axis of the event: two kinds, two subjects, and who may receive it
     content: str = typer.Argument(
         ..., help="The correction or preference, in your own words.", callback=_present_content
     ),
@@ -1407,6 +1407,16 @@ def learn(
         ),
     ),
     memory_kind: MemoryKind | None = _LEARN_MEMORY_KIND_OPTION,
+    *,
+    guarded: bool = typer.Option(
+        False,
+        "--guarded",
+        help=(
+            "Keep what this establishes for you alone: I will not say it on a channel "
+            "anyone else may hear. There is no flag for the opposite — leaving it off "
+            "is not a decision either way."
+        ),
+    ),
 ) -> None:
     """Teach the assistant from a correction or a stated preference.
 
@@ -1428,6 +1438,21 @@ def learn(
     prefers window seats"`` is stored with no subject, which the system reads as
     *yours*. The person flag is spelled long because ``--about`` and ``-a`` were
     already the scope axis's, on this very command.
+
+    **``--guarded`` says who may receive what this establishes, and it only ever
+    narrows** (ADR-0217 §7). Given, every record this feedback produces is placed
+    for you alone, so it is not said on a channel of unbounded audience; it is your
+    own act and no later model proposal lifts it. There is deliberately **no
+    ``--no-guarded``**: ADR-0217 adds a narrowing act at write and no widening one,
+    and leaving the flag off is not an act of any kind — it leaves the record with
+    the placement its class already has, which is not a record that you considered
+    this belief and declined to guard it. To widen one later, or to guard a belief
+    you have already told me, is a separate act on a stored record and not this
+    command's (§7, deferred to its own lane).
+
+    The flag is carried onto the event and nothing here reads it: deciding a
+    record's placement is not adapter work (``CLAUDE.md``, "Interface adapters are
+    thin"), so this sets a field and ``learning`` acts on it.
     """
     # `.get`, not `[...]`: `_DEFAULT_MEMORY_KIND` is deliberately not exhaustive, and
     # a miss is the absent value ADR-0122 §2 requires rather than a lookup error.
@@ -1441,6 +1466,7 @@ def learn(
             memory_kind=declared_memory_kind,
             subject=about,
             about_person=about_person,
+            guarded=guarded,
         )
     )
     raise typer.Exit(code)
@@ -2958,13 +2984,14 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
     return await _drive_resume(engine, timeout=timeout, approver=approver)
 
 
-async def _learn_feedback(
+async def _learn_feedback(  # noqa: PLR0913 — one parameter per field of the event this builds, each a separate thing the user said
     content: str,
     *,
     kind: FeedbackKind,
     memory_kind: MemoryKind | None,
     subject: str | None,
     about_person: str | None,
+    guarded: bool,
 ) -> int:
     """Load settings, build the engine, submit the feedback, and close it (ADR-0042 §2, §7).
 
@@ -2980,6 +3007,15 @@ async def _learn_feedback(
     ``memory_kind`` is relayed exactly as the caller resolved it, ``None`` included:
     an absent value is a *state of the request*, not a value to fill in here
     (ADR-0122 §2), and the field's own default would fill it in the same way.
+
+    ``guarded`` is relayed the same way and is **set explicitly even when it is
+    ``False``**, rather than left to the field's default. The two values are the
+    same value, and stating it is what keeps this constructor honest about the flag
+    it was handed: an adapter that accepted ``--guarded`` and then omitted the
+    member here would write the default placement over an explicit owner act, which
+    is the one failure the route exists to prevent (ADR-0217 §10). Nothing is
+    interpreted on the way — the flag is a field this sets and `learning` reads
+    (ADR-0217 §7, ``CLAUDE.md``'s third golden rule).
     """
     event = FeedbackEvent(
         kind=kind,
@@ -2988,6 +3024,7 @@ async def _learn_feedback(
         subject=subject,
         about_person=about_person,
         created_at=_utcnow(),
+        guarded=guarded,
     )
     try:
         engine = await _open_engine()

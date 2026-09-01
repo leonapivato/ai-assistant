@@ -1373,6 +1373,106 @@ def test_learn_rejects_an_unencodable_about_person() -> None:
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+def test_learn_guarded_flag_reaches_the_engine_on_the_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--guarded arrives at the engine as ``FeedbackEvent.guarded`` (ADR-0217 §10).
+
+    The CLI-seam arm §10 owes this lane by name. Every other arm ADR-0217 takes of
+    the write-time act starts from a **preconstructed** event, so an adapter that
+    accepted the flag and then omitted the member when building the event would
+    pass all of them while writing the default placement over an explicit owner
+    act — a control silently doing nothing, which is the one failure the route
+    exists to prevent. Only an assertion taken from the far side of the adapter
+    catches it, which is why this one reads the event the engine was handed.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "the office moved", "--guarded"]
+    )
+
+    assert result.exit_code == 0
+    assert engine.events[0].guarded is True
+
+
+def test_learn_without_the_guarded_flag_states_no_act(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence is ``False``, which ADR-0217 §7 says is not an act of any kind.
+
+    The other half of §10's CLI-seam arm: "the same command without it as one
+    carrying the default". The value is the field's default and the adapter sets it
+    explicitly, which are the same value — what the arm pins is that leaving the
+    flag off does not somehow arrive as an act, so the record keeps ADR-0217 §6's
+    default placement and nothing here records that the owner considered guarding
+    this belief and declined.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "the office moved"])
+
+    assert result.exit_code == 0
+    assert engine.events[0].guarded is False
+
+
+def test_learn_offers_no_flag_that_widens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is no ``--no-guarded``, because at write there is no widening act.
+
+    ADR-0217 §7: the member "is a narrowing only, and ``False`` is not an act of
+    any kind". A ``--no-guarded`` spelled as the flag's negative half would offer
+    the owner an act this decision does not give them at write — and would make the
+    absent flag look like the *other* half of a choice rather than the absence of
+    one. Widening a record the owner has already guarded is §7's ``unguard``, an
+    act on a stored record in a lane of its own; it is not reachable from here, so
+    the option is a usage error and no event is built.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "the office moved", "--no-guarded"]
+    )
+
+    assert result.exit_code == 2  # Typer's usage-error code
+    assert engine.events == []
+
+
+def test_learn_guarded_leaves_every_other_axis_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The placement flag composes with the two kinds and the two subjects.
+
+    ``--guarded`` is a fifth axis of one event, not a mode that reinterprets the
+    others: given alongside them, each field still carries what its own flag said.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "learn",
+            "--kind",
+            "preference",
+            "prefers window seats",
+            "--about",
+            "travel",
+            "--about-person",
+            "Marta",
+            "--memory-kind",
+            "semantic",
+            "--guarded",
+        ],
+    )
+
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.guarded is True
+    assert event.kind is FeedbackKind.PREFERENCE
+    assert event.memory_kind is MemoryKind.SEMANTIC
+    assert event.subject == "travel"
+    assert event.about_person == "Marta"
+
+
 def test_learn_memory_kind_flag_overrides_the_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
