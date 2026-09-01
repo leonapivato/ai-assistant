@@ -2477,13 +2477,308 @@ class MemoryBase(BaseModel):
         }
 
 
+# --- memory: what became of an exchange, and how its turn was captured (0221) -
+
+
+class ExchangeDisposition(StrEnum):
+    """What became of the exchange one captured episode records (ADR-0221 §2).
+
+    Sixteen members: one per member of :class:`Disposition`, one for the no-step
+    case, and one per member of :class:`RouteOutcome`. Before ADR-0221 those same
+    sixteen facts were sixteen constant *phrases*, composed at the capture point and
+    stored in :attr:`EpisodicMemory.outcome`; §1 gives that field to the composed
+    reply, and this enum is where the fact goes instead.
+
+    **Which vocabulary a member came from is legible in the member itself** (§2).
+    ``STEP_*`` mirrors a member of :class:`Disposition` — what became of one plan
+    step at the runner stage — ``ROUTED_*`` mirrors a member of
+    :class:`RouteOutcome`, and :attr:`NO_ACTION_NEEDED` mirrors neither, because it
+    is the pass on which no step was driven at all.
+
+    **The two vocabularies are not normalised into a smaller shared one** (§2).
+    Three pairs are true synonyms in ordinary English — ``STEP_EXECUTED`` and
+    ``ROUTED_PERFORMED``, ``STEP_DENIED`` and ``ROUTED_REFUSED``, and the two
+    ``AWAITING_CONFIRMATION``s — and **both members of each pair ship**. No
+    implementation or later ADR collapses a pair, and none maps two members onto
+    one. Eleven of the sixteen have no counterpart at all, and the three pairs
+    denote acts under different clauses (ADR-0170 §4, ADR-0197 §10), so a normalised
+    vocabulary would be a lossy projection dressed as a tidy one — and the loss
+    would fall exactly where the value is, since the reason to type this at all is
+    to count what the assistant did (§10).
+
+    **One field carries both vocabularies and no validator asserts it** (§2).
+    ADR-0197 §1 makes them mutually exclusive structurally — a taken route drives no
+    step, and a driven step means no route was taken — so a validator asserting it
+    would be asserting a property of the pipeline from inside a ``core`` type that
+    cannot see the pipeline.
+
+    **Every serialised value is fixed by §2's table and none of them changes.** A
+    ``StrEnum`` serialises its *value*, not its member name, and
+    :class:`EpisodicMemory` is wire-carried as well as persisted, so two conforming
+    implementations emitting ``step_executed`` and ``STEP_EXECUTED`` for one fact
+    would leave every record written under the loser undecodable. No implementation,
+    migration or later lane changes a value once ADR-0221 merged; no member is given
+    a second spelling, an alias or a numeric encoding; and **a member added later
+    takes a value of the same form, the member name lower-cased**.
+
+    **The phrase each member stands for is not written down here** (§3). §2's table
+    fixes one phrase per member, and §3 puts the table at each of the three render
+    sites — ``learning/observer.py``, ``planning/planner.py`` and
+    ``orchestration/composing.py`` — while forbidding a shared module, a ``core``
+    mapping, a method on this enum or a helper any two of the three import. A copy
+    in this docstring would be the fourth table a later lane reads instead of
+    writing its own, so each member below says what it *denotes* and which source
+    member it mirrors, and a reader wanting the rendered string reads §2 or a render
+    site.
+
+    **Absence, not a member, is the discriminator** (§8). A record written before
+    ADR-0221 carries no member of this enum at all, and
+    :attr:`EpisodicMemory.disposition` is ``None`` there; nothing infers the
+    population from the record's text, its length, its instant or its store.
+    """
+
+    NO_ACTION_NEEDED = "no_action_needed"
+    """The pass drove no plan step, so there is no :class:`Disposition` to mirror.
+
+    The one member of the sixteen belonging to neither source vocabulary (§2), and
+    the case ``orchestration/engine.py``'s ``_outcome_of`` reaches when it is handed
+    no ``StepOutcome`` at all."""
+
+    STEP_EXECUTED = "step_executed"
+    """Mirrors :attr:`Disposition.EXECUTED`: the selected tool's call was authorised
+    and handed to the executor.
+
+    Not ``ROUTED_PERFORMED``, which is a routed operation this system performed with
+    no plan, no step and no policy ruling behind it (ADR-0197 §1)."""
+
+    STEP_DENIED = "step_denied"
+    """Mirrors :attr:`Disposition.DENIED`: the permission policy refused the step,
+    which is a recorded :class:`PermissionDecision`.
+
+    Not ``ROUTED_REFUSED``, where the *user* declined a routed park and no
+    ``ActionPolicy`` was consulted at all (ADR-0197 §7)."""
+
+    STEP_AWAITING_CONFIRMATION = "step_awaiting_confirmation"
+    """Mirrors :attr:`Disposition.AWAITING_CONFIRMATION`: the policy wants a human
+    answer, and the step is durably ``AWAITING_APPROVAL``.
+
+    Kept distinct from ``ROUTED_AWAITING_CONFIRMATION`` because the two are
+    different acts under different clauses — ADR-0170 §4 and ADR-0197 §10 — and a
+    measure that could not tell them apart would be measuring nothing (§2)."""
+
+    STEP_NO_CAPABLE_TOOL = "step_no_capable_tool"
+    """Mirrors :attr:`Disposition.NO_CAPABLE_TOOL`: nothing advertised the
+    capability the step needed, so nothing was committed.
+
+    Not ``ROUTED_NOT_FOUND``: one is a fact about the tool registry and the other a
+    fact about the records a routed lookup matched (§2)."""
+
+    STEP_AMBIGUOUS_CAPABILITY = "step_ambiguous_capability"
+    """Mirrors :attr:`Disposition.AMBIGUOUS_CAPABILITY`: several tools advertised
+    the capability and no rule chose between them, so none was chosen and nothing
+    was committed."""
+
+    STEP_INVALID_PARAMETERS = "step_invalid_parameters"
+    """Mirrors :attr:`Disposition.INVALID_PARAMETERS`: the step's arguments were not
+    established as acceptable to any tool that could have run them (ADR-0145 §4).
+    Nothing was committed."""
+
+    STEP_EGRESS_UNBINDABLE = "step_egress_unbindable"
+    """Mirrors :attr:`Disposition.EGRESS_UNBINDABLE`: the egress binding seam could
+    not describe the outbound call, so no ruling was sought and nothing was asked or
+    sent (ADR-0152 §9)."""
+
+    ROUTED_PERFORMED = "routed_performed"
+    """Mirrors :attr:`RouteOutcome.PERFORMED`: the routed operation the user asked
+    for was called and returned."""
+
+    ROUTED_AWAITING_CONFIRMATION = "routed_awaiting_confirmation"
+    """Mirrors :attr:`RouteOutcome.AWAITING_CONFIRMATION`: a confirm-owed route
+    parked for the user to answer, and nothing was performed (ADR-0197 §7). See
+    ``STEP_AWAITING_CONFIRMATION`` for why the pair is not collapsed."""
+
+    ROUTED_REFUSED = "routed_refused"
+    """Mirrors :attr:`RouteOutcome.REFUSED`: the user answered a routed park
+    ``False``, so the operation was not performed. No policy was consulted and no
+    ruling recorded (ADR-0197 §7), which is what separates it from
+    ``STEP_DENIED``."""
+
+    ROUTED_AMBIGUOUS = "routed_ambiguous"
+    """Mirrors :attr:`RouteOutcome.AMBIGUOUS`: more than one record matched the
+    route's lookup, so nothing was performed."""
+
+    ROUTED_AMBIGUOUS_TRUNCATED = "routed_ambiguous_truncated"
+    """Mirrors :attr:`RouteOutcome.AMBIGUOUS_TRUNCATED`: more records matched than
+    could be shown, so nothing was performed. A separate member because a bare
+    ``ROUTED_AMBIGUOUS`` could not distinguish two candidates from a hundred
+    (ADR-0197 §5)."""
+
+    ROUTED_NOT_FOUND = "routed_not_found"
+    """Mirrors :attr:`RouteOutcome.NOT_FOUND`: the route's lookup matched nothing,
+    so nothing was performed."""
+
+    ROUTED_UNRECORDED = "routed_unrecorded"
+    """Mirrors :attr:`RouteOutcome.UNRECORDED`: ADR-0197 §9's row was not written,
+    so the operation was **never called** and nothing was destroyed. The member
+    ADR-0197 warns is most easily conflated with ``ROUTED_FAILED``, which is its
+    opposite statement about the same question."""
+
+    ROUTED_FAILED = "routed_failed"
+    """Mirrors :attr:`RouteOutcome.FAILED`: the operation was called and raised.
+    Whether it took effect is not asserted."""
+
+
+class Modality(StrEnum):
+    """How material reached this system (ADR-0221 §5).
+
+    Two members as ADR-0221 ships it, and a vocabulary that is **added to and never
+    renamed** (§5): a later decision admitting a further input modality adds a
+    member; no member of it is renamed, removed or given a second spelling, and no
+    later ADR replaces this enum with a differently-named one for the same question.
+    §2's rule on serialised values binds here too — both values are fixed by
+    ADR-0221 and no later lane changes them, and a member added later takes a value
+    of the same form, the member name lower-cased.
+
+    **This enum names a modality and nothing more.** *Whose* material a value
+    belongs to, and what may not be read off it, are :attr:`Capture.modality`'s to
+    state, and §5 is where both are decided.
+    """
+
+    TEXT = "text"
+    """The material did not reach this system as speech: true of a typed turn, and
+    true of an episode carrying no user material at all (§5). The default."""
+
+    SPEECH = "speech"
+    """The material reached this system as speech, and the text standing for it in
+    the record is a derivation of that speech (§5)."""
+
+
+class Capture(BaseModel):
+    """How the user material an episode renders reached this system (ADR-0221 §5).
+
+    **A record rather than a bare field, and the shape is the decision.** A two-valued
+    flag would have to be *superseded* the day a second modality arrives, and it has
+    nowhere to put the two facts a later archive decision needs. A record grows by
+    addition; a field does not. It carries one field as ADR-0221 ships it, and it is
+    on :class:`EpisodicMemory` alone and not on :class:`MemoryBase` (§5).
+
+    §5's meaning is **quoted rather than restated**, because three lanes restating
+    one rule is how the two drift apart:
+
+        ``modality`` names how **the material the user supplied, whose rendering
+        this episode carries**, reached this system — and nothing else. ``SPEECH``
+        says it reached this system as speech and that the text standing for it in
+        the record is a derivation of that speech. ``TEXT`` is the default and says
+        it did not: true of a typed turn, and true of an episode carrying no user
+        material at all.
+
+        ``modality`` says nothing about the assistant's own contributions to the
+        record, and no consumer reads it as saying anything about them. The plan
+        rationale rendered into ``content`` and the composed reply in ``outcome``
+        are text this system produced on every pass, whatever the utterance's
+        modality, and this ADR records no modality for either.
+
+        The value belongs to **the user material the episode renders**, not to the
+        pass that performs the capture and not to the conversation. Every capture
+        site falls in exactly one of the three cases below, and no implementation,
+        setting or later lane adds a fourth without the ADR that decides it.
+
+    **The three capture cases are decided in §5, and a producer reads them there**
+    rather than here. The one worth naming in this docstring is the one a capture
+    site gets wrong by defaulting: on the resolution of a parked step, the value is
+    *the parked turn's own*, "retained with the parked turn and applied unchanged.
+    No implementation re-evaluates, recomputes or defaults it at the second capture"
+    (§5) — never the resuming pass's.
+
+    **This record is where §5's two deferred facts land**, and neither is decided by
+    ADR-0221: which derivation produced the text, and whether and where the source
+    material is retained. Each is "an additive, defaulted field a later ADR adds to
+    this record; adding one supersedes no clause of this ADR, and this ADR names
+    neither field's type, spelling nor semantics" (§5). Neither ships as a
+    ``None``-only slot, on ADR-0073 §4's standing test: neither has a producer in
+    hand, and one of the two is blocked behind a ``core/protocols.py`` change.
+
+    **Nothing here retains source material, authorises retaining it, or is cited
+    toward doing so** (§5). ADR-0200 §8's clause that no audio is written to any
+    store, index, trace, audit trail, routing trail, outbox or log stands whole.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    modality: Modality = Field(
+        default=Modality.TEXT,
+        description=(
+            "How the material the user supplied, whose rendering this episode "
+            "carries, reached this system — and nothing else (ADR-0221 §5). "
+            "SPEECH says it reached this system as speech and that the text "
+            "standing for it in the record is a derivation of that speech; TEXT "
+            "is the default and says it did not, which is true of a typed turn "
+            "and true of an episode carrying no user material at all. It says "
+            "nothing about the assistant's own contributions — not the plan "
+            "rationale in content, not the composed reply in outcome — and no "
+            "consumer reads it as though it did."
+        ),
+    )
+
+
 class EpisodicMemory(MemoryBase):
-    """Something that happened: an event, with who and how it turned out."""
+    """Something that happened: an event, with who and how it turned out.
+
+    **Three fields divide the exchange between them** (ADR-0221). ``content``
+    renders what the user asked, ``outcome`` carries what the assistant said, and
+    ``disposition`` states what became of the pass. Before ADR-0221 the middle field
+    held the last of those as one of sixteen constant phrases and the reply was
+    stored nowhere at all; §1 gives ``outcome`` to the reply and §2 puts the fact in
+    its own typed field.
+
+    **Both new fields are additive with defaults** and this model does not set
+    ``extra="forbid"``, so every record already in a store deserialises and ADR-0221
+    §8 requires — and permits — no migration, backfill, column or index. The
+    **absence** of ``disposition`` is the discriminator between a record written
+    before that decision and one written after it, and no other discriminator is
+    introduced.
+    """
 
     kind: Literal["episodic"] = "episodic"
     occurred_at: UtcInstant
     participants: tuple[EncodableText, ...] = Field(default=())
-    outcome: EncodableText | None = None
+    outcome: EncodableText | None = Field(
+        default=None,
+        description=(
+            "What the assistant said, on a record this system captured after "
+            "ADR-0221 §1: the composed reply, whole. No implementation, setting or "
+            "later lane stores a prefix, a summary, an elision or any other lossy "
+            "rendering of it here. None where the pass produced no reply at all. A "
+            "record carrying a disposition carries the reply here; a record "
+            "carrying none carries something else — one of ADR-0221 §2's sixteen "
+            "constant phrases, on an episode captured before that decision, or an "
+            "assistant text a benchmark harness supplied, on a row it built (§3)."
+        ),
+    )
+    disposition: ExchangeDisposition | None = Field(
+        default=None,
+        description=(
+            "What became of the exchange this episode captures (ADR-0221 §2): one "
+            "of sixteen members, one per Disposition member, one for the no-step "
+            "case, and one per RouteOutcome member. None on a record written "
+            "before that decision and on a harness-supplied row, and that absence "
+            "is the discriminator between those populations and one captured after "
+            "it (§8) — nothing infers the population from the record's text, its "
+            "length, its instant or its store. No read returning records is "
+            "filtered on it (§14)."
+        ),
+    )
+    capture: Capture = Field(
+        default_factory=Capture,
+        description=(
+            "How the user material this episode renders reached this system "
+            "(ADR-0221 §5). Defaults to a Capture with every field at its default, "
+            "whose modality is TEXT — true of a typed turn and true of an episode "
+            "carrying no user material at all. It says nothing about the "
+            "assistant's own contributions to the record, and no read returning "
+            "records is filtered on it (§14)."
+        ),
+    )
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
