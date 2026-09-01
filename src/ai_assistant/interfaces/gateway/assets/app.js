@@ -1599,6 +1599,15 @@ function renderSpendFields(item, total) {
 // What the ask was routed to, in words. One entry per member of ADR-0197 §3's
 // vocabulary — the whole of it, so a member added under §3's widening rule renders
 // as an empty sentence here rather than as a raw enum value somewhere.
+//
+// **ADR-0217 §7's two acts are entries here and not a rendering decision** (§11). That
+// section admits "no gateway route, no rendering and no further consumer", and these
+// are none of the three: no route is added, nothing here renders a **placement** — a
+// reach, a setter, an instant — and this page consumes `RoutableOperation`, which it
+// consumed already, rather than either act. `ROUTED_ARM` and `ROUTED_EMPTY` below are
+// read against the enum for **equality** by `tests/interfaces/gateway/test_bundle.py`,
+// so a lane widening that enum and deferring these entries ships a red tree; ADR-0217
+// §11's own first clause settles that shape, where "no split of it compiles".
 const ROUTED_ASKED = {
   questions: "list what is waiting on your answer",
   recent_reads: "list the attempts to read your sources",
