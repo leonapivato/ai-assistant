@@ -44,6 +44,9 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     ObservationOutcome,
     ObservationReport,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
     SemanticMemory,
 )
@@ -1648,11 +1651,15 @@ async def test_an_observed_deferral_against_a_full_queue_is_reported_and_raises_
     assert len(await harness.deferrals.pending()) == 1, "the cap held; nothing new was parked"
 
 
-# --- ADR-0204 §5: the derivation rule, over what the producer was supplied ----
+# --- ADR-0204 §5 as ADR-0217 §3 generalises it: the derivation over the batch --
+
+#: What capture writes once the turn's ADR-0204 §2 evaluation is ``True``
+#: (ADR-0217 §1, §3): narrowed, by the derivation, at the turn's own instant.
+_NARROWED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
 
 
-def _episode_stamped(episode_id: str, *, supplied_withheld_content: bool) -> EpisodicMemory:
-    """One captured turn, as capture writes it once ADR-0204 §2 stamps it."""
+def _episode_placed(episode_id: str, *, placement: Placement) -> EpisodicMemory:
+    """One captured turn, as capture writes it once ADR-0217 §3 narrows it."""
     return EpisodicMemory(
         id=episode_id,
         content=f"the user said something in {episode_id}",
@@ -1661,50 +1668,50 @@ def _episode_stamped(episode_id: str, *, supplied_withheld_content: bool) -> Epi
             source=MemorySource.OBSERVED,
             confidence=0.9,
             last_updated=AT,
-            supplied_withheld_content=supplied_withheld_content,
         ),
+        placement=placement,
     )
 
 
-async def _conversation_of(harness: Harness, *stamps: bool) -> str:
-    """A conversation whose turns carry ``stamps``, oldest first."""
+async def _conversation_of(harness: Harness, *placements: Placement) -> str:
+    """A conversation whose turns carry ``placements``, oldest first."""
     conversation = await harness.conversations.start()
-    for stamped in stamps:
+    for placement in placements:
         turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(
-            _episode_stamped(turn.episode_id, supplied_withheld_content=stamped)
-        )
+        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
     return conversation.id
 
 
 async def _only_belief(harness: Harness) -> SemanticMemory:
-    """The one belief the run wrote, which is what its stamp is asserted about."""
+    """The one belief the run wrote, which is what its placement is asserted about."""
     written = [one for one in await harness.memory.export() if isinstance(one, SemanticMemory)]
     assert len(written) == 1, "one scripted belief, one written record"
     return written[0]
 
 
-async def test_a_belief_derived_from_a_stamped_episode_carries_the_stamp() -> None:
+async def test_a_belief_derived_from_a_narrowed_episode_carries_the_narrowing() -> None:
     """ADR-0204 §5's second clause, at the seam that derives beliefs from episodes.
 
     ADR-0074 §4 makes capture "the first producer into the derived band, arriving
     before the observer it exists to feed", so this stage is the second producer in
-    that chain and the one §5's clause is written for.
+    that chain and the one §5's clause is written for. The **setter** is pinned
+    beside the reach: the narrowing is inherited from a derivation, so it stays
+    ``DERIVED`` and is not one an owner's act may lift (ADR-0217 §3).
     """
     harness = Harness(observer=FakeObserver([ObservedBelief(content="the user runs early")]))
-    conversation = await _conversation_of(harness, True)
+    conversation = await _conversation_of(harness, _NARROWED)
 
     await harness.stage.observe(conversation)
 
-    assert (await _only_belief(harness)).provenance.supplied_withheld_content is True
+    assert (await _only_belief(harness)).placement == _NARROWED
 
 
-async def test_the_disjunction_ranges_over_what_the_producer_received() -> None:
+async def test_the_meet_ranges_over_what_the_producer_received() -> None:
     """§8 case 12: over the batch supplied, never over the subset cited.
 
-    The belief cites the unstamped episode and nothing else, so an implementation
-    folding the field over ``Provenance.evidence`` passes case 11 and fails here —
-    and its output reaches a channel of unbounded audience carrying a warrant the
+    The belief cites the unnarrowed episode and nothing else, so an implementation
+    folding the placement over ``Provenance.evidence`` passes case 11 and fails here
+    — and its output reaches a channel of unbounded audience carrying a warrant the
     producer actually read. ``evidence`` is not the input set, and §5 says so in
     terms.
     """
@@ -1712,45 +1719,47 @@ async def test_the_disjunction_ranges_over_what_the_producer_received() -> None:
         observer=FakeObserver([ObservedBelief(content="the user runs early", supports=1)])
     )
     # The batch reaches the producer oldest first and the belief cites its first
-    # entry, so the stamped episode is seeded second — and the assertions below pin
+    # entry, so the narrowed episode is seeded second — and the assertions below pin
     # that arrangement rather than trusting it.
-    conversation = await _conversation_of(harness, False, True)
+    conversation = await _conversation_of(harness, Placement(), _NARROWED)
 
     await harness.stage.observe(conversation)
 
     batch = harness.fake.batches[0]
     assert len(batch) == 2
-    assert batch[0].provenance.supplied_withheld_content is False
-    assert batch[1].provenance.supplied_withheld_content is True
+    assert batch[0].placement == Placement()
+    assert batch[1].placement == _NARROWED
     belief = await _only_belief(harness)
-    assert belief.provenance.evidence == (batch[0].id,), "it cited only the unstamped episode"
-    assert belief.provenance.supplied_withheld_content is True
+    assert belief.provenance.evidence == (batch[0].id,), "it cited only the unnarrowed episode"
+    assert belief.placement == _NARROWED
 
 
-async def test_a_producer_supplied_nothing_stamped_emits_false() -> None:
-    """§8 case 13: the direction that would otherwise stamp everything.
+async def test_a_producer_supplied_nothing_narrowed_writes_the_default() -> None:
+    """§8 case 13: the direction that would otherwise narrow everything.
 
-    Without this, an implementation writing ``True`` unconditionally passes both
-    cases above and empties ADR-0199 §3's speakable set by a different route.
+    Without this, an implementation writing reach ``OWNER`` unconditionally passes
+    both cases above and empties ADR-0199 §3's speakable set by a different route.
     """
     harness = Harness(observer=FakeObserver([ObservedBelief(content="the user runs early")]))
-    conversation = await _conversation_of(harness, False, False)
+    conversation = await _conversation_of(harness, Placement(), Placement())
 
     await harness.stage.observe(conversation)
 
-    assert (await _only_belief(harness)).provenance.supplied_withheld_content is False
+    assert (await _only_belief(harness)).placement == Placement()
 
 
 class _ClaimingObserver:
-    """An ``Observer`` whose proposal claims ADR-0204 §1's field for itself.
+    """An ``Observer`` whose proposal claims ADR-0217 §1's field for itself.
 
     Hand-rolled rather than scripted through :class:`FakeObserver`, because the
     canonical fake deliberately offers no knob for it: a producer's value has no
     effect anywhere (ADR-0106 §3 read for this field), so a knob would advertise an
-    input that is discarded. What is under test is precisely that discarding.
+    input that is discarded. What is under test is precisely that discarding — and
+    it is **not** ADR-0217 §4's proposal, which is a change of its own that §11
+    orders after §7's two acts.
     """
 
-    def __init__(self, *, claims: bool) -> None:
+    def __init__(self, *, claims: Placement) -> None:
         self._claims = claims
 
     async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome:
@@ -1764,8 +1773,8 @@ class _ClaimingObserver:
                 confidence=0.6,
                 evidence=tuple(episode.id for episode in episodes),
                 last_updated=AT,
-                supplied_withheld_content=self._claims,
             ),
+            placement=self._claims,
         )
         return ObservationOutcome(
             proposals=(MemoryUpdateProposal(proposed=proposed, rationale="the batch says so"),)
@@ -1775,18 +1784,18 @@ class _ClaimingObserver:
 async def test_the_stage_assigns_the_marker_over_the_producers_own_value() -> None:
     """ADR-0106 §3's discipline, applied to this field: assigned, never merged.
 
-    A producer that claimed the stamp on a batch that held none would otherwise put
-    a record beyond the spoken channel's reach on its own say-so, and a merge would
-    leave that code path open. The stage computes the fact from the batch it
+    A producer that narrowed on a batch that held nothing narrowed would otherwise
+    put a record beyond the spoken channel's reach on its own say-so, and a merge
+    would leave that code path open. The stage computes the fact from the batch it
     selected and writes it over whatever arrived, so the producer never had the
     choice.
     """
-    harness = Harness(observer=_ClaimingObserver(claims=True))
-    conversation = await _conversation_of(harness, False)
+    harness = Harness(observer=_ClaimingObserver(claims=_NARROWED))
+    conversation = await _conversation_of(harness, Placement())
 
     await harness.stage.observe(conversation)
 
-    assert (await _only_belief(harness)).provenance.supplied_withheld_content is False
+    assert (await _only_belief(harness)).placement == Placement()
 
 
 async def test_a_producer_that_forgets_the_marker_does_not_launder_the_warrant() -> None:
@@ -1796,12 +1805,12 @@ async def test_a_producer_that_forgets_the_marker_does_not_launder_the_warrant()
     producer over-claiming taint but one omitting it, and nothing guarantees a field
     in a model's output".
     """
-    harness = Harness(observer=_ClaimingObserver(claims=False))
-    conversation = await _conversation_of(harness, True)
+    harness = Harness(observer=_ClaimingObserver(claims=Placement()))
+    conversation = await _conversation_of(harness, _NARROWED)
 
     await harness.stage.observe(conversation)
 
-    assert (await _only_belief(harness)).provenance.supplied_withheld_content is True
+    assert (await _only_belief(harness)).placement == _NARROWED
 
 
 # --- the scheduled run: when a conversation is due (ADR-0218) ----------------

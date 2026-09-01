@@ -1386,21 +1386,22 @@ class _Parked:
     (recover the ``CONFIRM`` by its ``(execution_id, step_id)`` binding, ADR-0044
     §3) rather than caching a decision id a concurrent resolution could stale.
 
-    ``supplied_withheld_content`` is the parking turn's **own** evaluation, retained
-    here beside the turn it belongs to (ADR-0204 §2). The resolution's capture
+    ``supplied_withheld`` is the parking turn's **own** ADR-0204 §2 evaluation —
+    unchanged by ADR-0217 §3, which moves what it is written *into* and not how it is
+    computed — retained here beside the turn it belongs to. The resolution's capture
     renders that turn's goal and plan into a second episode from a pass that
     retrieves nothing of its own, so the value is carried rather than recomputed —
     recomputing it there would evaluate an empty supply and answer ``False`` about a
     rendering the parking turn's warrant produced. ``False`` on a recovered entry,
     whose ``turn`` is ``None``: its episode carries no goal statement and no plan
-    rationale of any turn, so there is nothing in it for a stamp to be about.
+    rationale of any turn, so there is nothing in it for a narrowing to be about.
     """
 
     turn: TurnResult | None
     execution_id: str
     step_id: str
     confirmation_id: str | None
-    supplied_withheld_content: bool = False
+    supplied_withheld: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1449,7 +1450,7 @@ def _paired_deliveries(
 
     **A delivery fact travels with the episode it qualifies and never without it.**
     Where a supply site withheld a record — under ADR-0199 §3, or under ADR-0204 §3's
-    test on ``Provenance.supplied_withheld_content`` — that record is not in
+    test as ADR-0217 §2 now reads it, on ``MemoryBase.placement`` — that record is not in
     ``memories``, so its fact is not in what this returns and no delivery fact for
     that turn reaches the composing stage at all. A fact stating how long an answer
     ran, standing beside no answer, is a value that narrows what was withheld, and
@@ -6714,7 +6715,7 @@ class Engine:
                 step=None,
                 resumed=False,
                 composed=composed,
-                supplied_withheld_content=withheld,
+                supplied_withheld=withheld,
                 spoken=spoken,
             )
         first = turn.plan.steps[0]
@@ -6747,7 +6748,7 @@ class Engine:
                 disposition,
                 step_id=first.id,
                 handle=handle,
-                supplied_withheld_content=withheld,
+                supplied_withheld=withheld,
             )
         finally:
             # The reservation held the slot across the awaits. It is now either in
@@ -6777,7 +6778,7 @@ class Engine:
             resumed=False,
             parked=parked,
             composed=composed,
-            supplied_withheld_content=withheld,
+            supplied_withheld=withheld,
             spoken=spoken,
         )
 
@@ -7268,7 +7269,7 @@ class Engine:
             # ADR-0204 §2's fifth clause: a pass that carries no turn carries
             # ``False``, and it is true of this episode rather than a default — its
             # content holds no goal statement and no plan rationale of any turn.
-            supplied_withheld_content=False,
+            supplied_withheld=False,
         )
 
     async def _finish_route(
@@ -7303,7 +7304,7 @@ class Engine:
             # A routed pass reaches no retrieval and no planner, so there is no
             # supply for the predicate to find and nothing in the episode for a
             # stamp to be about (ADR-0204 §2's fifth clause).
-            supplied_withheld_content=False,
+            supplied_withheld=False,
         )
 
     async def _composed_routed_whole(
@@ -7968,7 +7969,7 @@ class Engine:
             # clause). This pass retrieves nothing and evaluates nothing; the episode
             # it captures renders the parked turn's goal and plan, so what it is
             # stamped with is that turn's own evaluation, applied unchanged.
-            supplied_withheld_content=parked.supplied_withheld_content,
+            supplied_withheld=parked.supplied_withheld,
         )
 
     async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation and its spoken capture; every one is a distinct fact about the pass
@@ -7979,7 +7980,7 @@ class Engine:
         step: StepOutcome | None,
         resumed: bool,
         composed: ComposedReply | None,
-        supplied_withheld_content: bool,
+        supplied_withheld: bool,
         parked: ParkedBinding | None = None,
         routed: RoutedOperation | None = None,
         utterance: str | None = None,
@@ -8013,8 +8014,10 @@ class Engine:
         result to a model one turn later, satisfying every same-pass clause of §6 while
         breaking §6.
 
-        **``supplied_withheld_content`` is a property of the turn whose rendering the
-        episode carries, and it is passed at every call site** (ADR-0204 §2). This
+        **``supplied_withheld`` is a property of the turn whose rendering the
+        episode carries, and it is passed at every call site** (ADR-0204 §2, whose
+        evaluation ADR-0217 §3 leaves unchanged; what it now narrows is the episode's
+        ``placement``). This
         method neither computes nor defaults it: the turn passes its own evaluation, a
         resumption passes the parked turn's, and a routed pass passes ``False`` —
         which is true of what its episode holds rather than a fallback, because
@@ -8040,7 +8043,7 @@ class Engine:
             ),
             outcome=_outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome),
             parked=parked,
-            supplied_withheld_content=supplied_withheld_content,
+            supplied_withheld=supplied_withheld,
             delivery=None if spoken is None else spoken.delivery,
         )
         if spoken is not None:
@@ -8220,7 +8223,7 @@ class Engine:
         *,
         step_id: str,
         handle: str | None,
-        supplied_withheld_content: bool = False,
+        supplied_withheld: bool = False,
     ) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
 
@@ -8230,7 +8233,7 @@ class Engine:
         be ``None`` on the recovered path — but a resolving disposition is never
         ``AWAITING_CONFIRMATION``, so the parked branch below is never taken there).
 
-        ``supplied_withheld_content`` is this turn's own ADR-0204 §2 evaluation, on
+        ``supplied_withheld`` is this turn's own ADR-0204 §2 evaluation, on
         its way to the parked entry that the resolution's capture will read it back
         off. It reaches nothing else: the ``StepOutcome`` this method returns gains no
         member, and a pass that cannot park — a resumption, whose park already exists
@@ -8252,7 +8255,7 @@ class Engine:
                 turn,
                 disposition,
                 handle,
-                supplied_withheld_content=supplied_withheld_content,
+                supplied_withheld=supplied_withheld,
             )
         return StepOutcome(
             disposition=disposition.disposition,
@@ -8268,7 +8271,7 @@ class Engine:
         disposition: StepDisposition,
         handle: str,
         *,
-        supplied_withheld_content: bool = False,
+        supplied_withheld: bool = False,
     ) -> Confirmation:
         """Assemble the confirmation content around a pre-minted token (ADR-0042 §4).
 
@@ -8298,7 +8301,7 @@ class Engine:
             # The parking turn's own evaluation, retained beside the turn it belongs
             # to so the resolution's capture stamps that turn's value rather than
             # recomputing one from a pass that retrieves nothing (ADR-0204 §2).
-            supplied_withheld_content=supplied_withheld_content,
+            supplied_withheld=supplied_withheld,
         )
         return Confirmation(
             tool_id=recorded.tool.id,

@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     DataTier,
     NotificationCandidate,
     NotificationDelivery,
+    Placement,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenRendering,
@@ -424,7 +425,7 @@ class TestThePlacementsConditionOnTheStamp:
         The placed producer's inputs are what a ``Reader`` proposed over a configured
         calendar source, and what it speaks is that proposal's own sentence: ADR-0206
         §3's clause holds because the summary is the proposal's ``content`` byte for
-        byte, and the proposal carries the warrant as ``False``. Both halves are
+        byte, and the proposal carries the default placement. Both halves are
         asserted, because either alone would leave the derivation open — a producer
         that composed its summary from something else would satisfy the second and
         break the clause.
@@ -439,7 +440,7 @@ class TestThePlacementsConditionOnTheStamp:
 
         await harness.stage.notice()
 
-        assert proposal.proposed.provenance.supplied_withheld_content is False
+        assert proposal.proposed.placement == Placement()
         assert [candidate.summary for candidate in harness.offered] == [proposal.proposed.content]
         collaborators = set(inspect.signature(harness.stage.__class__).parameters)
         assert collaborators == {"reader", "grants", "writer", "reads", "now", "lead"}

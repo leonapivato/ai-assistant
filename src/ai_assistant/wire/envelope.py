@@ -666,7 +666,70 @@ from ai_assistant.wire.errors import (
 #: codec's dispatch, ADR-0087 §2c's scalar table, the error registry (a code is
 #: resolved by class name, so a new subclass registers nothing) and both adapters
 #: are untouched.
-PROTOCOL_VERSION: Final[int] = 22
+#: **23 since ADR-0217 §1 and §9**, under ADR-0124 §9's **second** limb — "a change
+#: to a wire-carried ``core`` type that makes a value one peer emits invalid for the
+#: other, whether the change widens or narrows the type" — and it is the ground
+#: ADR-0217 §9 calls "the one with a disclosure consequence".
+#: :class:`~ai_assistant.core.types.MemoryBase` gains ``placement`` and
+#: :class:`~ai_assistant.core.types.Provenance` **loses**
+#: ``supplied_withheld_content``, the field ADR-0204 §1 put there; the question the
+#: removed member answered is answered by the added one, ``True`` becoming reach
+#: ``OWNER`` with setter ``DERIVED``.
+#:
+#: **The removal is what makes it a bump, and it is a different case from the one
+#: ADR-0213 §11 settled on the same envelope** (ADR-0217 §9). That section ruled *no*
+#: bump for adding ``topics``, because "the new member has a default, so an older
+#: peer decoding a newer hub's record ignores a member it does not know" — and it is
+#: right about an addition. A member **removed** is not ignored: its default is
+#: *read*. Neither type sets ``extra="forbid"``, so no decode fails in either
+#: direction, and that is precisely the hazard. A peer at 22 decoding a record from a
+#: hub at 23 reads ``supplied_withheld_content`` as its ``False`` default — a
+#: definite "nothing was withheld" — on a record whose placement is ``OWNER``; and a
+#: peer at 23 decoding a hub at 22 reads the default placement on a record that hub
+#: had narrowed. Both are §9's second limb, "accepted by it with a different
+#: meaning", on the one value where the meaning lost is the **restrictive** one. No
+#: lane reads this entry as authority for bumping on a defaulted addition alone.
+#:
+#: **``MemoryBase`` and ``Provenance`` are wire-carried**, which is what puts them in
+#: reach of that limb at all: ``TurnResult.memories`` is ``tuple[MemoryRecord, ...]``,
+#: carried inside ``TurnOutcome.turn``, and ADR-0210 §8 reasons from exactly that.
+#: This is also a different case from the one ADR-0204 §7 and ADR-0210 §8 settled,
+#: and neither is cited as having answered it: both ruled on a value the hub
+#: *computes* for a field whose shape is unmoved — "No frame changes shape or
+#: encoding, no member is added or removed" — where here a member is added and a
+#: member is removed. The nearer precedent is ADR-0187 §5's account of ADR-0181 §3.
+#:
+#: **The decode is what keeps a store's own records from widening**, and it is not
+#: this constant's job (ADR-0217 §9): a record carrying the legacy member and no
+#: placement decodes to reach ``OWNER``, setter ``DERIVED``, wherever it is decoded.
+#: The version bump is what keeps a peer at 22 from being handed one of these records
+#: at all; the mapping is what covers the persistent store, which holds records
+#: written under ADR-0204 and is read on the first turn after the upgrade.
+#:
+#: **This is one of three bumps ADR-0217 §9 spends, each on its own ground and in its
+#: own change**: this one for the field move on the second limb, ``FeedbackEvent``'s
+#: ``guarded`` for a member a client sets, and §7's two ``AssistantEngine`` methods on
+#: the **first** limb. "Three entries in ``wire/envelope.py``'s log, each naming its
+#: own reason, is what that file's own practice requires; collapsing them would leave
+#: a released version whose log entry does not describe it."
+#:
+#: **The method set does not move**, and stands at forty; ADR-0177 §1's browser
+#: enumeration does not move either, and stands at thirty-one — this change adds no
+#: operation, and ADR-0217 §7's two are a later change with a bump of their own.
+#: Nothing else under ``wire/`` changes for it: the framing, the connect exchange,
+#: the frame kinds, the codec's dispatch, ADR-0087 §2c's scalar table, the error
+#: registry and both adapters are untouched. ``Placement`` is a frozen model of
+#: scalars with two ``StrEnum`` members, which is the shape the codec already
+#: carries, and it crosses by being named in a wire-carried type rather than by any
+#: second declaration (ADR-0085 §10).
+#:
+#: **ADR-0204 §7's hub-authoritative clause is kept as a live condition and
+#: generalised** (ADR-0217 §9): the placement is set in the hub, no client sets it,
+#: and no component reads it off a wire-received record to decide anything. A later
+#: decision giving any client, spoke or gateway a rule keyed on a placement **as
+#: received over the wire** owes ADR-0124 §9's test afresh in its own text and may not
+#: cite this entry as having answered it.
+PROTOCOL_VERSION: Final[int] = 23
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

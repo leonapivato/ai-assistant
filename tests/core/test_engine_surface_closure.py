@@ -789,6 +789,21 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     takes a ``MemoryRecord`` as an argument. The **second** limb is not met: no
     wire-carried type is minted and ADR-0087 §2c's scalar table gains no row.
 
+    **ADR-0217 §9 is under the second limb alone**, and moves only the version, to 23
+    against the same forty methods — its own §7 adds two methods, but those are a
+    later change with a bump of their own (§11's ordering). What fires the limb here
+    is a **removal**: ``MemoryBase`` gains ``placement`` and ``Provenance`` loses
+    ``supplied_withheld_content``. ADR-0213 §11 ruled no bump for *adding* ``topics``
+    to the same envelope, because "an older peer decoding a newer hub's record ignores
+    a member it does not know" — and a removed member is not ignored, its default is
+    *read*. Neither type sets ``extra="forbid"``, so no decode fails in either
+    direction, which is precisely the hazard: a peer at 22 reads
+    ``supplied_withheld_content`` as its ``False`` default on a record whose placement
+    is ``OWNER``, and a peer at 23 reads the default placement on a record an older
+    hub had narrowed. Both are §9's "accepted with a different meaning", on the one
+    value where the meaning lost is the restrictive one. The types are wire-carried
+    through ``TurnResult.memories``, which ADR-0210 §8 reasons from in terms.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -797,7 +812,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 22), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (40, 23), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -1589,11 +1589,17 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     §5a keep the fold's own composition rules off that contract. It is pinned
     against both writers directly instead.
 
-    ``supplied_withheld_content`` is the **disjunction** on both arms for the same
-    reason, and is mirrored here for the same one (ADR-0204 §5). A fake that omitted
-    it would clear a stamped record on the first unstamped reinforcement and hand a
-    channel of unbounded audience a record ADR-0204 §3 withholds — the laundering the
-    field exists to stop, performed by the double rather than by `memory`.
+    ``placement`` is the **meet** on both arms for the same reason, and is mirrored
+    here for the same one (ADR-0204 §5, generalised by ADR-0217 §3). A fake that
+    omitted it would inherit one side's placement through ``model_copy``, widen a
+    narrowed record on the first unnarrowed reinforcement and hand a channel of
+    unbounded audience a record ADR-0217 §2 withholds — the laundering the field
+    exists to stop, performed by the double rather than by `memory`. The meet is
+    :meth:`~ai_assistant.core.types.Placement.folded_with` rather than
+    ``narrowest_of``, because these are two placements of **one belief** and §3's
+    eligibility clause is bounded to exactly that case: a ``PROPOSED`` side is
+    discarded against an ``OWNER_ACT`` or ``DERIVED`` one, so a model cannot undo the
+    owner's act by duplication.
 
     ``last_confirmed_at`` is **composed** on both arms rather than inherited from
     either side (:func:`_confirming_instant`, ADR-0109 §5, §6): the later of the two
@@ -1626,10 +1632,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     # Likewise selected once, before the arms (ADR-0106 §4): the clause is stated
     # over the fold as a disjunction, so neither arm may read one side alone.
     tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
-    # And once more, on the same terms (ADR-0204 §5's first clause).
-    withheld = (
-        target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
-    )
+    # And once more, on the same terms and on the envelope since ADR-0217 §1
+    # (ADR-0204 §5's first clause, as a meet rather than a disjunction).
+    placement = target.placement.folded_with(incoming.placement)
     # And once more, on the envelope rather than on the warrant (ADR-0213 §8): the
     # union is stated over the fold, so neither arm may take one side's tuple.
     topics = _topics_of_fold(target, incoming)
@@ -1643,9 +1648,10 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             attestation=target.provenance.attestation,
             derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
-            supplied_withheld_content=withheld,
         )
-        return target.model_copy(update={"provenance": corroborated, "topics": topics})
+        return target.model_copy(
+            update={"provenance": corroborated, "topics": topics, "placement": placement}
+        )
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
@@ -1655,6 +1661,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         attestation=incoming.provenance.attestation,
         derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
-        supplied_withheld_content=withheld,
     )
-    return incoming.model_copy(update={"id": target.id, "provenance": provenance, "topics": topics})
+    return incoming.model_copy(
+        update={
+            "id": target.id,
+            "provenance": provenance,
+            "topics": topics,
+            "placement": placement,
+        }
+    )

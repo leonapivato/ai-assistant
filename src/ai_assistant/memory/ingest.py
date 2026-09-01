@@ -1193,9 +1193,9 @@ def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, 
     proposal reinforces it, and nothing about the survivor would look wrong
     afterwards. So no fold drops a label the target carried and no arm writes one
     side's tuple over the other's — which is why this is computed **once, before the
-    arms**, exactly as ``derived_from_external`` and ``supplied_withheld_content``
-    are and for the same reason: the rule is stated over the fold, so neither arm may
-    read one side alone.
+    arms**, exactly as ``derived_from_external`` and ``placement`` are and for the
+    same reason: the rule is stated over the fold, so neither arm may read one side
+    alone.
 
     **The admission order keeps that ratchet whole under §1's bound**: the target's
     own labels first, then the labels of the incoming record the target does not
@@ -1560,23 +1560,32 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     direction passes an implementation that merely copies the incoming field and
     proves nothing.
 
-    **``supplied_withheld_content`` is the disjunction of both sides too, on both
-    arms** (ADR-0204 §5). Every word of the paragraph above transfers: ADR-0106 §4's
-    ratchet is the argument ADR-0204 §5 takes by citation, and a survivor written as
-    ``incoming``'s value alone would clear a stamped target the first time an
-    unstamped proposal reinforced it — the laundering moved one step along, which is
-    the failure the field exists to stop. The field is built here rather than
-    inherited by ``model_copy``, so an implementation that simply forgot it would
-    default it to ``False`` and clear the stamp silently, which is why it is written
-    on both arms rather than on the arm that happens to be observed.
+    **``placement`` is the *meet* of both sides, on both arms** (ADR-0204 §5 as
+    ADR-0217 §3 generalises it from a disjunction to a meet). Every word of the
+    paragraph above transfers: a survivor written as ``incoming``'s placement alone
+    would widen a narrowed target the first time an unnarrowed proposal reinforced
+    it — the laundering moved one step along, which is the failure the field exists
+    to stop. It is written on **both arms** rather than on the arm that happens to be
+    observed, because each arm's ``model_copy`` would otherwise inherit *that side's*
+    placement and quietly discard the other's.
 
-    The corroboration arm takes the disjunction too, and not the target's value
+    **The meet is :meth:`~ai_assistant.core.types.Placement.folded_with` and its
+    eligibility rule is why the fold calls that rather than ``narrowest_of``**
+    (ADR-0217 §3). A placement whose setter is ``PROPOSED`` is not a *side* of a meet
+    against one whose setter is ``OWNER_ACT`` or ``DERIVED``: these are two
+    placements of **one belief**, so weighing the proposal would let a model undo the
+    owner's act on that belief by duplication. A record the owner has unguarded —
+    reach ``ANYONE``, setter ``OWNER_ACT`` — folded with a freshly proposed reach
+    ``OWNER`` therefore survives as the owner left it, while the same stored side
+    folded with an incoming ``DERIVED`` narrowing survives narrowed, because an act
+    does not lift a derivation. The survivor's instant is the winning side's and
+    never the instant of the fold: the stamp names when the placement was set, not
+    when a duplicate was merged.
+
+    The corroboration arm takes the meet too, and not the target's placement
     alone. ADR-0103 §6 withholds the incoming record's *belief properties* from
-    the survivor, and taint is not one of them: it is a fact about what warrant
-    was received, and a warrant is never un-received. The survivor there is
-    ``ATTESTED``, where ADR-0106 §2 says the field means nothing anyway — but
-    writing the disjunction keeps one rule over both arms instead of two that can
-    drift, and ADR-0106 §4's clause is stated over the fold rather than over
+    the survivor, and a placement is not one of them: it is a fact about who may
+    receive the record, and the ratchet is stated over the fold rather than over
     either side.
 
     **The union is bounded here, before the ``Provenance`` is constructed**, so
@@ -1634,12 +1643,11 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     # Likewise selected once, before the arms: ADR-0106 §4 states the rule over the
     # fold as a disjunction of both sides, so neither arm may read one side alone.
     tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
-    # And once more, for the same reason and by the same rule: ADR-0204 §5's first
-    # clause states the disjunction over the fold, so no fold, merge or reinforcement
-    # writes `False` over a `True` on either arm.
-    withheld = (
-        target.provenance.supplied_withheld_content or incoming.provenance.supplied_withheld_content
-    )
+    # And once more, for the same reason and by the same rule, on the envelope
+    # rather than on the warrant since ADR-0217 §1: ADR-0204 §5's first clause states
+    # the ratchet over the fold, generalised to a meet by ADR-0217 §3, so no fold,
+    # merge or reinforcement writes a wider reach over a narrower one on either arm.
+    placement = target.placement.folded_with(incoming.placement)
     # And once more, on the envelope rather than on the warrant: ADR-0213 §8 states
     # the union over the fold, so neither arm may take one side's tuple. Computed
     # here, before the arms, for the reason the three above are — one rule in one
@@ -1655,9 +1663,10 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             attestation=target.provenance.attestation,
             derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
-            supplied_withheld_content=withheld,
         )
-        return target.model_copy(update={"provenance": corroborated, "topics": topics})
+        return target.model_copy(
+            update={"provenance": corroborated, "topics": topics, "placement": placement}
+        )
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
@@ -1667,9 +1676,15 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         attestation=incoming.provenance.attestation,
         derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
-        supplied_withheld_content=withheld,
     )
-    return incoming.model_copy(update={"id": target.id, "provenance": provenance, "topics": topics})
+    return incoming.model_copy(
+        update={
+            "id": target.id,
+            "provenance": provenance,
+            "topics": topics,
+            "placement": placement,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -48,6 +48,9 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     Provenance,
 )
 
@@ -340,7 +343,7 @@ class ConversationLifecycle:
         content: str,
         outcome: str | None = None,
         parked: ParkedBinding | None = None,
-        supplied_withheld_content: bool = False,
+        supplied_withheld: bool = False,
         delivery: SpokenDelivery | None = None,
     ) -> CaptureReport:
         """Record one turn: the index entry first, then its episode (§3).
@@ -388,15 +391,18 @@ class ConversationLifecycle:
             outcome: How the exchange turned out, as the episode's own ``outcome``.
             parked: The binding this turn parked on, where it parked, so a
                 recovered resumption can find its way back to this conversation.
-            supplied_withheld_content: Whether content ADR-0199 §3 withholds from a
+            supplied_withheld: Whether content ADR-0199 §3 withholds from a
                 channel of unbounded audience stood in the warrant of the turn whose
-                rendering ``content`` carries (ADR-0204 §2). **Handed to capture, not
-                computed here** — capture judges nothing (§4), and this is the
-                pipeline's evaluation exactly as ``content`` is the pipeline's
-                rendering. ``False`` where no turn produced the rendering at all: a
-                routed pass and a resumption recovered from durable state each carry
-                no goal statement and no plan rationale of any turn, so there is
-                nothing in their episode for a stamp to be about.
+                rendering ``content`` carries (ADR-0204 §2, whose evaluation ADR-0217
+                §3 leaves unchanged). **Handed to capture, not computed here** —
+                capture judges nothing (§4), and this is the pipeline's evaluation
+                exactly as ``content`` is the pipeline's rendering. What the episode
+                *records* is ADR-0217 §1's placement: ``True`` here writes reach
+                ``OWNER`` with setter ``DERIVED``, and ``False`` writes the default.
+                ``False`` where no turn produced the rendering at all: a routed pass
+                and a resumption recovered from durable state each carry no goal
+                statement and no plan rationale of any turn, so there is nothing in
+                their episode for a narrowing to be about.
             delivery: What is known about this turn's spoken answer having been
                 played, written onto the index row this allocates (ADR-0205 §4).
                 ``converse_spoken`` supplies ``SpokenDelivery(state=UNKNOWN)`` —
@@ -437,7 +443,7 @@ class ConversationLifecycle:
             content=content,
             outcome=outcome,
             now=turn.occurred_at,
-            supplied_withheld_content=supplied_withheld_content,
+            supplied_withheld=supplied_withheld,
         )
         try:
             await self._memory.write_atomic(
@@ -545,7 +551,7 @@ class ConversationLifecycle:
         content: str,
         outcome: str | None,
         now: datetime,
-        supplied_withheld_content: bool,
+        supplied_withheld: bool,
     ) -> EpisodicMemory:
         """Build the one ``EpisodicMemory`` a turn deposits (§4).
 
@@ -574,12 +580,22 @@ class ConversationLifecycle:
         not a question about it. Writing ``occurred_at`` into the field instead
         would make every episode in the store claim a currency it has no use for.
 
-        **``supplied_withheld_content`` is the one field this method neither
-        defaults nor decides** (ADR-0204 §2). It is stamped from the value the
-        pipeline evaluated between retrieval and planning and carried here, so
-        "capture judges nothing" holds exactly as it does for ``content``: this
-        method reads no record, no supply and no channel, and every other field
-        ADR-0074 §4 fixes is stamped as it always was.
+        **``placement`` is the one field this method neither defaults nor decides**
+        (ADR-0204 §2, ADR-0217 §1). It is stamped from the value the pipeline
+        evaluated between retrieval and planning and carried here, so "capture judges
+        nothing" holds exactly as it does for ``content``: this method reads no
+        record, no supply and no channel, and every other field ADR-0074 §4 fixes is
+        stamped as it always was. What it writes is ADR-0217 §3's **derivation** —
+        reach ``OWNER``, setter ``DERIVED`` — and never an act or a proposal, neither
+        of which this producer can make.
+
+        **The instant is this turn's own**, which is ADR-0217 §1's producer
+        obligation discharged at the one site that can: "every derivation this system
+        performs writes the instant of the narrowing it makes", so that an untimed
+        ``DERIVED`` placement found in a store is diagnostic of §9's decode of a
+        pre-field record rather than of a producer that forgot. The turn's
+        ``occurred_at`` is the reading this method already carries, so the narrowing
+        and the record of it cannot disagree about when the turn happened.
         """
         return EpisodicMemory(
             id=turn.episode_id,
@@ -591,8 +607,12 @@ class ConversationLifecycle:
                 source=MemorySource.OBSERVED,
                 confidence=CAPTURE_CONFIDENCE,
                 last_updated=now,
-                supplied_withheld_content=supplied_withheld_content,
                 # `last_confirmed_at` left at its `None` default — see above.
+            ),
+            placement=(
+                Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=now)
+                if supplied_withheld
+                else Placement()
             ),
         )
 
