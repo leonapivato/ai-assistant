@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -307,6 +307,42 @@
   not arise. Appended note per ADR-0070 §1; no ratified text below is rewritten. The
   pair and this note land in the same change as ADR-0212 itself, which is the
   existence condition ADR-0082 §7 states. Refs #1788, #1737, #785.
+
+- **Partially superseded: 2026-09-01 by ADR-0221 — the field role, not the
+  argument: §3's "Not the message" bullet.** Design note **#1845** asks for the
+  assistant's own half of an exchange to be recorded, and five ADRs — ADR-0170 §9,
+  ADR-0197 §10 and §11, ADR-0203, ADR-0204 — had each deferred *"whether the composed
+  answer joins the episode the turn captures"* to `track:memory` by name. ADR-0221 §1
+  decides it: `EpisodicMemory.outcome` carries the composed reply, whole.
+
+  **Replaced — what `outcome` states.** §3's bullet reads *"Not the message:
+  `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange,
+  and one `occurred_at`, which a pair of messages minutes apart does not have."* Its
+  **argument** — that the unit of capture is the turn and not the message — stands
+  whole, and a reply is a property of a completed exchange exactly as a phrase is.
+  What is replaced is the field role the sentence assumes and that `_outcome_of` and
+  `_routed_outcome_of` implement: `outcome` is no longer where the *result* of the
+  exchange is stated. ADR-0221 §2 puts the result in a new closed `core` enum on a new
+  `EpisodicMemory.disposition` field, and ADR-0221 §3 makes every render site state
+  that result's phrase where the field is present and `outcome` where it is absent, so
+  no prompt's bytes move.
+
+  **What is untouched.** §3's capture point, its one-episode-per-outcome rule, its
+  resumption rule and its degraded-capture ruling; §4's stamps in full, including that
+  `content` is *"the canonical rendering of the exchange — what was asked, and how it
+  turned out"*, which ADR-0221 does not change; §7's retention horizon, which is what
+  bounds the stored reply's life; §8's deletion; §9's contract surface; and §11's
+  deferrals, of which the cross-device-presence bullet is **discharged in part rather
+  than superseded** — ADR-0221 §5 records the modality of the source material an
+  episode's text was derived from, which needs none of the device identity §11 names
+  as the reason for waiting, and §11's device-identity half stays open and unstarted.
+
+  **The six pairs on the `Status` line name different scopes** and accumulate under
+  ADR-0070 §4; this one reaches §3 alone, which no earlier pair names. No amendment
+  qualifier is on the line, so ADR-0082 §2's move does not arise. Appended note per
+  ADR-0070 §1; no ratified text below is rewritten. The pair and this note land in the
+  same change as ADR-0221 itself, which is the existence condition ADR-0082 §7 states.
+  Refs #1845, #1221, #1314, #1866.
 
 ## Context
 
