@@ -6617,13 +6617,42 @@ function whyDerived(belief) {
   );
 }
 
+// The words a listed row leads with: its band, and for a captured turn the fact that
+// the band is a *filing* (#1891).
+//
+// `bandWords` renders a band as a first-person sentence, which is what this page shows
+// and what its three filter checkboxes are labelled with. On an episode "I worked it
+// out" is not a label — it is a claim, and a false one: nothing worked a recorded turn
+// out (ADR-0075 §2, "it is true because it happened"). Left as it was, the row would
+// have asserted it one line above a `Why` that denies it.
+//
+// **The band's own words stay inside the phrase rather than being replaced**, and that
+// is what keeps ADR-0073 §4 met — the band is conveyed, "never omitted, never implied
+// by position alone" — while also keeping something this surface owes that the terminal
+// does not: the heading is how a user reads a row back to the checkbox that selected
+// it, so a row that stopped naming its band would stop saying which box it arrived
+// under. The terminal's heading needs no such repair; it leads with the band's bare
+// value, which is a filing already and claims nothing.
+//
+// **The confidence beside it is left exactly as it is**, for ADR-0073 §4's other
+// clause: every row conveys one, no kind is exempt, and ADR-0072 §6 rules the same of
+// anything rendered as a belief. What an episode's figure *means* — a standing value
+// ADR-0074 §4 sets at capture, not a measure of doubt that the exchange happened — is
+// said in the `Why` line, where there is room to say it.
+function beliefHeading(belief) {
+  if (belief.kind === "episodic") {
+    return `Filed under '${bandWords(belief.band)}'`;
+  }
+  return bandWords(belief.band);
+}
+
 // One belief, carrying everything ADR-0073 §4 requires of both views: the band, the
 // confidence, the kind, the content, why it is held, when it was last revised, the
 // end of its validity window where one is set, and its id.
 function renderBeliefFields(item, belief) {
   line(
     item,
-    `${bandWords(belief.band)} · ${belief.kind} · confidence ${belief.confidence.toFixed(2)}`,
+    `${beliefHeading(belief)} · ${belief.kind} · confidence ${belief.confidence.toFixed(2)}`,
     "hint"
   );
   line(item, belief.content, "reply");
