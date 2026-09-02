@@ -942,6 +942,20 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
     the store itself writes with**, so this test is not a second spelling of the row
     format: the stored candidate is decoded, its declared expiry moved out, and the
     same ``model_dump_json`` put back.
+
+    **Only the newest-record narrowing needs an arm here, and that asymmetry is §2's
+    own.** A store running under ADR-0215 admits at most one speaking record per key,
+    so the pair in which the *newest* is silent is the one no suite can construct —
+    which is why it is planted. The inverse pair, where the older record has expired
+    and the younger still speaks, is the ordinary alternation ADR-0130 §8 produces and
+    is reachable through the Protocol, so ADR-0215 §7 already put it in the shared
+    suite: "under ``retention = None``, where nothing is purged, a key freed by its
+    first record's expiry is admitted afresh, suppressed again while that second
+    record stands dismissed and inside its own expiry". Narrowing either store to the
+    *oldest* row under the key fails that arm —
+    ``NotificationStoreContract.test_a_key_alternates_between_free_and_suppressed_with_nothing_purged``
+    — so restating it here would be two statements of one contract, which §7 warns
+    against, and would close nothing.
     """
     clock = MutableClock()
     path = tmp_path / "notifications.db"
