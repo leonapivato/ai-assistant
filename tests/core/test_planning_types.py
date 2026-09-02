@@ -26,6 +26,9 @@ from ai_assistant.core.types import (
     PlanExport,
     PlanStep,
     Provenance,
+    ReadAsk,
+    ReadKind,
+    ReadRequest,
     SkipReason,
     StepExecution,
     StepFailure,
@@ -769,23 +772,23 @@ def test_deletion_reports_erased_indeterminate_steps() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 2
+    assert export.schema_version == 3
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_two() -> None:
+def test_export_pins_the_schema_version_to_exactly_three() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[2]`` refuses an explicit ``1`` — a v1 document does not validate
-    against this contract at all — and any other value, so the advertised
-    version cannot be mislabelled. The positive default is what a producer gets
-    for free; only the rejections pin it.
+    ``Literal[3]`` refuses an explicit ``2`` — a document of the shape this export
+    had before ``ActionPlan`` gained ``read_request`` does not validate against this
+    contract at all (ADR-0226 §4) — and any other value, so the advertised version
+    cannot be mislabelled. The positive default is what a producer gets for free;
+    only the rejections pin it.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=2).schema_version == 2
-    with pytest.raises(ValidationError):
-        PlanExport(exported_at=_WHEN, schema_version=1)  # type: ignore[arg-type]
-    with pytest.raises(ValidationError):
-        PlanExport(exported_at=_WHEN, schema_version=3)  # type: ignore[arg-type]
+    assert PlanExport(exported_at=_WHEN, schema_version=3).schema_version == 3
+    for stale in (1, 2, 4):
+        with pytest.raises(ValidationError):
+            PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
 
 def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
@@ -838,16 +841,25 @@ def test_a_step_cannot_finish_before_it_started() -> None:
 
 
 def test_export_round_trips_through_json() -> None:
-    """A v2 export with a failed step's failure survives a JSON round-trip.
+    """A v3 export with a failed step and a read request survives a round-trip.
 
-    Carrying the failure is the point: ``StepFailure`` is new to the exported
-    shape, which is exactly what ``schema_version`` moving to 2 announces.
+    Carrying both is the point, because each is why a version moved: ``StepFailure``
+    was new to the exported shape at 2 (ADR-0039 §10), and ``ActionPlan``'s
+    ``read_request`` is new to it at 3 (ADR-0226 §4). A document carrying either but
+    labelled with the other version does not validate at all, which is the whole of
+    what the label is for.
     """
     plan = ActionPlan(
         id="p1",
         goal_id="g1",
         steps=(PlanStep(id="s1", intent="mail", capability="send_email"),),
         created_at=_WHEN,
+        read_request=ReadRequest(
+            asks=(
+                ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+                ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M2", "M5")),
+            )
+        ),
     )
     execution = ExecutionState(
         id="e1",
@@ -863,7 +875,10 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 2
+    assert restored.schema_version == 3
+    request = restored.plans[0].read_request
+    assert request is not None
+    assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}
     step = restored.executions[0].steps[0]
     assert step.failure is not None
     assert step.failure.kind is ToolFailureKind.UNAVAILABLE
