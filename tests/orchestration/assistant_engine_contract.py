@@ -109,6 +109,7 @@ from ai_assistant.core.types import (
     CurrentContext,
     Disposition,
     EgressBinding,
+    ExchangeDisposition,
     ExecutionState,
     FeedbackEvent,
     FeedbackKind,
@@ -144,6 +145,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     ToolOutcome,
+    TranscriptEntry,
     TurnOutcome,
     TurnResult,
     is_live_confirmation_park,
@@ -155,6 +157,7 @@ from ai_assistant.testing import (
     Disclosure,
     FakeAuditTrail,
     FakeSourceReadTrail,
+    FakeTranscriptArchive,
     SecretMethod,
     source_read_record,
 )
@@ -1165,6 +1168,85 @@ async def seeded_read_trail(
         await trail.record(_attempt(record_id, at=_CHECKED_AT + timedelta(seconds=offset)))
     trail.reads.clear()
     return trail
+
+
+#: The instant :func:`seeded_transcript_archive` anchors its entries on. Fixed rather
+#: than read from a clock, so the ordering a case asserts is a property of the entries
+#: rather than of how long the suite took to run.
+_ARCHIVED_AT = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
+
+#: How many entries :func:`seeded_transcript_archive` holds. Named so the cases that
+#: assert "the archive is intact" and "the report counts what is there" cannot drift
+#: apart from the seed.
+_SEEDED_TRANSCRIPT_ENTRIES = 4
+
+
+def seeded_transcript_archive() -> FakeTranscriptArchive:
+    """An archive holding four turns across two conversations (ADR-0225 §7).
+
+    Shared by the three bindings so they cannot arrange three different premises for
+    one clause, on :func:`seeded_read_trail`'s reason.
+
+    **Two of the four share an instant**, and that is the whole shape of the seed
+    rather than a detail: §7's order is "by the instant the turn occurred, descending,
+    and by the address for two entries sharing an instant", and an implementation that
+    is merely recency-descending is free to return a tied pair either way round — so
+    paging over them would repeat or skip a row and every membership assertion would
+    still pass. The tie is between ``c1:3`` and ``c2:1``, which also puts the tie
+    *across* conversations, where a grouping implementation is most likely to break it
+    by the wrong key.
+
+    **Every entry's user half opens with the same word.** That is what makes the
+    unnormalised-query case non-vacuous: nothing in the corpus carries a space before
+    ``where``, so ``" where"`` matches nothing on a surface that relays the query as
+    written and matches everything on one that strips it.
+
+    Returns:
+        The archive, with a retention of ``None`` — ADR-0225 §6's default, so nothing
+        here is hidden by a horizon and the cases are about the reads rather than
+        about eviction, which is the archive suite's own subject.
+    """
+    archive = FakeTranscriptArchive(retention=None, now=lambda: _ARCHIVED_AT)
+    archive.hold(
+        _archived("c1:1", conversation="c1", ordinal=1, at=_ARCHIVED_AT - timedelta(days=3)),
+        _archived("c1:2", conversation="c1", ordinal=2, at=_ARCHIVED_AT - timedelta(days=2)),
+        _archived("c1:3", conversation="c1", ordinal=3, at=_ARCHIVED_AT - timedelta(days=1)),
+        _archived("c2:1", conversation="c2", ordinal=1, at=_ARCHIVED_AT - timedelta(days=1)),
+    )
+    return archive
+
+
+def _archived(address: str, *, conversation: str, ordinal: int, at: datetime) -> TranscriptEntry:
+    """One seeded turn, with both halves present and a disposition that is not a park."""
+    return TranscriptEntry(
+        address=address,
+        conversation_id=conversation,
+        ordinal=ordinal,
+        occurred_at=at,
+        asked="where did I say that",
+        replied="you said it on Tuesday",
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSubject:
+    """An engine on the archive surface, and the archive standing behind it.
+
+    Attributes:
+        engine: The subject under test.
+        archive: The seeded archive the engine ultimately reaches, held from the test
+            process rather than through the surface. Read by a case as a **negative
+            control** — a refusal ADR-0085 §9 makes local must leave the archive
+            untouched — and written to as a fault lever, which is how a case proves a
+            refusal happened *before* the seam rather than at it. It is the wide seam
+            in the test's hands and the wide seam in the engine's: nothing here can
+            append either (ADR-0225 §10), which is why :meth:`FakeTranscriptArchive.hold`
+            is what seeds it.
+    """
+
+    engine: AssistantEngine
+    archive: FakeTranscriptArchive
 
 
 @dataclass(frozen=True, slots=True)
@@ -5497,6 +5579,266 @@ class AssistantEngineContract(ABC):
     @abstractmethod
     def overfull_spending(self) -> AssistantEngine:
         """A subject whose contract limit the two totals exceed."""
+
+    # --- ADR-0225 §5, §6, §7: the transcript archive's seven ----------------
+
+    @pytest.fixture
+    @abstractmethod
+    def transcripts(self) -> TranscriptSubject:
+        """A subject over an archive holding :func:`seeded_transcript_archive`'s entries.
+
+        **A fixture because nothing on this surface writes one**, and here that is
+        ADR-0225 §10's clause rather than an accident of what exists: the seam
+        ``AssistantEngine`` holds is the **wide** one, which carries no ``append`` —
+        §1 reserves writing to capture, on the narrow ``TranscriptArchiveWriter``
+        ``ConversationLifecycle`` holds. So the only route to a populated archive is
+        to be handed one, and :func:`seeded_transcript_archive` builds it so the
+        three bindings cannot arrange three different premises for one clause.
+
+        **The archive comes with it**, on :attr:`reads`' reason: ADR-0085 §9's local
+        refusals are negative clauses — refused "before any I/O" — and an assertion
+        that no read reached the store is worth nothing unless a case can look at
+        the store it did not reach. It is also what lets a case script a fault and
+        prove a refusal happened *earlier* than the seam.
+        """
+
+    async def test_the_search_comes_back_newest_first_with_the_address_breaking_ties(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §7: "total and deterministic", newest first.
+
+        The tie is the half a page-stable implementation gets wrong invisibly: two
+        entries share :data:`_TIED_AT` here, so an order that were merely
+        recency-descending would be free to return them either way round and paging
+        over them would repeat or skip a row.
+        """
+        hits = await transcripts.engine.transcript_search("said")
+
+        assert [hit.address for hit in hits] == ["c1:3", "c2:1", "c1:2", "c1:1"]
+
+    async def test_a_conversation_comes_back_in_the_order_it_was_said(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §7: ordinal order, which is the one read here that is not newest first.
+
+        Asserted as the exact sequence rather than as a set, because the whole of the
+        clause is the direction: "a transcript's order is the order it was said in",
+        and an implementation reusing the recency order for this read satisfies every
+        membership assertion and shows the user their conversation backwards.
+        """
+        page = await transcripts.engine.transcript_conversation("c1")
+
+        assert [entry.ordinal for entry in page] == [1, 2, 3]
+
+    async def test_an_entry_comes_back_whole_and_an_unknown_address_comes_back_absent(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §7: the addressed read elides nothing, and §3: an address may name nothing.
+
+        "Whole" is asserted over **both** halves rather than over the one a search
+        would have excerpted, because §7 gives the excerpt bound to the search alone.
+        """
+        entry = await transcripts.engine.transcript_entry("c1:1")
+
+        assert entry is not None
+        assert entry.asked == "where did I say that"
+        assert entry.replied == "you said it on Tuesday"
+        assert await transcripts.engine.transcript_entry("c9:9") is None
+
+    async def test_the_enumeration_returns_every_entry_newest_first(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §7: the unfiltered enumeration **is** the archive's export.
+
+        So it is asserted to be unfiltered — every seeded address, not merely a page
+        of them — which is what makes it satisfy ADR-0004 §6's export right rather
+        than being a fourth listing.
+        """
+        page = await transcripts.engine.transcript_entries()
+
+        assert {entry.address for entry in page} == set(transcripts.archive.recorded)
+        assert [entry.address for entry in page] == ["c1:3", "c2:1", "c1:2", "c1:1"]
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_a_non_positive_limit_is_refused_on_every_enumerating_read(
+        self, transcripts: TranscriptSubject, limit: int
+    ) -> None:
+        """ADR-0225 §7 and ADR-0102 §10: refused locally, in every implementation.
+
+        §7 has the archive refuse "a limit of zero or below … with a ``ValueError``",
+        while ADR-0085 §9 admits ``[0, 2**63)`` for a page argument — so a zero is
+        well-formed under the surface rule and refused by the store beneath it, which
+        is exactly ``recent_grants``' position under ADR-0102 §10. **Refused before
+        any I/O** is the load-bearing half and is what the scripted fault proves: an
+        implementation that sent the call and let the archive raise would surface
+        ``TranscriptArchiveError`` here instead.
+        """
+        transcripts.archive.fail()
+
+        with pytest.raises(ValueError, match="limit"):
+            await transcripts.engine.transcript_search("said", limit=limit)
+        with pytest.raises(ValueError, match="limit"):
+            await transcripts.engine.transcript_conversation("c1", limit=limit)
+        with pytest.raises(ValueError, match="limit"):
+            await transcripts.engine.transcript_entries(limit=limit)
+
+    async def test_a_negative_offset_is_refused_on_every_enumerating_read(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0085 §9: an offset outside ``[0, 2**63)``, refused locally.
+
+        Zero is **not** refused here and that asymmetry is the contract rather than
+        an oversight: skipping nothing is a page a caller can want, while asking for
+        nothing is a caller error the store beneath refuses.
+        """
+        transcripts.archive.fail()
+
+        with pytest.raises(ValueError, match="offset"):
+            await transcripts.engine.transcript_search("said", offset=-1)
+        with pytest.raises(ValueError, match="offset"):
+            await transcripts.engine.transcript_conversation("c1", offset=-1)
+        with pytest.raises(ValueError, match="offset"):
+            await transcripts.engine.transcript_entries(offset=-1)
+
+    async def test_the_archive_page_size_default_is_the_declared_one(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """Clause 1, over the three enumerating archive reads.
+
+        A default written in a ``Protocol`` signature binds nobody, so the three
+        implementations are held to it here — and the archive seam beneath declares
+        **different** defaults (ADR-0225 §10 gives ``search`` 20 and the other two
+        50), which is exactly the divergence this clause exists to prevent from
+        reaching the surface.
+        """
+        for called, explicit in (
+            (
+                await transcripts.engine.transcript_entries(),
+                await transcripts.engine.transcript_entries(limit=DEFAULT_PAGE_SIZE),
+            ),
+            (
+                await transcripts.engine.transcript_search("said"),
+                await transcripts.engine.transcript_search("said", limit=DEFAULT_PAGE_SIZE),
+            ),
+            (
+                await transcripts.engine.transcript_conversation("c1"),
+                await transcripts.engine.transcript_conversation("c1", limit=DEFAULT_PAGE_SIZE),
+            ),
+        ):
+            assert called == explicit
+
+    async def test_a_blank_argument_is_refused_and_never_read_as_everything(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §10 and ADR-0101 §1: a blank is a refusal, never a wildcard.
+
+        The destroys are the reason this matters rather than the reads: ADR-0101 §9
+        forbids a destructive operation an absent scope widens, so a blank
+        ``address`` that meant "everything" would be that failure spelled with
+        whitespace. Asserted with the archive intact afterwards, which is what
+        distinguishes "refused" from "matched nothing".
+        """
+        for blank in ("", "   "):
+            with pytest.raises(ValueError, match="query"):
+                await transcripts.engine.transcript_search(blank)
+            with pytest.raises(ValueError, match="conversation_id"):
+                await transcripts.engine.transcript_conversation(blank)
+            with pytest.raises(ValueError, match="address"):
+                await transcripts.engine.transcript_entry(blank)
+            with pytest.raises(ValueError, match="address"):
+                await transcripts.engine.forget_transcript_entry(blank)
+            with pytest.raises(ValueError, match="conversation_id"):
+                await transcripts.engine.forget_transcript_conversation(blank)
+
+        assert len(transcripts.archive.recorded) == _SEEDED_TRANSCRIPT_ENTRIES
+
+    async def test_the_query_reaches_the_predicate_unnormalised(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §10: an id may be stripped and a query may not.
+
+        ``query`` is typed ``NonBlankEncodableText`` rather than ``Identifier``
+        precisely so this holds — an ``Identifier`` "strips the value it accepts,
+        which would rewrite the user's search text before §7's predicate ever saw
+        it and would make ``" hello"`` and ``"hello"`` one query". The seeded text
+        carries no leading space, so the padded query matching **nothing** is what
+        says the value travelled as written.
+        """
+        assert await transcripts.engine.transcript_search("where")
+        assert not await transcripts.engine.transcript_search(" where")
+
+    async def test_both_destroys_reach_the_archive_and_are_idempotent(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §5: destroy what they match or nothing, and say how much.
+
+        The second call is the clause: "an address with no entry is a no-op, and a
+        conversation with no entries is a no-op returning zero", so a second destroy
+        is a ``False`` and a ``0`` rather than a failure — which is the answer
+        ADR-0225 §13's fourteenth case has the *sweep* rely on.
+        """
+        assert await transcripts.engine.forget_transcript_entry("c2:1") is True
+        assert await transcripts.engine.forget_transcript_entry("c2:1") is False
+
+        assert await transcripts.engine.forget_transcript_conversation("c1") == 3
+        assert await transcripts.engine.forget_transcript_conversation("c1") == 0
+
+        assert transcripts.archive.recorded == {}
+
+    async def test_a_conversation_destroy_needs_no_index_and_no_memory_record(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §5: resolved inside the archive, against its own entries.
+
+        ``c1`` is in no conversation index and names no memory record on any of the
+        three subjects — nothing on this surface ever put one there — so a destroy
+        that only reached what an index named would return zero here. That is the
+        hole ADR-0074 §7's reclaim would otherwise open, and the clause it closes:
+        a user whose conversation was reclaimed able to *read* their transcript and
+        unable to destroy it.
+        """
+        assert await transcripts.engine.conversation("c1") is None
+
+        assert await transcripts.engine.forget_transcript_conversation("c1") == 3
+
+    async def test_the_size_report_is_on_the_surface_and_tracks_both_destroys(
+        self, transcripts: TranscriptSubject
+    ) -> None:
+        """ADR-0225 §6 and §13 item 17's surface half: reachable, and it counts.
+
+        §6 makes the report "a surface operation of its own and not metadata hung on
+        the reads" — "a lane that ships the reads without the report has not shipped
+        this section" — so its reachability *here*, on the promoted surface and
+        therefore across the local API, is the obligation rather than a convenience.
+
+        **``stored_bytes`` is asserted positive over a populated archive rather than
+        against a figure**, which is §6's own standard for a non-file implementation:
+        "a ``stored_bytes`` of zero over an archive holding entries is not a
+        conforming answer for any implementation, and a fake that gave one would make
+        the conformance case vacuous". The byte total against real files is the
+        SQLite binding's case, not this surface's.
+        """
+        before = await transcripts.engine.transcript_archive_size()
+        assert before.entries == _SEEDED_TRANSCRIPT_ENTRIES
+        assert before.stored_bytes > 0
+
+        await transcripts.engine.forget_transcript_entry("c2:1")
+        await transcripts.engine.forget_transcript_conversation("c1")
+
+        after = await transcripts.engine.transcript_archive_size()
+        assert after.entries == 0
+
+    async def test_the_addressed_read_takes_no_page_arguments(self) -> None:
+        """ADR-0225 §7: the addressed read "names one entry and is bounded by that".
+
+        A signature assertion rather than a behavioural one, because the clause is
+        about what the surface *offers*: "it takes no limit, and there is no limit on
+        it to refuse". An implementation that accepted one and ignored it would pass
+        every behavioural case here.
+        """
+        taken = set(inspect.signature(AssistantEngine.transcript_entry).parameters)
+
+        assert taken == {"self", "address"}
 
 
 def backwards_clock() -> Callable[[], datetime]:

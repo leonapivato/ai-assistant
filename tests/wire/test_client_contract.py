@@ -78,6 +78,7 @@ from assistant_engine_contract import (
     SettledParkSubject,
     SingleSlotParkSubject,
     SpendSubject,
+    TranscriptSubject,
     backwards_clock,
     near_ceiling_limit,
     overfull_invocation_rows,
@@ -85,6 +86,7 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
+    seeded_transcript_archive,
     spoken_routed_park_outcome,
     spoken_step_park_outcome,
 )
@@ -656,6 +658,29 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing.reads = trail
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield ReadSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def transcripts(self, tmp_path: Path) -> AsyncIterator[TranscriptSubject]:
+        """A client of a hub whose engine reads a seeded archive, and that archive.
+
+        Arranged hub-side on :attr:`reads`' terms, and the archive is read from the
+        test process rather than over the wire — which is what makes it a negative
+        control. ADR-0085 §9's refusals must happen **before a frame is sent**, and
+        only the store the call never reached can say so; the fault lever sharpens it
+        further, because a refusal that travelled would come back as the scripted
+        ``TranscriptArchiveError`` rather than as a local ``ValueError``.
+
+        This binding is also where ADR-0225 §13 item 17's "reachable … across the
+        local API" is actually discharged: the size report and the other six travel
+        as frames here, adapted by ``wire/surface``'s Protocol-derived adapters, so
+        the three new ``core`` models are exercised on the wire rather than asserted
+        to be encodable.
+        """
+        archive = seeded_transcript_archive()
+        backing = FakeAssistantEngine()
+        backing.archive = archive
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield TranscriptSubject(engine=client, archive=archive)
 
     @pytest.fixture
     async def invocations(self, tmp_path: Path) -> AsyncIterator[InvocationSubject]:
