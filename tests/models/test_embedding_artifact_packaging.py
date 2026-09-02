@@ -909,6 +909,58 @@ def test_the_notices_name_every_revision_that_ships() -> None:
     assert len(declared) == len(set(declared))
 
 
+def _declared_inventories(notices: str) -> dict[str, frozenset[str]]:
+    """Map each notice table's pinned commit to the file set that table declares.
+
+    The commit is the join key, not a second pin of the revisions —
+    ``test_the_notices_name_every_revision_that_ships`` owns those and fails first
+    — it is simply the one cell that says *which* artifact a ``Files`` row is
+    about. Both rows are read out of the same walk, in document order, so a table
+    that grew a second inventory or lost its own is a failure here rather than a
+    silently mis-attributed comparison.
+    """
+    inventories: dict[str, frozenset[str]] = {}
+    pinned: str | None = None
+    for row in re.finditer(
+        r"^\|\s*(?P<label>Pinned commit|Files)\s*\|\s*(?P<cell>.+?)\s*\|$", notices, re.MULTILINE
+    ):
+        if row["label"] == "Pinned commit":
+            assert pinned is None, f"the table pinning {pinned} declares no Files row"
+            pinned = row["cell"].strip("`")
+            continue
+        assert pinned is not None, "a Files row precedes every Pinned commit row"
+        names = re.findall(r"`([^`]+)`", row["cell"])
+        assert len(names) == len(set(names)), f"{pinned} lists a file twice"
+        assert pinned not in inventories, f"two Files rows for {pinned}"
+        inventories[pinned] = frozenset(names)
+        pinned = None
+    assert pinned is None, f"the table pinning {pinned} declares no Files row"
+    return inventories
+
+
+def test_the_notices_name_every_file_that_ships() -> None:
+    """The notices' inventory is the artifact's, not a prose copy that drifts (#203).
+
+    ``test_the_notices_name_every_revision_that_ships`` pins the commit rows, so a
+    re-pin that moved an artifact cannot leave the notices naming bytes the
+    distribution no longer carries. Nothing pinned the **Files** rows: a re-pin that
+    changed the *file set* — adding a ``vocab.txt``, dropping a tokenizer — would be
+    packaged and verified correctly, the commit row updated, and the notices would go
+    on telling recipients that exactly the old files ship. An attribution document is
+    the wrong place for that kind of stale.
+
+    Compared against every artifact this distribution redistributes — the embedding
+    model's ``ARTIFACT_MANIFEST`` and, since ADR-0200, each speech model's
+    ``SpeechArtifact.manifest`` — in the artifact-independent shape its sibling uses,
+    so a fourth artifact fails here rather than shipping with an unwritten inventory.
+    """
+    expected = {ARTIFACT_REVISION: frozenset(ARTIFACT_MANIFEST)} | {
+        artifact.revision: frozenset(artifact.manifest) for artifact in SPEECH_ARTIFACTS
+    }
+
+    assert _declared_inventories(_notices_in_the_checkout().decode()) == expected
+
+
 def test_the_notices_are_declared_as_a_licence_file() -> None:
     """The declaration is what puts the notices in a distribution.
 
