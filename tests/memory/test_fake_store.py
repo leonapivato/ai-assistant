@@ -15,7 +15,14 @@ import pytest
 from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
-from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
+from ai_assistant.core.errors import MemoryStoreStaleError
+from ai_assistant.core.types import (
+    MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
+    Provenance,
+    SemanticMemory,
+)
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
 from ai_assistant.testing.memory import _mint_position
@@ -40,6 +47,42 @@ def _semantic(record_id: str, content: str) -> SemanticMemory:
             source=MemorySource.OBSERVED, confidence=0.6, last_updated=_fixed_now()
         ),
     )
+
+
+async def test_an_absent_rows_refusal_says_no_record_is_stored_under_that_id() -> None:
+    """ADR-0219 §3's third fact, on ``FakeMemoryStore``'s own wording.
+
+    §3 requires the refusal to name "what the store found — the stored revision, or
+    that the id named nothing", and ``MemoryStoreContract``'s two message arms hold
+    every implementation to everything about that which is wording-free: the id, the
+    expectation, no revision the store could not have found, and the two limbs
+    reading differently. What they deliberately do **not** carry is a vocabulary for
+    absence — §3 declares none, so a shared suite reading for one would fail a
+    conforming store whose spelling it had not anticipated.
+
+    A store's own sentence is a property of that store, so it is pinned here, where
+    this backend's other own properties are. Without it every assertion in the suite
+    is satisfied by "…at revision 1: stale request", which names both other facts and
+    leaves an operator unable to tell the missing row from the moved one (#1835).
+    """
+    store = FakeMemoryStore(now=_fixed_now)
+    await store.add(_semantic("vanished", "the version the caller read"))
+    read = await store.get("vanished")
+    assert read is not None
+    assert await store.delete("vanished") is True
+
+    with pytest.raises(MemoryStoreStaleError) as absent:
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic("vanished", "computed over a record that is gone"),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=read.revision,
+                )
+            ]
+        )
+
+    assert "no record is stored under that id" in str(absent.value)
 
 
 class TestFakeMemoryStoreContract(MemoryStoreContract):
