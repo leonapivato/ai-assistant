@@ -20,6 +20,9 @@ satisfies both. That is the composition root's discipline and
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -82,32 +85,52 @@ _EXPECTED: Final = (
 def report(tmp_path_factory: pytest.TempPathFactory) -> str:
     """``mypy``'s own output over the snippet, run once for the whole module.
 
+    **A subprocess rather than** ``mypy.api.run``, for two reasons that both bit.
+    The checker then shares nothing with the pytest process that drives it — no
+    module table, no import cache, no accumulated state from whatever ran before it
+    under ``-n auto``. And its output width is ours to fix: ``mypy`` wraps its
+    messages to the terminal, and under xdist the width is not the one an
+    interactive run has, so a message that reads as one line here arrives folded
+    there. The whitespace normalisation below is the belt to that brace.
+
     ``--follow-imports=silent`` keeps the run to the snippet itself: what is under
     assertion is what the *declared types* carry, and re-checking the package would
     only make the case slower and its failure harder to read. The cache lives in a
     temporary directory so a run leaves the project's own untouched.
     """
-    from mypy import api  # noqa: PLC0415 — a type checker imported for one case
-
     directory = tmp_path_factory.mktemp("archive-seams")
     snippet = directory / "seams.py"
     snippet.write_text(_SNIPPET, encoding="utf-8")
-    stdout, stderr, _ = api.run(
+    completed = subprocess.run(  # noqa: S603 — this interpreter, a fixed argument list
         [
+            sys.executable,
+            "-m",
+            "mypy",
             "--follow-imports=silent",
             "--no-error-summary",
+            "--no-color-output",
             f"--cache-dir={directory / 'cache'}",
             str(snippet),
-        ]
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ | {"COLUMNS": "1000"},
+        cwd=_ROOT,
     )
-    assert not stderr, stderr
-    return stdout
+    assert not completed.stderr, completed.stderr
+    return completed.stdout
 
 
 @pytest.mark.parametrize("expected", _EXPECTED, ids=["search", "entries", "append", "composition"])
 def test_the_type_checker_reports_the_seam_violation(report: str, expected: str) -> None:
-    """Each of §13 item 2's four type-level cases, as ``mypy`` reports it."""
-    assert expected in report
+    """Each of §13 item 2's four type-level cases, as ``mypy`` reports it.
+
+    Matched over the report with its whitespace collapsed, because ``mypy`` folds a
+    long message to the terminal width and the width is not a property of what is
+    being asserted.
+    """
+    assert expected in " ".join(report.split())
 
 
 def test_the_snippet_reports_nothing_else(report: str) -> None:
