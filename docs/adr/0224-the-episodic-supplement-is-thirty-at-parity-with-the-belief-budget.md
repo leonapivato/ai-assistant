@@ -456,8 +456,9 @@ hands the tools egress seam tightens with it. That is the field working as speci
 defect — it is a disjunction over what the turn actually selected, and the turn now
 selects more — but it is a live consequence of this integer that nothing here has
 priced, and a lane watching egress behaviour after this lands should expect the rate to
-move. It is also an argument *for* the ceiling in §2: the externality surface grows with
-the supplement, not with the belief budget.
+move. Both groups feed that disjunction — `memories` is the retrieved beliefs *and* the
+supplement — so the belief budget is a second route to the same flag, and what this ADR
+moves is only the supplement's contribution to it.
 
 **What would revisit this.** The byte-budgeted single ranked pool ADR-0160 §5 leaves
 open, which replaces both numbers rather than tuning them. A scored run whose
