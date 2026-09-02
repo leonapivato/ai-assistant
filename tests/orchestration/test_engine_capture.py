@@ -718,6 +718,15 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
 
     Nothing here claims the fields listed are safe on some other ground; it claims the
     set cannot grow, and no secret can enter it, without someone noticing.
+
+    **``ReadAsk`` and ``ReadRequest`` joined the graph with ADR-0226 §4**, because
+    ``ActionPlan`` gained ``read_request`` and the plan is one of the four arguments
+    the stage takes. The judgement §7 asks of the lane that grows the graph, made
+    rather than assumed: between them they carry a kind from a closed enum, a query
+    the planner composed, and labels that are ordinals into this turn\'s ``memories``
+    — text this system\'s own planner wrote, on models that admit no ``SecretStr``
+    and hold no store. The carrier check below is what keeps that true rather than
+    merely stated.
     """
     reachable = _reachable_from_the_composing_stage()
 
@@ -741,6 +750,8 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "PreferenceMemory",
         "ProceduralMemory",
         "Provenance",
+        "ReadAsk",
+        "ReadRequest",
         "ReportedExtent",
         "SemanticMemory",
         "SpokenDelivery",
