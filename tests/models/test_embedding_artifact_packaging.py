@@ -737,6 +737,30 @@ def _prune(cache: Path, keep: str) -> None:
         _remove_build(cache, name)
 
 
+def _shared_build_in(root: Path, digest: str) -> _Distributions:
+    """The distributions under *root*, built there once for every session sharing it.
+
+    Reading is inside the lock and not merely building: a lock taken after the
+    check leaves every worker of a run missing at the same moment and building its
+    own, which is the whole cost this sharing exists to remove (#1682). Called by
+    the fixture below rather than inlined into it so that
+    `test_the_shared_build_is_resolved_under_the_run_wide_lock` drives the
+    production path instead of a copy of it (adversarial review of this change,
+    round 1).
+
+    Args:
+        root: The run root the build is shared under.
+        digest: The build inputs the record is keyed on.
+
+    Returns:
+        The three distributions, read or built.
+    """
+    shared = root / _SHARED_BUILD
+    shared.mkdir(parents=True, exist_ok=True)
+    with _exclusively(root / f"{_SHARED_BUILD}.lock"):
+        return _read_or_build(shared, digest)
+
+
 @pytest.fixture(scope="session")
 def built_distributions(
     request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
@@ -777,11 +801,7 @@ def built_distributions(
         " into this run's own temp tree instead",
         stacklevel=1,
     )
-    root = _run_root(request, tmp_path_factory)
-    shared = root / _SHARED_BUILD
-    shared.mkdir(parents=True, exist_ok=True)
-    with _exclusively(root / f"{_SHARED_BUILD}.lock"):
-        return _read_or_build(shared, digest)
+    return _shared_build_in(_run_root(request, tmp_path_factory), digest)
 
 
 @pytest.fixture(scope="session")
@@ -1519,17 +1539,23 @@ def _run_root_as(run_root: Path, worker: str | None) -> Path:
     )
 
 
-def _resolve_the_shared_build(root: Path) -> _Distributions:
-    """The fallback branch of :func:`built_distributions`, verbatim.
+def _locked(lock: Path) -> bool:
+    """Is *lock* already held exclusively — by another run, or by this caller?
 
-    The lock is taken here as the fixture takes it, so a regression that moved the
-    build out from under it — read first, lock second — is a regression this drives
-    rather than one it reasons around.
+    ``flock`` locks live on the open file *description*, so a second descriptor on
+    the same file is refused by a lock the very same process already holds through
+    the first (``flock(2)``: "these file descriptors are treated independently").
+    That is what lets one process observe "my caller is holding this" without a
+    second worker to contend with it, and it is why this probe opens the file
+    itself rather than reusing a handle.
     """
-    shared = root / _SHARED_BUILD
-    shared.mkdir(parents=True, exist_ok=True)
-    with _exclusively(root / f"{_SHARED_BUILD}.lock"):
-        return _read_or_build(shared, _INPUTS)
+    with lock.open("ab") as probe:
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+        return False
 
 
 def test_two_workers_of_one_run_share_a_single_build(
@@ -1547,12 +1573,49 @@ def test_two_workers_of_one_run_share_a_single_build(
     run_root = tmp_path / "run"
 
     first, second = _run_root_as(run_root, "gw0"), _run_root_as(run_root, "gw1")
-    resolved = [_resolve_the_shared_build(root) for root in (first, second)]
+    resolved = [_shared_build_in(root, _INPUTS) for root in (first, second)]
 
     assert first == second == run_root, "two workers of one run must resolve one root"
     assert len(ran) == 1, f"one build per run, not one per worker: built in {ran}"
     assert resolved[0] == resolved[1], "both workers must read the same distributions"
     assert resolved[0].sdist.is_relative_to(run_root / _SHARED_BUILD)
+
+
+def test_the_shared_build_is_resolved_under_the_run_wide_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock covers the *read*, not only the build it might turn into.
+
+    A lock taken after the check is the regression the sharing has no other
+    defence against: every worker of a run starts at the same moment, so every one
+    of them misses, and every one of them builds — five workers, five builds, and
+    a module still green on every assertion it makes about what a distribution
+    contains. `test_two_workers_of_one_run_share_a_single_build` runs its two
+    resolutions in sequence and so cannot see it: the first finishes before the
+    second starts, lock or no lock (adversarial review of this change, round 1).
+
+    Observed here without a second process, which #1734 rules out as more
+    expensive than what it guards. ``flock`` treats two descriptors on one file
+    independently even within a process, so a probe opened *inside* the step under
+    test reports whether the caller is holding the lock around it — which is the
+    ordering, stated directly rather than raced for.
+    """
+    held: list[bool] = []
+    resolve = _read_or_build
+
+    def watched(directory: Path, digest: str) -> _Distributions:
+        held.append(_locked(tmp_path / f"{_SHARED_BUILD}.lock"))
+        return resolve(directory, digest)
+
+    _mock_the_build(monkeypatch)
+    monkeypatch.setattr(sys.modules[__name__], "_read_or_build", watched)
+
+    _shared_build_in(tmp_path, _INPUTS)
+
+    assert held == [True], "the read-or-build step must run inside the run-wide lock"
+    # The probe says "held" for a reason, not by construction: with the step over,
+    # the lock is free again.
+    assert not _locked(tmp_path / f"{_SHARED_BUILD}.lock")
 
 
 def test_a_serial_runs_basetemp_is_already_its_run_root(tmp_path: Path) -> None:
