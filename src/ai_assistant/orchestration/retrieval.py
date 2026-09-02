@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import BeliefBand, band_of
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import MemoryKind, MemoryRecord
@@ -84,6 +84,7 @@ async def assemble_by_band(
     *,
     limit: int,
     kinds: Sequence[MemoryKind] | None = None,
+    on_page: Callable[[int], None] | None = None,
 ) -> list[MemoryRecord]:
     """Fill one budget of ``limit`` records band by band, highest precedence first.
 
@@ -207,6 +208,17 @@ async def assemble_by_band(
             decided here — the caller owns which kinds belong in its prompt.
             Observed **once**, before the first read, so every band is filtered on
             the same kinds even if the caller mutates the sequence it passed.
+        on_page: Called with the number of records each band's read returned,
+            immediately after that read and before the next one, or ``None`` to
+            observe nothing. It is how a caller that catches this function's failure
+            can tell whether an *earlier* band had already returned records:
+            ADR-0226 §9 states its partial-servicing field over **reads** rather
+            than over asks, and this composition is several reads behind one call,
+            so a caller could not otherwise distinguish "the first band raised" from
+            "the second band raised after the first returned". It observes and never
+            decides — nothing here reads what it returns, and it is called before
+            the band filter and the deduplication below, because the fact it carries
+            is about the *read* and not about what the composition kept.
 
     Returns:
         Up to ``limit`` records, ordered by band precedence and, within a band, by
@@ -262,6 +274,8 @@ async def assemble_by_band(
             # path, where a full budget still ends the composition.
             break
         found = await store.search(query, limit=request, kinds=wanted_kinds, bands=[band])
+        if on_page is not None:
+            on_page(len(found.records))
         # ``found.capped`` is unwrapped and nothing more: ADR-0128 §6 leaves what a
         # consumer does with it to that consumer's own lane, and this assembler
         # takes no policy from it here. The band-scoped read it composes is already

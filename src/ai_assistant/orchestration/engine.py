@@ -7373,6 +7373,18 @@ class Engine:
         park's *second* capture renders that same turn's goal and plan (§2's fourth
         clause) from a pass that retrieves nothing of its own.
 
+        **A planner-emitted read is serviced on this pass only where that same
+        object says the audience is bounded** (ADR-0226 §5). The turn stage is told
+        which posture this pass runs under, and it is told by asking ``supply``
+        rather than by a second argument this method would have to keep in step:
+        the operation that hands the unbounded twin is the operation whose request
+        is declined, its supply stays the three groups ADR-0203 §1 narrowed, and its
+        audit records the emission and that it was not serviced. Everything below
+        this line — the plan is already made, but the step this pass drives, the
+        origin the authoriser evaluates, the answer composed and the episode
+        captured — is over the four groups on a bounded pass that fired, which is
+        ADR-0226 §7's fourth group reaching the turn rather than a second turn.
+
         **``spoken`` is how ADR-0205 §4's "on this operation and no other" is
         mechanical rather than remembered.** ``converse_spoken`` hands one; every
         other conversational operation hands ``None``, so the capture point below
@@ -7409,6 +7421,14 @@ class Engine:
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
+            # ADR-0226 §5's channel scoping, derived from the object that already
+            # carries the posture rather than restated as a second fact this method
+            # has to keep in step. `TurnSupply` is a union of exactly two classes —
+            # ADR-0199 §1 fixes the posture as a function of the output channel's
+            # audience alone — so the operation that mints the bounded twin is the
+            # operation whose request may be serviced, and no caller can pair a
+            # subtraction with a servicing that would run after it.
+            bounded_audience=isinstance(supply, BoundedAudienceSupply),
         )
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
