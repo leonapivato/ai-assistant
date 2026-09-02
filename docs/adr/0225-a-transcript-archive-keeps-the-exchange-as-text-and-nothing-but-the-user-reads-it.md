@@ -571,9 +571,12 @@ looks.
 > is served by a full-text index or by a scan is the implementing lane's, and the
 > conformance suite pins the behaviour rather than the mechanism.
 
-> **Normative.** Every read is bounded by a caller-supplied limit and returns a page
-> and never an unbounded result set. A limit of zero or below is refused with a
-> `ValueError`, as ADR-0114 §6 refuses one and for the same reason.
+> **Normative.** The three **enumerating** reads — the search, a conversation's
+> entries, and the unfiltered enumeration — are each bounded by a caller-supplied
+> limit and return a page, never an unbounded result set; a limit of zero or below
+> is refused with a `ValueError`, as ADR-0114 §6 refuses one and for the same
+> reason. The **addressed** read names one entry and is bounded by that: it takes no
+> limit, and there is no limit on it to refuse.
 
 > **Normative.** Result order is **total and deterministic**, and entries come back
 > newest first: by the instant the turn occurred, descending, and by the address for
@@ -581,16 +584,19 @@ looks.
 > because a transcript's order is the order it was said in.
 
 > **Normative.** A **search** result carries each hit's address, its conversation,
-> its instant, and a bounded excerpt of the matching text. Reading an entry whole is
-> a second, addressed act, and no search response renders an entry's full text. The
-> other three reads return entries **whole**, and elide, truncate and summarise
-> nothing.
+> its instant, and a bounded excerpt of the matching text — never an entry's text
+> beyond that bound, and never both halves of an entry in full where either exceeds
+> it. Reading an entry whole is a second, addressed act. Where an entry's own text
+> is at or below the bound the excerpt may be the whole of it, which is what a
+> bound means rather than an exception to it. The other three reads return entries
+> **whole**, and elide, truncate and summarise nothing.
 
 > **Normative.** An excerpt is at most **512 bytes of UTF-8**. Where the text it is
 > taken from exceeds that, it is truncated at a codepoint boundary — so the encoded
-> result never exceeds the bound and never splits a codepoint — and the hit records
-> that it was truncated. Which window of the entry the excerpt is taken from is the
-> implementing lane's; the bound is not. The response is therefore bounded by the
+> result never exceeds the bound and never splits a codepoint — and `elided` is
+> `True`. Where it does not, the excerpt is that text and `elided` is `False`.
+> Which window of the entry the excerpt is taken from is the implementing lane's;
+> the bound is not. The response is therefore bounded by the
 > caller's `limit` times that figure plus the fixed fields, and a conformance suite
 > asserts the bound over an entry far larger than it.
 
@@ -767,11 +773,17 @@ mechanism is decided, and this ADR decides none of it.
 > §7's four reads and §6's size report. One concrete satisfies both, and the
 > composition root hands each holder exactly the seam it is entitled to (§4).
 
-> **Normative.** Every site that writes to the archive takes a
-> **`TranscriptArchiveWriter`** — never `TranscriptArchive` — as a required
-> constructor argument with no default. A composition that hands the wide seam to a
-> turn-path component does not type-check, and one that omits the seam does not
-> type-check either.
+> **Normative.** Every site that writes to the archive **declares** its seam as a
+> `TranscriptArchiveWriter`, as a required constructor argument with no default. A
+> composition that omits it does not type-check, and the holder cannot call a read:
+> a read on a value of that declared type fails `mypy`, whatever object was passed.
+
+> **Normative.** Which object the composition root passes is the root's discipline
+> and is not a type-level guarantee — a wide archive structurally satisfies the
+> narrow Protocol, and no Protocol can refuse a structural subtype. `app/` passes
+> the seam each collaborator is entitled to, and lane B's tests assert the wiring it
+> performs. No clause of this ADR is read as claiming that a wide object handed to a
+> writer parameter is rejected by a type checker.
 
 > **Normative.** `core/types.py` gains three frozen pydantic models —
 > `TranscriptEntry`, `TranscriptHit` and `TranscriptArchiveSize` — carrying exactly
@@ -788,6 +800,8 @@ mechanism is decided, and this ADR decides none of it.
 # core/types.py — all three frozen, all three additive-only
 
 class TranscriptEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     address: NonBlankEncodableText          # §3: the episode's own id
     conversation_id: NonBlankEncodableText  # §1: a grouping, not the key
     ordinal: int                            # §1: a grouping, not the key
@@ -797,13 +811,17 @@ class TranscriptEntry(BaseModel):
     disposition: ExchangeDisposition | None
 
 class TranscriptHit(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     address: NonBlankEncodableText
     conversation_id: NonBlankEncodableText
     occurred_at: UtcInstant
-    excerpt: EncodableText                  # §7: bounded, never the whole entry
+    excerpt: EncodableText                  # §7: at most the excerpt bound
     elided: bool                            # §7: True where the bound truncated it
 
 class TranscriptArchiveSize(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     entries: int                            # §6: what the surface reports, unasked
     stored_bytes: int
 
@@ -833,11 +851,11 @@ class TranscriptArchive(TranscriptArchiveWriter, Protocol):
 > returns how many were. Every operation raises a single archive error class on a
 > backend failure, as ADR-0101 §4's `MemoryStoreError` clause does for its own.
 
-> **Normative.** A `limit` of zero or below is refused with `ValueError` on all four
-> reads (§7); a negative `offset` is refused the same way; and a blank or
-> whitespace-only `query`, `address` or `conversation_id` is refused with
-> `ValueError` and never read as "everything", which is ADR-0101 §1's own rule for a
-> blank label.
+> **Normative.** A `limit` of zero or below is refused with `ValueError` on the
+> three reads that take one (§7), and a negative `offset` is refused the same way.
+> `entry` takes neither. A blank or whitespace-only `query`, `address` or
+> `conversation_id` is refused with `ValueError` on every operation that takes one,
+> and is never read as "everything" — ADR-0101 §1's own rule for a blank label.
 
 > **Normative.** Neither Protocol carries a walk, a cursor, a resumable position, an
 > embedder, a subject axis, or any operation this ADR has not named. ADR-0101 §9's
@@ -867,6 +885,19 @@ reading the append and the episode already share. So capture is a genuine second
 holder — and a single wide Protocol handed to it would give a turn-path collaborator
 all four reads, defeating §4's fence in the same breath that states it. The narrow
 seam is therefore bought against a specific failure and not for symmetry.
+
+**What the narrow seam buys, stated without over-claiming.** It is not that a
+type checker refuses the wide object at a writer parameter — Protocols are
+structural, so no narrowing can refuse a subtype, and any clause claiming otherwise
+would be false. It is that the *holder* cannot call a read: `ConversationLifecycle`
+declares a `TranscriptArchiveWriter`, so `self._archive.search(...)` fails `mypy`
+whatever was passed. That is the property gate 1 needs, and it composes with the
+package fence to become more than convention — `orchestration` may not import
+`ai_assistant.archive` at all (§4), so it cannot name the concrete class, cannot
+widen the value back, and sees exactly the members its declared Protocol has. This
+is ADR-0119 §7's own posture in its own words — one concrete satisfies every seam,
+and *"the composition root hands each collaborator exactly the seam it is entitled
+to"* — and that ADR did not claim a type check enforced the handing either.
 
 **Two rather than three, and this is where the count stops.** ADR-0119 needed a
 third because its purge had a third holder; here the conversation-scoped destroy and
@@ -964,11 +995,14 @@ address, and it is discharged.
    in no prompt any model seam receives: the router's, the planner's, the composing
    stage's and the observer's. This is the test a later feed-back lane must
    consciously delete, which is the point of it.
-2. **The fence is mechanical, on both halves.** An `import-linter` contract fails
-   when a pipeline package imports `ai_assistant.archive`, and passes for
-   `ai_assistant.app`. And the write site is typed to `TranscriptArchiveWriter`: a
-   composition handing `ConversationLifecycle` the wide seam fails `mypy`, and one
-   handing it no seam fails too.
+2. **The fence is mechanical, on each half that can be.** An `import-linter`
+   contract fails when a pipeline package imports `ai_assistant.archive`, and passes
+   for `ai_assistant.app`. A composition omitting the write site's seam fails
+   `mypy`. A read called on the write site's declared `TranscriptArchiveWriter`
+   fails `mypy` — asserted as a type-level test, not a runtime one. And the
+   composition root's wiring is asserted directly: what `app/` hands
+   `ConversationLifecycle` is the narrow seam. No test asserts that a wide object at
+   a writer parameter is rejected, because no such rejection exists (§10).
 3. **Eviction keeps and destruction destroys.** An entry survives its episode's
    expiry, its `purge_expired` reclaim, and the conversation reclaim ADR-0074 §7
    performs; and does not survive a forget of its record, a forget of its
@@ -991,14 +1025,19 @@ address, and it is discharged.
    false stops the write and destroys nothing, and the reads still serve what is
    there.
 9. **The reads are bounded and ordered.** A limit of zero or below and a negative
-   offset each raise `ValueError`, on all four reads; a blank `query`, `address` or
-   `conversation_id` raises `ValueError` and matches nothing; the search order is
-   newest-first and total; a conversation's read is in ordinal order; a search
-   response carries no entry's full text.
-10. **The excerpt bound holds over a hostile entry.** An entry far larger than 512
-    bytes yields a hit whose `excerpt` encodes to at most 512 bytes of UTF-8, splits
-    no codepoint, and carries `elided`. The same assertion runs against every
-    conforming implementation, index-backed or scan-backed.
+   offset each raise `ValueError` on the three reads that take them, and `entry`
+   takes neither; a blank `query`, `address` or `conversation_id` raises
+   `ValueError` and matches nothing; the search order is newest-first and total; a
+   conversation's read is in ordinal order.
+10. **The excerpt bound holds at both ends.** An entry far larger than 512 bytes
+    yields a hit whose `excerpt` encodes to at most 512 bytes of UTF-8, splits no
+    codepoint, and carries `elided` `True`; an entry whose whole text is one
+    character yields that character with `elided` `False`; and a multi-byte
+    codepoint straddling the bound is dropped rather than split. The same
+    assertions run against every conforming implementation, index-backed or
+    scan-backed.
+    Each of the three `core/types.py` models refuses mutation, as a frozen model
+    does.
 11. **The subject cascade, over the sequence and over its residue.** With a captured
     episode carrying a stated `about_person`: the enumeration precedes the erasure,
     every enumerated address is discarded after it, and the count `delete_about`
