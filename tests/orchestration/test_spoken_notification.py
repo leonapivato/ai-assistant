@@ -1064,6 +1064,40 @@ class TestTheOrdering:
                 budget=timedelta(0),
             )
 
+    async def test_a_member_that_cannot_describe_itself_still_earns_the_refusal(self) -> None:
+        """The refusal names the offending member, and naming it must not replace it.
+
+        An unhashable member whose ``__repr__`` raises reaches the ``except`` by the
+        route #1762 opened and would then, without a non-throwing renderer, leave the
+        ``raise`` carrying that object's own exception instead of the ``ValueError``
+        the Protocol and both implementations document. Held on both implementations,
+        because a caller must handle one class whichever it is talking to (ADR-0084
+        §4).
+        """
+
+        class _Unspeakable(list[object]):
+            __hash__ = None  # unhashable, which is half the subject; `list` is already
+
+            def __repr__(self) -> str:
+                msg = "this member refuses to describe itself"
+                raise RuntimeError(msg)
+
+        outbox = RecordingOutbox()
+        engine, _ = _speaking(outbox)
+
+        with pytest.raises(ValueError, match="not one of them"):
+            await engine.next_notification(
+                plays=(_Unspeakable(),),  # type: ignore[arg-type]  # the malformed value is the subject
+                budget=timedelta(0),
+            )
+        assert outbox.calls == []
+
+        with pytest.raises(ValueError, match="not one of them"):
+            await FakeAssistantEngine().next_notification(
+                plays=(_Unspeakable(),),  # type: ignore[arg-type]  # the malformed value is the subject
+                budget=timedelta(0),
+            )
+
     async def test_a_member_s_own_value_is_not_malformed(self) -> None:
         """The line between the two, and why it is where the wire puts it.
 
