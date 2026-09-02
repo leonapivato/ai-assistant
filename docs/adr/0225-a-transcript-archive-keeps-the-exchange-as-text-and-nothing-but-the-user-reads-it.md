@@ -883,8 +883,23 @@ ADR-0004 owns:
 > a downgrade the user did not choose; one protected more strongly is a claim the
 > memory store's own content does not support.
 
-> **Normative.** The archive's database file is created with owner-only permissions
-> (`0600`) in `Settings.data_dir`, as ADR-0004 §4 requires of the memory database.
+> **Normative.** The archive's database file **and every sidecar SQLite may keep
+> beside it** — `-journal`, `-wal`, `-shm` — are owner-only (`0600`) in
+> `Settings.data_dir`, as ADR-0004 §4 requires of the memory database, and the mode is
+> asserted on **every open** rather than at creation alone. The set of files is §6's
+> set: every file the archive's `stored_bytes` counts is a file this clause reaches,
+> and the two are stated against one another so that a lane cannot widen the
+> accounting and leave the protection behind. A sidecar holds the same pages the
+> database does, so a transcript is exposed by an unrestricted `-wal` exactly as it
+> would be by an unrestricted `.db`.
+
+> **Normative.** How that is done is `SqliteMemoryStore._restrict_permissions`'s, in
+> every respect already decided there and restated here in none: a missing sidecar
+> tolerated one name at a time, because a cleanly closed database has none; a sidecar
+> this process cannot restrict failing the open, because it is a file about to be
+> written through; and a symlink under a sidecar's name skipped rather than followed,
+> for the reasons #490 records. What this clause decides is that the archive is held
+> to that standard, not how the standard works.
 
 And the mitigation that is real today is the one the user already has: the archive
 can be turned off (§6), and what it holds can be destroyed at any scope (§5).
@@ -1235,8 +1250,9 @@ address, and it is discharged.
    `transcript_archive_enabled` set false stops the write and destroys nothing, and
    the reads still serve what is there. And the enforcement point specifically: an
    entry aged past a finite retention is returned by **none** of the four reads on an
-   archive that has had **no write and no sweep** since — the case a sweep-only
-   implementation passes and a read-time one does not. The two size figures part
+   archive that has had **no write and no sweep** since — the case a **read-time**
+   implementation passes and a sweep-only one fails, which is the whole point of
+   asserting it. The two size figures part
    company over that same entry, exactly as §6 requires: it leaves `entries`, and its
    bytes stay in `stored_bytes` until something physically reclaims them. A shortened
    retention hides more on the very next read; the hidden entry still yields to both
@@ -1309,6 +1325,14 @@ address, and it is discharged.
     surface half, which is where §6's obligation is actually discharged: the
     operation is reachable on the engine and across the local API, and a rendered
     archive read carries the figure beside it without being asked.
+18. **Owner-only reaches every file the archive owns** (§9, gate 4). After an open,
+    the archive's database file and each of `-journal`, `-wal` and `-shm` present
+    beside it are mode `0600`; a sidecar a previous process left group- or
+    world-readable is narrowed **on reopen** and not only on creation, which is the
+    case file-mode inheritance does not cover; a sidecar that cannot be restricted
+    fails the open rather than being skipped; and a symlink under a sidecar's name is
+    skipped rather than followed. These are the assertions the memory store's own
+    tests already make, run against the archive's file.
 
 ### 14. What the implementing lanes owe
 
