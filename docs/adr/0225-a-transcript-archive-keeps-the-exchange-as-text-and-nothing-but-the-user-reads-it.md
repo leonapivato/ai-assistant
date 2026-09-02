@@ -600,10 +600,20 @@ it is about, and there is no field on an entry for a match to be made against.
 > every row would be recomputed per row and would still leave a surface free to drop
 > it. A lane that ships the reads without the report has not shipped this section.
 
-> **Normative.** `stored_bytes` counts **every byte the archive's own files occupy on
-> disk under `Settings.data_dir`**, as they stand at the moment of the call: the
-> database, every index it keeps over the entries, and any journal or write-ahead log
-> it holds beside them. It is **not** a sum of entry lengths, not a count of logical
+> **Normative.** An implementation that keeps files at all keeps a **closed set** of
+> them, and no others: the one database file §10 gives it under `Settings.data_dir`,
+> and the sidecars SQLite keeps beside that file (`-journal`, `-wal`, `-shm`). Every index §7 permits an implementation to
+> build lives **inside** that database, as an FTS table does; no lane writes a
+> separate on-disk index artifact, a spill file, a cache or a second database, and one
+> that wants to needs the ADR that decides it. The set is closed so that §6's
+> accounting and §9's protection range over the same files by construction rather than
+> by two lists kept in step by hand — a byte this section counts is a byte gate 4
+> protects, and there is no third place for either to reach past the other.
+
+> **Normative.** `stored_bytes` counts **every byte those files occupy on disk**, as
+> they stand at the moment of the call: the database, the index inside it, and any
+> journal or write-ahead log beside it. It is **not** a sum of entry lengths, not a
+> count of logical
 > row bytes, and not the main database file alone. The figure answers *how much
 > storage this archive is costing*, and one that omits the part which grows fastest is
 > the dead trigger this section is written to avoid: §7 lets a lane serve the search
@@ -886,12 +896,12 @@ ADR-0004 owns:
 > **Normative.** The archive's database file **and every sidecar SQLite may keep
 > beside it** — `-journal`, `-wal`, `-shm` — are owner-only (`0600`) in
 > `Settings.data_dir`, as ADR-0004 §4 requires of the memory database, and the mode is
-> asserted on **every open** rather than at creation alone. The set of files is §6's
-> set: every file the archive's `stored_bytes` counts is a file this clause reaches,
-> and the two are stated against one another so that a lane cannot widen the
-> accounting and leave the protection behind. A sidecar holds the same pages the
-> database does, so a transcript is exposed by an unrestricted `-wal` exactly as it
-> would be by an unrestricted `.db`.
+> asserted on **every open** rather than at creation alone. That is §6's closed set
+> exactly: the archive owns no file outside it, so every byte `stored_bytes` counts is
+> a byte this clause protects, and neither can reach past the other. A sidecar holds
+> the same pages the database does, so a transcript is exposed by an unrestricted
+> `-wal` exactly as it would be by an unrestricted `.db`; an index living inside the
+> database is protected by the same `0600` as the rows it indexes.
 
 > **Normative.** How that is done is `SqliteMemoryStore._restrict_permissions`'s, in
 > every respect already decided there and restated here in none: a missing sidecar
@@ -1325,7 +1335,11 @@ address, and it is discharged.
     surface half, which is where §6's obligation is actually discharged: the
     operation is reachable on the engine and across the local API, and a rendered
     archive read carries the figure beside it without being asked.
-18. **Owner-only reaches every file the archive owns** (§9, gate 4). After an open,
+18. **Owner-only reaches every file the archive owns, and it owns no other** (§9,
+    gate 4). The archive's directory holds the database file and nothing but that
+    file and the three named sidecars after any sequence of appends, reads, destroys
+    and reopens — the assertion that pins §6's closed set, which an implementation
+    writing a separate index artifact fails. After an open,
     the archive's database file and each of `-journal`, `-wal` and `-shm` present
     beside it are mode `0600`; a sidecar a previous process left group- or
     world-readable is narrowed **on reopen** and not only on creation, which is the
