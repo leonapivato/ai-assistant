@@ -2,17 +2,17 @@
 
 - Status: Proposed
 - Date: 2026-09-02
-- **Partially supersedes:**
+- **Supersedes one clause of one ADR:**
   [ADR-0208](0208-recall-memory-leaves-the-default-tool-set-and-the-turns-supply-is-retrieved-at-one-site.md)
-  in one scope — §1's **one-site clause**, *"On the turn path the assistant's own
-  store is read **for relevance** … at exactly one site: the retrieval stage"*, in the
-  single respect that §2's sighted query is a second such site (§13 here). §1's four
-  other clauses stand, and the keyed-load clause is not merely untouched but
-  load-bearing: it is why §2's citation hop needs no supersession at all. And
-  [ADR-0210](0210-the-withholding-fires-on-what-the-turn-was-retrieved-for-and-the-conversations-own-turns-fire-nothing.md)
-  in one scope — §1's **evaluated-set clause**, in the single respect that the set
-  gains the records this ADR's servicer added (§7 here). §1's subtraction clause, its
-  first-group exclusion and its bounded-channel clause stand.
+  **partially**, in one scope — §1's **one-site clause**, *"On the turn path the
+  assistant's own store is read **for relevance** … at exactly one site: the retrieval
+  stage"*, in the single respect that §2's sighted query is a second such site (§13
+  here). §1's four other clauses stand, and the keyed-load clause is not merely
+  untouched but load-bearing: it is why §2's citation hop needs no supersession at
+  all. **No other ADR is superseded in whole or in part**, and §13 shows the working
+  for each one a reader would expect to be — ADR-0203, ADR-0210, ADR-0158 and
+  ADR-0074 among them. §5's scoping of this envelope off the channel of unbounded
+  audience is what keeps that list at one.
 - **Decides a change to `src/ai_assistant/core/types.py`** — three added types and one
   additive, defaulted field on `ActionPlan` — and a widening of `Planner.plan`'s and
   `TurnResult`'s documented meaning in `src/ai_assistant/core/protocols.py`. It adds
@@ -278,14 +278,49 @@ measured sighted shape is one or two beliefs citing one to three episodes each.
 > it actually labelled; it never parses an identifier out of model output, and it
 > never treats a model-supplied string as an identifier.
 
-> **Normative.** **A label outside the shown set resolves to nothing.** It is
-> discarded silently — not an error, not a park, not a degradation of the turn — and
-> it is recorded in §9's audit as dropped. A label naming a record that is no longer
-> live resolves to nothing by the same rule, through `get_many`'s existing behaviour.
+> **Normative.** **A record's label is its position in the sequence the loop
+> handed the planner.** The label of the record at 1-based index *n* of
+> `Planner.plan`'s `memories` is the ASCII string `M` followed by *n* in decimal with
+> no padding. That is the whole of the scheme: it is fixed here, it is the same on
+> both sides of the seam, and no later lane substitutes another spelling, adds a
+> prefix per group, or makes it configurable.
+
+> **Normative.** **Both sides derive the label from `memories` and neither consults
+> the other.** The planner renders each record's label from the sequence it was
+> given; the loop resolves a label by parsing *n* and indexing **the very sequence it
+> passed on this call**. No mapping, table or identifier crosses between `planning`
+> and `orchestration`, and neither package imports a name from the other to agree on
+> one. The ordered `memories` sequence is already the contract both hold — ADR-0074
+> §5 and ADR-0158 §5 fix its order and its grouping — and this decision adds a rule
+> for reading it rather than a channel for sharing it.
+
+> **Normative.** **A label outside the shown set resolves to nothing.** A string
+> that does not match the form, an *n* below 1 or beyond the sequence's length, and a
+> label whose record is no longer live all resolve to nothing. Each is discarded
+> silently — not an error, not a park, not a degradation of the turn — and recorded
+> in §9's audit as dropped. `get_many`'s existing behaviour supplies the last case:
+> *"An id that does not resolve is **simply missing from the mapping**."*
 
 > **Normative.** A `CITATION_HOP` follows **only** the labelled record's own stored
 > `Provenance.evidence`. It does not follow the evidence of a record reached by that
 > hop, and no lane adds a second level: that is iteration, and it is §12's.
+
+**The ordinal is what keeps the label from becoming a private protocol between two
+subsystems.** A scheme in which `planning` invents labels and `orchestration` resolves
+them would need the two to agree on an allocation that appears in no contract — two
+implementations could label the same `memories` differently, or coordinate privately
+across packages, which is the import golden rule 1 forbids and which no test in either
+package would catch. Deriving the label from the position in the sequence the loop
+itself passed removes the agreement entirely: there is nothing to share, because both
+sides are reading the same ordered value, and the loop resolves against its own copy.
+It also makes the failure mode inert — a label the planner invents is an index, and an
+index outside the range it was shown resolves to nothing by the clause above.
+
+**It costs one property, and the cost is named.** The label is meaningful only within
+the turn that rendered it, so no label survives to a later turn and none is
+persistable as a reference. That is the correct behaviour rather than a limitation to
+repair: the resolvable set is exactly what this turn showed, which is §3's whole point,
+and a label that outlived its turn would be an identifier by another name.
 
 This is the observer's own scheme, applied to the supply. `learning/observer.py`
 states the reason in terms — *"**The citations are ours, never the model's.** The
@@ -387,6 +422,46 @@ There is nothing to make loud.
 > implementation raises out of the turn, parks the turn, or asks the user anything
 > on account of a read that did not land.
 
+> **Normative.** **A read request is not serviced on an operation whose output
+> channel's audience is unbounded** (ADR-0199 §1, declared as ADR-0200 §3 declares
+> `converse_spoken`'s). On such an operation the servicer does nothing, the supply is
+> the three groups ADR-0203 §1 narrowed, and §9's audit records the emission and that
+> it was not serviced. A planner on such a turn is not told that its request will not
+> be serviced, and no lane suppresses the emission itself: what is scoped is the
+> **servicing**, so the trigger goes on being measured on every channel.
+
+> **Normative.** No lane services a request on such an operation on the ground that
+> the subtraction left the planner short, that the reply will otherwise be thin, or
+> that the read would be harmless. That is the case §12 defers, and it is the one
+> ADR-0203 §2's backfill clause is about.
+
+**The channel scoping is the whole of this ADR's answer to ADR-0203 §2, and it is
+taken rather than argued around.** §2 forbids an implementation that *"widens, re-runs
+or re-parameterises retrieval to replace what the subtraction removed"*, and its
+reasoning names the exact trap: *"A lane that noticed a spoken turn retrieving twelve
+records and planning over four would reasonably reach for a second read to fill the
+budget. That read is a second retrieval, which the clause above forbids, and it is
+worse than that: to be useful it would have to ask for 'more like these, but
+speakable', which is a retrieval shaped by what was withheld."*
+
+**A planner-emitted read on such a turn is not distinguishable from that backfill,
+and this ADR does not claim it is.** The planner never sees the withheld records —
+but on an unbounded-audience operation it judges sufficiency over a supply the
+subtraction has already thinned, so the hole is an input to the emission even though
+the content is not. A design that serviced the request there would be asking a model
+to notice a gap the withholding created and then reading to fill it, which is §2's
+sentence with the intent removed. Refusing to service it on that channel is the
+fail-closed answer, and it is why §13 records **no** supersession of ADR-0203: §§1
+and 2 bind an operation this envelope does not run on.
+
+**What it costs is stated rather than minimised.** A spoken turn gets no sighted read
+in milestone 1, so the mechanism's benefit lands first on the channel that is easiest
+to measure and hardest to leak through. That is a real limitation and #1908's exit
+for this milestone does not require the spoken channel; ADR-0203 §2's own accepted
+cost — *"A spoken turn may reach the planner with fewer records than a typed one for
+the same utterance; that is the decision working"* — is inherited unchanged rather
+than eroded by a mechanism that quietly refills it.
+
 **This placement is the one that satisfies every existing clause at once, and #1732
 asked for it to be argued rather than assumed.** Its point 3 names the tension
 exactly — ADR-0170 §2's "no second retrieval" clause *"binds the composing stage; a
@@ -409,10 +484,18 @@ never be able to take the reply down with it.
 
 > **Normative.** The whole emission shares **one record budget of ten records**,
 > counted **after** the deduplication of §7 — that is, ten records that were not
-> already in the turn's supply. Where both kinds are asked, they draw on the one
-> budget rather than on a share each, and the servicer fills it in a fixed order
-> stated by the implementing lane and asserted by its tests, so that a full budget is
-> never a race.
+> already in the turn's supply. Where both kinds are asked they draw on the one
+> budget rather than on a share each.
+
+> **Normative.** **The citation hop is serviced first, and the sighted query fills
+> what remains.** Where the hop exhausts the budget the query is serviced with
+> whatever is left, which may be nothing, and §9's audit records the truncation.
+> Within the hop, labels are followed in the order the ask names them and each
+> record's evidence in the order that record stores it; within the query, records
+> arrive in the order `assemble_by_band` returns them, which is ADR-0072 §5's band
+> precedence and is already ratified. The resulting fourth group is therefore a
+> function of the request and the store alone, and two conforming implementations
+> given one request over one store produce the same group in the same order.
 
 > **Normative.** A `CITATION_HOP` ask names **at most two labels**, and the evidence
 > of the records they resolve to is drawn under the same budget of ten. No
@@ -421,6 +504,24 @@ never be able to take the reply down with it.
 > **Normative.** The budget is a **second budget and never a share of the first**.
 > It does not reduce, borrow from, or draw against `RETRIEVAL_LIMIT` or
 > `EPISODIC_SUPPLEMENT_LIMIT`, and no lane funds it by lowering either.
+
+**The cross-kind precedence is ratified here rather than left to a lane, because it
+decides what reaches the prompt.** ADR-0158 treats exactly this kind of ordering as a
+decision — *"Position is how this corpus expresses precedence into a prompt"* — and
+under one shared budget the fill order is not a detail but a policy: the two kinds
+compete for the same ten slots, and either order satisfies every other clause of this
+section while producing a different fourth group, a different prompt and a different
+audit.
+
+**The hop goes first because it is the bounded read and the one the query cannot
+substitute for.** Its size is fixed and small by §2's two-label cap and the measured
+shape behind it — one or two beliefs citing one to three episodes each — so it can
+never crowd the query out by much. A sighted query, by contrast, can return the whole
+budget on its own, so putting it first would let a broad reformulation starve the hop
+entirely and silently reduce the envelope to its weaker half: on the hop territory
+the query alone reaches 50.0% where the union reaches 63.3%. Ordering the small
+bounded read ahead of the large unbounded one is what makes the union the *measured*
+union rather than whichever kind happened to run first.
 
 **Ten is a measured figure rather than a judged one, from three directions.** The
 replay's oracle shape is *"311/349 need **exactly one** belief, 29 need two, 9 need
@@ -448,24 +549,11 @@ and third adding 10.0pt then 4.6pt on the miss set — real, diminishing, and *"
 needing re-planning"*. Servicing one emission once is also what keeps this milestone
 inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 
-### 7. The union: the subtraction, the group, and what fires the withholding
-
-> **Normative.** The disclosure narrowing this turn already holds is applied to the
-> union of the supply and the serviced records, by the servicer, before the union
-> becomes the supply the composing stage runs over. It is **the same narrowing**,
-> applied a second time to a wider input — not a second decision procedure, not a
-> second placement rule, and not a judgement taken over content. ADR-0203 §1's
-> second clause binds this ADR unchanged.
-
-> **Normative.** Nothing is planned, composed or rendered over a supply wider than
-> the one the subtraction returned. The planner has already run, over the narrowed
-> pre-envelope supply, and it does not run again; the composing stage runs over the
-> narrowed union and over nothing else. ADR-0203 §1's every condition holds: content
-> ADR-0199 §3 withholds reaches no stage of the turn, wherever it entered it.
+### 7. The union: the group, the deduplication, and what the evaluation ranges over
 
 > **Normative.** A record the servicer returns that the supply already holds is
-> **deduplicated out**, and the copy the supply already held keeps its position.
-> This is ADR-0158 §4's rule applied to a fourth group, for its reason.
+> **deduplicated out**, and the copy the supply already held keeps its position. This
+> is ADR-0158 §4's rule applied to a fourth group, for its reason.
 
 > **Normative.** The serviced records enter `memories` as a **fourth group, appended
 > whole after the episodic supplement**, never interleaved. ADR-0074 §5's first
@@ -475,43 +563,44 @@ inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 > rely on the grouping and may not rely on a global relevance order — ADR-0158 §5's
 > clause, extended by one group and otherwise unchanged.
 
-> **Normative.** On an operation whose output channel's audience is unbounded, the
-> records the servicer added are **in** the set ADR-0210 §1's evaluation ranges over,
-> exactly as the two relevance-read groups are. A record of this fourth group that
-> ADR-0199 §3 withholds fires the deflection, and one already carrying the mark
-> ADR-0217 moved into `MemoryBase.placement` fires it too. §1's exclusion of the
-> conversation's own recent turns is untouched, and this clause reaches nothing else.
+> **Normative.** The `TurnResult` is constructed once, over the deduplicated union,
+> and the composing stage runs over that and nothing wider. Nothing is planned,
+> composed or rendered over a supply wider than the one this section returns.
 
-**The subtraction is the clause that would have been quietly got wrong**, and #1732
-point 4 names it. ADR-0203 §1 places the withholding *"before the turn plans"*; here
-there is a supply member that arrives after planning, and the honest reading is that
-§1's placement is a floor rather than a ceiling — the point of it is that withheld
-content *"reaches no stage of that turn"*, and a record admitted after planning has
-the composing stage still ahead of it. Re-applying the same narrowing is what makes
-that true. Applying a *different* one, or judging the new records by inspecting their
-text, is what §1's second clause forbids, and this section forbids it too.
+> **Normative.** ADR-0204 §2's evaluation — the boolean a bounded-audience turn's
+> capture records — is taken over the **whole supply including the fourth group**,
+> and is therefore taken **after** servicing. An implementation that evaluates before
+> servicing and does not re-evaluate over the union under-fires the boolean on
+> exactly the records the planner asked for.
 
-**ADR-0210 §1 is the clause this ADR genuinely moves, and the direction is
-fail-closed.** Its set is *"the members of the turn's supply a relevance read taken
-with the turn's own goal statement returned"* — and neither kind of this envelope is
-inside it as written. A `SIGHTED_QUERY` is a relevance read taken with the
-*planner's* query; a `CITATION_HOP` is not a relevance read at all. A reader holding
-only ADR-0210 §1 would therefore exclude both, which is ADR-0070 §1's test met and
-why §13 records a partial supersession rather than an extension.
+**This section changes no ADR, and the reason is §5's channel scoping.** ADR-0203 §1
+and §2 bind an operation whose output channel's audience is unbounded; §5 refuses to
+service a request on one. So the only turns this envelope's fourth group exists on
+are bounded-audience turns — and on those, `BoundedAudienceSupply` *"hands the turn
+back **everything it was given**"*, subtracting nothing. There is no subtraction for
+a servicer to re-apply, no second filter application to justify, and nothing of
+ADR-0203 to supersede.
 
-**But §1's own reason points the other way from its letter, which is why the
-extension is the right move rather than merely the safe one.** It excludes the
-conversation tail because *"A boolean whose meaning is 'something bearing on this
-turn was held back' cannot be set by a group whose membership does not depend on the
-turn"*, and it includes the two relevance groups because *"A withheld record in
-either was surfaced **for this question**, so ADR-0199 §5's third clause has
-something to be about."* The envelope's records are the most turn-dependent members
-of the whole supply: they exist because the planner read this turn's question, judged
-its supply short, and named what it wanted. Excluding them would under-fire a privacy
-boolean on the spoken channel — the #1692 class of defect — on the turns most likely
-to be about the withheld class, which is the exact failure §1's second clause was
-written to prevent one level down. ADR-0210 §1's stated posture for an unclassified
-case is *"the direction is fail-closed"*, and this is that direction.
+**ADR-0210 §1 is likewise untouched, and this is the clause a reader should check.**
+Its narrowed set governs the **unbounded** channel, which this envelope never reaches.
+Its **bounded** clause is the one that governs here, and it already covers the fourth
+group as written: on such an operation *"the evaluation is exactly ADR-0204 §2's and
+§4's, over the whole supply as assembled and retrieved, first group included, with
+nothing subtracted from that turn."* The serviced records are part of the supply the
+turn assembled, so they are inside that set by its own words and no extension is
+owed. An earlier draft of this ADR superseded §1 to put them there; that supersession
+was **withdrawn** once §5 scoped the envelope off the unbounded channel, and it is
+recorded here because a reader comparing drafts should see that the narrower design
+removed a clause change rather than hid one.
+
+**The ordering requirement above is the one real obligation this creates, and it is
+not book-keeping.** `orchestration/engine.py` reads the boolean *"once, immediately
+after the one evaluation that set it, so every capture below stamps the same turn's
+own value"*. If servicing lands after that read, a record the planner asked for and
+that ADR-0199 §3 would withhold sets nothing — and `BoundedAudienceSupply`'s own
+docstring says why that matters: *"#1708's laundering path runs entirely through this
+channel's captures"*, so an under-fired boolean here is a typed turn's capture
+becoming a clean input to a spoken one. The evaluation must see the fourth group.
 
 **A fourth group and not a merge**, because ADR-0158 §4's argument is positional:
 *"Position is how this corpus expresses precedence into a prompt"*, and sorting kinds
@@ -531,15 +620,21 @@ supplement, and a group appended after it leaves that condition untouched.
 > is `None` is a turn it did not.
 
 > **Normative.** Every turn writes §9's audit record, **whether or not the trigger
-> fired**, and that record carries the inputs the trigger's precision and recall are
-> computed **from**. A record is written for a turn that asked for nothing, and it
-> says so. An instrument that only records its positives cannot measure a fire rate.
+> fired**. A record is written for a turn that asked for nothing, and it says so. An
+> instrument that only records its positives cannot measure a fire rate.
 
-> **Normative.** Those figures are computed **over a population of turns** and are
-> never a per-turn quantity. A turn contributes inputs to a numerator or a
-> denominator; it does not carry a precision or a recall of its own, and a turn on
-> which the trigger rightly did not fire has neither. No lane reports either figure
-> as a property of a single turn.
+> **Normative.** Every figure this audit supports is computed **over a population of
+> turns** and is never a per-turn quantity. A turn contributes to a numerator or a
+> denominator; it carries no rate of its own, and a turn on which the trigger rightly
+> did not fire carries none at all. No lane reports any of these figures as a
+> property of a single turn.
+
+> **Normative.** The figures §9's record supports **on its own** are the **fire
+> rate** and the **novelty rate**, and no lane calls either of them precision or
+> recall. Precision and recall of the trigger additionally require, per turn, a
+> **label** of whether that turn's supply in fact sufficed. §9's record does not
+> carry one, no clause of this ADR obliges one, and no lane computes either figure
+> from this record alone or reports one as though it had.
 
 > **Normative.** No lane makes the trigger's firing conditional on a setting, a
 > channel, a surface or a deployment flag. It fires where the planner judges the
@@ -552,18 +647,29 @@ a request, directly comparable to the replay's 13.6% — and the **yield**: how 
 records came back, how many survived deduplication as genuinely new, and how many the
 subtraction dropped.
 
-**Precision has a live estimator and recall does not, and the asymmetry is stated
-because it decides what a later lane may conclude.** A fired request that returned
-records the supply did not already hold is direct evidence the supply *was*
-extendable, so the fired population can be scored against itself from §9's record
-alone. Recall's denominator is the turns on which a read **would** have helped — and
-on a turn where the trigger did not fire, nothing looked, so the system never learns
-whether it should have. Closing that gap needs either a labelled corpus, which the
-replay had because LoCoMo ships gold records and a live turn has not, or a sampled
-shadow read on non-fired turns, which is a spend decision this ADR does not take
-(§12). **This ADR states the limit rather than promising a figure the instrument
-cannot produce**, because a decision that claimed otherwise would be discovered to
-have claimed it at the first attempt to report.
+**The novelty rate is not precision, and conflating the two would be the easiest
+mistake this section could invite.** Novelty says a fired read returned records the
+supply did not already hold. It does **not** say the supply was insufficient, that
+the new records bore on the question, or that the reply was better for them: a
+planner can emit a broad query on a perfectly sufficed turn and get back one
+irrelevant record it had not seen, and that turn scores as novel while being a false
+fire. So novelty is an upper bound on precision and is reported as one.
+
+**Recall is further out of reach than precision, and for a structural reason rather
+than a missing field.** Its denominator is the turns on which a read **would** have
+helped — and on a turn where the trigger did not fire, nothing looked, so the system
+never learns whether it should have. No enrichment of §9's record closes that: the
+evidence does not exist on the turn. Closing it needs either a labelled corpus, which
+the replay had because LoCoMo ships gold records and a live turn has not, or a
+sampled shadow read on non-fired turns, which is a real per-turn spend and is
+deferred by name in §12.
+
+**This ADR states the limit rather than promising a figure the instrument cannot
+produce.** The owner ruled the live audit is the trigger's instrument, and the honest
+form of that ruling is an instrument whose readings are labelled with what they are.
+A decision that claimed precision and recall here would be discovered to have claimed
+them at the first attempt to report, and the number most worth watching — the fire
+rate against the replay's 13.6% — is available on day one and needs no label at all.
 
 **What the live figures are read against is the replay, and that is the point of
 deploying rather than re-measuring.** The replay's arms *"ran on sonnet-5, a floor"*
@@ -591,16 +697,23 @@ by making the planner ask twice.
 
 ### 9. The audit record
 
-> **Normative.** Each turn records: whether a request was emitted; for each ask, its
-> kind and what it asked (the query as composed, or the labels as named); how many
-> records the servicing returned; how many of those were new after deduplication; how
-> many the subtraction dropped; how many labels resolved to nothing; and whether the
-> servicing failed.
+> **Normative.** Each turn records: whether a request was emitted; whether it was
+> serviced or declined under §5's channel scoping; for each ask, its kind, and **the
+> identifier of the plan that carries the ask itself**; how many records the
+> servicing returned; how many of those were new after deduplication; how many the
+> deduplication removed; how many labels resolved to nothing; whether the budget
+> truncated a kind; and whether the servicing failed.
 
-> **Normative.** The record holds **counts and the planner's own asked-for terms**,
-> and no record content: not a `content` span, not an excerpt, not a rendering. What
-> a read *returned* is in the supply and in the turn's episode already, and a second
-> copy of it in an audit is a second thing to retain, place and destroy.
+> **Normative.** The record holds **counts, kinds and a reference**, and copies no
+> text. It does not copy the query the planner composed, the labels it named, any
+> `content` span, any excerpt or any rendering. The ask is already durable on the
+> plan (§4), and the record points at it.
+
+> **Normative.** A planner-composed query is a **model completion with no recorded
+> origin**, of the same class as `ActionPlan.rationale`. Wherever it is rendered,
+> read back or exported it is treated as that class already is, and nothing in this
+> ADR makes it speakable, placeable, or admissible to a channel a rationale is
+> inadmissible to. No lane infers a placement for it by inspecting it.
 
 > **Normative.** These are the fields milestone 2 **raises rather than replaces**. An
 > ADR admitting a second serviced emission per turn extends this record to account
@@ -608,31 +721,51 @@ by making the planner ask twice.
 > or start a second audit beside this one.
 
 The instrument has to exist at the first deploy rather than be added when someone
-asks, because the question it answers — did the trigger fire, and did the read help —
-is unanswerable retrospectively. Recording the not-fired turns is what turns a log
-into a denominator.
+asks, because the question it answers — did the trigger fire, and did the read return
+anything new — is unanswerable retrospectively. Recording the not-fired turns is what
+turns a log into a denominator, and recording the declined ones is what keeps §5's
+channel scoping visible rather than silent.
 
-**The content rule is ADR-0004 §7's minimisation applied to a new record**, and it
-costs nothing that matters: every question §8 poses is a question about counts and
-about what was asked. The asked-for query *is* retained, because it is the planner's
-own composition and is the one thing a later reader needs to judge whether a
-reformulation was any good.
+**The reference rather than a copy is ADR-0004 §7's minimisation taken seriously, and
+it closes a hole an earlier draft of this section had.** That draft retained the
+planner's own query text on the ground that it is the planner's composition rather
+than a record's content. But nothing bounds what a planner may put in a query: it
+reads the rendered supply, so a query may quote a sensitive span of a record verbatim,
+and the clause forbidding record content and the clause retaining the query would then
+contradict each other on the same bytes. Pointing at the plan removes the contradiction
+by removing the second copy: the ask is retained exactly once, on the frozen
+`ActionPlan` the planning store already keeps, under whatever retention that record
+has. A later reader who wants to judge whether a reformulation was any good reads it
+there.
+
+**And naming the query's class is what stops the same laundering ADR-0203 §1
+diagnosed.** That decision's reason is that *"a model completion is unplaceable"*, and
+that storing a plan rationale inside an episode *"launders an unplaced value into a
+placed one"*. A sighted query is the same kind of object produced at the same seam, so
+it inherits the same treatment by name here rather than being discovered to need it
+later — which is the whole of why this ADR says what the query *is* as well as where
+it lives.
 
 ### 10. What the implementing lanes owe
 
 > **Normative.** Two lanes, in order, each briefed from this ADR's merged text.
 
 **Lane A — the types and the planner's emission.** `core/types.py` (`ReadKind`,
-`ReadAsk`, `ReadRequest`, and `ActionPlan`'s field with its validators), the
-widened docstrings on `Planner.plan` and `TurnResult` in `core/protocols.py` and
-`core/types.py`, the labelled rendering of the supply in `planning/planner.py`, the
+`ReadAsk`, `ReadRequest`, and `ActionPlan`'s field with its validators), the widened
+docstrings on `Planner.plan` and `TurnResult` in `core/protocols.py` and
+`core/types.py`, §3's ordinal labelling of the supply in `planning/planner.py`, the
 planner's emission and the prompt that asks for it, and the canonical fakes in
 `ai_assistant.testing` that construct a request. **Not** the servicer.
 
 **Lane B — the servicer, the union and the audit.** In `orchestration/`: the
-servicing of both kinds, the label resolution, §6's budget, §7's deduplication,
-fourth group, re-applied narrowing and widened ADR-0210 §1 set, §5's degradation
-posture, and §9's audit record.
+servicing of both kinds, §3's label resolution by index into the sequence the loop
+passed, §5's channel scoping and degradation posture, §6's budget and cross-kind
+precedence, §7's deduplication, fourth group and post-servicing evaluation, and §9's
+audit record.
+
+> **Normative.** Neither lane invents a second label scheme, a shared label table, or
+> any value crossing `planning` and `orchestration` other than the `memories`
+> sequence and the `ActionPlan` that already cross it (§3).
 
 > **Normative.** Neither lane moves `PROTOCOL_VERSION`. `ActionPlan` crosses neither
 > `wire/` nor `service/` in the tree, no type this ADR adds does either, and no
@@ -683,32 +816,49 @@ to service.
    three groups it was, and the audit records a turn on which the trigger did not
    fire. Asserted over the audit and over the supply, not over a mock's call count.
 3. **A label outside the shown set resolves to nothing.** A request naming a label
-   the turn never rendered, a well-formed record identifier, and a label of a record
-   that has since expired each add no record, fail no turn, raise nothing, and are
-   recorded as dropped. No model-supplied string reaches `get_many` as an identifier.
-4. **The subtraction subtracts from the union.** On an operation whose channel
-   audience is unbounded, a record the servicing returns that ADR-0199 §3 withholds
-   appears in no prompt the composing stage receives — and the same record on a
-   bounded channel does appear. The withheld record fires the deflection, which is
-   §7's widened ADR-0210 §1 set asserted directly rather than assumed.
-5. **The audit records both a fired and a non-fired turn**, with the counts §9 names,
-   and its asked-for terms are the planner's own; and it holds no record content, so
-   a distinctive span of a returned record appears nowhere in it.
-6. **The budget and the bounds hold.** A hop naming three labels is not a request the
+   the turn never rendered, a string that is not of the form, an ordinal past the
+   sequence's end, a well-formed record identifier, and a label of a record that has
+   since expired each add no record, fail no turn, raise nothing, and are recorded as
+   dropped. No model-supplied string reaches `get_many` as an identifier.
+4. **The label is an ordinal into the sequence the loop passed.** `M3` resolves to
+   the third record of that turn's `memories` and to nothing else; the same planner
+   output against a different supply resolves to different records; and the two
+   packages agree with no shared table, asserted by resolving a request against a
+   `memories` sequence the test constructs directly.
+5. **An unbounded-audience operation services nothing.** A turn on `converse_spoken`
+   whose planner emits a request reaches the composing stage with the three groups
+   ADR-0203 §1 narrowed and no fourth one, performs no store read for the request,
+   and records the emission as declined — asserted for a request of each kind, and
+   asserted over the supply and the audit rather than over a call count.
+6. **A serviced record still fires ADR-0204 §2's boolean.** On a bounded-audience
+   turn, a record the servicing adds that ADR-0199 §3 would withhold sets the boolean
+   the capture records. This fails on any implementation that evaluates before
+   servicing and does not re-evaluate over the union, and it is the assertion standing
+   between this ADR and #1708's laundering path.
+7. **The hop is serviced before the query, and the budget truncates the query.** A
+   request whose hop yields records and whose query would yield more than the
+   remaining budget produces a fourth group holding the hop's records and exactly the
+   remainder from the query, in that order, with the truncation in the audit. A hop
+   that exhausts the budget leaves the query no slots and does not fail.
+8. **The audit records a fired, a non-fired and a declined turn**, with the counts §9
+   names; it copies no text, so neither a distinctive span of a returned record nor
+   the planner's query string appears anywhere in it; and the ask it points at is
+   readable on the plan.
+9. **The budget and the bounds hold.** A hop naming three labels is not a request the
    types admit; a request whose asks are two of one kind is not either; a servicing
    whose candidates exceed ten returns ten; and a record already in the supply is
    deduplicated out with the original keeping its position, counting against nothing.
-7. **The fourth group is appended, not interleaved.** The three existing groups keep
-   their order and their positions, the serviced records follow the supplement whole,
-   and `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group
-   of episodes appended at the tail.
-8. **A failed servicing degrades and does not fail.** A store that raises during
-   servicing leaves the turn composing from the supply planning saw, reports the
-   degradation, records what was asked and that nothing returned, and parks nothing.
-9. **The plan is still frozen and still auditable.** A plan carrying a request
-   refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
-   selected, ruled on or driven — asserted by a turn whose request names a query that
-   reads like a tool call and which reaches no registry, no gate and no executor.
+10. **The fourth group is appended, not interleaved.** The three existing groups keep
+    their order and their positions, the serviced records follow the supplement whole,
+    and `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group
+    of episodes appended at the tail.
+11. **A failed servicing degrades and does not fail.** A store that raises during
+    servicing leaves the turn composing from the supply planning saw, reports the
+    degradation, records what was asked and that nothing returned, and parks nothing.
+12. **The plan is still frozen and still auditable.** A plan carrying a request
+    refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
+    selected, ruled on or driven — asserted by a turn whose request names a query that
+    reads like a tool call and which reaches no registry, no gate and no executor.
 
 ### 12. Deferred, by name, each with what fires it
 
@@ -745,6 +895,12 @@ to service.
 - **Decomposition of a compound question** into several asks of one kind. §2 admits
   at most one ask per kind for this reason: decomposition is a different decision
   about how a question is split, not a larger budget. #1908 places it at milestone 2.
+- **Servicing a request on a channel of unbounded audience** (§5). Deferred because
+  ADR-0203 §2 forbids a read that replaces what the subtraction removed, and on such
+  a turn the planner judges sufficiency over an already-narrowed supply. Fired by an
+  ADR that answers §2's backfill question for a planner-emitted read — plausibly by
+  showing the emission is independent of the withholding, which is a measurement the
+  audit this ADR builds could supply. Not fired by a lane finding spoken replies thin.
 - **#838's coverage layer**, and whether the trigger is learnable from the supply
   alone. Fired by what §9's audit shows, or by #838's own ADR.
 - **A sampled shadow read on turns the trigger did not fire on** — the only live
@@ -757,10 +913,11 @@ to service.
 
 ### 13. Scope, and what this records against earlier ADRs
 
-**This ADR partially supersedes two clauses of two ratified ADRs and no others**,
-and every other clause it cites binds as written. That is a classification of this
-change and is therefore stated as prose rather than marked (ADR-0089 §1); what
-follows is the working under ADR-0070 §1's test.
+**This ADR partially supersedes exactly one clause of one ratified ADR and no
+others**, and every other clause it cites binds as written. That is a classification
+of this change and is therefore stated as prose rather than marked (ADR-0089 §1);
+what follows is the working under ADR-0070 §1's test, including for the three clauses
+a reader would most expect to have moved and which did not.
 
 **ADR-0208 §1's one-site clause is partially superseded, and the scope is exactly
 one of its five clauses.** It rules that the store is read for relevance *"at
@@ -805,10 +962,14 @@ scoping sentence that *"One site is not one call"*.
 **And §8 names five questions #1732 carries, each of which this ADR answers**, which
 is what discharging the deferral means concretely: *"the envelope question"* (§§1–2),
 *"the one-per-turn bound"* (§6), *"the ADR-0170 §2 reading a loop-level second read
-needs"* (§5), *"where the disclosure filter runs over the union"* (§7), and *"the
-measurement that should decide whether it is worth building at all"* (§8 here, read
-with Context's pricing and the owner's ruling that the live audit is the instrument).
-#1913 closes against this section.
+needs"* (§5), *"where the disclosure filter runs over the union"* (§§5 and 7), and
+*"the measurement that should decide whether it is worth building at all"* (§8 here,
+read with Context's pricing and the owner's ruling that the live audit is the
+instrument). The fourth of those gets the answer #1732 did not anticipate: the filter
+does not run over the union, because §5 declines to service a request on the only
+operations that have a filter at all, and on the operations that remain what runs over
+the union is ADR-0204 §2's evaluation rather than a subtraction. #1913 closes against
+this section.
 
 **ADR-0208 §1's keyed-load clause is untouched and load-bearing.** It rules that *"A
 **keyed load** — records the turn already names, fetched by identifier — is not a
@@ -819,26 +980,40 @@ clause names `ConversationLifecycle.history` using. **So the hop needs no
 supersession at all**, and the scope above is narrowed to the query alone for that
 reason rather than by drafting convenience.
 
-**ADR-0210 §1's evaluated-set clause is partially superseded, for the reason §7
-argues.** The set it names — the members a relevance read taken with *the turn's own
-goal statement* returned, plus the context facets — excludes both of this ADR's kinds
-as written, and §7 puts them in. Everything else in §1 stands: the subtraction still
-runs over the whole supply, the conversation's own recent turns still fire nothing,
-and a bounded channel still evaluates over the whole supply. §1's third clause as
-ADR-0217 amended it is read with the field where ADR-0217 moved it, and this ADR
-neither restores the old name nor moves it again.
+**ADR-0203 §§1 and 2 are untouched, and §5's channel scoping is the whole reason.**
+Both bind an operation whose output channel's audience is unbounded, and §5 refuses to
+service a request on one. So this envelope adds no supply member to a turn that has a
+subtraction, applies no second filter, and cannot backfill what a subtraction removed.
+§2's backfill clause is the one that decided the design rather than the one the design
+had to work around: a planner judging sufficiency over an already-narrowed supply is
+reading a hole the withholding made, and servicing that read is *"a retrieval shaped
+by what was withheld"* however honestly it was meant.
 
-**ADR-0203 §1 is extended in application and unchanged in text, and §7 was shaped so
-that it is.** Every condition it states stays true: nothing withheld reaches any
-stage of the turn; no implementation composes, plans or renders over a wider supply
-and narrows afterwards; no `TurnResult` is edited after the turn produced it; and no
-second decision procedure is introduced, because the narrowing re-applied is the same
-one. What is new is that `TurnResult.memories` may hold a record the plan was not
-produced over — a widening of what the supply contains, not a change to what may be
-withheld from it or to who decides. Had §7 instead let the servicer judge the new
-records by their own procedure, that *would* have been a supersession of §1's second
-clause, and this ADR records that it was considered and refused rather than leaving
-a later reader to wonder.
+**An earlier draft did it the other way, and recording that is the point of this
+paragraph.** It serviced the request on every channel and re-applied the same
+narrowing over the union, arguing that ADR-0203 §1 was extended in application rather
+than superseded. That argument was available and this ADR does not rest on it: it
+still owed a second filter application against a section titled *"One assembly, one
+retrieval, one filter"*, and it still let the withholding shape what the planner asked
+for. Scoping the envelope off the channel removes both objections and removes two
+clause changes with them, which is why the narrower design is the better one rather
+than merely the safer one.
+
+**ADR-0210 §1 is untouched, including the clause an earlier draft superseded.** Its
+narrowed set governs the unbounded channel this envelope never reaches. Its bounded
+clause governs here and already covers the fourth group in its own words — *"over the
+whole supply as assembled and retrieved, first group included, with nothing subtracted
+from that turn"* — so §7's evaluation requirement is that clause applied, not extended.
+That earlier draft's partial supersession of §1 was **withdrawn**, and §7 says so where
+a reader will meet it. §1's third clause as ADR-0217 amended it is read with the field
+where ADR-0217 moved it; this ADR neither restores the old name nor moves it again.
+
+**ADR-0204 §2 is untouched and its evaluation is relied on.** §7 requires only that it
+be taken after servicing, so the boolean it sets reflects the supply the turn actually
+ran over. That is the existing rule applied to a supply that gained a group, and
+`BoundedAudienceSupply`'s own statement of why it must not under-fire — *"#1708's
+laundering path runs entirely through this channel's captures"* — is the reason the
+ordering is normative here rather than left to a lane.
 
 **ADR-0158 §4 and §5 are extended in application and unchanged in text.** §4's rule
 is that the order is tail, then beliefs, then supplement, *"appended whole, never
@@ -881,13 +1056,16 @@ first test, which is written to fail if the mechanism is wired but not working.
 - **The trigger becomes a number.** From the first deploy the fire rate and the yield
   are per-turn measurables, read against the replay's 13.6% floor. Precision and
   recall stay unavailable live, and §8 says so rather than implying otherwise.
-- **The prompt grows by up to ten records on the turns that fire**, which the replay
-  puts at about one turn in seven. That is the honest cost, and §9's audit is where a
-  deployment watches it.
-- **Two clauses of two ADRs move**, and both moves are narrow: one site becomes two
-  for relevance reads, and one privacy evaluation's set gains one group. The second
-  is the one to watch — it is a fail-closed extension of a boolean on the spoken
-  channel, and §11's fourth test is what keeps it honest.
+- **The prompt grows by up to ten records on the bounded-audience turns that fire**,
+  which the replay puts at about one turn in seven. That is the honest cost, and §9's
+  audit is where a deployment watches it.
+- **The audit reports a fire rate and a novelty rate, and calls them that.** Precision
+  and recall need a per-turn label of whether the supply sufficed, which no live turn
+  carries; §8 says so and §12 defers the two ways of obtaining one.
+- **One clause of one ADR moves**: ADR-0208 §1's one site becomes two for relevance
+  reads. Nothing in the withholding corpus moves, because §5 keeps the envelope off
+  the channel that corpus is about — which is also why the spoken channel gains
+  nothing from this milestone, stated as a cost in §5 rather than as a footnote.
 - **A closed enumeration is now the growth path.** Milestones 2 through 4 add kinds
   and inherit §3's namer rule, §6's budget discipline, §7's union and §9's audit. A
   milestone that wanted a second *seam* would have to supersede §1 to get it, which
@@ -916,10 +1094,32 @@ Refused in §8. Two expressions of one judgement can disagree, and the audit wou
 then have to decide which of them the fire rate is about. Emitting a request *is* the
 trigger, so the two cannot part company.
 
+**Service the request on every channel, re-applying the same narrowing over the
+union.** This is what an earlier draft of this ADR did, and it is the alternative a
+reader is most likely to reach for, so §13 records it in full rather than leaving it
+implicit. Refused twice over: it owes a second filter application against a section
+titled *"One assembly, one retrieval, one filter"*, and — the deeper objection — on
+an unbounded-audience turn the planner's sufficiency judgement is taken over a supply
+the subtraction thinned, so the read it emits is shaped by what was withheld even
+though the planner never saw it. §5's channel scoping refuses the case instead, which
+costs the spoken channel this milestone and buys back two clause changes.
+
 **Let the servicer apply its own disclosure decision over the records it fetched.**
-Refused in §7 and recorded in §13. It is a second decision procedure over content,
-which ADR-0203 §1's second clause forbids in terms, and it would have made this ADR a
-supersession of that clause rather than an extension of its application.
+Refused for a reason that survives the scoping above: it is a second decision
+procedure over content, which ADR-0203 §1's second clause forbids in terms, and a
+lane tempted by it on some later channel should find the refusal recorded here.
+
+**Retain the planner's query text in the audit.** Refused in §9. Nothing bounds what
+a planner may put in a query — it reads the rendered supply — so the clause retaining
+the query and the clause forbidding record content would contradict each other on the
+same bytes, and ADR-0004 §7 would be breached by a second retained copy. The audit
+points at the plan that already holds the ask.
+
+**Let the implementing lane choose the cross-kind fill order.** Refused in §6. Under
+one shared budget the order decides which records reach the prompt, and ADR-0158
+treats prompt precedence as a decision rather than a detail. Left open, a lane that
+serviced the query first could silently starve the hop and reduce the envelope to the
+weaker of its two halves.
 
 **Fund the envelope from the existing budgets** — take ten of `RETRIEVAL_LIMIT`'s
 thirty, or of the supplement's. Refused in §6 for ADR-0158 §3's reason, sharpened by
