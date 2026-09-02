@@ -13,12 +13,12 @@ import contextlib
 import json
 import os
 import signal
-import socket
 import sys
 from typing import TYPE_CHECKING
 
 import pytest
 import structlog
+from gateway_ports import free_port
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
@@ -51,13 +51,6 @@ def _disclosure(value: str, *, act: MintAct | None = _ACT) -> Disclosure:
         max_sessions=8,
         mint_act=act,
     )
-
-
-def _free_port() -> int:
-    """A port nothing is listening on."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 async def _is_listening(port: int) -> bool:
@@ -171,7 +164,7 @@ async def test_a_gateway_that_cannot_disclose_its_bootstrap_value_does_not_start
     ADR-0182 §1 keeps this clause exactly where it was — it "binds the value minted
     at start and is untouched; it does not reach a later mint".
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
 
     def refuse(_disclosure: Disclosure) -> None:
         msg = "standard output is not writable"
@@ -196,7 +189,7 @@ async def test_the_value_is_disclosed_once_with_the_origin_before_the_listener_b
     puts the live count and the ceiling there "as **information and not a
     refusal**".
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
 
     disclosed = await _run_until_listening(settings)
 
@@ -218,7 +211,7 @@ async def test_the_mint_act_discloses_a_further_value_that_admits_a_browser() ->
     "A gateway process mints a bootstrap value at start… and mints a further one
     whenever the owner performs the **mint act** at the machine that runs it."
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
 
     async with _running(settings) as (disclosed, reported):
         await _disclosed_within(disclosed, 1)
@@ -242,7 +235,7 @@ async def test_the_mint_act_is_not_refused_at_the_ceiling_and_discloses_the_coun
     whatever the count is" — what the owner gets instead is the count "printed
     beside every value, which tells them the same thing without deciding anything".
     """
-    settings = Settings(gateway_port=_free_port(), gateway_max_sessions=1)
+    settings = Settings(gateway_port=free_port(), gateway_max_sessions=1)
 
     async with _running(settings) as (disclosed, reported):
         await _disclosed_within(disclosed, 1)
@@ -264,7 +257,7 @@ async def test_a_later_mint_that_cannot_be_disclosed_leaves_the_previous_value_a
     as it was — still outstanding, still on its own clock — and keeps every live
     session and keeps serving."
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
     disclosed: list[Disclosure] = []
 
     def disclose_once(one: Disclosure) -> None:
@@ -297,7 +290,7 @@ async def test_no_disclosure_names_the_act_before_the_disposition_is_installed()
     die of." The reading is taken inside the discloser, which is the only place
     that window is observable.
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
     seen: list[tuple[Disclosure, object]] = []
 
     def watch(one: Disclosure) -> None:
@@ -322,7 +315,7 @@ async def test_sighup_is_not_the_mint_act() -> None:
     action for it is to terminate, and the point is that the gateway did not change
     that.
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
     before = signal.getsignal(signal.SIGHUP)
 
     async with _running(settings) as (disclosed, _):
@@ -353,7 +346,7 @@ async def test_a_gateway_that_cannot_install_the_disposition_leaves_the_signal_i
         raise RuntimeError(msg)
 
     monkeypatch.setattr(type(loop), "add_signal_handler", refuse)
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
 
     async with _running(settings) as (disclosed, reported):
         await _disclosed_within(disclosed, 1)
@@ -394,7 +387,7 @@ async def test_a_gateway_that_can_do_neither_names_the_act_in_no_disclosure(
 
     monkeypatch.setattr(type(loop), "add_signal_handler", refuse)
     monkeypatch.setattr(signal, "signal", refuse_disposition)
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
 
     async with _running(settings) as (disclosed, reported):
         await _disclosed_within(disclosed, 1)

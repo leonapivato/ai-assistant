@@ -32,11 +32,11 @@ browser's own. What is asserted is still what Chromium did.
 from __future__ import annotations
 
 import contextlib
-import socket
 from base64 import b64encode
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import gateway_ports
 import numpy as np
 from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
@@ -320,13 +320,6 @@ class Drive:
         await self.page.wait_for_selector("#console:not([hidden])")
 
 
-def free_port() -> int:
-    """A port nothing is listening on, so two runs do not collide."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 @contextlib.asynccontextmanager
 async def driving(
     browser: Browser,
@@ -355,7 +348,7 @@ async def driving(
     Yields:
         The page, the gateway and the engine behind it.
     """
-    settings = Settings(gateway_port=free_port(), data_dir=tmp_path)
+    settings = Settings(gateway_port=gateway_ports.free_port(), data_dir=tmp_path)
     engine = SpeakingEngine(renderings or (rendering_of(8.0),))
     gateway = Gateway(
         settings=settings,

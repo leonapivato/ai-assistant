@@ -26,6 +26,7 @@ import socket
 from typing import TYPE_CHECKING, Any, cast
 
 import browser_drive
+import gateway_ports
 import pytest
 from playwright.async_api import Error as BrowserError
 
@@ -112,8 +113,8 @@ async def test_a_drive_whose_context_never_opens_leaves_no_gateway_listening(
     ran, and because the browser is shared, one crashed browser leaked a gateway per
     remaining case (adversarial review, round 7, ``major``).
     """
-    port = browser_drive.free_port()
-    monkeypatch.setattr(browser_drive, "free_port", lambda: port)
+    port = gateway_ports.free_port()
+    monkeypatch.setattr(gateway_ports, "free_port", lambda: port)
     browser = _RefusingBrowser()
 
     with pytest.raises(BrowserError) as raised:
@@ -136,8 +137,8 @@ async def test_a_context_that_will_not_close_still_releases_the_gateway(
     and ``server.close()`` with it. The close is still attempted first and its failure
     still propagates -- what changed is that it no longer costs the run a live port.
     """
-    port = browser_drive.free_port()
-    monkeypatch.setattr(browser_drive, "free_port", lambda: port)
+    port = gateway_ports.free_port()
+    monkeypatch.setattr(gateway_ports, "free_port", lambda: port)
     browser = _BadlyClosingBrowser()
 
     with pytest.raises(BrowserError):

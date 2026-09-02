@@ -42,7 +42,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
 import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -52,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import pytest
 import structlog
 from gateway_mint import bootstrap_value
+from gateway_ports import free_port
 from gateway_timing import Clock, Timers
 from gateway_tls import browser_context, issue_pair
 
@@ -328,13 +328,6 @@ class Remote:
         return await _read_answer(reader)
 
 
-def _free_port() -> int:
-    """A port free on every local address, so both listeners can take it."""
-    with socket.socket() as probe:
-        probe.bind(("", 0))
-        return int(probe.getsockname()[1])
-
-
 def _settings(home: Path, *, names: tuple[str, ...] = (_NAME,), **overrides: Any) -> Settings:
     """Settings with the remote browser listener on, past the validator.
 
@@ -360,7 +353,7 @@ def _settings(home: Path, *, names: tuple[str, ...] = (_NAME,), **overrides: Any
     certificate, key = issue_pair(home, names=names, issued_at=_NOW)
     overrides.setdefault("gateway_remote_host_names", names)
     settings = Settings(
-        gateway_port=_free_port(),
+        gateway_port=free_port(),
         gateway_remote_address="100.64.0.9",
         gateway_remote_tls_certificate=str(certificate),
         gateway_remote_tls_key=str(key),
@@ -490,7 +483,7 @@ async def test_a_gateway_with_no_remote_configuration_binds_no_second_listener()
     behave byte for byte as milestone 13's gateway did — including asking its agent
     nothing, because it has none and needs none.
     """
-    settings = Settings(gateway_port=_free_port())
+    settings = Settings(gateway_port=free_port())
     clock, timers = Clock(), Timers()
     gateway = _gateway(
         settings, agent=None, engine=FakeAssistantEngine(), clock=clock, timers=timers
@@ -721,7 +714,7 @@ def test_a_loopback_only_gateway_is_not_held_to_any_of_it() -> None:
     ``Settings`` model refusing a device list it could never read anyway.
     """
     gateway = _gateway(
-        Settings(gateway_port=_free_port()),
+        Settings(gateway_port=free_port()),
         agent=None,
         engine=FakeAssistantEngine(),
         clock=Clock(),
