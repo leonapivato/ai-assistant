@@ -844,16 +844,35 @@ class TranscriptArchiveContract:
         The boundary is asserted on both sides because a store that used ``>``
         instead of ``>=`` would evict an entry exactly at the horizon, which is a
         day of transcript nobody asked to lose.
+
+        **Both sides are asserted through all four reads**, because the predicate is
+        one clause per read rather than one shared one — §7 names four operations and
+        an implementation writes the horizon into each. A case watching ``entries``
+        alone passes on a store that hides the equality-boundary entry from the other
+        three, which is the gap #1901 records. The older entry sits one microsecond
+        back, the smallest step a stored ``occurred_at`` can take, so nothing between
+        the two instants can absorb the difference.
         """
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 3 * DAY, ordinal=1),
-            entry("c1:2", at=NOW - 3 * DAY - timedelta(microseconds=1), ordinal=2),
+            entry("c1:1", at=NOW - 3 * DAY, ordinal=1, asked="Ravensworth"),
+            entry(
+                "c1:2",
+                at=NOW - 3 * DAY - timedelta(microseconds=1),
+                ordinal=2,
+                asked="Ravensworth",
+            ),
         )
 
         aged = self.reopened(archive, 3 * DAY)
 
+        at_the_horizon = await aged.entry("c1:1")
+        assert at_the_horizon is not None
+        assert at_the_horizon.address == "c1:1"
+        assert await aged.entry("c1:2") is None
         assert [one.address for one in await aged.entries()] == ["c1:1"]
+        assert [one.address for one in await aged.conversation("c1")] == ["c1:1"]
+        assert [hit.address for hit in await aged.search("Ravensworth")] == ["c1:1"]
 
     async def test_shortening_the_retention_hides_more_on_the_very_next_read(
         self, archive: TranscriptArchive
