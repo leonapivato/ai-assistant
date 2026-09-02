@@ -586,21 +586,31 @@ async def test_a_resumption_recovered_from_durable_state_carries_text() -> None:
     assert "The user asked:" not in resumption.content
 
 
-# --- §11 test 15: the origin mark is not stamped ------------------------------
+# --- §11 test 15, as ADR-0223 §1 supersedes half of it ------------------------
 
 
-async def test_a_captured_episodes_provenance_is_not_marked_external() -> None:
-    """§11 test 15: ``derived_from_external`` is ``False``, so §6 is pinned.
+async def test_a_captured_episode_over_a_clean_supply_is_not_marked_external() -> None:
+    """§11 test 15's surviving half, and the record of what replaced the other.
 
-    §6 declines the mark and says why: stamping it would change the composing prompt's
-    origin phrase — the one thing §3's byte-identity property exists to detect — and
-    would remove ADR-0181 §5's automatic ``ALLOW`` for the egress calls of every later
-    turn in a conversation that has once held a stamped record. Both reach subsystems
-    ADR-0221 does not touch, so the mark is owed its own decision, and this test is what
-    makes a later lane change it deliberately.
+    **The deleted half was an assertion about ``model_fields_set``.** ADR-0221 §6's
+    first sentence — "capture writes the captured episode's
+    ``Provenance.derived_from_external`` exactly as it does today — it is not set, and
+    takes its ``False`` default" — was pinned here by asserting the field was *unset*.
+    ADR-0223 §1 makes that sentence false in terms: capture now takes the value as an
+    argument and stamps it, so the field is always set and the assertion can no longer
+    be true of a conforming implementation. The supersession is recorded on ADR-0221's
+    ``Status`` line; this is where it lands in the suite.
+
+    **What survives is the behaviour, and it is unchanged.** A turn whose supply held
+    no record resting on recorded external content still captures an episode carrying
+    ``False`` — the two harnesses here seed nothing, so their supplies are empty. What
+    that ``False`` says is ADR-0223 §7's sentence and no other: *no record in that
+    supply carried the marker*, never *no external content was involved*. The positive
+    direction, the partition and §6's consequence live in
+    ``test_engine_capture_origin``, which is ADR-0223 §10's own set.
 
     Asserted on both shapes the flip writes — a reply-bearing episode and a no-reply
-    one — because the mark's absence is a property of capture rather than of the reply.
+    one — because the value is a property of the supply rather than of the reply.
     """
     replying = Harness(composing=_replying(_LONG_REPLY), planner=NoStepPlanner())
     await replying.engine.converse("should I book it?", timeout=PATIENT)
@@ -610,10 +620,6 @@ async def test_a_captured_episodes_provenance_is_not_marked_external() -> None:
     for harness in (replying, parking):
         (episode,) = await _captured(harness)
         assert episode.provenance.derived_from_external is False
-        assert "derived_from_external" not in episode.provenance.model_fields_set, (
-            "§6: capture writes the field exactly as it does today — it is not set, and "
-            "takes its False default"
-        )
 
 
 # --- §11 test 13: the Tier 0 reliance, at the seam it rests on -----------------
