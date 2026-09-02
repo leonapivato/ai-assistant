@@ -2,8 +2,10 @@
 
 - Status: Proposed
 - Date: 2026-09-02
-- **Supersedes four clauses of three ADRs, each partially and each narrowly
-  scoped**, and §13 shows the working for every one. The first:
+- **Supersedes three ADRs, partially, in four narrowly stated scopes** — one of
+  ADR-0208, two of ADR-0204 and one of ADR-0158 — and §13 shows the working for every
+  one. Scopes rather than clauses, because the second ADR-0204 scope names two clauses
+  of one section that move together and for one reason. The first:
   [ADR-0208](0208-recall-memory-leaves-the-default-tool-set-and-the-turns-supply-is-retrieved-at-one-site.md)
   **partially**, in one scope — §1's **one-site clause**, *"On the turn path the
   assistant's own store is read **for relevance** … at exactly one site: the retrieval
@@ -862,7 +864,8 @@ by making the planner ask twice.
 
 > **Normative.** Each turn records: whether a request was emitted; whether it was
 > serviced or declined under §5's channel scoping; for each ask, its kind, and **the
-> identifier of the plan that carries the ask itself**; how many records the
+> identifier of the plan that carries the ask itself**, under the conditions below;
+> how many records the
 > servicing returned; how many of those were new after deduplication; how many the
 > deduplication removed; how many labels resolved to nothing; whether the budget
 > truncated a kind; and whether the servicing failed. No count here is of a record
@@ -873,6 +876,36 @@ by making the planner ask twice.
 > `content` span, any excerpt or any rendering. The ask is already durable on the
 > plan (§4), and the record points at it.
 
+> **Normative.** **What makes the record joinable is the ambient correlation
+> identifier**, ADR-0119 §4's, which `core/correlation.py` mints and which *"cannot be
+> supplied"*, and which `core/logging.py`'s `merge_contextvars` already puts on every
+> event. Joinability never depends on the plan reference.
+
+> **Normative.** **The plan reference is carried only where this system minted the
+> identifier it would log**, and is otherwise omitted. `Identifier` is a permissive
+> type — any non-blank encodable string satisfies it — so a `Planner` supplying
+> `alice@example.test` as a plan id would put Tier 1 content into a Tier 2 event.
+> `planning/planner.py` composes plan ids from `uuid4`, and the record carries the
+> reference **only** where the value is one of those; where it is not, the record says
+> the reference was withheld and carries the counts and the correlation id alone. No
+> lane logs an identifier of unknown provenance, and no lane relies on ADR-0004 §5's
+> redaction net to make one safe: that net catches a key someone named sensitively and
+> `core/logging.py` says so — *"it cannot catch Tier 1 data logged under an innocuous
+> name"*.
+
+> **Normative.** The record is emitted **once per turn, after the turn's plan has been
+> persisted** where the turn persists one. Where `PlanStore.save_plan` did not
+> succeed, the reference is omitted and the record says so, so no event points at a
+> plan a reader cannot fetch. The counts, the kinds and the fired/not-fired fact are
+> emitted either way: the fire rate never depends on the plan being resolvable.
+
+> **Normative.** The event is emitted at **`INFO`**, and the every-turn obligation
+> binds the **emitting code** rather than any deployment's log configuration. A
+> deployment whose `log_level` is above `INFO` discards the event and loses the
+> instrument along with it; that is the honest cost of putting the record in the log
+> rather than in a store, it is stated here rather than discovered, and §12's deferred
+> durable surface is what a deployment that cannot accept it fires.
+
 > **Normative.** A planner-composed query is a **model completion with no recorded
 > origin**, of the same class as `ActionPlan.rationale`. Wherever it is rendered,
 > read back or exported it is treated as that class already is, and nothing in this
@@ -880,12 +913,12 @@ by making the planner ask twice.
 > inadmissible to. No lane infers a placement for it by inspecting it.
 
 > **Normative.** **The record is a structured log event**, emitted from
-> `ai_assistant.orchestration` at the servicing site under one fixed event key, through
+> `ai_assistant.orchestration` under one fixed event key, through
 > the `structlog` seam `core/logging.py` configures. It is **Tier 2** in ADR-0004 §5's
-> classification and satisfies that tier by construction, because the clause above
-> holds it to *"identifiers, classes, and counts, never content"* — which is
-> `core/logging.py`'s own statement of the primary defence, and is why this record
-> needs no exception from the redaction net rather than relying on it.
+> classification, and what keeps it inside that tier is the clauses below rather than
+> the redaction net: the record carries *"identifiers, classes, and counts, never
+> content"* — `core/logging.py`'s own statement of the primary defence — and it carries
+> no identifier whose provenance is not this system's.
 
 > **Normative.** This ADR adds **no audit Protocol, no audit store and no injected
 > sink**, and no lane invents one. `AuditTrail` is the permissions trail and records
@@ -968,7 +1001,8 @@ implementation has to be rewritten to keep passing it.
 servicing of both kinds, §3's label resolution by index into the sequence the loop
 passed, §5's channel scoping and degradation posture, §6's budget and cross-kind
 precedence, §7's deduplication, fourth group and post-servicing evaluation, and §9's
-audit record.
+audit record — including its emission point, which is after the turn's plan is
+persisted rather than at the servicing site, and its conditional plan reference.
 
 > **Normative.** Neither lane invents a second label scheme, a shared label table, or
 > any value crossing `planning` and `orchestration` other than the `memories`
@@ -1069,31 +1103,42 @@ are absent in that window because the events they describe have not happened.
 8. **The audit records a fired, a non-fired and a declined turn**, with the counts §9
    names; it copies no text, so neither a distinctive span of a returned record nor
    the planner's query string appears anywhere in it; and the ask it points at is
-   readable on the plan.
-9. **The budget and the bounds hold.** A hop naming three labels is not a request the
-   types admit; a request whose asks are two of one kind is not either; a servicing
-   whose candidates exceed ten returns ten; and a record already in the supply is
-   deduplicated out with the original keeping its position, counting against nothing.
-   The ordering guarantee is asserted over a **fixed** candidate set: one request and
-   one supply over a store that returns the same candidates twice produce the same
-   group in the same order, and no test asserts that a concurrently-written store
-   does — ADR-0113 §5's accepted miss is inherited, and §6 says so rather than
-   pinning a guarantee the store does not offer.
-10. **The fourth group is appended, not interleaved, and the planner never saw it.**
+   readable on the plan. Asserted at the emitting seam through a capturing processor,
+   so the test is about the code's obligation and not about a configured level.
+9. **The audit carries no identifier this system did not mint.** A turn whose
+   `Planner` returns a plan whose id is not one `planning/planner.py` would have
+   minted — an address-shaped string is the case worth writing — emits a record with
+   the counts and the ambient correlation id and **no** plan reference, and that
+   string appears nowhere in the event. A turn whose plan id is minted carries the
+   reference.
+10. **A plan the store did not keep is not referenced.** A turn whose
+    `PlanStore.save_plan` fails still emits its record — the fired fact, the kinds and
+    the counts — with the reference omitted and the omission recorded, so no event
+    points at a plan a reader cannot fetch and the fire rate is unaffected.
+11. **The budget and the bounds hold.** A hop naming three labels is not a request the
+    types admit; a request whose asks are two of one kind is not either; a servicing
+    whose candidates exceed ten returns ten; and a record already in the supply is
+    deduplicated out with the original keeping its position, counting against nothing.
+    The ordering guarantee is asserted over a **fixed** candidate set: one request and
+    one supply over a store that returns the same candidates twice produce the same
+    group in the same order, and no test asserts that a concurrently-written store
+    does — ADR-0113 §5's accepted miss is inherited, and §6 says so rather than
+    pinning a guarantee the store does not offer.
+12. **The fourth group is appended, not interleaved, and the planner never saw it.**
     The `memories` the planner was called with carries exactly the three groups
     ADR-0158 §5 fixes; the `TurnResult` the same turn returns carries those three, in
     that order and in those positions, followed by the serviced records whole; and
     `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group of
     episodes appended at the tail. On a turn that serviced nothing the two sequences
     are identical, which is ADR-0158 §5's clause where it still binds.
-11. **A failed servicing degrades and does not fail.** A store that raises during
+13. **A failed servicing degrades and does not fail.** A store that raises during
     servicing leaves the turn composing from the supply planning saw, reports the
     degradation, records what was asked and that nothing returned, and parks nothing.
-12. **The plan is still frozen and still auditable.** A plan carrying a request
+14. **The plan is still frozen and still auditable.** A plan carrying a request
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
     reads like a tool call and which reaches no registry, no gate and no executor.
-13. **The export carries the request and announces its shape.** A `PlanExport` whose
+15. **The export carries the request and announces its shape.** A `PlanExport` whose
     plans carry a request round-trips through serialisation with the request intact
     and `schema_version` 3; a document labelled 2 does not validate as a `PlanExport`
     at all; and both conforming `PlanStore` implementations export the new version.
@@ -1157,8 +1202,9 @@ are absent in that window because the events they describe have not happened.
 
 ### 13. Scope, and what this records against earlier ADRs
 
-**This ADR partially supersedes four clauses of three ratified ADRs and no others**,
-and every other clause it cites binds as written. That is a classification
+**This ADR partially supersedes three ratified ADRs, in four scopes, and no others**
+— one scope of ADR-0208, two of ADR-0204, one of ADR-0158 — and every other clause it
+cites binds as written. That is a classification
 of this change and is therefore stated as prose rather than marked (ADR-0089 §1);
 what follows is the working under ADR-0070 §1's test, for both, and for the clauses
 a reader would most expect to have moved with them and which did not.
@@ -1368,7 +1414,7 @@ is the whole of what ADR-0070 §1 asks. Recording the near-miss the other way ro
 see.
 
 **ADR-0158 §5's sameness clause is partially superseded, and it is the third and
-last clause this ADR moves.** §5 rules that *"`TurnResult.memories` carries the same
+last scope this ADR moves.** §5 rules that *"`TurnResult.memories` carries the same
 three groups in the same order as `Planner.plan`'s `memories`"*. §7 makes them differ
 on exactly one kind of turn: the planner is called first and sees three groups, the
 servicer runs after it, and the `TurnResult` the turn returns carries a fourth. A
@@ -1436,7 +1482,7 @@ first test, which is written to fail if the mechanism is wired but not working.
 - **The audit reports a fire rate and a novelty rate, and calls them that.** Precision
   and recall need a per-turn label of whether the supply sufficed, which no live turn
   carries; §8 says so and §12 defers the two ways of obtaining one.
-- **Four clauses of three ADRs move, each narrowly.** ADR-0208 §1's one site becomes
+- **Three ADRs move, in four narrow scopes.** ADR-0208 §1's one site becomes
   two for relevance reads; ADR-0204 §2's evaluation moves from *"between retrieval and
   planning"* to the turn's final supply, and §4's freeze on a bounded turn's
   `TurnResult` and reply admits the fourth group; ADR-0158 §5's sameness clause admits
