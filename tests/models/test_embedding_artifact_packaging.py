@@ -78,7 +78,7 @@ from ai_assistant.models.embedding_artifact import (
 from ai_assistant.models.speech_artifact import SPEECH_ARTIFACTS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from hashlib import _Hash
     from typing import IO
 
@@ -889,6 +889,11 @@ def _notices_in_the_checkout() -> bytes:
     return (_PROJECT_ROOT / _NOTICES).read_bytes()
 
 
+def _declared_revisions(notices: str) -> list[str]:
+    """Every commit the notices pin, in document order and with repeats kept."""
+    return re.findall(r"^\|\s*Pinned commit\s*\|\s*`([0-9a-f]+)`\s*\|$", notices, re.MULTILINE)
+
+
 def test_the_notices_name_every_revision_that_ships() -> None:
     """The notices describe *these* bytes, not the models in general.
 
@@ -907,8 +912,7 @@ def test_the_notices_name_every_revision_that_ships() -> None:
     :func:`test_the_notices_name_every_file_that_ships` is written to inventory
     (adversarial round 2).
     """
-    notices = _notices_in_the_checkout().decode()
-    declared = re.findall(r"^\|\s*Pinned commit\s*\|\s*`([0-9a-f]+)`\s*\|$", notices, re.MULTILINE)
+    declared = _declared_revisions(_notices_in_the_checkout().decode())
 
     expected = [ARTIFACT_REVISION, *(artifact.revision for artifact in SPEECH_ARTIFACTS)]
 
@@ -976,6 +980,43 @@ def test_the_notices_name_every_file_that_ships() -> None:
     declared = _declared_inventories(_notices_in_the_checkout().decode())
 
     assert Counter(declared) == Counter(expected)
+
+
+def _synthetic_notices(tables: Sequence[tuple[str, Sequence[str]]]) -> str:
+    """A stand-in notices document: one "what is redistributed" table per pair given."""
+    return "\n\n".join(
+        "| | |\n|---|---|\n"
+        f"| Pinned commit | `{revision}` |\n"
+        f"| Files | {', '.join(f'`{name}`' for name in names)} |"
+        for revision, names in tables
+    )
+
+
+def test_two_artifacts_pinned_to_one_commit_need_a_notice_table_each() -> None:
+    """The multiplicity the shipped artifacts cannot exercise, since their commits differ.
+
+    Both assertions above pass under a set- or dict-keyed implementation for as long
+    as every shipped revision is distinct — which all three are today — so a
+    regression that collapsed two artifacts sharing a commit back into one entry
+    would ship green. This constructs the case the distribution does not: one
+    repository at one revision, vendored as two directories with different files.
+
+    Asserted in both directions, because only the pair is the behaviour: a table
+    each is accepted, and dropping either one is caught. It reads the same two
+    helpers the real assertions read, so it pins their rule rather than a copy of
+    it.
+    """
+    shared = "0" * 40
+    artifacts = [(shared, frozenset({"a.onnx"})), (shared, frozenset({"b.onnx"}))]
+    revisions = [shared, shared]
+
+    a_table_each = _synthetic_notices([(shared, ["a.onnx"]), (shared, ["b.onnx"])])
+    assert Counter(_declared_inventories(a_table_each)) == Counter(artifacts)
+    assert Counter(_declared_revisions(a_table_each)) == Counter(revisions)
+
+    one_table_between_them = _synthetic_notices([(shared, ["b.onnx"])])
+    assert Counter(_declared_inventories(one_table_between_them)) != Counter(artifacts)
+    assert Counter(_declared_revisions(one_table_between_them)) != Counter(revisions)
 
 
 def test_the_notices_are_declared_as_a_licence_file() -> None:
