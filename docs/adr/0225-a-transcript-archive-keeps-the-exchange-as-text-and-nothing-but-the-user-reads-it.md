@@ -574,10 +574,10 @@ looks.
 
 > **Normative.** The predicate is a **case-insensitive substring match**, evaluated
 > separately over an entry's `asked` and over its `replied`, never across the two.
-> Both sides are normalised to Unicode NFC and case-folded under Unicode simple case
-> folding before comparison — the semantics of `str.casefold` — and the entry
-> matches where the folded, normalised query occurs as a contiguous run in either
-> folded, normalised field.
+> Both sides are normalised to Unicode NFC and then case-folded under **full**
+> Unicode case folding — `str.casefold`'s semantics, which fold `ß` to `ss`, and not
+> simple case folding, which does not — and the entry matches where the folded,
+> normalised query occurs as a contiguous run in either folded, normalised field.
 
 > **Normative.** Nothing else is applied: no stemming, no lemmatisation, no
 > stop-word removal, no accent stripping beyond what NFC performs, no fuzzy or
@@ -869,8 +869,8 @@ class TranscriptArchiveWriter(Protocol):
 class TranscriptArchive(Protocol):          # NOT a subclass of the writer: no append
     async def discard(self, address: Identifier) -> bool: ...
     async def discard_conversation(self, conversation_id: Identifier) -> int: ...
-    async def search(
-        self, query: Identifier, *, limit: int = 20, offset: int = 0
+    async def search(                       # query is NEVER normalised: §7's predicate
+        self, query: NonBlankEncodableText, *, limit: int = 20, offset: int = 0
     ) -> list[TranscriptHit]: ...
     async def conversation(
         self, conversation_id: Identifier, *, limit: int = 50, offset: int = 0
@@ -891,6 +891,13 @@ class TranscriptArchive(Protocol):          # NOT a subclass of the writer: no a
 > `entry` takes neither. A blank or whitespace-only `query`, `address` or
 > `conversation_id` is refused with `ValueError` on every operation that takes one,
 > and is never read as "everything" — ADR-0101 §1's own rule for a blank label.
+
+> **Normative.** `query` is typed `NonBlankEncodableText` and not `Identifier`, and
+> the difference is load-bearing: `Identifier` *strips* the value it accepts, which
+> would rewrite the user's search text before §7's predicate ever saw it and would
+> make `" hello"` and `"hello"` one query. An id may be stripped and a query may
+> not. No implementation, setting or later lane trims, collapses or otherwise
+> normalises a query beyond §7's NFC and case folding.
 
 > **Normative.** `TranscriptEntry.ordinal` carries `ConversationTurn.ordinal`'s own
 > domain — `[FIRST_TURN_ORDINAL, 2**63)`, the range `ConversationStore`'s own
@@ -1102,9 +1109,11 @@ address, and it is discharged.
     above `2**63` fails validation, so a forged entry cannot sort ahead of a real
     first turn in a conversation's read.
 13. **The matching predicate, over the cases that separate implementations.**
-    `Straße` matched by `STRASSE`; a composed `é` matched by a decomposed one and
-    the reverse; an all-caps query against lower-case text and the reverse; a
-    one-character query; a query spanning the boundary between `asked` and
+    `Straße` matched by `STRASSE`, which full case folding admits and simple case
+    folding does not; a composed `é` matched by a decomposed one and the reverse; an
+    all-caps query against lower-case text and the reverse; a one-character query; a
+    query whose leading or trailing whitespace is significant, which matches only
+    text carrying it; and a query spanning the boundary between `asked` and
     `replied`, which matches nothing. Every case runs against every conforming
     implementation, index-backed and scan-backed alike.
 14. **No archive text in a log or a trace**, on the capture path and on every
