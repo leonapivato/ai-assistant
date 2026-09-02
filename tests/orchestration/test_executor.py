@@ -1600,6 +1600,36 @@ async def test_a_forged_cancellederror_from_serialization_does_not_strand(
     await _assert_unusable_indeterminate(tool(), ScriptedInvoker(tool(), [succeeded()]))
 
 
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+async def test_a_process_signal_from_serialization_still_propagates(
+    monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException]
+) -> None:
+    """A real process-control signal is **not** absorbed into the deterministic close.
+
+    ADR-0051 §1 and §6 name ``Exception`` and a forged ``asyncio.CancelledError``
+    and deliberately stop there: ``KeyboardInterrupt`` and ``SystemExit`` are the
+    process being told to end, and converting one into an ``INDETERMINATE`` step
+    would swallow a shutdown the executor does not own. That is the behaviour
+    today, and the test above pins only the *absorbing* half — broadening the
+    ``except`` clause to ``BaseException`` would still pass every one of them.
+
+    This is the assertion that fails in that case. The same instance arrives at
+    the caller, so the pin is "propagated unchanged", not merely "something of
+    this type was raised".
+    """
+    raised = interrupt()
+    _serializer_raises(monkeypatch, raised)
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+
+    with pytest.raises(interrupt) as excinfo:
+        await executor_over(store, ScriptedInvoker(tool(), [succeeded()])).execute(
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        )
+
+    assert excinfo.value is raised
+
+
 async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:
     """A claim lands *before* the tool is reachable, so it must not stand.
 
