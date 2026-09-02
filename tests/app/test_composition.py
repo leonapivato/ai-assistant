@@ -51,6 +51,8 @@ from ai_assistant.core.errors import (
     DeferralStoreError,
     ModelError,
     ReaderError,
+    RecipientGrantError,
+    RoutingTrailError,
     SourceNotGrantedError,
     TraceStoreError,
     TranscriptArchiveError,
@@ -111,6 +113,7 @@ from ai_assistant.orchestration.upcoming import (
 from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqliteRecipientGrantStore,
+    SqliteRoutingTrail,
     SqliteSourceReadTrail,
     ThresholdActionPolicy,
 )
@@ -1244,6 +1247,66 @@ async def test_closing_the_engine_closes_the_transcript_archive(tmp_path: Path) 
 
     with pytest.raises(TranscriptArchiveError):
         await archive.size()
+
+
+async def test_closing_the_engine_closes_the_recipient_grant_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0193 §1's store is Tier 1, so its connection owes the ordered shutdown.
+
+    It was registered on the build-failure cleanup list and absent from
+    ``Engine(closers=…)``, so a build that *failed* closed it and one that
+    *succeeded* never did — leaving an open connection and, in WAL mode, a ``-wal``
+    beside a database naming recipients of the user's and the declaration they were
+    made standing for (#1903).
+
+    **Closed after the audit trail**, which is the one ordering between the two that
+    is not free: the trail resolves a route-(b) ``authorised_by`` against this store
+    and ADR-0193 §6 makes a store it cannot read a refusal rather than an absence.
+    That order is what the closer list states; what this case states is the
+    connection, asserted through the store's own refusal because a list is a
+    statement about wiring.
+
+    The subject is the **same instance** the builder wired into the trail, taken from
+    the builder's own call rather than found by shape: a second store over the same
+    file would refuse here while the one the trail holds stayed open.
+    """
+    trail_calls = _spy_on_trail(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    grants = _trail_grant_seam(trail_calls)
+    assert isinstance(grants, SqliteRecipientGrantStore)
+    assert await grants.standing() == [], "open before, so the refusal below means something"
+
+    await engine.aclose()
+
+    with pytest.raises(RecipientGrantError):
+        await grants.standing()
+
+
+async def test_closing_the_engine_closes_the_routing_trail(tmp_path: Path) -> None:
+    """ADR-0197 §9's trail is Tier 1 too, and had the same gap for the same reason.
+
+    A row names the conversation an ask ran under and the subject of a
+    **model-selected** operation against the owner's own memory, which is why §9
+    states the residency clause explicitly. A connection surviving shutdown leaves
+    those pages in a ``-wal`` nobody classified (#1903).
+
+    Reached through the stage that holds it rather than through a spy, because the
+    engine is handed only the write-only ``RoutingRecorder`` face and this asserts
+    on the object that face actually is — a trail closed at shutdown while the stage
+    kept a live second one would pass a file-level check and fail this.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    stage = engine._routing
+    assert stage is not None
+    trail = stage._recorder
+    assert isinstance(trail, SqliteRoutingTrail)
+    assert await trail.recent(limit=1) == (), "open before, so the refusal below means something"
+
+    await engine.aclose()
+
+    with pytest.raises(RoutingTrailError):
+        await trail.recent(limit=1)
 
 
 async def test_build_engine_reads_both_archive_settings_from_configuration(
