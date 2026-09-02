@@ -393,6 +393,17 @@ one of its clauses more widely than it holds.
   **tail** turns.
 - **ADR-0221 — no record owed.** Nothing here reaches the episode's `disposition`,
   `outcome` or `capture`, or any read filtered on them.
+- **ADR-0223 — no record owed, and one interaction worth stating rather than burying.**
+  Its §1 stamps a captured episode's `Provenance.derived_from_external` with
+  `SelectionOrigin.over(turn.memories).planned_with_external_content` — the disjunction
+  of `rests_on_recorded_external_content` over the records *that turn selected*.
+  `LearningLoop` builds `memories = preceding + supplement`, so the episodic
+  supplement's records are in that set and this ADR widens it. No clause of ADR-0223
+  becomes false or is read more widely: the rule is a disjunction over whatever the turn
+  selected, and it is stable under a wider selection by construction — which is precisely
+  why §1 states it over `turn.memories` rather than over a fixed count. A reader holding
+  only ADR-0223 acts identically. The *effect* is real, and Consequences records it
+  rather than this section hiding it in a no-record finding.
 
 ## Consequences
 
@@ -411,6 +422,19 @@ neither number moves alone, in either direction, and a lane that lowers the beli
 must now expect to lower this bound with it. And the corpus has, for the first time,
 refused a measured gain on principle — the replay's 60-arm — which is a decision this
 ADR should be re-read against if the gain is ever re-measured larger.
+
+**And more turns will be marked as resting on external content.** ADR-0223 §1 takes a
+captured episode's `derived_from_external` as the disjunction of
+`rests_on_recorded_external_content` over `turn.memories`, and the supplement's records
+are in that set — `LearningLoop` builds `memories = preceding + supplement`. Tripling
+the supplement can only widen that disjunction's domain, so the flag turns `True` on
+strictly more turns, and the `SelectionOrigin` the runner hands the tools egress seam
+tightens on strictly more of them. That is the field working as specified rather than a
+defect — it is a disjunction over what the turn actually selected, and the turn now
+selects more — but it is a live consequence of this integer that nothing here has
+priced, and a lane watching egress behaviour after this lands should expect the rate to
+move. It is also an argument *for* the ceiling in §2: the externality surface grows with
+the supplement, not with the belief budget.
 
 **What would revisit this.** The byte-budgeted single ranked pool ADR-0160 §5 leaves
 open, which replaces both numbers rather than tuning them. A scored run whose
