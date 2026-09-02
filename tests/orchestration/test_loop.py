@@ -1673,7 +1673,7 @@ async def test_tuning_accepts_an_episodic_bound_equal_to_the_belief_budget() -> 
     assert result.goal.statement == "hello"
 
 
-@pytest.mark.parametrize("retrieval_limit", [1, 2, 4])
+@pytest.mark.parametrize("retrieval_limit", [1, 2, 4, 20, 29])
 async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_error(
     retrieval_limit: int,
 ) -> None:
@@ -1683,6 +1683,15 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
     configured none — so the default resolves against the budget it was given
     instead of being refused by it. The ceiling still holds, which is the half that
     matters: the supplement never asks for more than the beliefs do.
+
+    **The cases span the band, because ADR-0224 §1 widened it.** At a default of 10
+    the cap fired only below 10 and the three small budgets were the whole of it; at
+    30 it fires for every budget below 30, and 20 and 29 are in the half that did not
+    exist before. The assertion is symbolic, which is what makes them worth their
+    runtime rather than redundant: a cap resolving against the *old* default —
+    ``min(10, retrieval_limit)`` — still passes at 1, 2 and 4 and returns 10 against
+    a belief budget of 20, which is the ceiling breached by exactly the regression
+    this move makes reachable.
     """
     loop = _loop_with(retrieval_limit=retrieval_limit)
 
