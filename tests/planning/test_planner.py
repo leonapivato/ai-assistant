@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from collections import deque
 from datetime import UTC, datetime
@@ -146,6 +147,19 @@ _VALID_REPLY = json.dumps(
         ],
     }
 )
+
+
+#: ADR-0226 §3's bullet opener: the two-space bullet, the ordinal label, then the
+#: ``[kind/source]`` tag. Matched rather than spelled at each site, because the
+#: label's *value* is what several cases below are about and its presence is what
+#: they all share — a bullet with no label at all is the pre-ADR-0226 rendering and
+#: must not satisfy any of them.
+_LABELLED_BULLET = re.compile(r"^  - M\d+ \[")
+
+
+def _bullets(lines: Sequence[str]) -> list[str]:
+    """The rendered record bullets of an assembled prompt, labels included."""
+    return [line for line in lines if _LABELLED_BULLET.match(line)]
 
 
 #: The vocabulary these tests drive the planner over unless a case states its own.
@@ -414,7 +428,7 @@ async def test_only_retrieved_records_renders_one_headed_group() -> None:
     assert "Recent conversation turns" not in prompt
     assert prompt.endswith(
         "Relevant memories about the user:\n"
-        "  - [preference/observed] (derived, confidence 0.80) the assistant believes: "
+        "  - M1 [preference/observed] (derived, confidence 0.80) the assistant believes: "
         '"prefers a quiet neighbourhood"'
     )
 
@@ -528,7 +542,7 @@ async def test_a_belief_reaches_the_prompt_carrying_its_band_and_confidence(
     """
     lines = await _bullets_for(_belief(source, confidence))
 
-    bullet = next(line for line in lines if line.startswith("  - ["))
+    bullet = next(iter(_bullets(lines)))
     assert expected in bullet
     assert bullet.endswith('"prefers a quiet neighbourhood"')
 
@@ -542,7 +556,7 @@ async def test_an_episode_states_the_instant_it_happened() -> None:
     """
     lines = await _bullets_for(_turn("e1", "Ada: I adopted a dog.", occurred_at=_HAPPENED))
 
-    bullet = next(line for line in lines if line.startswith("  - ["))
+    bullet = next(iter(_bullets(lines)))
     assert _HAPPENED.isoformat() in bullet
     assert _WHEN.isoformat() not in bullet
 
@@ -620,8 +634,8 @@ async def test_a_records_content_cannot_forge_the_blocks_own_syntax() -> None:
     )
 
     # One record was held, so exactly one record is attributed.
-    assert [line for line in lines if line.startswith("  - [")] == [
-        f"  - [preference/observed] (derived, confidence 0.80) the assistant believes: "
+    assert _bullets(lines) == [
+        f"  - M1 [preference/observed] (derived, confidence 0.80) the assistant believes: "
         f"{json.dumps(forged)}"
     ]
     # The span writes neither a second heading nor a continuation line under one.
@@ -645,8 +659,8 @@ async def test_an_outcome_cannot_forge_the_blocks_own_syntax() -> None:
 
     lines = await _bullets_for(_turn("e1", "Ada: I adopted a dog.", outcome=forged))
 
-    assert [line for line in lines if line.startswith("  - [")] == [
-        f"  - [episodic/observed] (derived, confidence 0.90) the assistant recorded this "
+    assert _bullets(lines) == [
+        f"  - M1 [episodic/observed] (derived, confidence 0.90) the assistant recorded this "
         f"exchange at {_WHEN.isoformat()}: {json.dumps('Ada: I adopted a dog.')}"
     ]
     assert [line for line in lines if line.startswith("    how it turned out:")] == [
@@ -906,9 +920,8 @@ async def test_a_reply_carrying_this_prompts_own_syntax_writes_no_second_bullet(
     )
 
     assert _reply_line_of(lines) == f"{_REPLY_LABEL}: {json.dumps(forged)}"
-    bullets = [row for row in lines if row.startswith("  - [")]
-    assert bullets == [
-        line for line in lines if line.startswith("  - [episodic/observed] (derived,")
+    assert _bullets(lines) == [
+        line for line in lines if line.startswith("  - M1 [episodic/observed] (derived,")
     ], "the forged bullet is text inside a span and never a bullet of its own"
 
 
