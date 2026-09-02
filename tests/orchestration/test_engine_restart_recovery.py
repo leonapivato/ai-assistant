@@ -74,6 +74,8 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
+    FakeTranscriptArchive,
+    FakeTranscriptArchiveWriter,
 )
 
 if TYPE_CHECKING:
@@ -296,6 +298,8 @@ def _make_engine(
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: AT,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         ),
         observation=ObservationStage(
             observer=FakeObserver(),
@@ -307,6 +311,7 @@ def _make_engine(
         ),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=[_aclose(plans.close), _aclose(trail.close)],
+        archive=FakeTranscriptArchive(),
     )
 
 

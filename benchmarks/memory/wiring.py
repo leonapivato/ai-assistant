@@ -59,6 +59,7 @@ from ai_assistant.app.composition import (
     EPISODIC_SUPPLEMENT_LIMIT,
     RETRIEVAL_LIMIT,
 )
+from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.evaluation import SqliteTraceStore
@@ -766,6 +767,14 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
             memory=store,
             retention=settings.episode_retention,
             now=clock,
+            # ADR-0225 §10's narrow seam, required with no default. An ephemeral
+            # archive because a benchmark run's transcripts are not its subject and
+            # outlive nothing; `archive_enabled` carries the shipped default so the
+            # harness composes as production does. Ingestion supplies no
+            # `disposition` (`ingest.py`), so §10's own rule means no entry is in
+            # fact written — this wiring exists to compose, not to archive.
+            archive=SqliteTranscriptArchive(path=":memory:"),
+            archive_enabled=settings.transcript_archive_enabled,
         ),
         observation=ObservationStage(
             observer=observer

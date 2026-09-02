@@ -39,6 +39,7 @@ from ai_assistant.testing import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
+    FakeTranscriptArchive,
 )
 
 if TYPE_CHECKING:
@@ -105,6 +106,7 @@ def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: obj
         questions=harness.questions,
         notification_outbox=outbox,
         now=(lambda: AT) if clock is None else clock,  # type: ignore[arg-type]
+        archive=FakeTranscriptArchive(),
         **kwargs,  # type: ignore[arg-type]
     )
 

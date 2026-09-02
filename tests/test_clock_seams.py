@@ -81,6 +81,8 @@ from ai_assistant.testing import (
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
+    FakeTranscriptArchive,
+    FakeTranscriptArchiveWriter,
 )
 
 if TYPE_CHECKING:
@@ -306,6 +308,8 @@ async def _engine(now: Clock) -> None:
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: _AWARE,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         ),
         observation=ObservationStage(
             observer=FakeObserver(),
@@ -330,6 +334,7 @@ async def _engine(now: Clock) -> None:
         # order rather than by time.
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         now=now,
+        archive=FakeTranscriptArchive(),
     ).purge_expired()
 
 

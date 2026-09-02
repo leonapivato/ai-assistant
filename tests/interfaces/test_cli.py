@@ -139,6 +139,8 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
+    FakeTranscriptArchive,
+    FakeTranscriptArchiveWriter,
     StreamAttempt,
 )
 from ai_assistant.wire import TransportError
@@ -377,10 +379,13 @@ def _engine(
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: AT,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         ),
         observation=_observation(conversations, memory, writes),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=closers,
+        archive=FakeTranscriptArchive(),
     )
 
 
@@ -3138,9 +3143,12 @@ def _conversation_engine(
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: AT,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         ),
         observation=_observation(conversations, memory, writes),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
+        archive=FakeTranscriptArchive(),
     )
     return engine, conversations
 

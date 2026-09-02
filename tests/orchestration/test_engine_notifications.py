@@ -35,7 +35,11 @@ from ai_assistant.core.types import (
     TraceRef,
 )
 from ai_assistant.orchestration.engine import Engine
-from ai_assistant.testing import FakeNotificationPolicy, FakeNotificationStore
+from ai_assistant.testing import (
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+    FakeTranscriptArchive,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,6 +80,7 @@ def _wired(
         notifications=store,
         notification_policy=policy,
         now=lambda: AT,
+        archive=FakeTranscriptArchive(),
     )
 
 

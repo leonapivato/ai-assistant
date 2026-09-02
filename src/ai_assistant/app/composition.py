@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, assert_never
 
+from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.context import (
     AssemblingContextProvider,
     CalendarContextSource,
@@ -738,6 +739,38 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             tombstone_grace=settings.conversation_tombstone_grace,
         )
         opened.append(conversations.close)
+        # The transcript archive (ADR-0225 §10): a database of its own beside the
+        # conversation index, in a leaf package nothing but this module may import.
+        #
+        # **Its own file rather than a table in `memory.db`**, on ADR-0119 §6's
+        # reasoning: a separate file makes the reach of every whole-store operation a
+        # decided question instead of an accident of which tables share a connection.
+        # `MemoryStore.clear` empties the memory store and does not touch this one,
+        # and §5 obliges whoever gives `clear` a surface to erase both in one act.
+        #
+        # **Its retention is its own and is not derived from `episode_retention`**
+        # (§6), and it defaults to `None` — keep forever — which is the deliberate
+        # opposite of the episodic default. §7's argument for a finite episodic
+        # horizon is entirely about the read path, and the archive is not on it:
+        # nothing retrieves it, nothing observes it, nothing reads it into a prompt.
+        # A finite default here would reintroduce exactly the loss the archive exists
+        # to remove, at a second number nobody can argue for.
+        #
+        # **No embedder is passed and none exists to pass** (§4). The search is
+        # lexical by construction, so "never embedded" is a property of the shape
+        # rather than a rule a later lane must remember.
+        #
+        # **One object, handed out narrowed, and never whole.** The
+        # `ConversationLifecycle` below is given it as a `TranscriptArchiveWriter` —
+        # append and the two destroys, no read — and the `Engine` as a
+        # `TranscriptArchive` — the reads and the two destroys, no append. Nothing
+        # takes it whole, and the narrowing is the annotation on each consumer's own
+        # constructor rather than anything done here (§10).
+        archive = SqliteTranscriptArchive(
+            path=directory / "transcripts.db",
+            retention=settings.transcript_archive_retention,
+        )
+        opened.append(archive.close)
         # The deferred-question queue (ADR-0078 §2). A **fourth** connection-owning
         # Tier 1 store, under the same data directory and the same owner-only file
         # mode, because what it holds is the user's own words waiting on an answer.
@@ -1263,6 +1296,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).
             memory=memory,
+            # The transcript archive's **wide** seam — the same object the capture
+            # stage below is given the narrow face of, so `forget` destroys the entry
+            # capture wrote (ADR-0225 §5, §10). It carries no `append`, which is the
+            # capability rather than an omission: §1 reserves writing to capture, and
+            # a wide face that could write would let a future engine helper write to
+            # the archive without changing a Protocol and without crossing an import
+            # boundary.
+            archive=archive,
             # The very queue `writes` enqueues into and `questions` below answers
             # from, so the retention sweep (ADR-0083 §7) reclaims the rows the
             # user's own questions live in. A second queue here would report a cap
@@ -1297,6 +1338,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             conversations=ConversationLifecycle(
                 conversations=conversations,
                 memory=memory,
+                # The narrow seam, and the same object the `Engine` is given the wide
+                # face of just above: one archive, two views (ADR-0225 §10). Capture
+                # can append and destroy here and cannot read, which is §4's
+                # turn-path fence made a `mypy` property rather than a convention.
+                archive=archive,
+                # Whether the write happens at all (§6). It gates the write alone:
+                # off, the two destroys above still run, so entries already held stay
+                # searchable and stay destroyable and a configuration change is never
+                # a silent deletion.
+                archive_enabled=settings.transcript_archive_enabled,
                 retention=settings.episode_retention,
             ),
             # The terminal composing stage (ADR-0170 §1), holding the **same** model
