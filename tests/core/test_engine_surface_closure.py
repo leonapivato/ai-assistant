@@ -209,8 +209,27 @@ _NAMESPACE: Final = {
 #: shape ``SpokenAudioFormat`` already has here. The member beside it, ``spoken``, is
 #: a ``SpokenAudio | None``, and ``SpokenAudio`` is already on this roster, so the
 #: rest of ADR-0206 §6's addition reaches no type this list did not already name.
+#:
+#: The last three are ADR-0225 §10's — ``TranscriptEntry``, which the archive's
+#: addressed read and its two enumerating reads return; ``TranscriptHit``, which the
+#: search returns; and ``TranscriptArchiveSize``, which §6's size report returns.
+#: §10 declares all three field by field and fixes each as additive-only, and the
+#: walk terminates at every one of them immediately: ``Identifier``,
+#: ``EncodableText``, ``UtcInstant``, ``int`` and ``bool`` are scalars ADR-0087 §2c
+#: spells, and ``ExchangeDisposition`` is a closed ``StrEnum`` already inside this
+#: closure through ``TurnOutcome``.
+#:
+#: **Neither archive Protocol is on this surface and neither type it is keyed by is
+#: minted here**, which is §10's split rather than an omission. ``TranscriptArchive``
+#: and ``TranscriptArchiveWriter`` are seams the *hub* holds — the engine's wide one
+#: and capture's narrow one — and nothing on this surface returns either or names
+#: one in an argument. What crosses is the three values above, on the seven methods
+#: ADR-0225 §14 adds and on no other.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "TranscriptArchiveSize",
+        "TranscriptEntry",
+        "TranscriptHit",
         "SpokenRendering",
         "SpokenTurn",
         "SpokenAudio",
@@ -537,8 +556,32 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     implementation question inside ``memory/`` that this ADR does not settle", and
     ADR-0219 settled it one door over. Neither is a browser operation, by ADR-0177 §1's
     own closed enumeration, so its thirty-one is unmoved.
+
+    ADR-0225 §14's **seven** take it to forty-nine: the transcript archive's four
+    reads, its two destroys and §6's size report. **Seven and not six**, because §6
+    makes the size report "a surface operation of its own and not metadata hung on the
+    reads" — "a lane that ships the reads without the report has not shipped this
+    section" — so the report is on this surface beside them rather than a field on
+    ``TranscriptHit`` or ``TranscriptEntry``. And **two destroys and not one**: §5
+    gives the archive an address-scoped and a conversation-scoped destroy, each
+    resolved inside the archive against its own entries, and neither is reachable
+    through ``forget`` or ``forget_conversation`` — those two cascade *into* the
+    archive on their way to destroying a belief or a conversation, while these reach an
+    entry whose episode the horizon has already evicted.
+
+    **No ``append`` joins them, and that is the ADR's own clause rather than an
+    omission** (ADR-0225 §10). ``AssistantEngine`` holds the **wide** seam, which
+    carries no write: §1 reserves writing to capture, on the narrow
+    ``TranscriptArchiveWriter`` ``ConversationLifecycle`` holds, and a wide face that
+    inherited the writer "would give ``AssistantEngine`` an ``append``" — the
+    capability split defeated by the convenience that looked like tidiness. Neither
+    archive Protocol is on this surface at all; what is here is what a *user* reaches.
+
+    None of the seven is a browser operation either: ADR-0225 §8 requires the CLI and
+    *permits* a gateway page "as its own lane touching ``interfaces/`` alone", so
+    ADR-0177 §1's thirty-one is unmoved again.
     """
-    assert len(_method_names()) == 42
+    assert len(_method_names()) == 49
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -851,6 +894,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     member added to ``Placement`` itself would be the second limb again and would owe
     the test afresh.
 
+    **ADR-0225 §14's seven are under the first limb too**, and they take the set to
+    **forty-nine** and the version to 26: four reads, two destroys and a size report,
+    all on the transcript archive. §14 states the obligation rather than weighing it —
+    "Lane C moves ``PROTOCOL_VERSION``. Adding a method to the engine surface is a
+    method-set change, and the obligation falls on the change that adds the method, in
+    that same change" — and it states the other half too, that the archive's own store
+    lane "moves it not at all: no type it adds crosses ``wire/`` or ``service/``".
+
+    **The three new ``core`` models are not a second ground**, and it is worth
+    separating because ADR-0124 §9's second limb is about exactly this shape.
+    ``TranscriptEntry``, ``TranscriptHit`` and ``TranscriptArchiveSize`` arrive **on
+    the new methods only**, so no value a version 25 peer emits or decodes changes
+    shape: an old hub cannot be sent one, because it declines the method first. A
+    member added to any of the three later would be the second limb and would owe this
+    test afresh.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -859,7 +918,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (42, 25), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 26), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
