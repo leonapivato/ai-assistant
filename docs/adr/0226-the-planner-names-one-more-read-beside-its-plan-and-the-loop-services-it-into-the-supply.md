@@ -1,6 +1,6 @@
 # 226. The planner names one more read beside its plan, and the loop services it into the supply
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-02
 - **Supersedes three ADRs, partially, in four narrowly stated scopes** — one of
   ADR-0208, two of ADR-0204 and one of ADR-0158 — and §13 shows the working for every
