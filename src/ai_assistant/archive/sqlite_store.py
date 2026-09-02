@@ -820,6 +820,62 @@ class SqliteTranscriptArchive:
         self._conn.close()
 
 
+def _text(value: object) -> str:
+    """The value of a ``TEXT`` column, refusing any other storage class.
+
+    **SQLite is dynamically typed and a column's declared type does not bind what a
+    row holds**, so a value some other writer put in this database — a BLOB, an
+    integer, a float — arrives here as itself. ``str()`` would *coerce* it, and for a
+    transcript's own halves that is the worst available failure: ``str(b"...")`` is
+    ``"b'...'"``, so a read would report, as something the user said, words nobody
+    said. A store whose whole value is fidelity may not fabricate text.
+
+    So the storage class is checked and a wrong one is a fault — routed through
+    :func:`_unreadable` by the caller's own handler, since this raises ``TypeError``.
+
+    Args:
+        value: What the driver returned for the column.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        TypeError: If it is not a ``str``. The message names the class and never the
+            value (ADR-0225 §4, ADR-0004 §5).
+    """
+    if not isinstance(value, str):
+        msg = f"expected a TEXT column, found {type(value).__name__}"
+        raise TypeError(msg)
+    return value
+
+
+def _optional_text(value: object) -> str | None:
+    """:func:`_text`, admitting ``NULL`` — which is a fact and not a missing value.
+
+    ADR-0225 §1 makes ``asked`` absent where the pass received no user words and
+    ``replied`` absent where it produced no reply, so ``None`` is what those columns
+    legitimately hold and is the one non-``str`` this admits.
+    """
+    return None if value is None else _text(value)
+
+
+def _integer(value: object) -> int:
+    """The value of an ``INTEGER`` column, refusing any other storage class.
+
+    ``int()`` would coerce a float and a numeric string alike, and both would land in
+    a domain the model then judges — an ordinal or an instant read off a value that
+    was never one. ``bool`` is excluded although it is an ``int`` subclass: the driver
+    stores none, so one here is a value something else put there.
+
+    Raises:
+        TypeError: If it is not an ``int``, or is a ``bool``.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        msg = f"expected an INTEGER column, found {type(value).__name__}"
+        raise TypeError(msg)
+    return value
+
+
 def _unreadable(address: object, fault: Exception) -> TranscriptArchiveError:
     """The one error a row this store cannot rebuild raises (ADR-0225 §10).
 
@@ -847,7 +903,15 @@ def _unreadable(address: object, fault: Exception) -> TranscriptArchiveError:
     Returns:
         The error to raise.
     """
-    described = describe_untrusted(address)
+    # An address that is not itself text is described by its class rather than
+    # rendered: the row is already one this store did not write, so nothing says the
+    # bytes in that column are an address at all, and a message is not the place to
+    # find out.
+    described = (
+        describe_untrusted(address)
+        if isinstance(address, str)
+        else f"an unreadable address ({type(address).__name__})"
+    )
     msg = (
         f"a stored transcript entry at address {described} could not be read back "
         f"({fault_class_of(fault)})"
@@ -875,15 +939,20 @@ def _hit_of(row: tuple[Any, ...], needle: str) -> TranscriptHit:
     either exceeds the bound.
     """
     address, conversation_id, occurred_at_us, asked, replied, asked_folded, _ = row
-    matched = asked if asked_folded is not None and needle in str(asked_folded) else replied
-    # A row only reaches here because one folded half contained the needle, so
-    # `matched` is never both-None; the fallback keeps the type total.
     try:
-        text, elided = excerpt_of("" if matched is None else str(matched))
+        folded_asked = _optional_text(asked_folded)
+        matched = (
+            _optional_text(asked)
+            if folded_asked is not None and needle in folded_asked
+            else _optional_text(replied)
+        )
+        # A row only reaches here because one folded half contained the needle, so
+        # `matched` is never both-None; the fallback keeps the type total.
+        text, elided = excerpt_of("" if matched is None else matched)
         return TranscriptHit(
-            address=str(address),
-            conversation_id=str(conversation_id),
-            occurred_at=_from_micros(int(occurred_at_us)),
+            address=_text(address),
+            conversation_id=_text(conversation_id),
+            occurred_at=_from_micros(_integer(occurred_at_us)),
             excerpt=text,
             elided=elided,
         )
@@ -901,21 +970,22 @@ def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:
     address, conversation_id, ordinal, occurred_at_us, asked, replied, disposition = row
     try:
         return TranscriptEntry(
-            address=str(address),
-            conversation_id=str(conversation_id),
-            ordinal=int(ordinal),
-            occurred_at=_from_micros(int(occurred_at_us)),
-            asked=None if asked is None else str(asked),
-            replied=None if replied is None else str(replied),
-            disposition=ExchangeDisposition(disposition),
+            address=_text(address),
+            conversation_id=_text(conversation_id),
+            ordinal=_integer(ordinal),
+            occurred_at=_from_micros(_integer(occurred_at_us)),
+            asked=_optional_text(asked),
+            replied=_optional_text(replied),
+            disposition=ExchangeDisposition(_text(disposition)),
         )
     except (ValidationError, ValueError, OverflowError, TypeError) as fault:
         # Every arm is reachable from a row this store did not write: a disposition
         # outside the vocabulary and an ordinal outside its domain are `ValueError`
         # and `ValidationError`, an `occurred_at_us` outside the calendar is
-        # `OverflowError`, and a column holding the wrong storage class is
-        # `TypeError`. `ValidationError` is named first because it is a `ValueError`
-        # and the ordering would otherwise be silent about which one is meant.
+        # `OverflowError`, and a column holding the wrong storage class is the
+        # `TypeError` the three accessors above raise. `ValidationError` is named
+        # first because it is a `ValueError` and the ordering would otherwise be
+        # silent about which one is meant.
         raise _unreadable(address, fault) from None
 
 
