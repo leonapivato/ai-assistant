@@ -2665,19 +2665,29 @@ class MemoryStoreContract:
         two happened, and §3 requires it to: "the stored revision, **or** that the id
         named nothing".
 
-        Asserted without pinning a word of it. The same store, the same id and the
-        same expectation are driven through both limbs, and the two messages must
-        differ — which no implementation can satisfy by writing one sentence for
-        both — and the absent one must name no revision but the caller's, since there
-        is no stored row whose revision it could have found. Together with the arm
-        above, that is §3's three facts on each limb: an implementation reporting a
-        revision it did not find fails here, and one reporting none at all fails
-        there.
+        Asserted without pinning a word of it, and without pinning more than §3 says.
+        The same store, the same id and the same expectation are driven through both
+        limbs, and the two messages must differ — which no implementation can satisfy
+        by writing one sentence for both. The absent one must name the id and the
+        expectation, and must **not** name the revision the store would have found had
+        the row still been there, since what it found is that the id named nothing.
+
+        **Only that one revision is excluded, not every numeral.** §3 requires three
+        facts and forbids no other word, so a conforming message is free to carry a
+        number of its own — "found 0 stored records" is a compliant sentence — and an
+        arm reading every digit as a purported stored revision would refuse it. What
+        is excluded is the value that would be a false statement about what the store
+        found, and ADR-0219 §1 keeps it clear of the plausible accidents: every issued
+        revision is positive, so a count or an index in the wording cannot collide
+        with it at zero.
         """
         await store.add(_semantic("vanished", "the first version"))
         first = await store.get("vanished")
         assert first is not None
         await store.add(_semantic("vanished", "the second version"))
+        current = await store.get("vanished")
+        assert current is not None
+        assert current.revision != first.revision
 
         stale_write = MemoryWrite(
             record=_semantic("vanished", "computed over the first version"),
@@ -2695,8 +2705,10 @@ class MemoryStoreContract:
             await store.write_atomic([stale_write])
 
         gone = str(absent.value)
+        named = _integers_in(gone)
         assert "vanished" in gone  # the record id
-        assert _integers_in(gone) == {first.revision}  # the expectation, and no other
+        assert first.revision in named  # the expectation the caller carried
+        assert current.revision not in named  # ...and no revision it could not have found
         assert gone != str(moved.value)  # the two limbs are told apart
 
     async def test_if_unchanged_at_a_different_kind_is_refused_and_not_as_stale(
