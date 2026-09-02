@@ -1666,6 +1666,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
+                # And the standing recipient grants immediately after the trail, which
+                # is the one ordering between the two that is not free: the trail
+                # resolves a decision's route-(b) ``authorised_by`` against this store
+                # on its own write path and holds it as a constructor dependency, and
+                # ADR-0193 §6 makes a store it cannot read a refusal rather than an
+                # absence — "a component that cannot get an answer from this seam fails
+                # closed, and the trail is such a component". Closed the other way
+                # round, the last records of a shutdown would meet a grant store already
+                # gone and fail closed onto an ``InvalidAuthorisationError``.
+                #
+                # It is a Tier 1 store like the rest and joins the same ordered shutdown
+                # (ADR-0083 ruling 4, ADR-0042 §2). It was registered on the
+                # build-failure cleanup list above and not here, so a build that
+                # *failed* closed it and one that *succeeded* never did (#1903).
+                _as_async(recipient_grants.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The deferral queue joins the façade's ordered shutdown (ADR-0042
@@ -1707,6 +1722,20 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # could no longer record (ADR-0185 §5). Nothing else constrains it —
                 # no store reads this one and it reads none.
                 _as_async(reads.close),
+                # And the routing trail beside it — the third recorder in this run, and
+                # the same shape as the two above: one row per routed decision, written
+                # before the act it precedes (ADR-0197 §9). **Nothing constrains its
+                # position** among the stores: the engine holds it only as a
+                # ``RoutingRecorder``, nothing holds the readable face at all, no store
+                # reads it and it reads none — so it sits with the trails it belongs
+                # with rather than for an ordering reason, and the façade has drained
+                # the routing stage before any of these run.
+                #
+                # It was registered on the build-failure cleanup list above and not
+                # here, so a build that *failed* closed it and one that *succeeded*
+                # never did (#1903); it is a Tier 1 store and owes the same ordered
+                # shutdown as the rest (ADR-0083 ruling 4, ADR-0042 §2).
+                _as_async(routing_trail.close),
                 # And the notification store, on the same ordering and for the
                 # same reason (ADR-0130 §9). It is closed **before** the trace
                 # store because it emits nothing into one; what it must outlive is
