@@ -338,3 +338,24 @@ async def test_the_snapshot_survives_a_subclass_that_forges_its_own_dict() -> No
     held = await store.live(source=SOURCE, use=GrantScope.FACET)
     assert held is not None
     assert held.scope == (GrantScope.FACET,)
+
+
+async def test_a_record_missing_a_field_is_refused_by_the_narrow_fakes_lever() -> None:
+    """``hold`` is the second door onto ``_GrantLog.append``, and no suite reaches it.
+
+    ``SourceGrantStoreContract`` holds ``record`` to this — a ``__dict__`` a field
+    was deleted from is refused rather than escaping as a raw ``AttributeError``
+    (#696) — but the narrow fake has no ``record``: its history is arranged
+    through ``hold``, a test-only lever the contract calls to *seed* rather than
+    to assert against. The two share one validation, so the same corruption
+    reaches this seam by a route the shared suite cannot see, and a later change
+    that fixed only ``record``'s message would leave it open here.
+    """
+    grants = FakeSourceGrants()
+    corrupted = source_grant(SOURCE, grant_id="g-1")
+    object.__getattribute__(corrupted, "__dict__").pop("id")
+
+    with pytest.raises(InvalidGrantError, match="not a valid record"):
+        grants.hold(corrupted)
+
+    assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
