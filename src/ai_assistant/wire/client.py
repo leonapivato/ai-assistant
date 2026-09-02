@@ -124,6 +124,9 @@ if TYPE_CHECKING:
         SpokenAudioFormat,
         SpokenDeliveryReport,
         SpokenTurn,
+        TranscriptArchiveSize,
+        TranscriptEntry,
+        TranscriptHit,
         TurnOutcome,
     )
 
@@ -804,6 +807,138 @@ class HubClient:
         return await self._call(  # type: ignore[no-any-return]
             "forget_conversation", conversation_id=named
         )
+
+    # --- the transcript archive (ADR-0225 §5, §6, §7) ----------------------
+
+    # **Every refusal below is local, before any socket is opened** (ADR-0085 §9).
+    # The blank-query and blank-address checks and the two page checks run here so
+    # this client refuses exactly what the in-process engine refuses, without a round
+    # trip and without either being silently more permissive. The zero ``limit`` is
+    # the interesting one: ADR-0085 §9 admits ``[0, 2**63)`` and ADR-0225 §7 has the
+    # archive refuse a limit of zero or below, so ``positive_page_argument`` closes
+    # the gap here exactly as it does for ``recent_grants`` under ADR-0102 §10.
+
+    async def transcript_search(
+        self,
+        query: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptHit, ...]:
+        """One page of transcript search hits, newest first.
+
+        The query travels **unnormalised** (ADR-0225 §10): it is refused when blank
+        and otherwise sent exactly as the caller wrote it, leading and trailing
+        whitespace included, because §7's predicate is evaluated over the query the
+        user typed and an ``Identifier``-style strip would silently merge
+        ``" hello"`` with ``"hello"``.
+
+        Args:
+            query: What to look for.
+            limit: How many hits this page holds.
+            offset: How many to skip.
+
+        Returns:
+            The page.
+        """
+        asked = non_blank_text(query, name="query")
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        return await self._call(  # type: ignore[no-any-return]
+            "transcript_search", query=asked, limit=limit, offset=offset
+        )
+
+    async def transcript_conversation(
+        self,
+        conversation_id: Identifier,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptEntry, ...]:
+        """One page of a conversation's transcript, in ordinal order.
+
+        Args:
+            conversation_id: Which conversation.
+            limit: How many entries this page holds.
+            offset: How many to skip.
+
+        Returns:
+            The page, entries whole.
+        """
+        named = identifier(conversation_id, name="conversation_id")
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        return await self._call(  # type: ignore[no-any-return]
+            "transcript_conversation", conversation_id=named, limit=limit, offset=offset
+        )
+
+    async def transcript_entry(self, address: Identifier) -> TranscriptEntry | None:
+        """One transcript entry, whole.
+
+        Args:
+            address: The entry's address.
+
+        Returns:
+            The entry, or ``None`` if nothing is held at that address.
+        """
+        named = identifier(address, name="address")
+        return await self._call("transcript_entry", address=named)  # type: ignore[no-any-return]
+
+    async def transcript_entries(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[TranscriptEntry, ...]:
+        """One page of every entry the archive holds — its export (ADR-0225 §7).
+
+        Args:
+            limit: How many entries this page holds.
+            offset: How many to skip.
+
+        Returns:
+            The page, entries whole, newest first.
+        """
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        return await self._call(  # type: ignore[no-any-return]
+            "transcript_entries", limit=limit, offset=offset
+        )
+
+    async def forget_transcript_entry(self, address: Identifier) -> bool:
+        """Destroy one transcript entry.
+
+        Args:
+            address: The entry's address.
+
+        Returns:
+            Whether anything was held to destroy.
+        """
+        named = identifier(address, name="address")
+        return await self._call(  # type: ignore[no-any-return]
+            "forget_transcript_entry", address=named
+        )
+
+    async def forget_transcript_conversation(self, conversation_id: Identifier) -> int:
+        """Destroy one conversation's transcript, whatever else survives it.
+
+        Args:
+            conversation_id: Which conversation.
+
+        Returns:
+            How many entries were destroyed; ``0`` where none were held, which is
+            the conforming answer rather than a failure (ADR-0225 §5).
+        """
+        named = identifier(conversation_id, name="conversation_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "forget_transcript_conversation", conversation_id=named
+        )
+
+    async def transcript_archive_size(self) -> TranscriptArchiveSize:
+        """What the archive holds and what it costs on disk (ADR-0225 §6).
+
+        Returns:
+            The two figures, which are allowed to disagree — ``entries`` is what the
+            reads would return and ``stored_bytes`` is what is on the disk.
+        """
+        return await self._call("transcript_archive_size")  # type: ignore[no-any-return]
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Every parked confirmation the hub can currently resolve.

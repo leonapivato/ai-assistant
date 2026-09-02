@@ -134,6 +134,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
+from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
@@ -161,6 +162,9 @@ if TYPE_CHECKING:
         RoutedListing,
         SecretValue,
         SourceReadRecord,
+        TranscriptArchiveSize,
+        TranscriptEntry,
+        TranscriptHit,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -293,6 +297,13 @@ class FakeAssistantEngine:
         self.notification_store = FakeNotificationStore()
         self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
+        #: The transcript archive this engine's seven archive operations read and
+        #: destroy against (ADR-0225 §10), public so a consumer can seed it —
+        #: ``engine.archive.hold(entry)`` — there being no producer on this
+        #: surface. It is the **wide** seam, which carries no ``append``: writing
+        #: is capture's, and a fake engine that could write would give away the
+        #: split §10 buys.
+        self.archive = FakeTranscriptArchive()
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -1483,6 +1494,119 @@ class FakeAssistantEngine:
         self.calls.append(("forget_conversation", {"conversation_id": named}))
         self.activity.pop(named, None)
         return self._checked(self.conversations_held.pop(named, None) is not None, "forget")
+
+    # --- the transcript archive (ADR-0225 §5, §6, §7) ----------------------
+
+    # **Relayed to :attr:`archive` rather than reimplemented here**, which is
+    # ``spend_totals``' reason applied to a second store: ADR-0225 §6 and §7 make the
+    # read-time retention predicate, the matching predicate, the total order, the
+    # excerpt bound and both size figures the **archive's** guarantees, so a fake
+    # engine computing any of them would be a second implementation of a rule the
+    # shared suite could then only compare against itself. What is asserted here is
+    # what this surface owes: the local argument refusals, and that each call reaches
+    # the seam at all.
+    #
+    # **Seeded through the archive, because nothing on this seam can create an
+    # entry** (§10): ``engine.archive.hold(entry)`` is how a consumer arranges a
+    # history, exactly as ``notification_store`` is seeded for the notification
+    # surface. The wide seam carries no ``append``, and the fake does not grow one.
+
+    async def transcript_search(
+        self,
+        query: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptHit, ...]:
+        """Search the held transcript lexically, newest first."""
+        asked = non_blank_text(query, name="query")
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "transcript_search",
+            max_bytes=self._max_payload_bytes,
+            query=asked,
+            limit=limit,
+            offset=offset,
+        )
+        self.calls.append(("transcript_search", {"query": asked, "limit": limit, "offset": offset}))
+        # The query is relayed **unstripped**: ``non_blank_text`` refuses a blank and
+        # returns what it was given, so a query whose leading space is significant
+        # still is one here (ADR-0225 §10).
+        found = await self.archive.search(asked, limit=limit, offset=offset)
+        return self._checked(tuple(found), "transcript_search")
+
+    async def transcript_conversation(
+        self,
+        conversation_id: Identifier,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptEntry, ...]:
+        """Read one conversation's transcript, in ordinal order."""
+        named = identifier(conversation_id, name="conversation_id")
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "transcript_conversation",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+            limit=limit,
+            offset=offset,
+        )
+        self.calls.append(
+            (
+                "transcript_conversation",
+                {"conversation_id": named, "limit": limit, "offset": offset},
+            )
+        )
+        held = await self.archive.conversation(named, limit=limit, offset=offset)
+        return self._checked(tuple(held), "transcript_conversation")
+
+    async def transcript_entry(self, address: Identifier) -> TranscriptEntry | None:
+        """Read one entry whole, or report that nothing is held at that address."""
+        named = identifier(address, name="address")
+        check_arguments("transcript_entry", max_bytes=self._max_payload_bytes, address=named)
+        self.calls.append(("transcript_entry", {"address": named}))
+        return self._checked(await self.archive.entry(named), "transcript_entry")
+
+    async def transcript_entries(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[TranscriptEntry, ...]:
+        """Enumerate every entry held — the archive's export (ADR-0225 §7)."""
+        positive_page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "transcript_entries", max_bytes=self._max_payload_bytes, limit=limit, offset=offset
+        )
+        self.calls.append(("transcript_entries", {"limit": limit, "offset": offset}))
+        held = await self.archive.entries(limit=limit, offset=offset)
+        return self._checked(tuple(held), "transcript_entries")
+
+    async def forget_transcript_entry(self, address: Identifier) -> bool:
+        """Destroy one transcript entry, reporting whether one was there."""
+        named = identifier(address, name="address")
+        check_arguments("forget_transcript_entry", max_bytes=self._max_payload_bytes, address=named)
+        self.calls.append(("forget_transcript_entry", {"address": named}))
+        return self._checked(await self.archive.discard(named), "forget_transcript_entry")
+
+    async def forget_transcript_conversation(self, conversation_id: Identifier) -> int:
+        """Destroy one conversation's transcript, reporting how many entries went."""
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments(
+            "forget_transcript_conversation",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+        )
+        self.calls.append(("forget_transcript_conversation", {"conversation_id": named}))
+        return self._checked(
+            await self.archive.discard_conversation(named), "forget_transcript_conversation"
+        )
+
+    async def transcript_archive_size(self) -> TranscriptArchiveSize:
+        """Relay the archive's own two figures, unnetted (ADR-0225 §6)."""
+        self.calls.append(("transcript_archive_size", {}))
+        return self._checked(await self.archive.size(), "transcript_archive_size")
 
     # --- durable recovery --------------------------------------------------
 

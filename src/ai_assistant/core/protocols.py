@@ -11141,6 +11141,338 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the transcript archive (ADR-0225 §5, §6, §7, §8) ------------------
+
+    # **The seam behind these seven is the wide one, and it carries no ``append``**
+    # (ADR-0225 §10). Writing is reserved to capture, which holds a
+    # :class:`TranscriptArchiveWriter`; what an implementation of *this* Protocol
+    # reaches is the four reads, the two destroys and the size report. §1's "no
+    # other producer writes to the archive" is therefore a property of the seam
+    # rather than only a rule somebody is asked to keep.
+    #
+    # **None of them is on the turn path** (§4). No component of the pipeline holds
+    # an archive seam at all — not the conversation loop, the retrieval stage, the
+    # context assembler, the planner, the composing stage, the observer, the
+    # reconciler, the router or any tool — no transcript text is rendered into any
+    # prompt, no entry enters a turn's supply, and no citation resolution reads the
+    # archive. These seven are reached from this surface's user-facing and
+    # data-rights operations and from no operation on the turn path.
+    #
+    # **The channel posture is unconditional** (§8). Archive content is reachable
+    # only on an operation whose output channel's audience is **bounded**
+    # (ADR-0199 §1) — never in a reply, a delivery or a deflection — and there is no
+    # setting, user act or grant that admits it to a channel of unbounded audience.
+    # The reason is mechanical rather than cautious: ADR-0199 §3's withholding is a
+    # field read over ``MemoryBase.about_person``, and a transcript entry has no
+    # such field, carries no band and holds free text in which a third party may be
+    # named anywhere. Deciding a transcript speakable would mean inspecting the
+    # words, which ADR-0199 §2 forbids, or inferring a subject, which ADR-0100 §4
+    # forbids.
+    #
+    # **They live on their own command and never as a mode of ``beliefs`` or
+    # ``conversations``** (§8), and no surface presents a transcript entry as a
+    # belief, as something the assistant holds, or as evidence for anything. A
+    # surface rendering archive content states, without being asked, that what it
+    # shows is a record of what was said and not what the assistant believes or
+    # retrieves.
+    #
+    # **The page-size default here is this surface's own, one level above the
+    # archive's.** Clause 1 above makes :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`
+    # normative for every implementation of this Protocol, so the three enumerating
+    # reads default to it; ADR-0225 §10's own signatures default ``search`` to 20
+    # and the other two to 50 on the *archive* seam below. Two seams with two
+    # defaults is not two implementations of one contract disagreeing, which is
+    # what clause 1 exists to prevent.
+    #
+    # **A zero ``limit`` is refused here rather than answered with an empty page**,
+    # which is ADR-0102 §10's precedent applied to a second store rather than a new
+    # rule. ADR-0085 §9 admits ``[0, 2**63)`` for a page argument and ADR-0225 §7
+    # requires the archive to refuse a limit of zero or below with a ``ValueError``,
+    # exactly as ADR-0114 §6 does — so ``transcript_entries(limit=0)`` is well-formed
+    # under the surface rule and refused by the store beneath it. Every
+    # implementation therefore refuses it **locally, before any I/O**, so neither is
+    # silently more permissive and no undeclared failure travels: ``limit`` is in
+    # ``[1, 2**63)`` on all three enumerating reads and ``offset`` stays in
+    # ``[0, 2**63)``. ``recent_grants`` is in exactly this position and states it in
+    # these words.
+
+    async def transcript_search(
+        self,
+        query: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptHit, ...]:
+        """Search the transcript archive lexically, newest first (ADR-0225 §7).
+
+        **The predicate is a case-insensitive substring match**, evaluated
+        separately over an entry's ``asked`` and over its ``replied`` and never
+        across the two, with both sides normalised to Unicode NFC and case-folded
+        under **full** Unicode case folding — ``str.casefold``'s semantics, which
+        fold ``ß`` to ``ss``. Nothing else is applied: no stemming, no
+        lemmatisation, no stop-word removal, no accent stripping beyond what NFC
+        performs, no fuzzy matching and no minimum query length.
+
+        **``query`` is never normalised beyond that**, which is why it is typed
+        :data:`~ai_assistant.core.types.NonBlankEncodableText` rather than
+        :data:`~ai_assistant.core.types.Identifier`: an ``Identifier`` *strips* the
+        value it accepts, which would rewrite the user's search text before the
+        predicate saw it and would make ``" hello"`` and ``"hello"`` one query. An
+        id may be stripped and a query may not.
+
+        **A hit is a taste, not the entry.** It carries the address, the
+        conversation, the instant and a bounded excerpt — at most
+        :data:`~ai_assistant.core.types.TRANSCRIPT_EXCERPT_BYTES` bytes of UTF-8,
+        truncated at a codepoint boundary and marked ``elided`` — and never an
+        entry's text beyond that bound. Reading an entry whole is a second,
+        addressed act (:meth:`transcript_entry`).
+
+        There is no relevance model, no ranking by similarity and no vector search:
+        §4's never-list forbids an embedding, so a semantic search is not available
+        even in principle, and the question a transcript search answers — "where did
+        I say that word?" — is the class of query vectors are weakest on anyway.
+
+        Args:
+            query: What to look for, taken as the user wrote it.
+            limit: Page size; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many ordered hits to skip before the page begins.
+
+        Returns:
+            The page, by the instant the turn occurred descending, with the address
+            breaking ties — a total order, so paging is stable.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` or ``offset`` is not an integer, or is a
+                ``bool`` — a flag is not a count.
+            ValueError: If ``query`` is blank or whitespace-only, ``limit`` falls
+                outside ``[1, 2**63)``, or ``offset`` falls outside ``[0, 2**63)``.
+                Not an ``AssistantError``: an adapter letting a user supply any of
+                them refuses an out-of-range value at its own parse boundary.
+            OversizedValueError: If the page exceeds the contract limit.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def transcript_conversation(
+        self,
+        conversation_id: Identifier,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[TranscriptEntry, ...]:
+        """Read one conversation's transcript, in the order it was said (§7).
+
+        **Ordinal order, ascending**, because a transcript's order is the order it
+        was said in — the one read on this surface that is not newest-first, and the
+        difference is the decision rather than an inconsistency.
+
+        **It needs neither the conversation index nor the conversation record to
+        still exist** (§5). ADR-0074 §7 reclaims an emptied conversation's index and
+        record on the horizon and the archive keeps the transcript, so most of the
+        time there will be no index to consult: an id ``conversation`` no longer
+        resolves still yields its transcript here. That is what "expiry evicts" means
+        and it is the steady state rather than an anomaly.
+
+        Entries come back **whole** — nothing elided, truncated or summarised.
+
+        Args:
+            conversation_id: Which conversation, taken as opaque.
+            limit: Page size; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many ordered entries to skip before the page begins.
+
+        Returns:
+            The page, in ordinal order. Empty where the conversation has no
+            surviving entries, which is not distinguished from never having had any.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` or ``offset`` is not an integer, or is a
+                ``bool``.
+            ValueError: If ``conversation_id`` is blank or whitespace-only,
+                ``limit`` falls outside ``[1, 2**63)``, or ``offset`` falls outside
+                ``[0, 2**63)``.
+            OversizedValueError: If the page exceeds the contract limit.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def transcript_entry(self, address: Identifier) -> TranscriptEntry | None:
+        """Read one entry whole, by its address (§3, §7).
+
+        **The address is the captured episode's own id**, and it is *stable*: it
+        never changes, is never reissued, and stays a valid name for its entry after
+        the episode it names has expired, been reclaimed or been destroyed. An
+        address naming a destroyed entry resolves to nothing, and to nothing for
+        good.
+
+        **An address is a name and never a capability.** That an expired episode's
+        id is also a live archive address is a property of §3's reuse and is not a
+        fallback: citation resolution never reads the archive (§4), and what a
+        belief whose cited episode has expired renders is unchanged by this
+        operation's existence.
+
+        Args:
+            address: The entry's address, taken as opaque.
+
+        Returns:
+            The entry, whole, or ``None`` where nothing is held at that address —
+            never held, past a finite ``transcript_archive_retention``, or destroyed.
+            The three are not distinguished, deliberately: a surface that told them
+            apart would report on transcripts it is meant to have evicted.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``address`` is blank or whitespace-only.
+            OversizedValueError: If the entry exceeds the contract limit.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def transcript_entries(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[TranscriptEntry, ...]:
+        """Enumerate every entry the archive holds — and this **is** its export (§7).
+
+        **A read rather than a fourth artifact, and that is not a shortcut.**
+        ADR-0004 §6 requires that the user can view, export and delete; for a store
+        holding text and nothing else, a paged, ordered, unfiltered read of every
+        entry *is* a portable snapshot of everything it holds, and inventing a second
+        serialisation would be a second thing to keep correct for no information the
+        first does not carry. This makes the archive the first Tier-1 store whose
+        export exists on day one rather than deferred.
+
+        **Any surface that later exports the memory store exports the archive beside
+        it** (§5), and no lane ships a whole-store erasure or whole-memory export
+        surface that reaches one store and not the other.
+
+        Args:
+            limit: Page size; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many ordered entries to skip before the page begins.
+
+        Returns:
+            The page, whole entries, by the instant the turn occurred descending
+            with the address breaking ties.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` or ``offset`` is not an integer, or is a
+                ``bool``.
+            ValueError: If ``limit`` falls outside ``[1, 2**63)`` or ``offset``
+                falls outside ``[0, 2**63)``.
+            OversizedValueError: If the page exceeds the contract limit.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def forget_transcript_entry(self, address: Identifier) -> bool:
+        """Destroy the transcript entry at ``address`` (§5).
+
+        The archive's **own** address-scoped destroy, resolved inside the archive
+        against its own entries: it requires neither the conversation index, the
+        conversation record nor the memory record to still exist, and it enumerates
+        no second store.
+
+        **Distinct from** :meth:`forget`, which destroys a *belief* and cascades to
+        this entry on its way. This one destroys the transcript and nothing else,
+        and it exists because §5's reads and destroys must reach what the horizon
+        has already evicted: it is what stops a user whose conversation was
+        reclaimed being able to read their transcript and unable to destroy it,
+        which would be ADR-0004 §6's right made conditional on a sweep.
+
+        **It reaches what the reads hide.** An entry past a finite
+        ``transcript_archive_retention`` and not yet reclaimed still yields here: a
+        destruction is never refused on the ground that a read would not have shown
+        it.
+
+        Args:
+            address: The entry's address, taken as opaque.
+
+        Returns:
+            ``True`` if an entry was destroyed, ``False`` if nothing was at that
+            address. Idempotent: a second call at the same address is a no-op
+            returning ``False``.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``address`` is blank or whitespace-only. Never read as
+                "everything": no spelling of this argument means that.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+    async def forget_transcript_conversation(self, conversation_id: Identifier) -> int:
+        """Destroy every transcript entry of one conversation (§5).
+
+        The archive's own conversation-scoped destroy, resolved inside the archive
+        and needing no index, no conversation record and no second store — which is
+        what makes it work after ADR-0074 §7's reclaim has taken both. The scope the
+        user names is the scope the archive resolves, forever.
+
+        **Distinct from** :meth:`forget_conversation`, which stamps the conversation
+        and destroys its episodes, discarding these entries as the first action of
+        ADR-0074 §8's step 2. This one destroys the transcript alone, and reaches a
+        conversation that operation can no longer see.
+
+        **A surface offering it obeys ADR-0073 §5's show-then-confirm at the unit the
+        user thinks in**, exactly as ``forget-conversation`` does, and states what
+        will be destroyed before consent is taken.
+
+        Args:
+            conversation_id: Which conversation, taken as opaque.
+
+        Returns:
+            How many entries were destroyed. Idempotent and total: a conversation
+            with no entries is a no-op returning ``0``, which is the conforming
+            answer and not a failure.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``conversation_id`` is blank or whitespace-only. Never
+                read as "everything" (ADR-0101 §9): the argument is required and
+                positional, and no spelling of it widens what is destroyed.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+    async def transcript_archive_size(self) -> TranscriptArchiveSize:
+        """What the archive holds and what it costs on disk (§6).
+
+        **Reported without being asked, so the deferred cap's trigger is a figure
+        somebody has rather than one nobody ever produces.** ADR-0225 §6 sets no size
+        or count cap — ADR-0007 §5's deferral is inherited whole — and the reason a
+        report is obliged instead is ADR-0162 §5's lesson: a trigger with no
+        instrument never fires. **Every surface that renders any archive read renders
+        this figure beside that read, unasked.**
+
+        **A surface operation of its own rather than metadata hung on the reads.** It
+        is not a field on :class:`~ai_assistant.core.types.TranscriptHit` nor one on
+        :class:`~ai_assistant.core.types.TranscriptEntry`: a store-wide figure copied
+        onto every row would be recomputed per row and would still leave a surface
+        free to drop it. **A lane that ships the reads without the report has not
+        shipped §6.**
+
+        **The two figures answer different questions and are allowed to disagree.**
+        ``entries`` is what the reads would return, so an entry hidden by a finite
+        retention is not counted; ``stored_bytes`` is what is on the disk, hidden and
+        unreclaimed entries included. That gap is the point: the figure that would
+        fire the cap is the one that measures the storage, and a report that netted
+        the two would hide exactly the growth the cap exists to catch.
+
+        It reads no entry, and it is not on the turn path.
+
+        Returns:
+            The two figures, as they stand at the moment of the call.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TranscriptArchiveError: If the archive cannot be measured.
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

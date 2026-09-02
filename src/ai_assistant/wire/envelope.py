@@ -824,7 +824,53 @@ from ai_assistant.wire.errors import (
 #: two cannot drift. ADR-0177 §1's browser enumeration does **not** move and stands at
 #: thirty-one: ADR-0217 §7 adds no gateway route and obliges no surface to render a
 #: placement.
-PROTOCOL_VERSION: Final[int] = 25
+#:
+#: **26 since ADR-0225 §14**, which adds **seven** methods to the promoted
+#: ``AssistantEngine`` surface: the transcript archive's four reads
+#: (``transcript_search``, ``transcript_conversation``, ``transcript_entry``,
+#: ``transcript_entries``), its two destroys (``forget_transcript_entry``,
+#: ``forget_transcript_conversation``) and §6's size report
+#: (``transcript_archive_size``). ADR-0124 §9's **first** limb again — "any change to
+#: the promoted surface's method set" — and ADR-0225 §14 states the obligation in as
+#: many words rather than weighing it: "Lane C moves ``PROTOCOL_VERSION``. Adding a
+#: method to the engine surface is a method-set change, and the obligation falls on
+#: the change that adds the method, in that same change." Nothing offers a way out: a
+#: ``transcript_search`` from a version 26 client to a version 25 hub is refused by
+#: ``_dispatch`` as a method "this build's engine surface does not declare", which
+#: closes the connection with no reply, so the operator sees a hub that hangs up
+#: rather than §3's message naming both versions.
+#:
+#: **The archive's own store lane moved this constant not at all**, and that is the
+#: same division ADR-0225 §14 draws: no type ADR-0225's first lane added crosses
+#: ``wire/`` or ``service/`` — ``TranscriptArchiveWriter`` is capture's seam, held
+#: inside the hub — so the bump belongs to the change that put the methods on the
+#: promoted surface and to no earlier one.
+#:
+#: **Three ``core`` models cross the wire for the first time** —
+#: :class:`~ai_assistant.core.types.TranscriptEntry`,
+#: :class:`~ai_assistant.core.types.TranscriptHit` and
+#: :class:`~ai_assistant.core.types.TranscriptArchiveSize` — and none of them is a
+#: second ground for this bump. They arrive **on the new methods only**, so no value a
+#: version 25 peer emits or decodes changes shape, which is precisely what ADR-0124
+#: §9's second limb is about and what it does not reach here. They mint no row in
+#: ADR-0087 §2c's scalar table either: each is a pydantic model rendered by
+#: ``model_dump()``, over field types the projection already carries.
+#:
+#: **The error registry is untouched.**
+#: :class:`~ai_assistant.core.errors.TranscriptArchiveError` is registered as a
+#: ``core`` error like any other and reaches a client through ``wire/errors``'
+#: name-keyed reconstruction, which is derived from ``core.errors`` and not from a
+#: hand-kept table. Nothing else under ``wire/`` changes for this bump: the framing,
+#: the connect exchange, the frame kinds, the codec's dispatch, ``surface.METHODS``
+#: and both adapters are derived from the Protocol.
+#:
+#: **The method set moves to forty-nine**, which is what this entry is *for*;
+#: ``tests/core/test_engine_surface_closure.py`` pins it beside this constant.
+#: ADR-0177 §1's browser enumeration does **not** move and stands at thirty-one:
+#: ADR-0225 §8 requires the CLI and *permits* a gateway page as its own later lane,
+#: so this change adds no browser route and no browser request resolves to any of the
+#: seven.
+PROTOCOL_VERSION: Final[int] = 26
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
