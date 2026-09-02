@@ -1519,8 +1519,9 @@ class SqliteNotificationStore:
         """End one record's actionability, leaving it readable (§7, §9).
 
         It frees a slot under the cap at once and does **not** free the record's
-        key: the record goes on suppressing that key until its candidate's
-        declared expiry (ADR-0215 §§1-2).
+        key: the record goes on suppressing that key until the expiry its own
+        candidate declared — or, where the candidate declared none, no further
+        than its actionability reached (ADR-0215 §§1-2).
 
         Returns:
             ``True`` if an actionable record was dismissed, ``False`` if the id

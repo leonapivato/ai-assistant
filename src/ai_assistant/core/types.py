@@ -17144,7 +17144,7 @@ class SpokenTurn(BaseModel):
     after the fact — and nothing on this type carries what was withheld.
 
     Frozen and ``extra="forbid"`` like every other value on the promoted surface,
-    so the four members are the whole of it.
+    so its members are the whole of it.
 
     Attributes:
         heard: The transcript the recording carried, or ``None`` where it carried

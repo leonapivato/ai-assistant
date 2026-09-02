@@ -645,8 +645,9 @@ class FakeNotificationStore:
         """End one record's actionability, leaving it readable (§7).
 
         It frees a slot under the cap at once and does **not** free the record's
-        key, which goes on suppressing until the candidate's declared expiry
-        (ADR-0215 §§1-2).
+        key, which goes on suppressing until the expiry its candidate declared —
+        or, where the candidate declared none, no further than its actionability
+        reached (ADR-0215 §§1-2).
 
         Args:
             notification_id: The record to dismiss.
