@@ -6,10 +6,23 @@
   other clause of §1.** The offline replay recorded on **#1844** on 2026-09-01
   priced a planner-named second read over pilot-5's as-run stores, and the owner
   opened `track:planning` (**#1908**) on 2026-09-02 with that envelope as its first
-  milestone. This is the decision this ADR deferred by name: its Context says of
-  `recall_memory` that *"The useful capability the tool gestured at — a
-  planner-named second retrieval into the supply — is **#1732**, a separate decision
-  this ADR defers to by name and does not take."*
+  milestone. **§8 deferred this decision by name** — *"A planner-requested second
+  retrieval into the supply — the useful half — is **#1732** and is deferred to it
+  by name"* — and this ADR's honest statement adds that it *"is not that decision
+  and may not be read as prejudging it in either direction."* ADR-0226 §13
+  discharges that deferral, answering each of the five questions §8 says #1732
+  carries, and obeys §8's closing prohibition — *"Nothing in this ADR is cited
+  toward that decision in either direction"* — by resting its justification on
+  #1844's replay and #1908's charter rather than on anything decided here.
+
+  **The deferral of the decision and the supersession of §1's clause are separate,
+  and both are owed.** §8 reserves the *decision*; §1 forecloses the *conduct* in
+  the meantime, unconditionally, so a reader holding only this ADR would refuse to
+  open a second relevance site whatever §8 reserves. Discharging the deferral does
+  not release §1, and ADR-0070 §1's test is about what a reader would do rather than
+  about what an author foresaw. The obligation to state this relation in terms was
+  filed as **#1913** from PR #1910's first adversarial round, and closes against
+  ADR-0226 §13.
 
   **Replaced, in one scope.** §1's one-site clause — *"On the turn path the
   assistant's own store is read **for relevance** — records selected by their
