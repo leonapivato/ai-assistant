@@ -1,6 +1,6 @@
 # 204. A record carries whether the supply it was produced over held withheld content, and a channel of unbounded audience withholds one that does
 
-- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns) and ADR-0217 (§1's first through fourth clauses, §3's first and third clauses and §5's first and second clauses, only as they name the field that carries the answer and the values it takes — `Provenance.supplied_withheld_content` becomes `MemoryBase.placement`, whose `OWNER` reach is that field's `True`; the same records are narrowed, on the same evidence, at the same site, by the same producer — together with §7's version footing, `PROTOCOL_VERSION` moving because a member is removed from a wire-carried `core` type) and ADR-0226 (§2's timing clause alone, "once, between retrieval and planning" — the evaluation is taken once over the turn's final supply, which on a turn that serviced a planner-named read request is after that servicing and on every other turn is exactly where §2 puts it; §2's two terms, its disjunction, its "once", the set it ranges over, the field it writes and its carrying of the value to capture are untouched, and §3 and §4 stand entire)
+- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns) and ADR-0217 (§1's first through fourth clauses, §3's first and third clauses and §5's first and second clauses, only as they name the field that carries the answer and the values it takes — `Provenance.supplied_withheld_content` becomes `MemoryBase.placement`, whose `OWNER` reach is that field's `True`; the same records are narrowed, on the same evidence, at the same site, by the same producer — together with §7's version footing, `PROTOCOL_VERSION` moving because a member is removed from a wire-carried `core` type) and ADR-0226 (§2's timing clause alone, "once, between retrieval and planning" — the evaluation is taken once over the turn's final supply, which on a turn that serviced a planner-named read request is after that servicing and on every other turn is exactly where §2 puts it; §2's two terms, its disjunction, its "once", the set it ranges over, the field it writes and its carrying of the value to capture are untouched,; and §4's first and second clauses, only as they freeze the supply a bounded turn composes over, the `TurnResult` it returns, the reply composed for it and `TurnResult.memories`' meaning, and only on a turn whose planner emitted a read request — §4's narrowing prohibition, the plan, the step it drives and the plan persisted through `PlanStore.save_plan` all stand, and §3 stands entire)
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0203](0203-on-a-channel-of-unbounded-audience-the-withholding-binds-the-whole-turn.md)
@@ -173,6 +173,36 @@
   fourth group carries withheld-class records exactly as the other three do. §5's
   ratchet, §6's residue, §7's version footing and §8's tests bind unchanged, and
   ADR-0210's and ADR-0217's own scopes are untouched in both directions.
+
+  **Also replaced — §4's freeze on a bounded turn's `TurnResult` and reply, in one
+  narrow respect.** §4's first clause rules that on such an operation *"the supply the
+  turn runs over, the plan it produces, the step that plan drives, the `TurnResult` it
+  returns, the reply composed for it and the plan persisted through
+  `PlanStore.save_plan` are all exactly what they are today"*, and its second that
+  *"no `TurnOutcome`, `TurnResult` or `SpokenTurn` member gains, loses or changes
+  meaning"*. On a turn whose planner emitted a read request, ADR-0226 §7 appends a
+  fourth group to `TurnResult.memories`, so the supply the turn composes over, the
+  `TurnResult` it returns, the reply composed from it and that member's meaning are
+  not what they were. A reader holding only this ADR would refuse to append it, which
+  is ADR-0070 §1's test, so the record is owed — even though §4's evident subject is
+  this ADR's own reach, and even though its own last sentence qualifies only the
+  narrowing prohibition with *"on the strength of this ADR"*. The conservative
+  reading is recorded rather than argued away.
+
+  **Not replaced, and the scope is deliberately three things wide and no wider.**
+  The plan the turn produces, the step that plan drives and the plan persisted
+  through `PlanStore.save_plan` are untouched, because the planner runs before the
+  servicer and ADR-0014 §2 freezes its output. **§4's narrowing prohibition is
+  untouched entirely** — *"no implementation narrows a bounded channel's supply on
+  the strength of this ADR"* — and ADR-0203 §1's last clause stands whole beside it:
+  ADR-0226 removes nothing from a bounded turn's supply and applies no placement test
+  at its servicer. No surface renders differently, no existing field changes value,
+  and no `TurnOutcome` or `SpokenTurn` member moves. On every turn whose planner
+  emitted no request — every turn in this system until a lane ships the emission —
+  §4 binds word for word, which is why the scope names the serviced turn and not the
+  channel. §4's own argument, that #1708's finding is about the capture rather than
+  the bounded channel's own answer, is untouched and is what ADR-0226 §7 relies on
+  when it moves §2's timing so that capture sees the fourth group.
 
   The scope on the `Status` line names a clause and carries no `ADR-NNNN` token, so
   ADR-0070 §4's extraction invariant holds and the pair accumulates beside ADR-0210's

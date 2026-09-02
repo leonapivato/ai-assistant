@@ -2,7 +2,8 @@
 
 - Status: Proposed
 - Date: 2026-09-02
-- **Supersedes one clause each of two ADRs.** The first:
+- **Supersedes four clauses of three ADRs, each partially and each narrowly
+  scoped**, and §13 shows the working for every one. The first:
   [ADR-0208](0208-recall-memory-leaves-the-default-tool-set-and-the-turns-supply-is-retrieved-at-one-site.md)
   **partially**, in one scope — §1's **one-site clause**, *"On the turn path the
   assistant's own store is read **for relevance** … at exactly one site: the retrieval
@@ -17,21 +18,41 @@
   **final** supply: after servicing on a turn that serviced a request, and exactly
   where §2 puts it on every other turn. Only the timing moves. §2's two terms, its
   *"once"*, the set it ranges over, the field it writes and the stage that carries the
-  value to capture are untouched; §3's withholding test and §4's bounded-channel rule
-  are untouched **entirely**, and nothing in this ADR narrows a bounded channel's
-  supply or discards a record on the strength of its class. §13 shows the working and
-  says why the alternative — a servicer admitting nothing the evaluation would have
-  found — was refused.
+  value to capture are untouched; §3 is untouched **entirely**, and nothing in this ADR
+  narrows a bounded channel's supply or discards a record on the strength of its class.
+  §13 shows the working and says why the alternative — a servicer admitting nothing the
+  evaluation would have found — was refused. **And, of the same ADR,** §4's first and
+  second clauses, only as they freeze the supply a bounded turn composes over, the
+  `TurnResult` it returns, the reply composed for it and `TurnResult.memories`'
+  meaning, and only on a turn whose planner emitted a request. §4's narrowing
+  prohibition stands entire, and so do the plan, the step it drives and the plan
+  persisted through `PlanStore.save_plan`.
+- **And the third:**
+  [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
+  **partially**, in one scope — §5's **sameness clause**, *"`TurnResult.memories`
+  carries the same three groups in the same order as `Planner.plan`'s `memories`"*.
+  The planner is called before the servicer and keeps its three groups; the
+  `TurnResult` of a turn that serviced a request carries those three, in that order,
+  and a fourth appended after them. §5's three-group clause on `Planner.plan` is
+  **untouched**, and so is its caution that an implementation *"may rely on the
+  grouping and may not rely on a global relevance order"*, which §7 carries word for
+  word to the fourth group. §4's append-never-interleave rule is extended in
+  application and unchanged in text.
 - **No other ADR is superseded in whole or in part**, and §13 shows the working
-  for each one a reader would expect to be — ADR-0203, ADR-0210, ADR-0158 and
-  ADR-0074 among them. §5's scoping of this envelope off the channel of unbounded
-  audience is what keeps that list at two.
+  for each one a reader would expect to be — ADR-0203, ADR-0210, ADR-0074 and
+  ADR-0039 among them. §5's scoping of this envelope off the channel of unbounded
+  audience is what keeps the list this short.
 - **Decides a change to `src/ai_assistant/core/types.py`** — three added types, one
   additive defaulted field on `ActionPlan`, and `PlanExport.schema_version` moving to
-  **3** — and a widening of `Planner.plan`'s and `TurnResult`'s documented meaning in
-  `src/ai_assistant/core/protocols.py`. It adds **no Protocol and no member to one**,
-  and moves no `PROTOCOL_VERSION`: `ActionPlan` crosses neither `wire/` nor
-  `service/` in the tree. The versioned surface it *does* cross is the portable
+  **3**, with `TurnResult.memories`' documented meaning widened by one group — and a
+  widening of `Planner.plan`'s documented **return** in
+  `src/ai_assistant/core/protocols.py`: the `ActionPlan` it hands back may carry a
+  read request. `Planner.plan`'s signature and its `memories` **input** are unchanged,
+  it adds **no Protocol and no member to one**, and it moves no `PROTOCOL_VERSION`:
+  `ActionPlan` crosses neither `wire/` nor `service/` in the tree. **The widened
+  meaning is flagged under golden rule 5 rather than smuggled**, exactly as ADR-0158
+  §5 flagged its own, and §10 binds Lane A to extend the shared `PlannerContract`
+  conformance suite that already runs against both `Planner` implementations. The versioned surface it *does* cross is the portable
   export, and §4 moves it. **This ADR changes no code.** §10 states what the
   implementing lanes owe; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
@@ -536,8 +557,12 @@ never be able to take the reply down with it.
 > record's evidence in the order that record stores it; within the query, records
 > arrive in the order `assemble_by_band` returns them, which is ADR-0072 §5's band
 > precedence and is already ratified. The resulting fourth group is therefore a
-> function of the request and the store alone, and two conforming implementations
-> given one request over one store produce the same group in the same order.
+> function of the request, the store and **the turn's pre-servicing supply** — the
+> last because §7 deduplicates against it and this section counts the budget after
+> that deduplication — and two conforming implementations given one request over one
+> store and one such supply produce the same group in the same order. The candidate
+> **ordering** before deduplication is fixed by the request and the store alone;
+> which candidates survive, and therefore how many slots the query is left, is not.
 
 > **Normative.** A `CITATION_HOP` ask names **at most two labels**, and the evidence
 > of the records they resolve to is drawn under the same budget of ten. No
@@ -605,10 +630,27 @@ inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 > **Normative.** The serviced records enter `memories` as a **fourth group, appended
 > whole after the episodic supplement**, never interleaved. ADR-0074 §5's first
 > group, the retrieved beliefs and ADR-0158 §4's supplement keep their positions,
-> their order and their meanings. `Planner.plan`'s and `TurnResult`'s documented
-> `memories` widens from three groups to four, and a `Planner` implementation may
-> rely on the grouping and may not rely on a global relevance order — ADR-0158 §5's
-> clause, extended by one group and otherwise unchanged.
+> their order and their meanings.
+
+> **Normative.** **`Planner.plan`'s `memories` still carries exactly three groups.**
+> The planner is called before the servicer runs and receives what it receives
+> today; ADR-0158 §5's three-group clause and its caution that an implementation
+> *"may rely on the grouping and may not rely on a global relevance order"* bind on
+> that parameter word for word. What widens in `Planner.plan` is its **return** —
+> the `ActionPlan` may carry a `read_request` (§4) — and nothing about its input.
+
+> **Normative.** **`TurnResult.memories` carries those same three groups in the same
+> order and, on a turn that serviced a request, the fourth group appended after
+> them.** On every other turn it is exactly the three it is today. This **partially
+> supersedes ADR-0158 §5's sameness clause** — *"`TurnResult.memories` carries the
+> same three groups in the same order as `Planner.plan`'s `memories`"* — in that one
+> respect and no other (§13), and the grouping-not-ranking caution carries over to
+> the fourth group unchanged: a consumer of `TurnResult.memories` may rely on the
+> grouping and may not rely on a global relevance order.
+
+> **Normative.** That the turn composes over more than the planner saw is the
+> mechanism and not a side effect, and no lane closes the gap by re-calling the
+> planner: §6 services one emission once and ADR-0014 §2's frozen plan stands (§12).
 
 > **Normative.** The `TurnResult` is constructed once, over the deduplicated union,
 > and the composing stage runs over that and nothing wider. Nothing is planned,
@@ -627,11 +669,17 @@ inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 > moves **when** it is taken and nothing else about it.
 
 > **Normative.** This **partially supersedes ADR-0204 §2's timing clause** — *"once,
-> between retrieval and planning"* — and that clause alone (§13). §2's set is
+> between retrieval and planning"* — and no other clause of §2 (§13). §2's set is
 > untouched and needs no widening: ADR-0210 §1's bounded clause already ranges the
 > evaluation over *"the whole supply as assembled and retrieved"*, and the serviced
 > records are part of the supply the turn assembled. §2's *"once"* is kept in letter,
 > so no implementation evaluates twice and none disjoins two evaluations' results.
+
+> **Normative.** The fourth group also reaches **ADR-0204 §4's** first and second
+> clauses, which freeze a bounded turn's `TurnResult` and the reply composed for it,
+> and **that is recorded too** (§13). Its scope is what such a turn may *gain* and
+> nothing else: §4's narrowing prohibition stands entire, and so do the plan, the step
+> it drives and the plan persisted through `PlanStore.save_plan`.
 
 > **Normative.** The value that evaluation produces is carried to capture exactly as
 > ADR-0204 §2 requires, and an implementation reads it **once, after the one
@@ -863,6 +911,26 @@ docstrings on `Planner.plan` and `TurnResult` in `core/protocols.py` and
 planner's emission and the prompt that asks for it, and the canonical fakes in
 `ai_assistant.testing` that construct a request. **Not** the servicer.
 
+> **Normative.** Lane A **extends the shared `PlannerContract` conformance suite**
+> (`tests/planning/planner_contract.py`) for the widened return, so that every
+> `Planner` implementation is held to it — the model-backed planner and the canonical
+> fake alike, through the `Test…Contract` subclasses that already run it. A canonical
+> fake updated without the suite is an unverified fake, which is the failure
+> `CONTRIBUTING.md` → "Adding a Protocol: land the triad together" names.
+
+**This is a widened contract and not a triad, and the difference decides what is
+owed.** `CONTRIBUTING.md`'s triad is *"the required unit of work for a **new**
+Protocol"*, and ADR-0137 §3 forbids splitting one; this ADR adds no Protocol, so no
+triad exists to split and §3 has no subject here. What does exist is a `Planner`
+Protocol whose documented return widens, and the corpus already carries the guardrail
+for that — a shared `PlannerContract` run against both implementations — so the clause
+above binds Lane A to it rather than leaving a widened meaning pinned by nothing. The
+widening is **not breaking**: `Planner.plan`'s signature and its `memories` input are
+unchanged, `read_request` is additive and defaulted, and an existing implementation
+that returns an `ActionPlan` without one conforms exactly as it does today (§4). It is
+flagged under golden rule 5 regardless, which is what ADR-0158 §5 did for the same
+kind of widening.
+
 **Lane B — the servicer, the union and the audit.** In `orchestration/`: the
 servicing of both kinds, §3's label resolution by index into the sequence the loop
 passed, §5's channel scoping and degradation posture, §6's budget and cross-kind
@@ -957,10 +1025,13 @@ to service.
    types admit; a request whose asks are two of one kind is not either; a servicing
    whose candidates exceed ten returns ten; and a record already in the supply is
    deduplicated out with the original keeping its position, counting against nothing.
-10. **The fourth group is appended, not interleaved.** The three existing groups keep
-    their order and their positions, the serviced records follow the supplement whole,
-    and `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group
-    of episodes appended at the tail.
+10. **The fourth group is appended, not interleaved, and the planner never saw it.**
+    The `memories` the planner was called with carries exactly the three groups
+    ADR-0158 §5 fixes; the `TurnResult` the same turn returns carries those three, in
+    that order and in those positions, followed by the serviced records whole; and
+    `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group of
+    episodes appended at the tail. On a turn that serviced nothing the two sequences
+    are identical, which is ADR-0158 §5's clause where it still binds.
 11. **A failed servicing degrades and does not fail.** A store that raises during
     servicing leaves the turn composing from the supply planning saw, reports the
     degradation, records what was asked and that nothing returned, and parks nothing.
@@ -1026,8 +1097,8 @@ to service.
 
 ### 13. Scope, and what this records against earlier ADRs
 
-**This ADR partially supersedes exactly one clause each of two ratified ADRs and no
-others**, and every other clause it cites binds as written. That is a classification
+**This ADR partially supersedes four clauses of three ratified ADRs and no others**,
+and every other clause it cites binds as written. That is a classification
 of this change and is therefore stated as prose rather than marked (ADR-0089 §1);
 what follows is the working under ADR-0070 §1's test, for both, and for the clauses
 a reader would most expect to have moved with them and which did not.
@@ -1178,13 +1249,40 @@ content-reading and store queries, its rules for a parked turn and a routed pass
 its carrying of the value to capture all bind whole. §1's field, as ADR-0217 moved it
 into `MemoryBase.placement`, is untouched. **§3 is untouched entirely** — including its
 third clause, that *"A supply site for a channel whose audience is bounded applies this
-test to nothing"*, which the servicer obeys by applying no such test. **§4 is untouched
-entirely**, and its clause that *"no implementation narrows a bounded channel's supply
-on the strength of this ADR"* is honoured in letter: §7 discards no record on the ground
-of its class, and the fourth group carries withheld-class records exactly as the other
-three do. §5's ratchet, §6's residue, §7's version footing and §8's tests bind
+test to nothing"*, which the servicer obeys by applying no such test. **§4's narrowing
+prohibition is untouched**, and its clause that *"no implementation narrows a bounded
+channel's supply on the strength of this ADR"* is honoured in letter: §7 discards no
+record on the ground of its class, and the fourth group carries withheld-class records
+exactly as the other three do. (§4 is reached in a different respect — what a bounded
+turn's `TurnResult` may *gain* — and that is recorded immediately below rather than
+here, because it has nothing to do with §2's timing.) §5's ratchet, §6's residue,
+§7's version footing and §8's tests bind
 unchanged. ADR-0210 §1 and ADR-0217's amendments to ADR-0204 are untouched in both
 directions.
+
+**ADR-0204 §4 is reached as well, in one narrow respect, and recording it is the
+conservative reading rather than the comfortable one.** §4's first clause rules that
+on a bounded-audience operation *"the supply the turn runs over, the plan it produces,
+the step that plan drives, the `TurnResult` it returns, the reply composed for it and
+the plan persisted through `PlanStore.save_plan` are all exactly what they are
+today"*, and its second that *"no `TurnOutcome`, `TurnResult` or `SpokenTurn` member
+gains, loses or changes meaning"*. On a turn that serviced a request this ADR does
+change three of those: the supply the turn composes over, the `TurnResult` it returns
+and the reply composed from it, and `TurnResult.memories`' meaning with them. A
+reader holding only ADR-0204 would refuse to append the fourth group, which is
+ADR-0070 §1's test, so the record is owed even though §4's evident subject is
+ADR-0204's own reach.
+
+**The scope is those two clauses and only as this envelope reaches them.** The plan
+the turn produces, the step that plan drives and the plan persisted through
+`PlanStore.save_plan` are untouched — the planner runs before the servicer and its
+output is frozen (ADR-0014 §2). **§4's narrowing prohibition is untouched entirely**,
+and so is ADR-0203 §1's last clause standing whole beside it: nothing here removes a
+record from a bounded channel's supply. No surface renders differently, no existing
+field changes value, and no `TurnOutcome` or `SpokenTurn` member moves at all. And
+on a turn whose planner emitted no request — every turn in the system until a lane
+ships the emission — §4 binds exactly as written, which is why the scope names the
+serviced turn rather than the channel.
 
 **Two other designs were available and both were refused, which is why this record
 exists rather than a workaround.** A **servicer-side filter** — admit no record §2's
@@ -1209,14 +1307,35 @@ is the whole of what ADR-0070 §1 asks. Recording the near-miss the other way ro
 "we nearly worked around a clause instead of moving it" — is what a later reader should
 see.
 
-**ADR-0158 §4 and §5 are extended in application and unchanged in text.** §4's rule
-is that the order is tail, then beliefs, then supplement, *"appended whole, never
+**ADR-0158 §5's sameness clause is partially superseded, and it is the third and
+last clause this ADR moves.** §5 rules that *"`TurnResult.memories` carries the same
+three groups in the same order as `Planner.plan`'s `memories`"*. §7 makes them differ
+on exactly one kind of turn: the planner is called first and sees three groups, the
+servicer runs after it, and the `TurnResult` the turn returns carries a fourth. A
+reader holding only ADR-0158 builds a `TurnResult` from the planner's own sequence
+and has nowhere to put the serviced records — they would refuse to build this — so
+ADR-0070 §1's test is met and the partial form is the tool. The scope is that one
+clause: **on a turn that serviced no request the two sequences are identical**, as
+§5 requires, and on one that did they agree on the first three groups in the same
+order and differ only by the appended fourth.
+
+**Everything else of ADR-0158 §5 stands, and one clause of it is untouched precisely
+because §7 was redrafted to leave it so.** §5's three-group clause governs
+`Planner.plan`'s `memories`, and that parameter still carries three groups: the
+planner is called before the servicer and receives what it receives today. An earlier
+draft of this ADR widened it to four, which was both a needless contract change and
+incoherent — the planner cannot receive a group produced from its own output. §5's
+operative caution, that an implementation *"may rely on the grouping and may not rely
+on a global relevance order"*, is carried word for word and extended to the fourth
+group for `TurnResult`'s consumers. §5's degraded-read clause, its episodic-bound
+clauses and its `Settings` prohibition are untouched.
+
+**ADR-0158 §4 is extended in application and unchanged in text.** §4's rule is that
+the order is tail, then beliefs, then supplement, *"appended whole, never
 interleaved"*; §7 appends a fourth group after the third and disturbs neither the
-rule nor any existing group's position. §5's three-group clause on `Planner.plan`
-becomes four groups, which is the same widening §5 itself performed on ADR-0074 §5's
-two — and §5's operative sentence, that an implementation *"may rely on the grouping
-and may not rely on a global relevance order"*, is carried word for word. ADR-0074
-§5's own clause is untouched: the tail is still first, still in order, still bounded.
+rule nor any existing group's position, and §4's separator rule is evaluated over
+what precedes the supplement. ADR-0074 §5's own clause is untouched: the tail is
+still first, still in order, still bounded.
 
 **ADR-0170 §2 and §5a are untouched, and §5a is relied on.** The composing stage
 still holds no `MemoryStore`, performs no second retrieval, and renders step accounts
@@ -1232,7 +1351,7 @@ untouched**; §4 distinguishes its required-input reasoning rather than extendin
 ADR-0014 §§2 and 5; ADR-0015 §5; ADR-0016 §5; ADR-0027 and ADR-0070 §§1, 3 and 4 for
 the supersession form; ADR-0039 §10; ADR-0072 §5; ADR-0086 §6; ADR-0088 and ADR-0089
 for the citation forms and the marks; ADR-0098 §2; ADR-0113; ADR-0137 §§1 and 2;
-ADR-0158 §§1, 3, 4 and 5; ADR-0187 §4; ADR-0199 §§1, 3 and 5; ADR-0203 §§1 and 2;
+ADR-0158 §§1, 3 and 4; ADR-0187 §4; ADR-0199 §§1, 3 and 5; ADR-0203 §§1 and 2;
 ADR-0210 §1; ADR-0212 §8; ADR-0217 §2; ADR-0221 §5;
 ADR-0224 §1; ADR-0225 §12.
 
@@ -1257,13 +1376,16 @@ first test, which is written to fail if the mechanism is wired but not working.
 - **The audit reports a fire rate and a novelty rate, and calls them that.** Precision
   and recall need a per-turn label of whether the supply sufficed, which no live turn
   carries; §8 says so and §12 defers the two ways of obtaining one.
-- **One clause each of two ADRs moves**: ADR-0208 §1's one site becomes two for
-  relevance reads, and ADR-0204 §2's evaluation moves from *"between retrieval and
-  planning"* to the turn's final supply. Nothing else in the withholding corpus moves —
-  §5 keeps the envelope off the channel that corpus is mostly about, which is also why
-  the spoken channel gains nothing from this milestone, stated as a cost in §5 rather
-  than as a footnote; and on the bounded channel the corpus binds on **more** material
-  after this ADR than before, because the evaluation now sees a group it did not.
+- **Four clauses of three ADRs move, each narrowly.** ADR-0208 §1's one site becomes
+  two for relevance reads; ADR-0204 §2's evaluation moves from *"between retrieval and
+  planning"* to the turn's final supply, and §4's freeze on a bounded turn's
+  `TurnResult` and reply admits the fourth group; ADR-0158 §5's sameness clause admits
+  a `TurnResult` carrying one group more than the planner saw. Nothing else in the
+  withholding corpus moves — §5 keeps the envelope off the channel that corpus is
+  mostly about, which is also why the spoken channel gains nothing from this milestone,
+  stated as a cost in §5 rather than as a footnote; and on the bounded channel the
+  corpus binds on **more** material after this ADR than before, because the evaluation
+  now sees a group it did not.
 - **A closed enumeration is now the growth path.** Milestones 2 through 4 add kinds
   and inherit §3's namer rule, §6's budget discipline, §7's union and §9's audit. A
   milestone that wanted a second *seam* would have to supersede §1 to get it, which
