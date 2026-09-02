@@ -919,8 +919,29 @@ def test_the_notices_name_every_revision_that_ships() -> None:
     assert Counter(declared) == Counter(expected)
 
 
+def _notice_tables(notices: str) -> list[list[str]]:
+    """Each Markdown table in the notices, as its own list of rows.
+
+    A table is a maximal run of lines beginning with ``|``, which is what the
+    document's own tables are. Rows are read within a table and never across one,
+    so a ``Files`` row cannot be credited to a pin declared somewhere else in the
+    file (adversarial round 4).
+    """
+    tables: list[list[str]] = []
+    rows: list[str] = []
+    for line in notices.splitlines():
+        if line.startswith("|"):
+            rows.append(line)
+        elif rows:
+            tables.append(rows)
+            rows = []
+    if rows:
+        tables.append(rows)
+    return tables
+
+
 def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
-    """Every notice table's pinned commit paired with the file set that table declares.
+    """Every notice table's pinned commit paired with the file set that same table declares.
 
     A **list**, not a mapping keyed by the commit: two artifacts pinned to one
     commit are two artifacts, and a mapping would collapse them into whichever the
@@ -930,26 +951,28 @@ def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
 
     The commit is what says *which* artifact a ``Files`` row is about; it is not a
     second pin of the revisions, which ``test_the_notices_name_every_revision_that_ships``
-    owns and which fails first. Both rows are read out of one walk in document
-    order, so a table that grew a second inventory or lost its own fails here
-    rather than being silently mis-attributed.
+    owns and which fails first. That association is only worth anything if it holds
+    within one table, so a table carrying one of the two rows without the other is
+    refused here rather than borrowing its partner from a neighbour: a recipient
+    reading the document reads a table, not a document-order pairing.
     """
     inventories: list[tuple[str, frozenset[str]]] = []
-    pinned: str | None = None
-    for row in re.finditer(
-        r"^\|\s*(?P<label>Pinned commit|Files)\s*\|\s*(?P<cell>.+?)\s*\|$", notices, re.MULTILINE
-    ):
-        if row["label"] == "Pinned commit":
-            assert pinned is None, f"the table pinning {pinned} declares no Files row"
-            pinned = row["cell"].strip("`")
+    for table in _notice_tables(notices):
+        pinned = [_cell(row) for row in table if row.startswith("| Pinned commit ")]
+        listed = [_cell(row) for row in table if row.startswith("| Files ")]
+        if not pinned and not listed:
             continue
-        assert pinned is not None, "a Files row precedes every Pinned commit row"
-        names = re.findall(r"`([^`]+)`", row["cell"])
-        assert len(names) == len(set(names)), f"{pinned} lists a file twice"
-        inventories.append((pinned, frozenset(names)))
-        pinned = None
-    assert pinned is None, f"the table pinning {pinned} declares no Files row"
+        assert len(pinned) == 1, f"a table declares {len(pinned)} pinned commits: {table}"
+        assert len(listed) == 1, f"the table pinning {pinned[0]} declares {len(listed)} Files rows"
+        names = re.findall(r"`([^`]+)`", listed[0])
+        assert len(names) == len(set(names)), f"{pinned[0]} lists a file twice"
+        inventories.append((pinned[0].strip("`"), frozenset(names)))
     return inventories
+
+
+def _cell(row: str) -> str:
+    """The value cell of a two-column Markdown row, stripped of its pipes."""
+    return row.split("|")[2].strip()
 
 
 def test_the_notices_name_every_file_that_ships() -> None:
@@ -1017,6 +1040,27 @@ def test_two_artifacts_pinned_to_one_commit_need_a_notice_table_each() -> None:
     one_table_between_them = _synthetic_notices([(shared, ["b.onnx"])])
     assert Counter(_declared_inventories(one_table_between_them)) != Counter(artifacts)
     assert Counter(_declared_revisions(one_table_between_them)) != Counter(revisions)
+
+
+def test_a_pin_cannot_borrow_its_inventory_from_a_different_table() -> None:
+    """A recipient reads a table, so the pairing is only worth anything within one.
+
+    Scanning the document for the two row kinds in order would credit a stray
+    ``Files`` row to a pin declared paragraphs earlier, and the pairs would compare
+    equal while the notices told nobody which files that commit ships. Refused
+    rather than repaired: a table carrying one row of the two is a malformed
+    notice, and this test is what a malformed notice has to run into.
+    """
+    shared = "0" * 40
+    only_a_pin = f"| | |\n|---|---|\n| Pinned commit | `{shared}` |"
+    only_an_inventory = "| | |\n|---|---|\n| Files | `a.onnx` |"
+
+    assert _declared_inventories(_synthetic_notices([(shared, ["a.onnx"])])) == [
+        (shared, frozenset({"a.onnx"}))
+    ]
+
+    with pytest.raises(AssertionError, match="declares 0 Files rows"):
+        _declared_inventories(f"{only_a_pin}\n\nprose in between\n\n{only_an_inventory}")
 
 
 def test_the_notices_are_declared_as_a_licence_file() -> None:
