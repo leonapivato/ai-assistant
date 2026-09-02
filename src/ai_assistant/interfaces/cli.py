@@ -250,6 +250,7 @@ import typer
 from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from ai_assistant import __version__
 from ai_assistant.core.config import load_settings
@@ -7312,6 +7313,17 @@ def _render_content(content: str) -> None:
     so that the block is legible as one quoted thing, and because a first line without
     it would be one line of an unmarked block for the eye to anchor on.
 
+    **"Every line" means every line on the screen, so the wrapping is taken here rather
+    than left to the console.** Rich does not repeat a literal prefix on the
+    continuations it wraps: handed one long line, it emits the gutter once and puts the
+    remainder at the margin, so ``…many words… Why: forged`` becomes a second display
+    line the marker never reached. Adversarial review, round 2, ``blocker``. The
+    content is therefore wrapped to the room left beside the gutter — by Rich's own
+    measurement, which counts cells rather than characters — and the gutter is written
+    onto each piece. What is printed is a :class:`~rich.text.Text` rather than a markup
+    string, so the escaping :func:`_safe_prose` applied is resolved once, by
+    :meth:`~rich.text.Text.from_markup`, and cannot be re-parsed by the print.
+
     **A single-line content is printed exactly as it was**, which is not merely tidy:
     one line cannot forge a second, so the marker would be ceremony bought with a
     change to every row this system has ever rendered. Only a value carrying the break
@@ -7337,8 +7349,11 @@ def _render_content(content: str) -> None:
     if len(lines) == 1:
         console.print(f"  {lines[0]}")
         return
+    gutter = Text("  │ ", style="dim")
+    room = max(console.width - len(gutter), 1)
     for text_line in lines:
-        console.print(f"  [dim]│[/] {text_line}")
+        for wrapped in Text.from_markup(text_line).wrap(console, room):
+            console.print(gutter + wrapped)
 
 
 def _render_belief_summary(summary: BeliefSummary) -> None:
