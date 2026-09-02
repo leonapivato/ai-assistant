@@ -597,7 +597,7 @@ class SqliteTranscriptArchive:
         floor = self._floor()
         async with self._lock:
             rows = await _run_to_completion(self._search_sync, needle, floor, limit, offset)
-        return [self._hit(row) for row in rows]
+        return [_hit_of(row, needle) for row in rows]
 
     def _search_sync(
         self, needle: str, floor: int, limit: int, offset: int
@@ -605,33 +605,19 @@ class SqliteTranscriptArchive:
         with self._transaction("search the transcript archive", immediate=False) as conn:
             return list(
                 conn.execute(
-                    "SELECT address, conversation_id, occurred_at_us, asked, replied "
+                    # `replied_folded` is selected and not read: the two halves are
+                    # matched separately, so `asked_folded` failing the needle is
+                    # already the answer that `replied` is the matching half. Keeping
+                    # the column in the projection is what makes that legible beside
+                    # the `WHERE` clause it mirrors.
+                    "SELECT address, conversation_id, occurred_at_us, "
+                    "asked, replied, asked_folded, replied_folded "
                     "FROM entries WHERE occurred_at_us >= ? "
                     "AND (instr(asked_folded, ?) > 0 OR instr(replied_folded, ?) > 0) "
                     "ORDER BY occurred_at_us DESC, address ASC LIMIT ? OFFSET ?",
                     (floor, needle, needle, limit, offset),
                 )
             )
-
-    def _hit(self, row: tuple[Any, ...]) -> TranscriptHit:
-        """Build one hit, excerpting the half that matched.
-
-        ``asked`` is preferred where both halves matched, so a hit reads as what the
-        *user* said wherever they said it — and never carries both halves, which §7
-        forbids where either exceeds the bound.
-        """
-        address, conversation_id, occurred_at_us, asked, replied = row
-        matched = asked if asked is not None else replied
-        # A row only reaches here because one folded half contained the needle, so
-        # `matched` is never both-None; the fallback keeps the type total.
-        text, elided = excerpt_of("" if matched is None else str(matched))
-        return TranscriptHit(
-            address=str(address),
-            conversation_id=str(conversation_id),
-            occurred_at=_from_micros(int(occurred_at_us)),
-            excerpt=text,
-            elided=elided,
-        )
 
     async def conversation(
         self, conversation_id: str, *, limit: int = 50, offset: int = 0
@@ -770,6 +756,39 @@ class SqliteTranscriptArchive:
     def close(self) -> None:
         """Close the underlying database connection."""
         self._conn.close()
+
+
+def _hit_of(row: tuple[Any, ...], needle: str) -> TranscriptHit:
+    """Build one hit, excerpting **the half the needle actually occurs in** (§7).
+
+    ADR-0225 §7 says a hit carries "a bounded excerpt of the matching text", and the
+    two halves are matched separately — so which half matched is part of the answer
+    and cannot be guessed from which half is present. An implementation that
+    excerpted ``asked`` whenever it was non-``None`` would hand back the user's
+    sentence for a query that occurs only in the reply: a hit that does not contain
+    what was searched for, which reads to a user as a wrong result rather than as a
+    bounded one.
+
+    The decision is made here against the **folded** columns the row already carries,
+    so the excerpt is decided by exactly the predicate the ``WHERE`` clause used —
+    two evaluations of one rule rather than two rules that could disagree.
+
+    ``asked`` is preferred where **both** halves match, so a hit reads as what the
+    *user* said wherever they said it; it never carries both, which §7 forbids where
+    either exceeds the bound.
+    """
+    address, conversation_id, occurred_at_us, asked, replied, asked_folded, _ = row
+    matched = asked if asked_folded is not None and needle in str(asked_folded) else replied
+    # A row only reaches here because one folded half contained the needle, so
+    # `matched` is never both-None; the fallback keeps the type total.
+    text, elided = excerpt_of("" if matched is None else str(matched))
+    return TranscriptHit(
+        address=str(address),
+        conversation_id=str(conversation_id),
+        occurred_at=_from_micros(int(occurred_at_us)),
+        excerpt=text,
+        elided=elided,
+    )
 
 
 def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:

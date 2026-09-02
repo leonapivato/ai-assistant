@@ -472,6 +472,55 @@ class TranscriptArchiveContract:
 
         assert [hit.address for hit in await archive.search("Ravensworth")] == ["c1:1"]
 
+    async def test_the_excerpt_is_the_half_the_query_was_found_in(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """ADR-0225 §7: "a bounded excerpt of **the matching text**".
+
+        The case that separates "which half is present" from "which half matched" —
+        and the one an implementation gets wrong by excerpting whichever half is
+        non-``None``. A hit that does not contain what was searched for reads to a
+        user as a *wrong* result rather than as a bounded one, and it makes the
+        address the only usable part of the answer.
+
+        Asserted in both directions, because a rule tested only where it fires is
+        half a rule: a store that always excerpted ``replied`` would pass the first
+        assertion below and fail the second.
+        """
+        await self.store(
+            archive,
+            entry("c1:1", asked="hello", replied="the lender was Ravensworth"),
+            entry(
+                "c2:1",
+                conversation="c2",
+                asked="was it Ravensworth",
+                replied="that is right",
+            ),
+        )
+
+        replied_side = await archive.search("Ravensworth", limit=1, offset=0)
+        found = {hit.address: hit.excerpt for hit in await archive.search("Ravensworth")}
+
+        assert replied_side, "the fixture must actually match"
+        assert found["c1:1"] == "the lender was Ravensworth"
+        assert found["c2:1"] == "was it Ravensworth"
+
+    async def test_the_users_half_wins_where_both_halves_match(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """The tie, decided the same way by every conforming implementation.
+
+        §7 leaves *which window* of the matching text an excerpt is taken from to the
+        lane; it does not leave two implementations free to answer a two-sided match
+        with different halves, which would be the divergence §7 names the predicate to
+        prevent, one level up.
+        """
+        await self.store(archive, entry(asked="Ravensworth asked", replied="Ravensworth said"))
+
+        hit = (await archive.search("Ravensworth"))[0]
+
+        assert hit.excerpt == "Ravensworth asked"
+
     async def test_a_query_spanning_the_two_halves_matches_nothing(
         self, archive: TranscriptArchive
     ) -> None:
