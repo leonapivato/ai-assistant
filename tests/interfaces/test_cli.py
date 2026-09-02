@@ -8,6 +8,7 @@ the production, model-backed engine, so no network or key is needed.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import errno
 import re
@@ -17,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from inspect import getsource, isfunction, unwrap
 from io import StringIO
 from itertools import count, product
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -148,7 +150,6 @@ from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-    from pathlib import Path
 
     from ai_assistant.core.types import MemoryRecord, SourceGrant
 
@@ -7146,6 +7147,54 @@ def test_the_hint_printer_leaves_the_line_for_the_terminal_to_fold(
     cli._print_hint(line)
 
     assert buffer.getvalue() == f"{line}\n", "neither folded nor truncated"
+
+
+def test_every_renderer_that_builds_a_command_prints_it_through_the_hint_printer() -> None:
+    """The other half of #1023's "deciding once", which no rendering case can reach.
+
+    Twelve prints carry a copyable command and the two cases above exercise two of
+    them; a lane that reverted any of the other ten to a bare ``console.print``
+    would leave both of them green and would restore the fold on that surface. So
+    the routing is asserted structurally instead, over the module's own syntax
+    tree — the only vantage point from which "every site" is a statement rather
+    than a list somebody keeps up to date.
+
+    The rule is read off what a function *does* rather than off a roster of names:
+    a renderer that composes a shell argument (:func:`~ai_assistant.interfaces.cli
+    ._argument`) or a reference hint and then prints anything at all is offering a
+    command to copy, and has to offer it unfolded. :func:`~ai_assistant.interfaces
+    .cli._reference_hint` composes one and prints nothing, so it is not a renderer
+    and is excluded by that same test rather than by an exemption.
+
+    It cannot see a renderer that prints the *prose around* a hint through
+    ``console.print`` — which is correct, and is what those calls are for — so the
+    two rendering cases above stay the pin on what reaches the buffer.
+    """
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+
+    def _called(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            called = inner.func
+            if isinstance(called, ast.Name):
+                names.add(called.id)
+            elif isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+                names.add(f"{called.value.id}.{called.attr}")
+        return names
+
+    unfolded: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        calls = _called(node)
+        composes = {"_argument", "_reference_hint"} & calls
+        prints = {"console.print", "_print_hint"} & calls
+        if composes and prints and "_print_hint" not in calls:
+            unfolded.append(f"{node.name} (line {node.lineno})")
+
+    assert not unfolded, f"builds a command and prints it folded: {unfolded}"
 
 
 def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: StringIO) -> None:
