@@ -56,6 +56,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from ai_assistant.archive._transactions import transaction
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import TranscriptArchiveError
@@ -66,6 +68,7 @@ from ai_assistant.core.types import (
     TranscriptEntry,
     TranscriptHit,
     describe_untrusted,
+    fault_class_of,
 )
 
 if TYPE_CHECKING:
@@ -817,6 +820,41 @@ class SqliteTranscriptArchive:
         self._conn.close()
 
 
+def _unreadable(address: object, fault: Exception) -> TranscriptArchiveError:
+    """The one error a row this store cannot rebuild raises (ADR-0225 §10).
+
+    A read reaches this only for a row the SQL already returned — a value some other
+    writer put in the reserved namespace, or a damaged one. §10 gives this seam a
+    single archive error class, and a raw ``ValidationError``, ``ValueError`` or
+    ``OverflowError`` out of the model conversion would leave every caller matching on
+    a class the contract does not document. It is the arrangement ADR-0119 §3 already
+    makes for a trace row that cannot be hydrated: **raised over rather than skipped**,
+    because dropping the row silently would hide from the user a transcript that is
+    on their disk.
+
+    **The message names the address and the fault's class, and nothing is chained.**
+    A ``ValidationError`` renders the value it refused into its own text, and here
+    that value is the entry — so attaching it as ``__cause__`` would put the
+    transcript one ``exc_info`` away from a log, which is the leak §4 forbids
+    (ADR-0004 §5). The class name goes through
+    :func:`~ai_assistant.core.types.fault_class_of`, which is total and drops a name
+    that will not fit rather than carrying it.
+
+    Args:
+        address: The row's address, as stored. Not the text.
+        fault: What the conversion raised.
+
+    Returns:
+        The error to raise.
+    """
+    described = describe_untrusted(address)
+    msg = (
+        f"a stored transcript entry at address {described} could not be read back "
+        f"({fault_class_of(fault)})"
+    )
+    return TranscriptArchiveError(msg)
+
+
 def _hit_of(row: tuple[Any, ...], needle: str) -> TranscriptHit:
     """Build one hit, excerpting **the half the needle actually occurs in** (§7).
 
@@ -840,28 +878,45 @@ def _hit_of(row: tuple[Any, ...], needle: str) -> TranscriptHit:
     matched = asked if asked_folded is not None and needle in str(asked_folded) else replied
     # A row only reaches here because one folded half contained the needle, so
     # `matched` is never both-None; the fallback keeps the type total.
-    text, elided = excerpt_of("" if matched is None else str(matched))
-    return TranscriptHit(
-        address=str(address),
-        conversation_id=str(conversation_id),
-        occurred_at=_from_micros(int(occurred_at_us)),
-        excerpt=text,
-        elided=elided,
-    )
+    try:
+        text, elided = excerpt_of("" if matched is None else str(matched))
+        return TranscriptHit(
+            address=str(address),
+            conversation_id=str(conversation_id),
+            occurred_at=_from_micros(int(occurred_at_us)),
+            excerpt=text,
+            elided=elided,
+        )
+    except (ValidationError, ValueError, OverflowError, TypeError) as fault:
+        raise _unreadable(address, fault) from None
 
 
 def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:
-    """Rebuild one :class:`TranscriptEntry` from its row, whole and validated."""
+    """Rebuild one :class:`TranscriptEntry` from its row, whole and validated.
+
+    Raises:
+        TranscriptArchiveError: If the row cannot be rebuilt — see :func:`_unreadable`
+            for why that is raised rather than skipped, and why nothing is chained.
+    """
     address, conversation_id, ordinal, occurred_at_us, asked, replied, disposition = row
-    return TranscriptEntry(
-        address=str(address),
-        conversation_id=str(conversation_id),
-        ordinal=int(ordinal),
-        occurred_at=_from_micros(int(occurred_at_us)),
-        asked=None if asked is None else str(asked),
-        replied=None if replied is None else str(replied),
-        disposition=ExchangeDisposition(disposition),
-    )
+    try:
+        return TranscriptEntry(
+            address=str(address),
+            conversation_id=str(conversation_id),
+            ordinal=int(ordinal),
+            occurred_at=_from_micros(int(occurred_at_us)),
+            asked=None if asked is None else str(asked),
+            replied=None if replied is None else str(replied),
+            disposition=ExchangeDisposition(disposition),
+        )
+    except (ValidationError, ValueError, OverflowError, TypeError) as fault:
+        # Every arm is reachable from a row this store did not write: a disposition
+        # outside the vocabulary and an ordinal outside its domain are `ValueError`
+        # and `ValidationError`, an `occurred_at_us` outside the calendar is
+        # `OverflowError`, and a column holding the wrong storage class is
+        # `TypeError`. `ValidationError` is named first because it is a `ValueError`
+        # and the ordering would otherwise be silent about which one is meant.
+        raise _unreadable(address, fault) from None
 
 
 __all__ = ["SqliteTranscriptArchive"]

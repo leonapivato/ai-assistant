@@ -28,6 +28,7 @@ from transcript_archive_contracts import (
 )
 
 from ai_assistant.archive import SqliteTranscriptArchive
+from ai_assistant.archive.sqlite_store import folded
 from ai_assistant.core.errors import TranscriptArchiveError
 
 if TYPE_CHECKING:
@@ -41,6 +42,10 @@ SIDECARS = ("-journal", "-wal", "-shm")
 
 #: What the symlink case plants, and expects to find untouched afterwards.
 _NOT_OURS = "held by something else"
+
+#: A span the failure cases look for in what a refusal says. Distinctive, so a
+#: match anywhere is this entry's text and not an incidental word.
+_PRIVATE = "PRIVATE-TRANSCRIPT-MARKER"
 
 
 def _at_now(**kwargs: Any) -> SqliteTranscriptArchive:
@@ -501,3 +506,95 @@ def test_a_retention_that_is_not_a_positive_duration_is_refused(
 def test_keeping_forever_is_admitted(tmp_path: Path) -> None:
     """``None`` is §6's default and its whole spelling for "keep forever"."""
     SqliteTranscriptArchive(path=tmp_path / "transcripts.db", retention=None).close()
+
+
+# --- a row this store did not write (§10) -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    # `2**63` is deliberately absent: a SQLite INTEGER tops out one below it, so an
+    # ordinal past `TranscriptEntry`'s ceiling cannot reach a row at all — the driver
+    # refuses the bind. The ceiling is asserted where it *is* reachable, on the model
+    # itself (`tests/core/test_transcript_types.py`).
+    [("disposition", "not-a-member"), ("ordinal", 0), ("occurred_at_us", -(2**62))],
+    ids=["a-foreign-disposition", "an-ordinal-below-the-floor", "an-instant-off-the-calendar"],
+)
+async def test_a_row_this_store_cannot_rebuild_raises_this_seams_own_error(
+    tmp_path: Path, column: str, value: object
+) -> None:
+    """ADR-0225 §10's single archive error class, over the one thing SQL cannot catch.
+
+    A read reaches the model conversion only after the SQL succeeded, so a row some
+    other writer put in the reserved namespace — or a damaged one — escapes the
+    transaction's own translation. A raw ``ValidationError`` or ``OverflowError`` out
+    of a read would leave every caller matching on a class the contract does not
+    document.
+
+    **Raised over rather than skipped**, on ADR-0119 §3's ground for a trace row that
+    cannot be hydrated: dropping it silently would hide from the user a transcript
+    that is on their disk.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry(asked=_PRIVATE, replied=_PRIVATE))
+        _damage(path, column, value)
+
+        for read in (archive.entry("c1:1"), archive.conversation("c1"), archive.entries()):
+            with pytest.raises(TranscriptArchiveError) as refused:
+                await read
+            assert "c1:1" in str(refused.value), "the address is what a failure names"
+            assert _PRIVATE not in str(refused.value), "and never the entry's text"
+            assert _PRIVATE not in repr(refused.value.__cause__), "nor anything chained to it"
+    finally:
+        archive.close()
+
+
+async def test_a_row_whose_text_the_hit_model_refuses_raises_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """The search's own conversion, held to §10 exactly as the three whole reads are.
+
+    A hit is built from the matching half, so a row carrying text no ``EncodableText``
+    admits refuses there rather than at ``TranscriptEntry`` — a different construction
+    on a different path, and one an implementation could plausibly guard in only one
+    of the two places.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry(asked=_PRIVATE, replied=None))
+        # Written through a second connection so the value bypasses this store's own
+        # `append`, which is the only way an unencodable half reaches a row at all.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("PRAGMA encoding")
+            conn.execute(
+                "UPDATE entries SET asked = CAST(? AS TEXT), asked_folded = ?",
+                (b"\xed\xa0\x80", folded(_PRIVATE)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(TranscriptArchiveError) as refused:
+            await archive.search(_PRIVATE)
+
+        assert _PRIVATE not in str(refused.value)
+    finally:
+        archive.close()
+
+
+def _damage(path: Path, column: str, value: object) -> None:
+    """Write ``value`` into ``column`` for every row, through a second connection.
+
+    Through raw SQL because that is the only way to arrange the case: this store's
+    own ``append`` validates, so a row it wrote can never be one it cannot read back.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f"UPDATE entries SET {column} = ?", (value,))  # noqa: S608 — a fixed set
+        conn.commit()
+    finally:
+        conn.close()
