@@ -83,8 +83,15 @@ dependencies = [
     # audited embedding packages and is not this lane's to widen; it is filed as
     # #1462 and nothing here pre-empts it.
     "python-dateutil>=2.9",
-    # ChaCha20-Poly1305 for the backup artifact's age v1 container (ADR-0123 §4),
-    # and for nothing else. §4 fixes the *format* — "age version 1 … with an
+    # Two consumers, and no others. ChaCha20-Poly1305 for the backup artifact's age
+    # v1 container (ADR-0123 §4), and `x509` for the gateway's remote browser
+    # listener: `interfaces/gateway/tls.py` reads a certificate's `subjectAltName`
+    # entries and both bounds of its validity period, which ADR-0202 §5's
+    # disclosure, §6's name check and §8's start-time refusals each require of it.
+    # No import-linter contract confines this package, so that pair is a claim this
+    # comment makes and review checks, not one the gate holds.
+    #
+    # ADR-0123 §4 fixes the *format* — "age version 1 … with an
     # scrypt passphrase recipient" — and leaves the library to the lane against
     # `CONTRIBUTING.md`'s filter, which this clears: `requires-python >=3.9` and
     # real `cp311-abi3` manylinux/macOS/Windows wheels, so 3.14 needs no source

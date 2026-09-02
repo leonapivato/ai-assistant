@@ -9909,11 +9909,13 @@ def _invocation_outcome(outcome: ToolOutcome, *, egress_call: bool) -> tuple[str
     the cancellation count — and none of them is a transmission; an egress callable
     that returns normally without putting a byte on the wire produces ``SUCCEEDED``
     like any other. Nothing available could carry the word either:
-    ``ToolImplementation`` returns a ``FrozenJson`` with no channel for a
-    transmission fact (#1558). And nothing here says or implies that anything was
-    received, delivered or acted on by any recipient, on any row, in any state:
-    ``SUCCEEDED`` is what the tool reported to the seam, and nothing in this system
-    observes what happened after that — or upstream of it.
+    ``ToolImplementation`` returns ``FrozenJson | ReportedOutput`` (ADR-0195 §2),
+    and neither arm has a channel for a transmission fact — the envelope carries
+    ``output`` and ``incurred_cost`` and, under ``extra="forbid"``, nothing else, so
+    it states a price and never an outcome. And nothing here says or implies that
+    anything was received, delivered or acted on by any recipient, on any row, in
+    any state: ``SUCCEEDED`` is what the tool reported to the seam, and nothing in
+    this system observes what happened after that — or upstream of it.
 
     **``INDETERMINATE`` is a state and not a hedge** (ADR-0014 §4, ADR-0192 §3).
     The call may or may not have taken effect, and a surface resolving that in
