@@ -32,6 +32,8 @@ from ai_assistant.archive.sqlite_store import folded
 from ai_assistant.core.errors import TranscriptArchiveError
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ai_assistant.core.protocols import TranscriptArchive, TranscriptArchiveWriter
     from ai_assistant.core.types import TranscriptEntry
 
@@ -46,6 +48,19 @@ _NOT_OURS = "held by something else"
 #: A span the failure cases look for in what a refusal says. Distinctive, so a
 #: match anywhere is this entry's text and not an incidental word.
 _PRIVATE = "PRIVATE-TRANSCRIPT-MARKER"
+
+#: A value SQLite's TEXT affinity does **not** convert, which is what makes it a
+#: wrong storage class rather than a wrong Python type the driver quietly fixes.
+_BINARY = b"\x00\x01binary"
+
+#: The three reads that return whole entries, as callables rather than coroutines: a
+#: tuple of coroutines is a tuple of *started* ones, and the two a failing case never
+#: awaits are reported as never-awaited warnings.
+_WHOLE_READS: tuple[Callable[[SqliteTranscriptArchive], Awaitable[object]], ...] = (
+    lambda archive: archive.entry("c1:1"),
+    lambda archive: archive.conversation("c1"),
+    lambda archive: archive.entries(),
+)
 
 
 def _at_now(**kwargs: Any) -> SqliteTranscriptArchive:
@@ -541,9 +556,9 @@ async def test_a_row_this_store_cannot_rebuild_raises_this_seams_own_error(
         await archive.append(entry(asked=_PRIVATE, replied=_PRIVATE))
         _damage(path, column, value)
 
-        for read in (archive.entry("c1:1"), archive.conversation("c1"), archive.entries()):
+        for read in _WHOLE_READS:
             with pytest.raises(TranscriptArchiveError) as refused:
-                await read
+                await read(archive)
             assert "c1:1" in str(refused.value), "the address is what a failure names"
             assert _PRIVATE not in str(refused.value), "and never the entry's text"
             assert _PRIVATE not in repr(refused.value.__cause__), "nor anything chained to it"
@@ -598,3 +613,97 @@ def _damage(path: Path, column: str, value: object) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("asked", _BINARY),
+        ("replied", _BINARY),
+        ("disposition", b"no_action_needed"),
+        ("ordinal", 1.5),
+        ("occurred_at_us", 1.5),
+    ],
+    ids=[
+        "a-blob-where-the-users-words-go",
+        "a-blob-where-the-reply-goes",
+        "a-blob-disposition",
+        "a-real-ordinal",
+        "a-real-instant",
+    ],
+)
+async def test_a_wrong_storage_class_is_refused_and_never_coerced(
+    tmp_path: Path, column: str, value: object
+) -> None:
+    """SQLite is dynamically typed, so a declared column type binds nothing (§10).
+
+    The failure this closes is the worst one available to a transcript store:
+    ``str(b"...")`` is ``"b'...'"``, so coercing a BLOB in ``asked`` would report, as
+    something the user said, words nobody said — a *fabrication* rather than an
+    error, in the one store whose whole value is that it is what was said.
+
+    **The set is what SQLite's type affinity actually admits, and not every wrong
+    Python type.** A ``TEXT``-affinity column converts an integer or a real to text on
+    the way in, and an ``INTEGER``-affinity column converts an integral string or
+    float to an integer — so those never arrive as a wrong storage class and a case
+    for them would be asserting against the driver rather than against this store.
+    What affinity does *not* convert is a BLOB into a text column, or a non-integral
+    real into an integer one, and those are the cases here.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry(asked=_PRIVATE, replied=_PRIVATE))
+        _damage(path, column, value)
+
+        for read in _WHOLE_READS:
+            with pytest.raises(TranscriptArchiveError):
+                await read(archive)
+    finally:
+        archive.close()
+
+
+@pytest.mark.parametrize("column", ["address", "conversation_id"])
+async def test_a_blob_in_an_identity_column_is_refused_by_the_enumeration(
+    tmp_path: Path, column: str
+) -> None:
+    """The same guard on the two columns a row is *found* by.
+
+    Asserted through the unfiltered enumeration alone, and that is the case rather
+    than an omission: a row whose address or conversation is no longer text is a row
+    the addressed and conversation-scoped reads no longer *match*, so they answer
+    nothing and have nothing to refuse. The enumeration is where such a row surfaces,
+    and it is also ADR-0225 §7's export — so a fabricated identity there would travel
+    into whatever the user exported it to.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry(asked=_PRIVATE, replied=_PRIVATE))
+        _damage(path, column, _BINARY)
+
+        with pytest.raises(TranscriptArchiveError) as refused:
+            await archive.entries()
+
+        assert _PRIVATE not in str(refused.value)
+    finally:
+        archive.close()
+
+
+async def test_a_search_hit_is_never_built_out_of_a_coerced_column(tmp_path: Path) -> None:
+    """The same guard on the search's own conversion, which builds a different model.
+
+    The row still *matches*, because the folded column is untouched — so an
+    implementation that guarded only the whole reads would answer this search with a
+    hit whose excerpt reads ``b'\\x00\\x01binary'`` and call it a transcript.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry(asked=_PRIVATE, replied=None))
+        _damage(path, "asked", _BINARY)
+
+        with pytest.raises(TranscriptArchiveError):
+            await archive.search(_PRIVATE)
+    finally:
+        archive.close()
