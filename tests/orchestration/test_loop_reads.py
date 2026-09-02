@@ -17,8 +17,9 @@ the behaviour itself.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, get_args
 
 import pytest
 import structlog
@@ -46,6 +47,7 @@ from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
 from ai_assistant.orchestration.composing import _split_conversation_tail as compose_split
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
+    TurnSupply,
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.reads import (
@@ -80,6 +82,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemorySearchResult,
     )
+    from ai_assistant.testing.cancellation import LoopSuspension
 
 _NOW: Final = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
 
@@ -262,6 +265,47 @@ class _DeletingPlanner:
             created_at=_NOW,
             read_request=self._request,
         )
+
+
+class _SuspendingPlanner:
+    """A planner that arms the store's suspension, so the servicing can be cancelled.
+
+    The store's suspension holds whichever call enters it next, and the turn's own
+    belief composition has already read three times by the time the planner runs — so
+    the planner is the one place a case can arm it *between* the retrieval and the
+    servicing, which is the window ADR-0226 §9's completed-servicing clause is about.
+    """
+
+    def __init__(self, store: FakeMemoryStore, request: ReadRequest) -> None:
+        self._store = store
+        self._request = request
+        self._armed = asyncio.Event()
+        self.held: LoopSuspension | None = None
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
+    ) -> ActionPlan:
+        del context, memories, capabilities
+        self.held = self._store.suspend_next_operation()
+        self._armed.set()
+        return ActionPlan(
+            id=f"{goal.id}-plan",
+            goal_id=goal.id,
+            steps=(),
+            created_at=_NOW,
+            read_request=self._request,
+        )
+
+    async def armed(self) -> LoopSuspension:
+        """Wait until the suspension is in place, and hand it to the case."""
+        await self._armed.wait()
+        assert self.held is not None
+        return self.held
 
 
 class _RaisingPlanner:
@@ -1243,7 +1287,9 @@ async def test_an_unbounded_audience_turn_still_narrows_before_planning() -> Non
     assert supply.withheld is True
 
 
-async def test_the_evaluation_is_taken_once_on_a_turn_that_serviced_a_request() -> None:
+async def test_the_evaluation_is_taken_once_on_a_turn_that_serviced_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """§7: "§2's *"once"* is kept in letter, so no implementation evaluates twice".
 
     A recording filter counts its applications. Two would disjoin two evaluations'
@@ -1251,31 +1297,28 @@ async def test_the_evaluation_is_taken_once_on_a_turn_that_serviced_a_request() 
     and the ``TurnResult`` another for a reason nothing states.
     """
     applications: list[int] = []
+    applied = BoundedAudienceSupply.__call__
 
-    class _Counting(BoundedAudienceSupply):
-        """The real bounded filter, counting how many times it was applied.
+    def counting(
+        supply: BoundedAudienceSupply,
+        context: CurrentContext,
+        memories: tuple[MemoryRecord, ...],
+        retrieved_ids: frozenset[str],
+    ) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
+        applications.append(len(memories))
+        return applied(supply, context, memories, retrieved_ids)
 
-        Subclassed rather than replaced by a lambda because ADR-0226 §5's posture is
-        read off the filter's own type: a plain callable declares no audience, so it
-        would be testing the fail-closed path instead of this one.
-        """
-
-        def __call__(
-            self,
-            context: CurrentContext,
-            memories: tuple[MemoryRecord, ...],
-            retrieved_ids: frozenset[str],
-        ) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
-            applications.append(len(memories))
-            return super().__call__(context, memories, retrieved_ids)
-
-    counting = _Counting(speakable_attested_sources=frozenset())
+    # Patched on the class rather than subclassed: ADR-0226 §5's posture is read off
+    # the filter's exact type, and ``TurnSupply``'s members are ``@final`` precisely
+    # so that a subclass cannot claim a posture it does not keep. The subject is
+    # therefore the real object, instrumented.
+    monkeypatch.setattr(BoundedAudienceSupply, "__call__", counting)
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
     await memory.add(_belief("cited-1", "an earlier exchange"))
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
-    await _loop(memory, planner=planner).respond("billing schedule", narrow=counting)
+    await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
 
     assert applications == [2], "once, over the final supply of four groups"
 
@@ -1623,3 +1666,90 @@ async def test_no_caller_can_declare_an_unbounded_turn_bounded() -> None:
             narrow=_unbounded(),
             bounded_audience=True,  # type: ignore[call-arg]  # the point of the case
         )
+
+
+async def test_a_cancellation_inside_the_servicing_is_not_audited_as_a_completed_read() -> None:
+    """§9's counts are "taken over a servicing that completed", and this one did not.
+
+    A cancellation is not a ``MemoryStoreError``, so it passes through the servicer's
+    degradation and out of the turn — and §9's record is emitted from a ``finally``,
+    which is the whole point of it. Without the failure being recorded *before* the
+    await, that record would say a fired, serviced turn that returned nothing: a true
+    fire with no read under it, sitting in §8's novelty denominator and
+    indistinguishable from a hop whose citations had all expired.
+
+    The cancellation itself still propagates, unabsorbed: nothing here makes a
+    cancelled turn look like a turn.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await memory.add(_belief("cited-1", "an earlier exchange"))
+    planner = _SuspendingPlanner(memory, _hop("M1"))
+    loop = _loop(memory, planner=planner)
+
+    with structlog.testing.capture_logs() as captured:
+        turn = asyncio.ensure_future(loop.respond("billing schedule", narrow=_bounded()))
+        held = await planner.armed()
+        await held.reached()
+        turn.cancel()
+        held.release()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    record = _record(captured)
+    assert record["trigger"] == TriggerOutcome.FIRED.value
+    assert record["servicing"] == Servicing.SERVICED.value
+    assert record["failed"] is True
+    assert record["new"] == 0
+    assert record["returned"] == 0
+
+
+async def test_an_unexpected_failure_inside_the_servicing_is_recorded_as_a_failure() -> None:
+    """The same rule over the paths a store contract does not name.
+
+    ``MemoryStoreError`` is what the contract states and what §5 degrades; anything
+    else is a fault rather than a degradation and takes the turn down. What it must
+    not do is take it down while the audit says the read completed.
+    """
+
+    class _Faulty(FakeMemoryStore):
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+            del record_ids
+            msg = "fake: something no contract describes"
+            raise RuntimeError(msg)
+
+    memory = _Faulty(now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(RuntimeError, match="no contract describes"),
+    ):
+        await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+
+    record = _record(captured)
+    assert record["failed"] is True
+    assert record["returned"] == 0
+
+
+def test_the_two_postures_are_the_only_two_and_cannot_be_subclassed() -> None:
+    """ADR-0199 §1's closed question, closed mechanically (ADR-0226 §5).
+
+    The loop reads the channel's audience off the filter's **exact** type in order to
+    decide whether a request is serviced, so a subtype is not a third answer: a class
+    inheriting :class:`BoundedAudienceSupply` and overriding ``__call__`` to subtract
+    would be classified bounded and would put withheld records in the planner's own
+    prompt. ``@final`` is what stops one being written — `mypy` refuses the subclass
+    where it is declared, over ``src/`` and ``tests/`` alike — and the runtime test
+    declines it besides, which is the fail-closed direction.
+
+    A genuine third posture is a new *audience*, and ADR-0199 §1 puts that behind its
+    own decision rather than behind a subclass.
+    """
+    assert getattr(BoundedAudienceSupply, "__final__", False) is True
+    assert getattr(UnboundedAudienceSupply, "__final__", False) is True
+    assert set(get_args(TurnSupply.__value__)) == {
+        BoundedAudienceSupply,
+        UnboundedAudienceSupply,
+    }

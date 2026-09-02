@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.reads import (
+    ServicedRead,
     Servicing,
     TriggerOutcome,
     TurnReadAudit,
@@ -271,6 +272,15 @@ RESOLUTION_KINDS: tuple[MemoryKind, ...] = (
 #: ``MemoryStore.search``'s own default is the same number, which is the width this
 #: corpus already treats as "a page".
 _DEFAULT_RESOLUTION_LIMIT = 10
+
+
+#: What ADR-0226 §9's record says of a servicing that did not return.
+#:
+#: A cancellation, or any failure the servicer does not itself degrade, leaves the
+#: turn without a result to record — and §9's counts are "taken over a servicing that
+#: completed". So the failure fields are what such a turn carries, and every count is
+#: zero, which is exactly what §5's discard makes true of it.
+_INTERRUPTED: Final = ServicedRead(failed=True)
 
 
 def _narrowed(
@@ -740,12 +750,17 @@ class LearningLoop:
         # caller supplies alongside ``narrow`` is a pair a caller can *contradict* —
         # an unbounded supply declared bounded would service a request on the one
         # channel §5 refuses, and subtract after planning rather than before it —
-        # and §5 is a fail-closed clause. `TurnSupply` is a closed union of exactly
-        # two classes, because ADR-0199 §1 "fixes the posture as a function of the
-        # output channel's audience alone", so this test is total and stays total by
-        # that ADR's own clause. Anything else — ``None``, or a filter a test
-        # supplies — has declared no posture, and §5 refuses rather than guesses.
-        bounded_audience = isinstance(narrow, BoundedAudienceSupply)
+        # and §5 is a fail-closed clause.
+        #
+        # **Exact, not `isinstance`, and `TurnSupply`'s members are `@final`.** What
+        # is being asked is "which of ADR-0199 §1's two postures is this", and §1
+        # makes that a closed question: a subtype is not a third answer to it. A
+        # subclass overriding `__call__` to subtract would be classified bounded and
+        # would put withheld records in the planner's own prompt, so the runtime test
+        # declines it and `@final` stops it being written at all. Every other filter —
+        # `None`, or one a test supplies — has declared no posture, and §5 refuses
+        # rather than guesses, which is the same fail-closed direction.
+        bounded_audience = type(narrow) is BoundedAudienceSupply
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -784,6 +799,20 @@ class LearningLoop:
                 # `TurnResult` is constructed. `memories` here is the very
                 # sequence the planner was passed, which is both §3's label space
                 # and §7's deduplication set.
+                # Marked failed *before* the await and overwritten by what the
+                # servicing returns, so an await that never returns cannot be
+                # audited as a completed servicing (ADR-0226 §9). A cancellation
+                # is the case that matters — it is not a `MemoryStoreError`, so it
+                # passes through the servicer's degradation and out of this turn,
+                # and `respond`'s `finally` would otherwise record a fired,
+                # serviced, zero-yield turn: a true fire with no read under it,
+                # counted in §8's novelty denominator. This says the honest thing
+                # instead, and says it about *every* non-returning path rather than
+                # about the ones an author thought of. `failed_after_read_returned`
+                # stays `False` because nothing here knows otherwise, which is the
+                # conservative half of §9's pair — and §5 discarded whatever had
+                # returned in any case.
+                audit.read = _INTERRUPTED
                 audit.read = await service_read_request(self._memory, request, supply=memories)
                 # §7: appended whole after the episodic supplement, never
                 # interleaved. The three groups keep their positions, their order
