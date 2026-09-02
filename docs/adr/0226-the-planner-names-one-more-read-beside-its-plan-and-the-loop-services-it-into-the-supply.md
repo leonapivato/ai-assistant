@@ -1185,7 +1185,7 @@ are absent in that window because the events they describe have not happened.
    correlation id is the only identifier on the event. Asserted over the emitted
    event's own fields, not over the redaction net.
 10. **A turn that fired and then failed still counts, and a turn that never judged
-    counts as neither.** Three cases, each emitting exactly one record. Two carry the
+    counts as neither.** Four cases, each emitting exactly one record. Two carry the
     fired fact and the servicing counts — a turn rejected for capacity, which
     `AssistantEngine` decides **after** the loop has planned and serviced, and a turn
     whose `PlanStore.save_plan` raises — and neither suppresses the record, so neither
