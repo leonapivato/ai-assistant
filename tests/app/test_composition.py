@@ -53,6 +53,7 @@ from ai_assistant.core.errors import (
     ReaderError,
     SourceNotGrantedError,
     TraceStoreError,
+    TranscriptArchiveError,
 )
 from ai_assistant.core.protocols import (
     ConnectionPurger,
@@ -1219,6 +1220,30 @@ async def test_build_engine_hands_capture_the_narrow_archive_seam(tmp_path: Path
         assert get_annotations(Engine.__init__)["archive"] == TranscriptArchive.__name__
     finally:
         await engine.aclose()
+
+
+async def test_closing_the_engine_closes_the_transcript_archive(tmp_path: Path) -> None:
+    """ADR-0225 §6 and §9 are jointly about the files, so the connection must close.
+
+    §6 closes the archive's file set to the database and the sidecars SQLite keeps
+    beside it, and §9 makes every one of them owner-only. A connection left open past
+    shutdown leaves a ``-wal`` holding transcript pages behind — the one residue those
+    two sections exist to prevent, and the kind of omission that is invisible until a
+    backup picks the file up.
+
+    Asserted through the store's own refusal rather than through the closer list,
+    because a list is a statement about wiring and this is a statement about the
+    connection.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    archive = engine._archive
+    assert isinstance(archive, SqliteTranscriptArchive)
+    assert await archive.size() is not None, "open before, so the refusal below means something"
+
+    await engine.aclose()
+
+    with pytest.raises(TranscriptArchiveError):
+        await archive.size()
 
 
 async def test_build_engine_reads_both_archive_settings_from_configuration(
