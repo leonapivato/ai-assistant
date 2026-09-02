@@ -23,6 +23,9 @@ from ai_assistant.core.types import (
     Goal,
     MemorySource,
     Provenance,
+    ReadAsk,
+    ReadKind,
+    ReadRequest,
     TimeOfDay,
 )
 from ai_assistant.testing import FakePlanner, FakePlanStore
@@ -74,6 +77,26 @@ class TestFakePlannerContract(PlannerContract):
     @pytest.fixture
     def planner(self) -> Planner:
         return FakePlanner(now=_fixed_now)
+
+    @pytest.fixture
+    def asking_planner(self) -> Planner | None:
+        """The fake arranged to ask for a read, so ADR-0226 §4's arms bind on it.
+
+        Both kinds at once, which is the widest emission the envelope admits — one
+        ask of each, the hop at its two-label cap (ADR-0226 §§1-2, §6). The labels
+        are the ones the suite's own supply would carry, though nothing here checks
+        that: §3 gives resolution to the loop, and a fake that filtered its own
+        emission would hide the drop §9's audit exists to count.
+        """
+        return FakePlanner(
+            now=_fixed_now,
+            read_request=ReadRequest(
+                asks=(
+                    ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1", "M2")),
+                    ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+                )
+            ),
+        )
 
 
 async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> None:

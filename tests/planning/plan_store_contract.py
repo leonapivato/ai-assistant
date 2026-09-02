@@ -37,6 +37,9 @@ from ai_assistant.core.types import (
     MemorySource,
     PlanStep,
     Provenance,
+    ReadAsk,
+    ReadKind,
+    ReadRequest,
     SkipReason,
     StepFailure,
     StepStatus,
@@ -75,7 +78,22 @@ def _goal(goal_id: str = "g1") -> Goal:
     )
 
 
-def _plan(plan_id: str = "p1", goal_id: str = "g1", *, steps: int = 1) -> ActionPlan:
+#: One read request of each of ADR-0226 §2's two kinds, for the export arms below.
+_READ_REQUEST = ReadRequest(
+    asks=(
+        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1", "M2")),
+        ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+    )
+)
+
+
+def _plan(
+    plan_id: str = "p1",
+    goal_id: str = "g1",
+    *,
+    steps: int = 1,
+    read_request: ReadRequest | None = None,
+) -> ActionPlan:
     return ActionPlan(
         id=plan_id,
         goal_id=goal_id,
@@ -84,6 +102,7 @@ def _plan(plan_id: str = "p1", goal_id: str = "g1", *, steps: int = 1) -> Action
             for index in range(1, steps + 1)
         ),
         created_at=_WHEN,
+        read_request=read_request,
     )
 
 
@@ -1127,6 +1146,43 @@ class PlanStoreContract:
         await self._started(store)
         export = await store.export()
         assert type(export).model_validate_json(export.model_dump_json()) == export
+
+    async def test_export_announces_the_shape_its_plans_carry(self, store: PlanStore) -> None:
+        """ADR-0226 §11 item 16: "both conforming ``PlanStore`` implementations export
+        the new version".
+
+        The version is a fact about the *document*, so it cannot be a producer's
+        claim (ADR-0039 §10) — and it is asserted here rather than only over the type
+        because a store is the thing that mints an export, and one that assembled a
+        document by hand could carry an ``ActionPlan`` with a ``read_request``
+        while labelling it as the shape before that field existed.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan(read_request=_READ_REQUEST))
+        export = await store.export()
+
+        assert export.schema_version == 3
+        assert export.plans[0].read_request == _READ_REQUEST
+
+    async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:
+        """The other half of item 16: the request survives serialisation intact.
+
+        An export is the artifact a user takes elsewhere, and ADR-0226 §4 makes the
+        request part of what the plan records — a document that carried the version
+        but dropped the field would announce a shape it does not have.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan(read_request=_READ_REQUEST))
+        export = await store.export()
+
+        restored = type(export).model_validate_json(export.model_dump_json())
+        assert restored == export
+        request = restored.plans[0].read_request
+        assert request is not None
+        assert {ask.kind for ask in request.asks} == {
+            ReadKind.CITATION_HOP,
+            ReadKind.SIGHTED_QUERY,
+        }
 
     async def test_deleting_a_goal_cascades(self, store: PlanStore) -> None:
         state = await self._started(store)

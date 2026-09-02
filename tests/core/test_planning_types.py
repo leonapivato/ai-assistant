@@ -13,9 +13,10 @@ from typing import Any
 
 import pytest
 from _int_str_digits import pinned_int_str_digits
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    MAX_HOP_LABELS,
     ActionPlan,
     ExecutionState,
     FrozenDict,
@@ -765,6 +766,197 @@ def test_deletion_reports_erased_indeterminate_steps() -> None:
     """The warning the contract promises the user has to survive in the result."""
     result = GoalDeletion(deleted=True, plans_removed=1, indeterminate_steps=("s1",))
     assert result.indeterminate_steps == ("s1",)
+
+
+# --- ADR-0226: the read request the planner may name beside its plan -----
+# §11 item 11: "Every condition §4 puts on the models is refused by the models,
+# arm for arm, and none of them is left to a caller." Each arm below is one of the
+# nine that section enumerates.
+
+
+def _hop(*labels: str) -> ReadAsk:
+    return ReadAsk(kind=ReadKind.CITATION_HOP, labels=labels)
+
+
+def _query(text: str = "which lender did you recommend?") -> ReadAsk:
+    return ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=text)
+
+
+def test_a_plan_asks_for_no_read_by_default() -> None:
+    """ADR-0226 §4's default, which is what makes the field additive.
+
+    ``None`` is the semantically correct answer for a planner that knows nothing of
+    this envelope, and no implementation reads it as an error, a degradation, or an
+    instruction to service a default read — so the *positive* fact asserted here is
+    that constructing a plan exactly as every existing caller does still produces
+    one that asked for nothing.
+    """
+    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
+
+    assert plan.read_request is None
+
+
+def test_a_request_carries_the_two_kinds_it_was_given() -> None:
+    """The positive case, so the refusals below cannot be satisfied by a model that
+    refuses everything."""
+    request = ReadRequest(asks=(_hop("M1", "M2"), _query()))
+
+    assert [ask.kind for ask in request.asks] == [ReadKind.CITATION_HOP, ReadKind.SIGHTED_QUERY]
+    assert request.asks[0].labels == ("M1", "M2")
+    assert request.asks[1].query == "which lender did you recommend?"
+
+
+def test_an_empty_request_is_refused() -> None:
+    """§11 item 11 names this arm as the one worth stating.
+
+    "A ``ReadRequest`` that admitted no ask would be a non-``None``
+    ``read_request``, which §8 defines as a turn the trigger fired on, servicing
+    nothing — a fire-rate numerator with no read under it." The instrument's
+    numerator is what this refusal protects, which is why the condition is the
+    model's and not a servicer's.
+    """
+    with pytest.raises(ValidationError, match="at least one ask"):
+        ReadRequest(asks=())
+
+
+def test_two_asks_of_one_kind_are_refused() -> None:
+    """ADR-0226 §2: "one emission may carry at most one ask of each kind".
+
+    Everything downstream is stated over one ask per kind — §6's budget and
+    cross-kind precedence, §7's deduplication, §9's per-kind counts — so a second
+    ask of a kind is not an emission with a defined servicing at all.
+    """
+    with pytest.raises(ValidationError, match="at most one ask of each kind"):
+        ReadRequest(asks=(_query("first"), _query("second")))
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t "], ids=["empty", "spaces", "whitespace"])
+def test_a_sighted_query_ask_refuses_a_blank_query(blank: str) -> None:
+    """§4: "a non-blank query for ``SIGHTED_QUERY``".
+
+    A blank query is a fired trigger with nothing to search for: it would reach
+    ``assemble_by_band`` as an empty relevance selection, spend the budget's
+    ordering and the audit's counts on a read that asked for nothing, and register
+    in the fire rate as a judged insufficiency.
+    """
+    with pytest.raises(ValidationError):
+        ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=blank)
+
+
+def test_a_sighted_query_ask_refuses_labels() -> None:
+    """§4: a ``SIGHTED_QUERY`` ask carries a query "and no labels".
+
+    An ask carrying both is two asks wearing one kind's name, and §6's precedence —
+    the hop first, the query second — has no answer for which half of it runs when.
+    """
+    with pytest.raises(ValidationError, match="must not carry labels"):
+        ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="where?", labels=("M1",))
+
+
+def test_a_sighted_query_ask_refuses_a_missing_query() -> None:
+    """The other half of the same clause: the kind's own argument is required."""
+    with pytest.raises(ValidationError, match="must carry a query"):
+        ReadAsk(kind=ReadKind.SIGHTED_QUERY)
+
+
+def test_a_citation_hop_ask_refuses_naming_no_label() -> None:
+    """§4: "at least one label for ``CITATION_HOP``"."""
+    with pytest.raises(ValidationError, match="at least one label"):
+        ReadAsk(kind=ReadKind.CITATION_HOP)
+
+
+def test_a_citation_hop_ask_refuses_a_query() -> None:
+    """§4: a ``CITATION_HOP`` ask carries labels "and no query"."""
+    with pytest.raises(ValidationError, match="must not carry a query"):
+        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",), query="where?")
+
+
+def test_a_citation_hop_ask_refuses_a_third_label() -> None:
+    """ADR-0226 §6's cap, which is a measurement and not a round number.
+
+    Two is "the figure the replay's own real arm used", so the 47.6% conversion it
+    measured is the conversion of this bound rather than of a looser one. Uncapped,
+    two labels at ``MAX_EVIDENCE_CITATIONS`` would be 128 records against a
+    ``get_many`` that is contractually uncapped.
+    """
+    assert MAX_HOP_LABELS == 2
+    with pytest.raises(ValidationError, match="at most 2 labels"):
+        _hop("M1", "M2", "M3")
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        pytest.param(ReadAsk, {"kind": "citation_hop", "labels": ["M1"], "extra": "x"}, id="ask"),
+        pytest.param(
+            ReadRequest,
+            {"asks": [{"kind": "citation_hop", "labels": ["M1"]}], "extra": "x"},
+            id="request",
+        ),
+    ],
+)
+def test_both_models_refuse_an_unknown_field(
+    model: type[BaseModel], payload: dict[str, Any]
+) -> None:
+    """``extra="forbid"`` on both, for the reason every boundary model here has it.
+
+    A member the contract does not name is a member no reader can be relied on to
+    carry, and on a document that outlives the code that wrote it — an
+    ``ActionPlan`` reaches ``PlanExport`` — a tolerated extra is a shape change
+    nothing announced.
+    """
+    with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
+        model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        pytest.param("ask", "labels", ("M9",), id="ask-labels"),
+        pytest.param("ask", "kind", ReadKind.SIGHTED_QUERY, id="ask-kind"),
+        pytest.param("request", "asks", (), id="request-asks"),
+    ],
+)
+def test_both_models_refuse_mutation_after_construction(
+    target: str, field: str, value: object
+) -> None:
+    """A plan is an audit record all the way down (ADR-0014 §2, ADR-0068).
+
+    ``frozen=True`` is why the emission cannot be edited after the plan records it:
+    a frozen plan holding a mutable request would let a later stage rewrite what the
+    planner asked for, after the decision the plan is a record of.
+    """
+    ask = _hop("M1")
+    subject: object = ask if target == "ask" else ReadRequest(asks=(ask,))
+
+    with pytest.raises(ValidationError):
+        setattr(subject, field, value)
+
+
+def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
+    """ADR-0226 §3's discard is the loop's, so the models must admit its inputs.
+
+    "A string that does not match the form, an *n* below 1 or beyond the sequence's
+    length, and a label whose record is no longer live all resolve to nothing … each
+    is discarded silently — **not an error**, not a park, not a degradation of the
+    turn — and recorded in §9's audit as dropped." A form check here would turn
+    exactly that population into a construction failure at the emitting seam, and
+    would empty the audit field that exists to count it.
+    """
+    for label in ("M0", "M999", "banana", "9d2f7a10-8c44-4f2b-9a1e-1c0b5d6e7f80"):
+        assert _hop(label).labels == (label,)
+
+
+def test_the_kind_vocabulary_is_the_two_the_decision_admits() -> None:
+    """§1: a closed enumeration, and §4: added to and never renamed.
+
+    Pinned by value as well as by name, because the serialised spelling is what a
+    ``PlanExport`` carries and what a later reader matches on — renaming a member
+    would silently invalidate every document already written.
+    """
+    assert {member.value for member in ReadKind} == {"sighted_query", "citation_hop"}
+    assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
+    assert ReadKind.CITATION_HOP.value == "citation_hop"
 
 
 # --- PlanExport ---------------------------------------------------------

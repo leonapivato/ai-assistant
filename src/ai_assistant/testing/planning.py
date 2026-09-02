@@ -49,7 +49,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, StepTransition
+    from ai_assistant.core.types import (
+        CurrentContext,
+        Goal,
+        MemoryRecord,
+        ReadRequest,
+        StepTransition,
+    )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
@@ -94,9 +100,21 @@ class FakePlanner:
     """A ``Planner`` that returns a scripted plan and records how it was called.
 
     Structurally implements :class:`~ai_assistant.core.protocols.Planner`.
+
+    **It can also ask for one more read** (ADR-0226 §4). ``read_request`` scripts
+    what the synthesised plan carries, so a consumer's tests can drive a turn on
+    which the trigger fired — and, left alone, the fake asks for nothing on every
+    turn, which is what a planner that knows nothing of the envelope does and what
+    every existing consumer of this fake keeps getting.
     """
 
-    def __init__(self, plan: ActionPlan | None = None, *, now: Clock = _utcnow) -> None:
+    def __init__(
+        self,
+        plan: ActionPlan | None = None,
+        *,
+        now: Clock = _utcnow,
+        read_request: ReadRequest | None = None,
+    ) -> None:
         """Create a planner.
 
         Args:
@@ -106,8 +124,26 @@ class FakePlanner:
                 Guarded by :func:`~ai_assistant.core.clock.checked_clock`
                 (ADR-0026 §7): ``ActionPlan.created_at``'s only producer today is
                 this fake, so a fake looser than the contract is the whole gap.
+            read_request: What the synthesised plan asks to have read beside it
+                (ADR-0226 §4), or ``None`` — the default, and the true answer for a
+                planner that asked for no read. This is the hook a consumer's tests
+                take to drive a turn on which the trigger fired, without standing a
+                model up.
+
+        Raises:
+            ValueError: If both ``plan`` and ``read_request`` are given. A scripted
+                plan carries its own ``read_request`` field, so honouring both would
+                give one value two sources that can disagree — and a fake that can
+                disagree with itself certifies nothing.
         """
+        if plan is not None and read_request is not None:
+            msg = (
+                "pass read_request only with a synthesised plan; a scripted plan carries "
+                "its own read_request field"
+            )
+            raise ValueError(msg)
         self._plan = plan
+        self._read_request = read_request
         self._clock = checked_clock(now, owner="FakePlanner")
         #: One entry per call: the goal, the context, the memories and the
         #: capability vocabulary the caller stated (ADR-0211 §9 item 3). The
@@ -154,6 +190,21 @@ class FakePlanner:
         (ADR-0211 §1) — and only frozen into a tuple, so a caller mutating the
         sequence it passed cannot rewrite what this records.
 
+        **The read request is scripted for the same reason and is not derived from
+        ``memories``** (ADR-0226 §8). Whether this turn's supply sufficed is the
+        judgement the trigger *is*, and a fake that judged it would be a fake with
+        an opinion the contract leaves to an implementation — and one whose fire
+        rate a consumer's test could not control. So the request is whatever the
+        constructor was handed, on every call, and a fake constructed without one
+        asks for no read on every turn: §4's default, which is exactly what a
+        planner that knows nothing of the envelope does.
+
+        **It emits the labels it was given, unfiltered.** Nothing here checks a
+        label against ``memories``: ADR-0226 §3 gives resolution to the loop, which
+        discards what does not resolve and records the drop in §9's audit, so a fake
+        that filtered its own emission would make that population unreachable from
+        a consumer's tests — which is precisely where it needs to be reachable.
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
@@ -171,6 +222,7 @@ class FakePlanner:
             steps=(),
             created_at=self._now(),
             rationale="synthesised by FakePlanner",
+            read_request=self._read_request,
         )
 
 
