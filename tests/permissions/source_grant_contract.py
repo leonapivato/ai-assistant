@@ -1094,6 +1094,41 @@ class SourceGrantStoreContract(SourceGrantsContract):
 
         assert [held.id for held in await store.export()] == ["g-1"]
 
+    @pytest.mark.parametrize("field", ["id", "source", "scope", "decided_at"])
+    async def test_a_record_missing_a_field_is_refused_not_a_raw_attribute_error(
+        self, store: SourceGrantStore, field: str
+    ) -> None:
+        """A ``__dict__`` a field was *deleted* from is the other half of that access.
+
+        The case above corrupts a record by **substituting** a value, which leaves
+        every attribute present. Deleting one is the other half — ``frozen=True``
+        refuses ``grant.scope = …`` but refuses neither ``__dict__["scope"] = …``
+        nor ``__dict__.pop("scope")`` — and it is where a refusal message composed
+        through ``grant.id`` stops being a refusal: the attribute is gone, so
+        building the message raises a bare ``AttributeError`` out of the handler
+        and this layer's error boundary leaks a builtin instead of saying the
+        record was refused.
+
+        **Bound on the shared suite rather than on one implementation**, which is
+        what #696 asks for in its own last paragraph: the case lived beside
+        ``SqliteSourceGrantStore`` only, so the canonical fake was held to nothing
+        here and carried the defect the real store had already closed — an
+        implementation and its double disagreeing about which exception a
+        corrupted record produces, which is precisely what ADR-0097 §10 makes a
+        shared suite for.
+
+        ``id`` is the sharp one because it is what the message names; the other
+        three are here so the answer is about the shape rather than about one
+        field.
+        """
+        corrupted = source_grant(SOURCE, grant_id="g-1")
+        object.__getattribute__(corrupted, "__dict__").pop(field)
+
+        with pytest.raises(InvalidGrantError, match="not a valid record"):
+            await store.record(corrupted)
+
+        assert await store.export() == []
+
     async def test_the_stored_snapshot_is_detached_from_the_caller(
         self, store: SourceGrantStore
     ) -> None:

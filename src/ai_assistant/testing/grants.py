@@ -222,15 +222,30 @@ class _GrantLog:
         Hardening past that is cheap here and is taken, but it is not a property
         any store can carry to the end.
 
+        **The refusal names the id out of the same mapping**, never through
+        ``grant.id``, which is ``SqliteSourceGrantStore._rebuilt``'s rule copied
+        here rather than restated (#696). A record whose ``__dict__`` is missing a
+        field — the deletion beside the substitution this validation exists to
+        catch — has no ``id`` attribute at all, so composing the message from one
+        raises a bare ``AttributeError`` out of the handler and replaces the
+        refusal with a builtin escaping the seam's error boundary. That is worse
+        in a *fake* than in the store: this is the double every consumer's driver
+        tests are written against, and an implementation and its canonical double
+        disagreeing about which exception a corrupted record produces is exactly
+        what a shared suite exists to prevent (ADR-0097 §10). ``fields.get``
+        answers ``None`` for the field that is gone and still names the record
+        when it is present, which is the whole of what the message is for.
+
         Raises:
             InvalidGrantError: If the record does not satisfy its own model, if
                 its id is already recorded, if it grants a source that already has
                 a live grant, or if it revokes and fails any of §4's invariants.
         """
+        fields = dict(object.__getattribute__(grant, "__dict__"))
         try:
-            snapshot = SourceGrant.model_validate(dict(object.__getattribute__(grant, "__dict__")))
+            snapshot = SourceGrant.model_validate(fields)
         except ValidationError as exc:
-            msg = f"grant {grant.id!r} is not a valid record: {exc}"
+            msg = f"grant {fields.get('id')!r} is not a valid record: {exc}"
             raise InvalidGrantError(msg) from exc
         if any(held.id == snapshot.id for held in self._records):
             msg = (
