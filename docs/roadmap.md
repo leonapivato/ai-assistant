@@ -444,12 +444,14 @@ it found, are on #1844 rather than here.
   planner names a query; the loop runs `assemble_by_band` and appends — #1732's
   instance) and a **citation hop** (the planner names a belief it can see; the
   loop follows that record's own `Provenance.evidence`). The trigger is judged
-  sufficiency (#838's middle layer), defined so its precision and recall are a
-  per-turn number. Outward fetch is named and deferred, and the adjacent ground
-  is named rather than half-decided: structured keys (#1874), hybrid search
-  (ADR-0006 §5), the archive fetch (ADR-0225 §12). It changes the planner seam,
-  so the contract ADR lands alone first and the implementation follows (golden
-  rule 5); the batch is #1909.
+  sufficiency (#838's middle layer), defined so that every turn records what its
+  precision and recall are computed from. Outward fetch is named and deferred,
+  and the adjacent ground is named rather than half-decided: structured keys
+  (#1874), hybrid search (ADR-0006 §5), the archive fetch (ADR-0225 §12). It
+  changes the planner seam, so the contract ADR lands alone first and the
+  implementation follows (golden rule 5): it is the planner-requested second
+  retrieval ADR-0208 §8 defers to #1732 by name, and §1's one-site clause is not
+  read as prejudging it in either direction. The batch is #1909.
   *Exit: a cross-conversation reply-vocabulary question ("which lender did you
   recommend?") answers through the hop; the trigger's precision and recall are
   on the record; and a turn whose supply sufficed pays no extra read.*
