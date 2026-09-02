@@ -853,6 +853,12 @@ async def test_cancelling_the_assembling_task_propagates_past_a_suppressing_sour
     assert not provider_module._abandoned
 
 
+#: The cause :class:`_RequiredCancellingSource` chains onto its ``CancelledError``.
+#: A distinct object, so the assertion below is about *this* exception surviving
+#: the propagation rather than about a cause of the right shape (#326).
+_CANCELLATION_CAUSE = RuntimeError("what actually cancelled the source")
+
+
 class _RequiredCancellingSource:
     """A required source whose ``contribute()`` raises ``CancelledError`` itself.
 
@@ -860,6 +866,9 @@ class _RequiredCancellingSource:
     treat as a raised exception — so the assembler must scan for a cancelled task
     explicitly or a suppressing sibling holds it forever (a regression caught in
     review of the issue #231 fix).
+
+    It raises ``from`` :data:`_CANCELLATION_CAUSE` so the propagated exception
+    carries a cause a reconstruction would lose (#326).
     """
 
     required = True
@@ -869,7 +878,7 @@ class _RequiredCancellingSource:
         return "cancels"
 
     async def contribute(self) -> Mapping[str, object]:
-        raise asyncio.CancelledError("source cancelled mid-flight")
+        raise asyncio.CancelledError("source cancelled mid-flight") from _CANCELLATION_CAUSE
 
 
 class _OtherRequiredFailingSource:
@@ -895,8 +904,8 @@ async def test_a_required_source_ending_in_cancellation_still_drains_and_propaga
     required source raising ``CancelledError`` beside a source that suppresses
     cancellation would hang the assembler. Looping on ``FIRST_COMPLETED`` and
     treating the cancelled task as terminal drains the sibling within the budget
-    and propagates the cancellation — with its payload intact, exactly as
-    ``gather`` did, not blanked into a fresh ``CancelledError``.
+    and propagates the cancellation — with its payload *and its cause* intact,
+    exactly as ``gather`` did, not blanked into a fresh ``CancelledError``.
     """
     budget = 0.05
     monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
@@ -911,6 +920,12 @@ async def test_a_required_source_ending_in_cancellation_still_drains_and_propaga
     elapsed = time.monotonic() - started
 
     assert excinfo.value.args == ("source cancelled mid-flight",)  # payload preserved, not blanked
+    # The cause too, which the payload assertion alone does not reach: an
+    # implementation that raised ``CancelledError(*original.args)`` would satisfy
+    # the line above and drop this. ``_first_failure`` recovers the source's own
+    # exception through ``task.result()``, so the object that arrives here is the
+    # one the source raised (#326).
+    assert excinfo.value.__cause__ is _CANCELLATION_CAUSE
     assert elapsed < budget + 0.5  # bounded by the drain, not hung on the sibling
     assert stubborn.cancels >= 1
     assert len(provider_module._abandoned) == 1
