@@ -39,6 +39,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
+    TranscriptArchiveError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
@@ -55,6 +56,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     Provenance,
+    TranscriptEntry,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +64,11 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import ConversationStore, MemoryStore
+    from ai_assistant.core.protocols import (
+        ConversationStore,
+        MemoryStore,
+        TranscriptArchiveWriter,
+    )
     from ai_assistant.core.types import (
         Conversation,
         ConversationExport,
@@ -193,15 +199,17 @@ class DataExport:
 class ConversationLifecycle:
     """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the three stores this stage spans, the switch that gates the third's write, the horizon both the episodes and the index are judged against, and the clock; every one is an injected collaborator or its own configuration
         self,
         *,
         conversations: ConversationStore,
         memory: MemoryStore,
+        archive: TranscriptArchiveWriter,
+        archive_enabled: bool,
         retention: timedelta | None,
         now: Clock = _utcnow,
     ) -> None:
-        """Wire the stage from the two injected stores.
+        """Wire the stage from the three injected stores.
 
         **``retention`` must be the value ``conversations`` was built with.** No
         type can say so, so it is a composition-root obligation of the same shape
@@ -224,6 +232,21 @@ class ConversationLifecycle:
                 retrieves from and the writer persists to, because a stage wired to
                 a second store would write episodes no retrieval could see and
                 destroy nothing the user was shown.
+            archive: The transcript archive, as its **narrow** seam (ADR-0225 §10).
+                A :class:`~ai_assistant.core.protocols.TranscriptArchiveWriter` and
+                never a ``TranscriptArchive``: §4's turn-path fence gives the one
+                component that writes an entry no way to read one back, and this
+                annotation is the whole of the narrowing —
+                ``self._archive.search(...)`` fails ``mypy`` whatever object the
+                composition root passed. **Required with no default**, in §10's own
+                words: "a composition that omits it does not type-check".
+            archive_enabled: Whether a captured turn is also archived (ADR-0225 §6's
+                ``transcript_archive_enabled``). It gates the **write alone**:
+                turning it off destroys nothing, and both destroys below still run,
+                so entries already held stay searchable and stay destroyable and a
+                configuration change is never a silent deletion. Required with no
+                default for ``retention``'s reason — the one place the default is
+                decided is ``core.config.Settings``.
             retention: The episodic horizon. ``None`` means "keep forever": no
                 ``expires_at`` is stamped and the retention reclaim is switched off
                 entirely rather than guessed at (ADR-0074 §7).
@@ -235,6 +258,8 @@ class ConversationLifecycle:
         """
         self._conversations = conversations
         self._memory = memory
+        self._archive = archive
+        self._archive_enabled = archive_enabled
         self._retention = retention
         self._clock = checked_clock(now, owner="ConversationLifecycle")
 
@@ -344,6 +369,7 @@ class ConversationLifecycle:
         conversation_id: str,
         *,
         content: str,
+        asked: str | None,
         outcome: str | None = None,
         disposition: ExchangeDisposition | None = None,
         parked: ParkedBinding | None = None,
@@ -381,6 +407,32 @@ class ConversationLifecycle:
         (ADR-0075 §2): a second attempt would take a second ``append``, allocating a
         second ordinal and a second id, and so record the same exchange twice.
 
+        **The archive entry lands between the index entry and the episode**
+        (ADR-0225 §2). The order is the protocol there too, and for a reason of its
+        own: ADR-0074 §3 accepts a failed episode write on the ground that "a missing
+        episode is the one outcome that loses nothing but the record", which is true
+        while the record's whole life is thirty days and less true once there is a
+        store whose job is to still hold the exchange in three years. Ordering the
+        archive last would make the long-lived copy the one most exposed to the very
+        failure §3 accepts. Ordering it first costs nothing §8 does not already
+        handle: the index entry still lands before either write, and a crash between
+        the two writes leaves exactly the state §3 already ratifies — with the
+        transcript intact.
+
+        **The archive write never fails a turn and never fails a capture** (§2). A
+        store failure writing it is logged and reported on this capture's own
+        degraded outcome exactly as a failed episode write is, the episode write
+        proceeds, and nothing is retried. Nor does a landed archive entry make a lost
+        episode undegraded: the archive makes the loss smaller and does not make it
+        disappear.
+
+        **No entry is written where the caller supplied no ``disposition``** (§10).
+        That caller is recording an exchange this system did not drive, and the
+        archive holds what this system's own capture recorded; coercing a member
+        would recreate for a parked turn exactly the ambiguity the field is carried
+        to prevent. ``archive_enabled`` set false likewise stops the write and
+        destroys nothing (§6).
+
         **The verification after the write is the fence, not the clock.** An append
         that succeeded before a deletion stamped the conversation is no evidence
         that it still exists when the episode write commits — the two are separate
@@ -394,6 +446,17 @@ class ConversationLifecycle:
             conversation_id: The conversation to record the turn in.
             content: The canonical text rendering of the exchange — what was asked
                 and how it turned out (ADR-0005 §1).
+            asked: **What the user said**, in their own words, unrewritten and
+                unrendered — the archive entry's user half (ADR-0225 §1). ``None``
+                where the pass received no user words at all, which includes the
+                resolution of a parked step: the utterance that parked was archived
+                at its own address by the pass that parked, and repeating it here
+                would render one sentence as though the user had said it twice.
+                **Handed to capture, not computed here** — capture judges nothing
+                (§4), and this method could not derive it anyway: ``content`` is a
+                rendering built for the observer and for retrieval, from which the
+                user's sentence is recoverable, if at all, by parsing a prefix this
+                system is free to change (ADR-0225 §1).
             outcome: **What the assistant said** — the composed reply, whole, as the
                 episode's own ``outcome`` (ADR-0221 §1). ``None`` where the pass
                 produced no reply, which is the five paths §1 enumerates; the caller
@@ -478,6 +541,15 @@ class ConversationLifecycle:
             _log.warning("conversation_capture_degraded", stage="append", exc_info=True)
             return CaptureReport(conversation_id=conversation_id, degraded=True)
 
+        # ADR-0225 §2: between the index entry and the episode. `archived` is what
+        # the verification below needs — it compensates an entry that landed, on
+        # every path including the one where the episode write then fails, because
+        # that path now has something to compensate where before it had nothing.
+        archived = await self._archive_turn(
+            turn, asked=asked, outcome=outcome, disposition=disposition
+        )
+        degraded = self._archive_owed(disposition) and not archived
+
         # The turn and the episode recording it carry **one** instant: the reading
         # rides back on the turn rather than being taken twice, so no clock
         # adjustment between the two writes can make them disagree.
@@ -501,16 +573,23 @@ class ConversationLifecycle:
             # failed turn; rolling the index entry back would lose the only durable
             # record that the exchange happened at all.
             _log.warning("conversation_capture_degraded", stage="episode", exc_info=True)
-            # The **id is still reported**, degraded though the capture is
-            # (ADR-0205 §1): the index row landed and it is what carries the
-            # delivery, so a device reporting on this turn later reaches a row that
-            # exists. What did not land is the episode, which every reader already
-            # renders as a gap.
-            return CaptureReport(
-                conversation_id=conversation_id, episode_id=turn.episode_id, degraded=True
-            )
+            if not archived:
+                # The **id is still reported**, degraded though the capture is
+                # (ADR-0205 §1): the index row landed and it is what carries the
+                # delivery, so a device reporting on this turn later reaches a row
+                # that exists. What did not land is the episode, which every reader
+                # already renders as a gap. Nothing was written that a compensation
+                # could reach, so this path still returns without verifying.
+                return CaptureReport(
+                    conversation_id=conversation_id, episode_id=turn.episode_id, degraded=True
+                )
+            # ADR-0225 §2: the verification runs whenever **either** write landed.
+            # An archive entry stands at this address, so a conversation stamped
+            # underneath this capture has something to compensate here that it did
+            # not have before.
+            return await self._verify(turn, wrote_episode=False, wrote_entry=True, degraded=True)
 
-        return await self._verify(turn)
+        return await self._verify(turn, wrote_episode=True, wrote_entry=archived, degraded=degraded)
 
     async def record_delivery(
         self, conversation_id: str, report: SpokenDeliveryReport
@@ -561,33 +640,140 @@ class ConversationLifecycle:
             _log.warning("spoken_delivery_unrecorded", stage="record_delivery", exc_info=True)
             return None
 
-    async def _verify(self, turn: ConversationTurn) -> CaptureReport:
-        """Destroy the episode just written if its conversation is gone (§8).
+    def _archive_owed(self, disposition: ExchangeDisposition | None) -> bool:
+        """Whether this capture owes the archive an entry at all (ADR-0225 §6, §10).
+
+        Two conditions and no others: the archive is switched on, and the caller
+        supplied a disposition. A caller that supplies none is recording an exchange
+        this system did not drive, and the archive holds what this system's own
+        capture recorded.
+        """
+        return self._archive_enabled and disposition is not None
+
+    async def _archive_turn(
+        self,
+        turn: ConversationTurn,
+        *,
+        asked: str | None,
+        outcome: str | None,
+        disposition: ExchangeDisposition | None,
+    ) -> bool:
+        """Write this turn's transcript entry; report whether one landed (§1, §2).
+
+        **The entry is built from values handed here and from no rendering** (§1).
+        ``asked`` is the user's own words as the call site threaded them, ``outcome``
+        is the composed reply this capture is already storing whole, and no part of
+        ``content`` reaches the archive: not the plan rationale, not the confirmation
+        line, not the tool line.
+
+        The address is the episode's own id, which
+        :meth:`~ai_assistant.core.protocols.ConversationStore.append` derived and
+        returned on the turn (§3) — this stage mints nothing and predicts nothing —
+        and the conversation and ordinal ride along as §1's grouping fields.
+
+        Returns:
+            Whether an entry now stands at this turn's address. ``False`` where none
+            was owed, and ``False`` where the write failed — the caller distinguishes
+            the two through :meth:`_archive_owed`, because only the second degrades
+            the capture.
+        """
+        if not self._archive_owed(disposition):
+            return False
+        entry = TranscriptEntry(
+            address=turn.episode_id,
+            conversation_id=turn.conversation_id,
+            ordinal=turn.ordinal,
+            occurred_at=turn.occurred_at,
+            asked=asked,
+            replied=outcome,
+            # Narrowed by `_archive_owed` above, which is what `disposition is not
+            # None` there buys: the field is required and carries no `None` (§10).
+            disposition=disposition,  # type: ignore[arg-type]
+        )
+        try:
+            await self._archive.append(entry)
+        except TranscriptArchiveError:
+            # §2: never fails a turn, never fails a capture, never retried. Logged
+            # rather than swallowed, and the address is what the log carries — an
+            # entry's text reaches no log, trace or audit trail (§4, ADR-0004 §5).
+            _log.warning(
+                "conversation_capture_degraded",
+                stage="archive",
+                address=turn.episode_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _verify(
+        self,
+        turn: ConversationTurn,
+        *,
+        wrote_episode: bool,
+        wrote_entry: bool,
+        degraded: bool,
+    ) -> CaptureReport:
+        """Destroy what this capture wrote if its conversation is gone (§8).
 
         §8's compensation has exactly one trigger, the one the ordering cannot rule
         out: an append that *succeeded* before the conversation was stamped, whose
-        episode write lands after.
+        writes land after. ADR-0225 §2 widens what it destroys rather than when it
+        runs: the archive entry at that address goes too, so a conversation the user
+        deleted mid-capture leaves neither an episode nor a transcript.
+
+        **The archive entry is discarded first**, on §5's rule that the residue of a
+        partial failure must be the one the user can still reach and destroy: the
+        other order would leave retained text after a deletion the user was told
+        succeeded.
+
+        Args:
+            turn: The index row this capture allocated.
+            wrote_episode: Whether the episode write landed, so there is one to
+                compensate. ``False`` on the path where it raised.
+            wrote_entry: Whether an archive entry landed, likewise.
+            degraded: What this capture already knows about itself — a failed archive
+                write, which §2 reports here and which a standing conversation does
+                not clear.
         """
         try:
             standing = await self._conversations.get(turn.conversation_id)
         except ConversationStoreError:
-            # We cannot tell whether to compensate. The episode was written and,
-            # absent evidence otherwise, it stands — so the turn is **not** reported
-            # as unrecorded, which would be a false alarm. A conversation that was
-            # in fact stamped still has its tombstone, and the next sweep destroys
-            # this episode through it.
+            # We cannot tell whether to compensate. The writes went in and, absent
+            # evidence otherwise, they stand — so the turn is **not** reported as
+            # unrecorded, which would be a false alarm. A conversation that was in
+            # fact stamped still has its tombstone, and the next sweep destroys this
+            # episode and this entry through it.
             _log.warning("conversation_capture_unverified", stage="verify", exc_info=True)
-            return CaptureReport(conversation_id=turn.conversation_id, episode_id=turn.episode_id)
+            return CaptureReport(
+                conversation_id=turn.conversation_id,
+                episode_id=turn.episode_id,
+                degraded=degraded,
+            )
         if standing is not None:
-            return CaptureReport(conversation_id=turn.conversation_id, episode_id=turn.episode_id)
+            return CaptureReport(
+                conversation_id=turn.conversation_id,
+                episode_id=turn.episode_id,
+                degraded=degraded,
+            )
 
-        try:
-            await self._memory.delete(turn.episode_id)
-        except MemoryStoreError:
-            # §9.6: the turn still returns its answer and the failure is reported
-            # rather than swallowed. What is left is an orphan the tombstone's own
-            # sweep will find, for as long as the grace holds.
-            _log.warning("conversation_capture_compensation_failed", exc_info=True)
+        if wrote_entry:
+            try:
+                await self._archive.discard(turn.episode_id)
+            except TranscriptArchiveError:
+                _log.warning(
+                    "conversation_capture_compensation_failed",
+                    stage="archive",
+                    address=turn.episode_id,
+                    exc_info=True,
+                )
+        if wrote_episode:
+            try:
+                await self._memory.delete(turn.episode_id)
+            except MemoryStoreError:
+                # §9.6: the turn still returns its answer and the failure is reported
+                # rather than swallowed. What is left is an orphan the tombstone's own
+                # sweep will find, for as long as the grace holds.
+                _log.warning("conversation_capture_compensation_failed", exc_info=True)
         return CaptureReport(conversation_id=turn.conversation_id, degraded=True)
 
     def _episode(  # noqa: PLR0913 — the turn, the rendering, the reply, what became of the pass, the instant both writes share, the disclosure evaluation, the modality and the origin mark; every one is a distinct fact about the turn being recorded
@@ -753,6 +939,9 @@ class ConversationLifecycle:
             MemoryStoreError: If an episode could not be destroyed. The tombstone
                 stands and the next sweep finishes the job; reporting success over
                 content the user asked to be gone would be the worse failure.
+            TranscriptArchiveError: If the transcript could not be destroyed, which
+                aborts step 2 before any episode is deleted (ADR-0225 §5). The
+                tombstone stands here too, for the same reason.
         """
         stamped = await self._conversations.stamp_deleted(conversation_id)
         try:
@@ -802,17 +991,42 @@ class ConversationLifecycle:
             cursor = batch[-1]
 
     async def _finish_deletion(self, conversation_id: str) -> bool:
-        """Destroy every episode the index names, then ask for the drop (§8).
+        """Destroy this conversation's transcript and episodes, then ask for the drop (§8).
 
         Idempotent by re-walking: nothing removes an index row until the record is
         dropped, so a run that dies part-way is re-run from the beginning and every
         delete it repeats is a no-op on an id already gone.
 
+        **The archive discard is the first action of §8's step 2** (ADR-0225 §5),
+        before any episode is deleted, on the rule §5 draws from ADR-0074 §8's own
+        third mitigation: the residue of a partial failure must be the one the user
+        can still reach and destroy. A crash after it leaves *records* present, which
+        ``forget`` and this very sweep destroy on the next attempt; the other order
+        would leave retained text after a deletion the user was told succeeded.
+
+        **A discard that raises aborts the call here, and no clause of §8 changes.**
+        Every episode the index names still resolves, so step 3's own condition is
+        unmet by §8's own terms — the tombstone survives and the reclaim re-runs the
+        whole of step 2, this discard included, in the deleting call, at engine start
+        and later on the hub's schedule. No third conjunct is added to step 3.
+
+        **A second run finding the archive already empty is the conforming answer.**
+        ``discard_conversation`` destroys what it matches or nothing and returns zero
+        for a conversation with no entries (ADR-0225 §5), so the run that follows a
+        ``MemoryStore.delete`` failure part-way through step 2 carries the remaining
+        episode deletions through to the drop rather than treating the zero as an
+        error.
+
         Returns:
             Whether the record was dropped. ``False`` while the grace still holds —
             the tombstone is deliberately kept alive past the deletion so a capture
             that commits and then dies is still swept.
+
+        Raises:
+            TranscriptArchiveError: If the transcript could not be destroyed. Nothing
+                below runs, and the tombstone stands.
         """
+        await self._archive.discard_conversation(conversation_id)
         cursor: str | None = None
         while True:
             batch = await self._conversations.episodes_to_purge(conversation_id, after_id=cursor)

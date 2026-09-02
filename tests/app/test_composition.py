@@ -1577,7 +1577,7 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns **thirteen** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
+    owns **fourteen** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
     that ruling by living inside the directory the instance lock already covers.
     ADR-0130 §9's notification store is the eighth and obeys it for the same
     reason: inside the directory the instance lock already covers, opened by the
@@ -1586,7 +1586,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     the twelfth on the same terms again; and ADR-0197 §9's routing trail is the
     thirteenth, whose §9 states the residency clause explicitly for the reason
     ADR-0185 §9 gave — "a new store which omitted to would be a store nobody had
-    classified".
+    classified". ADR-0225 §10's transcript archive is the **fourteenth** and obeys
+    the ruling on the same terms, and it is the store the ruling matters most for:
+    it holds Tier 1 text for longer than anything else here and nothing but the
+    user reads it (§4).
 
     **The count in this docstring said "eight" while the list below named ten**,
     which is exactly the hazard ADR-0123's Context records — "the count in the most
@@ -1639,6 +1642,15 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # names is destroyed (ADR-0185 §2's ground).
             "routing.db",
             "traces.db",
+            # ADR-0225 §10's transcript archive, the fourteenth and the thirteenth
+            # that is Tier 1: an entry holds what the user said and what the
+            # assistant said, verbatim. **A file of its own rather than a table in
+            # ``memory.db``** (§10, on ADR-0119 §6's reasoning): a separate file is
+            # what makes the reach of every whole-store operation a decided question
+            # instead of an accident of which tables share a connection —
+            # ``MemoryStore.clear`` empties one and not the other, and §5 obliges
+            # whoever gives ``clear`` a surface to erase both in one act.
+            "transcripts.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
         # ADR-0004 §4 reaches the eighth exactly as it reaches the sixth: a
@@ -1655,6 +1667,12 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # "is the one clause of §9 that a working store can violate while every
         # other test passes".
         assert stat.S_IMODE((tmp_path / "routing.db").stat().st_mode) == 0o600
+        # And the fourteenth (ADR-0225 §9, ADR-0004 §4). ADR-0225 §9 calls this the
+        # gate it "cannot close" — the archive ships at the memory store's own
+        # at-rest baseline while holding the same class of content for longer — so
+        # the one protection it does have is asserted rather than assumed here, and
+        # `tests/archive/` asserts it again over the sidecars and over a reopen.
+        assert stat.S_IMODE((tmp_path / "transcripts.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
 

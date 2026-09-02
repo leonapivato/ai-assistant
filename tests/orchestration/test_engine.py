@@ -144,6 +144,8 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
+    FakeTranscriptArchive,
+    FakeTranscriptArchiveWriter,
     ObservationGate,
     evaluation_trace,
     source_grant,
@@ -529,6 +531,8 @@ class Harness:
             memory=self.memory,
             retention=RETENTION,
             now=lambda: AT,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.handles = iter(f"tok-{n}" for n in range(1, 100))
@@ -726,6 +730,7 @@ class Harness:
             # the call: ADR-0207's park cases pin that the spoken path acquired no
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
+            archive=FakeTranscriptArchive(),
         )
 
 
@@ -1539,6 +1544,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
+        archive=FakeTranscriptArchive(),
     )
 
 
@@ -1659,6 +1665,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
+        archive=FakeTranscriptArchive(),
     )
     pending = await facade.pending_confirmations()
     assert len(pending) == 1
@@ -1723,6 +1730,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
+        archive=FakeTranscriptArchive(),
     )
     parked = await facade_a.converse("send it", timeout=PATIENT)  # A parks in-process (g-1)
     assert parked.step is not None
@@ -1778,6 +1786,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
+        archive=FakeTranscriptArchive(),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
     assert first.step is not None
@@ -1921,6 +1930,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
+        archive=FakeTranscriptArchive(),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
 
@@ -2676,6 +2686,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         observation=harness.observation,
         questions=harness.questions,
         now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=1),
+        archive=FakeTranscriptArchive(),
     )
 
     report = await facade.purge_expired()
@@ -3114,6 +3125,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
+        archive=FakeTranscriptArchive(),
     )
 
     first = await engine.converse("send it", timeout=PATIENT)
@@ -3187,6 +3199,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
+        archive=FakeTranscriptArchive(),
     )
 
     calls = [asyncio.ensure_future(engine.converse("send it", timeout=PATIENT)) for _ in range(3)]
@@ -3224,6 +3237,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             observation=harness.observation,
             questions=harness.questions,
             max_outstanding_confirmations=0,
+            archive=FakeTranscriptArchive(),
         )
 
 
@@ -3251,6 +3265,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             observation=harness.observation,
             questions=harness.questions,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
+            archive=FakeTranscriptArchive(),
         )
 
 
@@ -4343,7 +4358,9 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
 async def _one_captured_turn(harness: Harness) -> str:
     """Record one turn through the capture stage, so an episode exists to observe."""
     conversation = await harness.conversations.begin(None)
-    await harness.conversations.capture(conversation.id, content="the user said something")
+    await harness.conversations.capture(
+        conversation.id, content="the user said something", asked=None
+    )
     return conversation.id
 
 

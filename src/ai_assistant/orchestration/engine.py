@@ -216,6 +216,7 @@ if TYPE_CHECKING:
         SpendLedger,
         TraceRetention,
         TraceSink,
+        TranscriptArchive,
     )
     from ai_assistant.core.types import (
         AnswerOutcome,
@@ -1758,6 +1759,7 @@ class Engine:
         spend: SpendLedger,
         reads: SourceReadTrail,
         memory: MemoryStore,
+        archive: TranscriptArchive,
         deferrals: DeferralStore,
         traces: TraceRetention,
         trace_sink: TraceSink,
@@ -1863,6 +1865,23 @@ class Engine:
                 make the stage the seam for a question it has no part in. Wired to a
                 *second* store, a listing would show beliefs the assistant does not
                 use and ``forget`` would destroy nothing the user was shown.
+            archive: The transcript archive, as its **wide** seam (ADR-0225 §10) and
+                the **same** instance ``conversations`` was given the narrow face
+                of — a composition-root single-instance obligation of the same shape
+                as ``plans`` and ``trail``, because a façade wired to a second
+                archive would destroy nothing capture wrote. It carries no
+                ``append``, and the omission *is* the capability: §1 reserves writing
+                to capture, so ``self._archive.append(...)`` fails ``mypy`` here
+                whatever object was passed, and §4's package fence stops this module
+                naming the concrete class to get one back.
+
+                What this façade does with it in this change is one thing —
+                :meth:`forget` cascades the address-scoped discard §5 puts ahead of
+                the record's own destruction. The four reads, the conversation-scoped
+                destroy and the size report are operations of their own and are not
+                on this surface yet (ADR-0225 §14, lane C); this seam is reached from
+                the façade's user-facing and data-rights operations and from **no**
+                operation on the turn path (§4).
             deferrals: The durable deferred-question queue — the **same** instance
                 ``questions`` holds and the write stage enqueues into, a
                 composition-root single-instance obligation of the same shape as
@@ -2312,6 +2331,7 @@ class Engine:
         self._spend = spend
         self._reads = reads
         self._memory = memory
+        self._archive = archive
         self._deferrals = deferrals
         self._traces = traces
         self._trace_retention = trace_retention
@@ -4313,21 +4333,48 @@ class Engine:
         forget **the belief that id names**, not a guarantee that the bytes destroyed
         are the bytes rendered, and an adapter must not claim otherwise.
 
+        **It reaches the transcript archive first, and it attempts that discard
+        whether or not a live record stands at the id** (ADR-0225 §5). Both halves are
+        the decision. *First*, because the residue of a partial failure must be the
+        one the user can still reach and destroy: a failure between the two leaves a
+        record they can forget again rather than text they were told was gone. *Whether
+        or not*, because §3 keeps an entry's address valid after its episode has
+        expired, been reclaimed or been destroyed — so short-circuiting on an absent
+        memory record would make the transcript of an expired turn permanently
+        unreachable by this operation, which is ADR-0004 §6's right made conditional on
+        a horizon. A second attempt at the same id therefore reaches the entry however
+        the first one failed.
+
         Args:
             record_id: The id the user named, taken as opaque.
 
         Returns:
             ``True`` if a record was destroyed, ``False`` if no record had that id —
-            which the adapter renders and maps to an exit code (ADR-0073 §7).
+            which the adapter renders and maps to an exit code (ADR-0073 §7). The
+            archive discard does not enter the answer: the question this operation
+            answers is "was there a belief at that id", and reporting a destroyed
+            transcript as a destroyed record would tell the user something else.
 
         Raises:
             RuntimeError: If the engine is shutting down.
             MemoryStoreError: If memory cannot be written.
+            TranscriptArchiveError: If the transcript entry could not be destroyed.
+                The memory record is left standing, deliberately (ADR-0225 §5).
         """
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
-        return await self._tracked(self._memory.delete(named), "forget", checked=True)
+        return await self._tracked(self._forgotten(named), "forget", checked=True)
+
+    async def _forgotten(self, record_id: str) -> bool:
+        """Discard the transcript entry, then destroy the record (ADR-0225 §5).
+
+        One coroutine rather than two tracked calls, so the pair is a single unit of
+        in-flight work: a shutdown drain that let the discard land and cancelled the
+        deletion would produce exactly the residue §5 orders the sequence to avoid.
+        """
+        await self._archive.discard(record_id)
+        return await self._memory.delete(record_id)
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).
@@ -7008,6 +7055,10 @@ class Engine:
                 step=None,
                 resumed=False,
                 composed=composed,
+                # ADR-0225 §1's first case: the pass carried a turn, so the user's
+                # own words are that turn's goal statement — the value before
+                # `_exchange_of` folds it into a rendering.
+                asked=turn.goal.statement,
                 supplied_withheld=withheld,
                 modality=modality,
                 # ADR-0223 §3's first case on the branch §2 exists for: the pass
@@ -7073,6 +7124,8 @@ class Engine:
             resumed=False,
             parked=parked,
             composed=composed,
+            # ADR-0225 §1's first case, as on the branch above and for its reason.
+            asked=turn.goal.statement,
             supplied_withheld=withheld,
             modality=modality,
             # ADR-0223 §3's first case: this pass's own value, carried unchanged from
@@ -7566,6 +7619,9 @@ class Engine:
             resumed=True,
             composed=composed,
             routed=routed,
+            # ADR-0225 §1's third case: this pass received no user words at all — it
+            # is handed an opaque token and a boolean — so the entry carries none.
+            asked=None,
             # ADR-0204 §2's fifth clause: a pass that carries no turn carries
             # ``False``, and it is true of this episode rather than a default — its
             # content holds no goal statement and no plan rationale of any turn.
@@ -7616,6 +7672,10 @@ class Engine:
             routed=routed,
             utterance=utterance,
             spoken=spoken,
+            # ADR-0225 §1's second case: a routed pass threads its utterance, which
+            # is the user's own words for an episode that has no turn to read them
+            # off (ADR-0197 §10).
+            asked=utterance,
             # ADR-0221 §5's first case: this episode renders the utterance this pass
             # threads to the capture point, so the value is this pass's own —
             # `SPEECH` "whether or not that pass routed", which is what makes a routed
@@ -8294,6 +8354,16 @@ class Engine:
             step=step,
             resumed=True,
             composed=composed,
+            # **No user words**, and this is ADR-0225 §1's own clause rather than an
+            # absence of data: the parked turn is right here, and its utterance was
+            # archived at its own address by the pass that parked. Repeating it here
+            # would render one sentence as though the user had said it twice. The
+            # asymmetry with `modality` and `supplied_withheld` just below is
+            # deliberate — those are *retained* from the parked turn and applied
+            # unchanged, because they describe the rendering this episode carries;
+            # this field describes what the user said on *this* pass, and they said
+            # nothing.
+            asked=None,
             # The **parking turn's** value, not this pass's (ADR-0204 §2's fourth
             # clause). This pass retrieves nothing and evaluates nothing; the episode
             # it captures renders the parked turn's goal and plan, so what it is
@@ -8317,7 +8387,7 @@ class Engine:
             derived_from_external=parked.derived_from_external,
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
@@ -8325,6 +8395,7 @@ class Engine:
         step: StepOutcome | None,
         resumed: bool,
         composed: ComposedReply | None,
+        asked: str | None,
         supplied_withheld: bool,
         modality: Modality,
         derived_from_external: bool,
@@ -8391,6 +8462,26 @@ class Engine:
         ``_routed_exchange_of`` renders the utterance and a phrase for the route's
         outcome with no goal statement and no plan rationale of any turn in it.
 
+        **``asked`` is the user's own words, passed at every call site, and this
+        method neither computes nor derives it** (ADR-0225 §1) — a fourth field with
+        the shape ``supplied_withheld``, ``modality`` and ``derived_from_external``
+        already have. It is what the *transcript archive* keeps as the user's half of
+        the exchange, and it is threaded rather than read off ``content`` for the
+        reason §1 gives: ``content`` is ``_exchange_of``'s rendering, built for the
+        observer and for retrieval, and the user's sentence is recoverable from it —
+        if at all — only by parsing a prefix this system is free to change.
+
+        Its three cases are ADR-0221 §5's three capture cases and no other partition
+        is introduced. :meth:`_run_turn` passes ``turn.goal.statement`` on both its
+        branches, because the pass carried a turn; :meth:`_finish_route` passes the
+        ``utterance`` it already threads, because a routed pass has user material and
+        no turn to read it off; and :meth:`_capture_resumption` and
+        :meth:`_compose_and_capture_routed` each pass ``None``. The resumption's
+        ``None`` is §1's own clause rather than an absence of data — the parked turn
+        *is* in front of that method — because the utterance that parked was archived
+        at its own address by the pass that parked, and repeating it would render one
+        sentence as though the user had said it twice.
+
         **``spoken`` decides whether this capture writes a delivery at all** (ADR-0205
         §4). It is present exactly on a turn of ``converse_spoken``, which writes
         ``UNKNOWN`` unconditionally — the park, the ``reply`` of ``None`` and the
@@ -8434,6 +8525,7 @@ class Engine:
                 if routed is None
                 else _routed_exchange_of(utterance, resumed=resumed)
             ),
+            asked=asked,
             outcome=None if composed is None else composed.text,
             disposition=(
                 _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)

@@ -51,7 +51,13 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import Engine, RecoveryScan
 from ai_assistant.permissions import SqliteAuditTrail
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.testing import FakeAuditTrail, FakeIdentifiers, FakeIdentifierSpace, FakePlanStore
+from ai_assistant.testing import (
+    FakeAuditTrail,
+    FakeIdentifiers,
+    FakeIdentifierSpace,
+    FakePlanStore,
+    FakeTranscriptArchive,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -870,6 +876,7 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
         observation=harness.observation,
         questions=harness.questions,
         recovery=scan,
+        archive=FakeTranscriptArchive(),
     )
 
 

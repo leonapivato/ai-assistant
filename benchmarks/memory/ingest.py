@@ -447,7 +447,14 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
         harness.clock.set(session.occurred_at)
         for exchange in exchanges_of(session):
             report = await harness.lifecycle.capture(
-                conversation.id, content=exchange.content, outcome=exchange.outcome
+                conversation.id,
+                content=exchange.content,
+                # ADR-0225 §1's user half. This corpus's `content` **is** the user's
+                # side rather than a rendering of it (see :class:`Exchange`), so it
+                # is the honest value here — and no entry is written anyway, since
+                # this call supplies no `disposition` (§10).
+                asked=exchange.content,
+                outcome=exchange.outcome,
             )
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1

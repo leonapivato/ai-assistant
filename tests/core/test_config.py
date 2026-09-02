@@ -1359,6 +1359,15 @@ def test_every_duration_setting_is_discovered() -> None:
         # a ceiling slot nothing can ever free. The ``bool`` guard is the difference
         # between a fifteen-minute card and one dead a second after it is rendered.
         "routed_confirmation_ttl",
+        # ADR-0225 §6's archive horizon. Nullable, and its ``None`` is the
+        # **default** rather than a sentinel an operator has to spell — the
+        # deliberate opposite of ``episode_retention`` above, on the ground §6
+        # argues: §7's case for a finite episodic default is entirely about the read
+        # path, and the archive is not on it (§4), so a finite default here would
+        # reintroduce the loss the archive exists to remove at a second number nobody
+        # can argue for. The ``bool`` guard is the difference between "keep forever"
+        # and a one-second horizon that hides every entry on the next read.
+        "transcript_archive_retention",
     }
 
 

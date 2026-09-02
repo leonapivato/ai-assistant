@@ -42,7 +42,7 @@ from ai_assistant.orchestration.conversations import (
     CAPTURE_CONFIDENCE,
     ConversationLifecycle,
 )
-from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeTranscriptArchiveWriter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -103,6 +103,8 @@ class Wiring:
             memory=self.memory,
             retention=retention,
             now=self.clock,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         )
 
 
@@ -111,7 +113,7 @@ async def _capture_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
     conversation = await wiring.stage.begin(None)
     episodes: list[str] = []
     for index in range(count):
-        report = await wiring.stage.capture(conversation.id, content=f"turn {index}")
+        report = await wiring.stage.capture(conversation.id, content=f"turn {index}", asked=None)
         assert report.episode_id is not None, "the fixture must actually record its turns"
         episodes.append(report.episode_id)
     return conversation.id, episodes
@@ -169,6 +171,7 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
         outcome="Nothing needed doing, so I did nothing.",
         disposition=ExchangeDisposition.NO_ACTION_NEEDED,
         modality=Modality.SPEECH,
+        asked=None,
     )
 
     assert report.degraded is False
@@ -236,7 +239,9 @@ async def test_capture_defaults_the_two_new_fields_where_a_caller_states_neither
     wiring = Wiring()
     conversation = await wiring.stage.begin(None)
 
-    report = await wiring.stage.capture(conversation.id, content="The user asked: hello")
+    report = await wiring.stage.capture(
+        conversation.id, content="The user asked: hello", asked=None
+    )
 
     assert report.episode_id is not None
     stored = await wiring.memory.get(report.episode_id)
@@ -259,10 +264,10 @@ async def test_a_capture_on_a_resumed_conversation_still_writes_no_topics() -> N
     """
     wiring = Wiring()
     conversation = await wiring.stage.begin(None)
-    await wiring.stage.capture(conversation.id, content="The user asked: hello")
+    await wiring.stage.capture(conversation.id, content="The user asked: hello", asked=None)
 
     resumed = await wiring.stage.begin(conversation.id)
-    report = await wiring.stage.capture(resumed.id, content="The user asked: and again")
+    report = await wiring.stage.capture(resumed.id, content="The user asked: and again", asked=None)
 
     assert report.episode_id is not None
     stored = [
@@ -277,7 +282,7 @@ async def test_an_unset_retention_stamps_a_finite_expiry() -> None:
     wiring = Wiring(retention=7 * DAY)
     conversation = await wiring.stage.begin(None)
 
-    report = await wiring.stage.capture(conversation.id, content="x")
+    report = await wiring.stage.capture(conversation.id, content="x", asked=None)
 
     assert report.episode_id is not None
     stored = await wiring.memory.get(report.episode_id)
@@ -295,7 +300,7 @@ async def test_retention_set_to_none_stamps_no_expiry_at_all() -> None:
     wiring = Wiring(retention=None)
     conversation = await wiring.stage.begin(None)
 
-    report = await wiring.stage.capture(conversation.id, content="x")
+    report = await wiring.stage.capture(conversation.id, content="x", asked=None)
 
     assert report.episode_id is not None
     stored = await wiring.memory.get(report.episode_id)
@@ -332,7 +337,7 @@ async def test_an_episode_id_that_is_already_stored_fails_the_capture_loudly() -
     squatted = f"conv:{conversation.id}:1"
     await wiring.memory.add(_foreign_episode(squatted))
 
-    report = await wiring.stage.capture(conversation.id, content="mine")
+    report = await wiring.stage.capture(conversation.id, content="mine", asked=None)
 
     assert report.degraded is True
     # The **index row landed** before the episode write was attempted, and ADR-0205
@@ -357,7 +362,7 @@ async def test_an_append_refused_because_the_conversation_is_gone_writes_no_epis
     conversation = await wiring.stage.begin(None)
     await wiring.conversations.stamp_deleted(conversation.id)
 
-    report = await wiring.stage.capture(conversation.id, content="too late")
+    report = await wiring.stage.capture(conversation.id, content="too late", asked=None)
 
     assert report.degraded is True
     assert report.episode_id is None
@@ -382,7 +387,7 @@ async def test_a_memory_store_fault_leaves_the_turn_recorded_with_no_episode() -
     wiring = Wiring(memory=Faulting())
     conversation = await wiring.stage.begin(None)
 
-    report = await wiring.stage.capture(conversation.id, content="answered anyway")
+    report = await wiring.stage.capture(conversation.id, content="answered anyway", asked=None)
 
     assert report.degraded is True
     # The index entry stands: the turn happened, and the transcript shows a gap.
@@ -430,7 +435,7 @@ async def test_a_deletion_landing_mid_write_is_compensated() -> None:
     memory.conversations = wiring.conversations
     memory.target = conversation.id
 
-    report = await wiring.stage.capture(conversation.id, content="racing the deletion")
+    report = await wiring.stage.capture(conversation.id, content="racing the deletion", asked=None)
 
     assert stamped == [conversation.id], "the fixture must really have deleted mid-write"
     assert report.degraded is True
@@ -473,7 +478,7 @@ async def test_a_failing_compensating_delete_is_reported_rather_than_raised() ->
     memory.conversations = wiring.conversations
     memory.target = conversation.id
 
-    report = await wiring.stage.capture(conversation.id, content="racing the deletion")
+    report = await wiring.stage.capture(conversation.id, content="racing the deletion", asked=None)
 
     assert memory.refused == 1, "the compensation was attempted"
     assert report.degraded is True
@@ -640,6 +645,8 @@ async def test_history_degrades_rather_than_failing_the_turn() -> None:
         memory=Faulting(now=wiring.clock),
         retention=RETENTION,
         now=wiring.clock,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
 
     history = await broken.history(conversation_id)
@@ -911,10 +918,17 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
     first = SqliteConversationStore(path=path, now=clock, tombstone_grace=GRACE)
     try:
         stage = ConversationLifecycle(
-            conversations=first, memory=memory, retention=RETENTION, now=clock
+            conversations=first,
+            memory=memory,
+            retention=RETENTION,
+            now=clock,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         )
         conversation = await stage.begin(None)
-        report = await stage.capture(conversation.id, content="recorded before the crash")
+        report = await stage.capture(
+            conversation.id, content="recorded before the crash", asked=None
+        )
         assert report.episode_id is not None
         assert await first.stamp_deleted(conversation.id) is True
         # ...and here the process dies: no episode purged, no record dropped.
@@ -927,7 +941,12 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
     reopened = SqliteConversationStore(path=path, now=clock, tombstone_grace=GRACE)
     try:
         restarted = ConversationLifecycle(
-            conversations=reopened, memory=memory, retention=RETENTION, now=clock
+            conversations=reopened,
+            memory=memory,
+            retention=RETENTION,
+            now=clock,
+            archive=FakeTranscriptArchiveWriter(),
+            archive_enabled=True,
         )
 
         assert await restarted.sweep_deletions() == 1
@@ -1036,14 +1055,24 @@ async def test_reclaim_judges_against_the_horizon_in_force_when_it_runs(
     conversations = RetunableStore(now=clock, retention=started_under, tombstone_grace=GRACE)
     memory = FakeMemoryStore(now=clock)
     started = ConversationLifecycle(
-        conversations=conversations, memory=memory, retention=started_under, now=clock
+        conversations=conversations,
+        memory=memory,
+        retention=started_under,
+        now=clock,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
     conversation = await started.begin(None)  # emptied by construction: no turn ever landed
 
     clock.advance(10 * DAY)
     conversations.retune(reclaimed_under)
     reclaiming = ConversationLifecycle(
-        conversations=conversations, memory=memory, retention=reclaimed_under, now=clock
+        conversations=conversations,
+        memory=memory,
+        retention=reclaimed_under,
+        now=clock,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
 
     assert await reclaiming.reclaim() == expected
@@ -1085,7 +1114,9 @@ async def test_a_turn_held_past_the_horizon_is_answered_but_not_recorded() -> No
     clock.advance(7 * DAY + MINUTE)  # ...and the turn outlasts the whole horizon
     assert await wiring.stage.reclaim() == 1
 
-    report = await wiring.stage.capture(conversation.id, content="answered, far too late")
+    report = await wiring.stage.capture(
+        conversation.id, content="answered, far too late", asked=None
+    )
 
     assert report.degraded is True
     assert report.episode_id is None
@@ -1225,10 +1256,12 @@ async def test_a_capture_and_a_deletion_of_one_conversation_serialise() -> None:
         memory=wiring.memory,
         retention=RETENTION,
         now=clock,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
 
     captured, _ = await asyncio.gather(
-        wiring.stage.capture(conversation_id, content="racing"),
+        wiring.stage.capture(conversation_id, content="racing", asked=None),
         other.delete(conversation_id),
     )
 
@@ -1265,7 +1298,7 @@ async def test_a_capture_landing_inside_the_grace_is_swept_and_one_after_it_is_t
 
     # After the record is dropped, a capture that commits has nowhere to record
     # itself: the append is refused, which is the loud half of the residue.
-    late = await wiring.stage.capture(conversation_id, content="far too late")
+    late = await wiring.stage.capture(conversation_id, content="far too late", asked=None)
     assert late.degraded is True
     assert late.episode_id is None
 
@@ -1289,9 +1322,13 @@ async def test_a_non_conforming_clock_degrades_the_capture_rather_than_failing_t
         memory=wiring.memory,
         retention=RETENTION,
         now=lambda: datetime(2026, 7, 28, 9, 0),  # noqa: DTZ001 — naive, which is the fault
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
 
-    report = await unreadable.capture(conversation.id, content="answered, then unrecordable")
+    report = await unreadable.capture(
+        conversation.id, content="answered, then unrecordable", asked=None
+    )
 
     assert report.degraded is True
     assert report.episode_id is None

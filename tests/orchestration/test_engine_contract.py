@@ -140,6 +140,8 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
+    FakeTranscriptArchive,
+    FakeTranscriptArchiveWriter,
 )
 from ai_assistant.testing.grants import source_grant
 from ai_assistant.tools.registry import InMemoryToolRegistry
@@ -468,6 +470,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         memory=records,
         retention=RETENTION,
         now=conversation_clock,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
     )
     writer = FakeMemoryWriter(store=records, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
@@ -559,6 +563,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
+        archive=FakeTranscriptArchive(),
     )
 
 
