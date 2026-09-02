@@ -247,7 +247,6 @@ async def service_read_request(
     request: ReadRequest,
     *,
     supply: Sequence[MemoryRecord],
-    budget: int = READ_BUDGET,
 ) -> ServicedRead:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
@@ -271,6 +270,14 @@ async def service_read_request(
     enters the fourth group and reaches the turn" (§7). ADR-0204 §2's evaluation is
     the loop's, taken once over the final supply after this returns.
 
+    **The budget is not a parameter, and that is ADR-0226 §6 rather than an
+    inflexibility.** §6 fixes it at ten and rules that "no configuration, setting or
+    later lane makes the count configurable without the ADR that decides it"; a
+    keyword defaulted to :data:`READ_BUDGET` would be exactly such a setting,
+    reachable by any caller in this package and by any later lane, so the figure is
+    read from the constant here and nowhere else. §12 is where a decision to move it
+    goes.
+
     **A failure discards everything.** §5 makes the servicing all-or-nothing, so a
     ``MemoryStoreError`` from any read — the hop's ``get_many``, or any band of the
     query's composition — leaves the supply as planning saw it and returns a record
@@ -292,15 +299,12 @@ async def service_read_request(
             :meth:`~ai_assistant.core.protocols.Planner.plan` **on this call**, in
             order. It is both §3's label space and §7's deduplication set, and it is
             the same sequence for both because §3's label *is* a position in it.
-        budget: How many new records the whole emission may add. Defaults to
-            :data:`READ_BUDGET`; a caller passing another is a test, since §6 fixes
-            the figure and forbids making it configurable.
 
     Returns:
         The fourth group and §9's counts over it.
     """
     reads = _Reads()
-    union = _Union(held={record.id for record in supply}, budget=budget)
+    union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     # `ReadAsk`'s validator makes a `SIGHTED_QUERY` ask's query non-``None`` (§4),
@@ -329,7 +333,7 @@ async def service_read_request(
             # A query given the whole budget was not truncated by it, however much
             # more the store might have held; a query given less and filling every
             # slot of it is the case §6 says the audit records.
-            if allowed < budget and len(found) == allowed:
+            if allowed < READ_BUDGET and len(found) == allowed:
                 truncated.append(ReadKind.SIGHTED_QUERY)
     except MemoryStoreError:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
