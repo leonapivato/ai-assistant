@@ -641,6 +641,16 @@ inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 > **deduplicated out**, and the copy the supply already held keeps its position. This
 > is ADR-0158 §4's rule applied to a fourth group, for its reason.
 
+> **Normative.** **The deduplication ranges over the whole union and not only against
+> the pre-servicing supply.** A record **both kinds** reach — a belief's cited evidence
+> that the sighted query also returns, held by none of the three groups planning saw —
+> enters the fourth group **once**, at the position §6's precedence gives its first
+> arrival, which is the hop's; the second arrival is deduplicated out and **consumes no
+> slot of the budget**. A servicer seeding its seen set from the supply alone would
+> satisfy the clause above and still render one record twice and spend two of the ten
+> on it, which is exactly what the deduplicated union below forbids — so the rule is
+> stated over both directions rather than left to be inferred from the noun.
+
 > **Normative.** The serviced records enter `memories` as a **fourth group, appended
 > whole after the episodic supplement**, never interleaved. ADR-0074 §5's first
 > group, the retrieved beliefs and ADR-0158 §4's supplement keep their positions,
@@ -1214,8 +1224,13 @@ are absent in that window because the events they describe have not happened.
     `read_request`, which §8 defines as a turn the trigger fired on, servicing nothing
     — a fire-rate numerator with no read under it.
 12. **The budget and the bounds hold.** A servicing whose candidates exceed ten
-    returns ten, and a record already in the supply is deduplicated out with the
-    original keeping its position, counting against nothing. The ordering guarantee is
+    returns ten; a record already in the supply is deduplicated out with the original
+    keeping its position, counting against nothing; and a record **both kinds** return
+    — the hop's cited evidence that the query also finds, held by no group of the
+    pre-servicing supply — appears in the fourth group exactly once, at the hop's
+    position, with the query's copy consuming no slot of the ten. That third case is
+    the one a servicer deduplicating only against the pre-servicing supply gets
+    wrong. The ordering guarantee is
     asserted over a **fixed** candidate set: one request and one supply over a store
     that returns the same candidates twice produce the same group in the same order,
     and no test asserts that a concurrently-written store does — ADR-0113 §5's accepted
