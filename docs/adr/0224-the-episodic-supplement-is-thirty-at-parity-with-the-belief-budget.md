@@ -1,6 +1,6 @@
 # 224. The episodic supplement is thirty, at parity with the belief budget
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
