@@ -2587,12 +2587,8 @@ def device_enrol(
     verifier. Enrol the device again at the hub, which mints a new one in a single
     act and leaves the old verifying against nothing.
     """
-    credential = (
-        sys.stdin.readline().strip()
-        if credential_stdin
-        else typer.prompt("Credential", hide_input=True)
-    )
-    code = asyncio.run(_store_device_enrolment(hub_identity, credential))
+    read = _credential_from_stdin if credential_stdin else _prompt_for_credential
+    code = asyncio.run(_store_device_enrolment(hub_identity, read))
     raise typer.Exit(code)
 
 
@@ -2617,15 +2613,23 @@ def device_unenrol() -> None:
     raise typer.Exit(code)
 
 
-async def _store_device_enrolment(hub_identity: str, credential: str) -> int:
+async def _store_device_enrolment(hub_identity: str, read_credential: Callable[[], str]) -> int:
     """Load settings, store both values, and say what happened (ADR-0124 §6).
 
     One error boundary spanning every stage that can fail, as every other command
     here has (ADR-0042 §7): a keyring that is absent or locked, a value this device
-    will not hold, and a configuration that will not load are all rendered and
-    mapped to a non-zero exit code rather than escaping as a traceback.
+    will not hold, a standard input this credential may not be read from, and a
+    configuration that will not load are all rendered and mapped to a non-zero exit
+    code rather than escaping as a traceback.
+
+    **The credential is read here rather than by the caller** (#1146), which is what
+    puts it inside that boundary: both readers refuse by raising ``ValueError`` —
+    a stream still going past the widest admissible line, or a hidden prompt asked
+    for where standard input is not a terminal — and a refusal raised outside the
+    ``try`` would leave as a traceback instead of a rendered line.
     """
     try:
+        credential = read_credential()
         settings = load_settings()
         configure_logging(settings)
         await store_enrolment(
@@ -3585,7 +3589,8 @@ async def _tune_notifications(asked: _Tuning) -> int:
 def _prompt_for_credential() -> str:
     """Read the credential from the terminal without echoing it (I/O; ADR-0042 §6).
 
-    ``device enrol``'s prompt, one surface over, and hidden for the same reason: a
+    The one hidden prompt on this surface — ``connect``, ``reconnect`` and ``device
+    enrol`` all reach it (#1146) — and hidden for the reason each of them shares: a
     Tier 0 value must not be left on screen, in a scrollback buffer, or in whatever
     records a terminal session.
 
@@ -3642,13 +3647,17 @@ _CREDENTIAL_READ_LIMIT: Final[int] = SECRET_VALUE_MAX_BYTES + 2
 def _credential_from_stdin() -> str:
     r"""Read the credential from the first line of standard input (I/O; ADR-0042 §6).
 
-    **The line terminator is removed and nothing else is**, which is where this
-    parts company with ``device enrol``'s reader. That credential is minted by the
-    hub from an alphabet with no whitespace in it, so a ``strip()`` there cannot
-    change the value; an integration credential is whatever the service issued, and
+    **The line terminator is removed and nothing else is**, and that holds for every
+    credential this surface reads — ``connect``, ``reconnect`` and ``device enrol``
+    alike (#1146). An integration credential is whatever the service issued, and
     ADR-0125 §3 is explicit that "two spellings of a secret are two different
     secrets" and that helpfully removing a trailing character "would produce an
-    authentication failure nobody could reproduce by inspection". A leading space
+    authentication failure nobody could reproduce by inspection". A hub-minted
+    enrolment credential comes from an alphabet with no whitespace in it (ADR-0124
+    §6), so a ``strip()`` there could not change a *conforming* value — but that is
+    an invariant held by the minting alphabet rather than by this reader, spent at
+    the one moment a user cannot re-read the value, and a padded line is better
+    refused than silently repaired. A leading space
     in a pasted token is admissible and is kept — and so is a **trailing carriage
     return**, which is why the terminator is matched as a unit rather than stripped
     one character at a time. ``sys.stdin`` hands a final ``\r`` through untranslated
@@ -4562,7 +4571,7 @@ async def _drive_grant(
         if _is_pasteable(recorded.source)
         else f"Withdraw it any time with 'assistant revoke'. {_uncopyable('Its name')}"
     )
-    console.print(
+    _print_hint(
         f"[green]Granted.[/] I may now read [bold]{_safe(recorded.source)}[/] for "
         f"{_scope_phrase(recorded.scope)}. {withdrawal}"
     )
@@ -5803,6 +5812,36 @@ def _uncopyable(
         "no command here to copy — one written from what is on screen would name "
         f"something else. {remedy}"
     )
+
+
+def _print_hint(line: str) -> None:
+    """Print a line offering a command to copy, without folding the command (#1023).
+
+    **Rich wraps by inserting a real newline**, not by leaving the terminal to fold
+    the line, so a hint wider than the console arrives on screen as two lines and
+    pastes as *two commands*: ``assistant dismiss`` with no argument, and then the
+    argument as a command of its own. Where the argument is quoted the fold lands
+    inside the quotes instead, and the command then names a value with a newline in
+    it. Neither is exotic — no field a hint carries has a length limit, so the
+    trigger is a long value plus a narrow terminal.
+
+    ``soft_wrap`` is the same answer :class:`_StreamedReply` reaches for one screen
+    over and for the same reason: Rich emits the line as it stands and the terminal
+    folds it, which costs a word break mid-word and keeps the line *one* line to
+    anything that copies it. It is the whole of the decision, taken once here rather
+    than per site — an ``overflow`` or ``crop`` setting would instead **truncate** a
+    long hint, which turns a command that pastes wrongly into one that pastes
+    silently short.
+
+    **It is for the print that carries the command, and only that one.** A hint
+    embedded in a paragraph takes this too, because the fold hazard is the same
+    wherever the command sits; prose with no command in it keeps Rich's wrapping,
+    which reads better and has nothing to lose.
+
+    Args:
+        line: The hint, with its markup, exactly as it would have been printed.
+    """
+    console.print(line, soft_wrap=True)
 
 
 def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> bool:
@@ -7167,7 +7206,7 @@ def _render_question(question: Question) -> None:
         )
         # The step is numbered either way: what a lossy id costs is the copyable
         # command, never the recovery step it belongs to.
-        console.print(
+        _print_hint(
             f"  [dim]1.[/] Dispose of it: assistant forget-question {_argument(question.id)}"
             if _is_pasteable(question.id)
             else f"  [dim]1.[/] Dispose of it with 'assistant forget-question'. "
@@ -7178,7 +7217,7 @@ def _render_question(question: Question) -> None:
             "the correction is missing."
         )
     else:
-        console.print(
+        _print_hint(
             f"  [dim]Answer with:[/] assistant answer {_argument(question.id)} "
             f"--accept  [dim]|[/]  --reject"
             if _is_pasteable(question.id)
@@ -7495,7 +7534,7 @@ def _render_redeferral(outcome: AnswerOutcome) -> None:
                     "Its id", "'assistant answer' still takes it, given the exact bytes."
                 )
             )
-            console.print(f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] {offer}")
+            _print_hint(f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] {offer}")
         case QuestionState.DECLINED:
             console.print(
                 f"  [dim]That raises a question you had already declined:[/] {identifier} "
@@ -8251,7 +8290,7 @@ def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
             if _is_pasteable(chosen.source)
             else f"first with 'assistant revoke'. {_uncopyable('Its name')}"
         )
-        console.print(
+        _print_hint(
             "\n  [yellow]It is already granted[/] for "
             f"{_scope_phrase(chosen.live.scope)}. A source has one grant at a time, "
             f"so this will be refused — withdraw the current one {withdrawal}"
@@ -8356,7 +8395,7 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
             if _is_pasteable(record.source)
             else "assistant revoke"
         )
-        console.print(f"    [dim]withdraw with '{withdrawal}'[/]")
+        _print_hint(f"    [dim]withdraw with '{withdrawal}'[/]")
         console.print()
     console.print(
         "[dim]This is what you permitted, read from the record of your own "
@@ -8391,7 +8430,7 @@ def _render_unamendable_source(source: str, offered: tuple[GrantableSource, ...]
     withdrawal = (
         f"assistant revoke {_argument(source)}" if _is_pasteable(source) else "assistant revoke"
     )
-    console.print(
+    _print_hint(
         f"[dim]Withdrawing is not affected: '{withdrawal}' works whatever is "
         "configured. 'assistant granted' shows what you currently allow.[/]"
     )
@@ -8834,7 +8873,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
             )
         )
         return
-    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_argument(record.id)}")
+    _print_hint(f"  [dim]Deal with it:[/] assistant dismiss {_argument(record.id)}")
     if NotificationCondition.PERISHABLE in record.failed:
         console.print(
             "  [dim]No reach setting can make this one interrupt:[/] it names no "
@@ -8847,7 +8886,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
         and NotificationCondition.PERISHABLE not in record.failed
         else NotificationReach.OFF
     )
-    console.print(
+    _print_hint(
         f"  [dim]Tune the class:[/] assistant tune --class "
         f"{_argument(notification_class)} --reach {wanted.value}"
     )
@@ -10380,7 +10419,7 @@ def _render_connected(verb: str, record: ConnectedAccount) -> None:
         f"at revision {record.revision}."
     )
     console.print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
-    console.print(
+    _print_hint(
         "  [dim]Read it back any time with 'assistant connections'. Replace its "
         "credential with 'assistant reconnect', or end it with "
         f"{_reference_hint(record.reference, 'assistant disconnect')}[/]"
@@ -10527,7 +10566,7 @@ def _render_residual_credential(landed: str, exc: Exception, *, reference: str |
         "record names it, but it has not gone."
     )
     if reference is not None:
-        console.print(
+        _print_hint(
             f"  [dim]Run {_reference_hint(reference, 'assistant disconnect')} again to "
             "finish the deletion — it is safe to repeat.[/]"
         )
@@ -10628,7 +10667,7 @@ def _render_connections(connected: tuple[ConnectedAccount, ...]) -> None:
                 "    [yellow]Nothing is in progress and nothing will finish it.[/] "
                 "Run the act again with 'assistant reconnect', or end it below."
             )
-        console.print(
+        _print_hint(
             f"    [dim]end it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
         )
         console.print()

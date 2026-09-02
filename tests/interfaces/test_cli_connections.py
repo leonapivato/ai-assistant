@@ -829,11 +829,14 @@ def test_the_credential_read_from_stdin_is_not_stripped(
 ) -> None:
     """ADR-0125 §3: two spellings of a secret are two different secrets.
 
-    ``device enrol``'s reader calls ``strip()``, which is harmless there because
-    that credential is hub-minted from an alphabet with no whitespace in it. An
-    integration credential is whatever the service issued, and a client that
+    An integration credential is whatever the service issued, and a client that
     helpfully removed a trailing space would produce an authentication failure
     nobody could reproduce by inspection. Exactly one line terminator goes.
+
+    ``device enrol`` used to have a reader of its own that called ``strip()``,
+    defended on the ground that a hub-minted credential comes from an alphabet with
+    no whitespace in it. That is an invariant of the minting alphabet rather than of
+    the reader, and #1146 routed that command through this one instead.
     """
     engine = _ScriptedConnectionEngine()
     _wire(monkeypatch, engine)
