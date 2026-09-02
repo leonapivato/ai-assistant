@@ -1355,19 +1355,32 @@ class SqliteAuditTrail:
         return None
 
     def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
-        conn = self._conn
-        try:
+        """The open ``CONFIRM`` for this binding, read as **one** observation.
+
+        Two *dependent* reads: the first decides whether the binding is already
+        resolved, the second answers "then which ``CONFIRM`` is still open". Run
+        bare, they describe two states of the trail either side of a racing
+        commit — the first says unresolved, the second returns a ``CONFIRM`` that
+        has since been answered, and the caller is handed a park for a binding
+        that is already decided. That is the #257 hazard ADR-0044 §2b exists to
+        close, reachable here across *processes*: the ``asyncio`` lock arbitrates
+        one event loop and ADR-0036 §2 is explicit that a second process on the
+        same file is the case this store exists for.
+
+        ``immediate=False`` is the read form — a deferred transaction, so the two
+        ``SELECT``s share one snapshot without taking the write lock a reader has
+        no use for. It is the shape :meth:`_spend_rows_sync` and the sibling
+        stores' paged reads already use (#720).
+        """
+        with self._transaction(
+            f"read the pending confirmation for ({execution_id!r}, {step_id!r})",
+            immediate=False,
+        ) as conn:
             if conn.execute(_BINDING_HAS_RESOLUTION, (execution_id, step_id)).fetchone():
                 return None
             row = conn.execute(
                 _BINDING_CONFIRMS, (PermissionOutcome.CONFIRM.value, execution_id, step_id)
             ).fetchone()
-        except sqlite3.Error as exc:
-            msg = (
-                f"failed to read the pending confirmation for "
-                f"({execution_id!r}, {step_id!r}): {exc}"
-            )
-            raise AuditError(msg) from exc
         return None if row is None else str(row[0])
 
     async def resolution_of(self, *, execution_id: str, step_id: str) -> PermissionDecision | None:
