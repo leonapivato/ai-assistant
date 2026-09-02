@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog
 from gateway_mint import bootstrap_value
+from gateway_ports import free_port
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
@@ -211,19 +212,12 @@ async def _read_answer(reader: asyncio.StreamReader) -> Answer:
     return Answer(status=status, headers=headers, body=body, closed=closed)
 
 
-def _free_port() -> int:
-    """A port nothing is listening on, so two runs do not collide."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 @contextlib.asynccontextmanager
 async def _harness(
     engine: FakeAssistantEngine | None = None, **overrides: Any
 ) -> AsyncIterator[Harness]:
     """Bind one gateway on a free port and tear it down afterwards."""
-    settings = Settings(gateway_port=_free_port(), **overrides)
+    settings = Settings(gateway_port=free_port(), **overrides)
     clock, timers = Clock(), Timers()
     behind = engine or FakeAssistantEngine()
     gateway = Gateway(

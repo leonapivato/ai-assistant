@@ -14,13 +14,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from gateway_mint import bootstrap_value
+from gateway_ports import free_port
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
@@ -332,19 +332,12 @@ async def _read_all(reader: asyncio.StreamReader) -> list[dict[str, Any]]:
     return [value async for value in _values(reader)]
 
 
-def _free_port() -> int:
-    """A port nothing is listening on, so two runs do not collide."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 @contextlib.asynccontextmanager
 async def _harness(
     engine: FakeAssistantEngine | None = None, **overrides: Any
 ) -> AsyncIterator[Harness]:
     """Bind one gateway with a session already minted, and tear it down after."""
-    settings = Settings(gateway_port=_free_port(), **overrides)
+    settings = Settings(gateway_port=free_port(), **overrides)
     clock, timers = Clock(), Timers()
     behind = engine or FakeAssistantEngine()
     gateway = Gateway(settings=settings, engine=behind, now=clock, defer=timers, bundle=_BUNDLE)
