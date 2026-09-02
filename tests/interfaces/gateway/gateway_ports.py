@@ -24,7 +24,7 @@ neither can two concurrent runs — ``just test-fast`` admits three at once. Nor
 a **forked** child, which inherits a claim instead of making one and is therefore
 the one door a claim does not close by itself: the claim is remembered against the
 process that made it, and a child that finds a stranger's claim lets it go and
-claims its own (:meth:`_Block.base`).
+claims its own (:meth:`_Block._claimed_base`).
 
 **Claimed rather than computed from ``PYTEST_XDIST_WORKER``.** Deriving the block
 from the worker id is the shape issue #1894 names third, and it closes the
@@ -63,6 +63,7 @@ from __future__ import annotations
 import atexit
 import os
 import socket
+import threading
 from pathlib import Path
 from typing import Final
 
@@ -201,26 +202,58 @@ def _an_ephemeral_port() -> int:
 
 
 class _Block:
-    """The block this process claimed, and where in it the next port comes from."""
+    """The block this process claimed, and where in it the next port comes from.
+
+    **One allocation at a time, under a gate.** Everything below reads state and
+    writes it back — the claim, and the offset that keeps two callers off one port —
+    and a second caller arriving mid-update would be handed either a port the first
+    is about to take or, worse, the ephemeral fallback: a claim in progress looks
+    exactly like no claim at all from outside, and the fallback is the probe-and-
+    release this module exists to replace. Nothing in this suite allocates off the
+    main thread today, so the gate costs a lock acquisition per gateway and buys
+    that the invariant is a property of the allocator rather than of how it happens
+    to be called (adversarial review, round 2).
+    """
 
     def __init__(self) -> None:
+        self._gate = threading.Lock()
         self._claim: socket.socket | None = None
         self._base: int | None = None
         self._claimed_by: int | None = None
         self._offset = 0
 
+    def reopen_after_fork(self) -> None:
+        """Replace the gate, which a fork may have copied in a locked state.
+
+        A lock is inherited exactly as it stood, so a child forked while another
+        thread of the parent held this one would inherit it held and never acquire
+        it. Registered with :func:`os.register_at_fork` rather than reasoned about,
+        because whether the parent forks mid-allocation is not this module's to
+        know. Nothing else needs resetting here: the claim itself is keyed on the
+        process id (:attr:`base`).
+        """
+        self._gate = threading.Lock()
+
     @property
     def base(self) -> int | None:
-        """The first port of this process's block, claiming one if none is held yet.
+        """The first port of this process's block, claiming one if none is held yet."""
+        with self._gate:
+            return self._claimed_base()
+
+    def _claimed_base(self) -> int | None:
+        """The claimed block's first port, claiming one where this process has none.
 
         **Keyed on the process id, so a fork does not inherit a claim.** A child of
-        ``os.fork()`` starts with a copy of everything below — the same base, the
-        same offset, and a descriptor onto the *parent's* claim socket — and would
-        therefore hand out the parent's next port as if it were its own. That is the
-        collision this module exists to remove, arriving through the one door a
-        claim does not close, and this suite already forks in three modules. So the
-        claim is remembered against the process that made it: a mismatch means this
-        process inherited it rather than made it, and it claims afresh.
+        ``os.fork()`` starts with a copy of everything on this object — the same
+        base, the same offset, and a descriptor onto the *parent's* claim socket —
+        and would therefore hand out the parent's next port as if it were its own.
+        That is the collision this module exists to remove, arriving through the one
+        door a claim does not close, and this suite already forks in three modules.
+        So the claim is remembered against the process that made it: a mismatch means
+        this process inherited it rather than made it, and it claims afresh.
+
+        Returns:
+            The block's first port, or ``None`` where no block could be claimed.
         """
         here = os.getpid()
         if self._claimed_by != here:
@@ -254,15 +287,16 @@ class _Block:
             RuntimeError: If every port of the claimed block is taken, which would
                 mean something outside this process has bound the whole block.
         """
-        base = self.base
-        if base is None:
-            return _an_ephemeral_port()
-        span = BLOCK_SIZE - 1
-        for _ in range(span):
-            candidate = base + 1 + self._offset % span
-            self._offset = (self._offset + 1) % span
-            if _is_bindable(candidate):
-                return candidate
+        with self._gate:
+            base = self._claimed_base()
+            if base is None:
+                return _an_ephemeral_port()
+            span = BLOCK_SIZE - 1
+            for _ in range(span):
+                candidate = base + 1 + self._offset % span
+                self._offset = (self._offset + 1) % span
+                if _is_bindable(candidate):
+                    return candidate
         msg = (
             f"every port of this process's block ({base + 1}-{base + span}) is bound; "
             "something outside this test run is holding them"
@@ -271,6 +305,8 @@ class _Block:
 
 
 _THIS_PROCESS = _Block()
+
+os.register_at_fork(after_in_child=_THIS_PROCESS.reopen_after_fork)
 
 
 def free_port() -> int:

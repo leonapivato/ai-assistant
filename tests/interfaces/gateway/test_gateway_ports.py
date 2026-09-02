@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import queue
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +28,16 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 pytestmark = pytest.mark.integration
+
+#: How long to wait for a thing that should happen at once. Long enough that a
+#: loaded machine cannot fail the case, and bounded so a thing that never happens
+#: fails it rather than hanging the run.
+_PATIENCE = 10.0
+
+#: How long to wait for a thing that must *not* happen. Short, because it is only
+#: ever spent: what makes the case deterministic is that the first caller holds the
+#: gate throughout, not the length of this.
+_A_MOMENT = 0.2
 
 #: What the child interpreter below prints: the block it claimed for itself and one
 #: port out of it. Two integers on one line, so the parent parses no format.
@@ -158,3 +170,48 @@ def test_a_forked_child_is_handed_nothing_out_of_its_parents_block() -> None:
     assert theirs != base
     assert port != ours
     assert not base < port < base + gateway_ports.BLOCK_SIZE
+
+
+def test_a_second_caller_waits_for_a_claim_in_progress_rather_than_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim in progress is not the same as no claim (adversarial review, round 2).
+
+    Without the gate, a caller arriving while the first is still inside
+    ``_claim_a_block`` reads a base of ``None`` and takes the ephemeral fallback —
+    the probe-and-release this module exists to replace, on a run that had a block
+    all along. Deterministic in both directions: the first caller is held inside the
+    claim, so the second either blocks (and cannot possibly finish while it is held)
+    or returns, and returning is the defect.
+    """
+    claimed = gateway_ports._claim_a_block()
+    if claimed is None:
+        pytest.skip("no block could be claimed here, so the fallback is an ephemeral probe")
+    claim, base = claimed
+    inside, may_finish = threading.Event(), threading.Event()
+
+    def held() -> tuple[socket.socket, int] | None:
+        inside.set()
+        may_finish.wait(_PATIENCE)
+        return claimed
+
+    monkeypatch.setattr(gateway_ports, "_claim_a_block", held)
+    block = gateway_ports._Block()
+    drawn: queue.Queue[int] = queue.Queue()
+    callers = [threading.Thread(target=lambda: drawn.put(block.next_port())) for _ in range(2)]
+    try:
+        callers[0].start()
+        assert inside.wait(_PATIENCE), "the first caller never reached the claim"
+        callers[1].start()
+        callers[1].join(_A_MOMENT)
+        assert callers[1].is_alive(), "the second caller took the fallback instead of waiting"
+        may_finish.set()
+        for caller in callers:
+            caller.join(_PATIENCE)
+    finally:
+        may_finish.set()
+        claim.close()
+
+    ports = [drawn.get_nowait(), drawn.get_nowait()]
+    assert len(set(ports)) == 2
+    assert all(base < port < base + gateway_ports.BLOCK_SIZE for port in ports)
