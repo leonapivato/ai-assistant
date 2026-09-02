@@ -548,13 +548,22 @@ it is about, and there is no field on an entry for a match to be made against.
 > **Normative.** A finite retention is enforced **at the read**, and that is what
 > makes it a guarantee rather than a schedule. An entry whose `occurred_at` is
 > strictly older than *the instant of the read minus the retention in force at that
-> read* is treated as already evicted: no read returns it, none of the four counts it,
-> and it is hidden whether or not anything has physically reclaimed it, whether or not
+> read* is treated as already evicted: none of §7's four reads returns it, and it is
+> hidden whether or not anything has physically reclaimed it, whether or not
 > the archive has been written to since, and on a process that has run no sweep at
 > all. This is ADR-0007 §2's own rule for a record past `expires_at` — *"treated as
 > already forgotten"* whether or not `purge_expired` has run, so *"the privacy
 > guarantee does not depend on a background job"* — inherited deliberately and for the
 > same reason.
+
+> **Normative.** The predicate binds **before** ordering and **before** pagination,
+> and not as a filter over a page already cut. §7's three enumerating reads fill a
+> page from what survives the retention, so a hidden entry consumes no slot in any
+> `limit`, shifts no `offset`, and is absent from the ordering the page is cut out of.
+> An implementation that pages first and filters afterwards is not conforming: with an
+> expired entry newer than a live one it would answer `limit=1` with an empty first
+> page, making a live entry unreachable through the ordinary read — which is eviction
+> reaching further than the entry it evicted.
 
 > **Normative.** Physical reclamation is therefore permitted at any point of the
 > implementation's choosing and is **obliged nowhere**: no sweep, schedule or hub job
@@ -1225,11 +1234,16 @@ address, and it is discharged.
    entries forever; a finite `transcript_archive_retention` evicts past it;
    `transcript_archive_enabled` set false stops the write and destroys nothing, and
    the reads still serve what is there. And the enforcement point specifically: an
-   entry aged past a finite retention is returned by **none** of the four reads and
-   counted by neither figure of the size report, on an archive that has had **no
-   write and no sweep** since — the case a sweep-only implementation passes and a
-   read-time one does not; a shortened retention hides more on the very next read; and
-   that same hidden entry still yields to both destroys.
+   entry aged past a finite retention is returned by **none** of the four reads on an
+   archive that has had **no write and no sweep** since — the case a sweep-only
+   implementation passes and a read-time one does not. The two size figures part
+   company over that same entry, exactly as §6 requires: it leaves `entries`, and its
+   bytes stay in `stored_bytes` until something physically reclaims them. A shortened
+   retention hides more on the very next read; the hidden entry still yields to both
+   destroys; and it consumes **no page slot** — with an expired entry newer than a
+   live one and `limit=1`, each of the three enumerating reads returns the live entry
+   on its first page rather than an empty one, which is the assertion an
+   implementation that pages before it filters fails.
 9. **The reads are bounded and ordered.** A limit of zero or below and a negative
    offset each raise `ValueError` on the three reads that take them, and `entry`
    takes neither; a blank `query`, `address` or `conversation_id` raises
