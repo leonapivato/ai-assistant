@@ -763,3 +763,43 @@ async def test_a_value_the_archives_model_refuses_degrades_rather_than_failing()
     assert wiring.archive.recorded == {}
     assert report.episode_id is not None
     assert await wiring.memory.get(report.episode_id) is not None, "the episode still landed"
+
+
+async def test_a_refused_entrys_own_text_reaches_no_log() -> None:
+    """ADR-0225 §4 on the path a defensive handler most easily breaks.
+
+    A ``ValidationError`` renders the value it refused into its own text, and here
+    that value *is* the transcript — so a handler that logged the exception would
+    write into a log exactly the content §4 exists to keep out of one, on a failure
+    path rather than the ordinary one, which is where such a leak sits unnoticed
+    longest. The marker below is unencodable by construction (a lone surrogate), so
+    it reaches the model's refusal and nothing else.
+
+    What the record may carry is asserted too, because "logs nothing" would be a
+    silent failure of the other kind: the address, and pydantic's own field-and-code
+    pair, neither of which can hold an input.
+    """
+    marker = "PRIVATE-TRANSCRIPT-MARKER"
+    captured = structlog.testing.LogCapture()
+    structlog.configure(processors=[captured])
+    try:
+        wiring = Wiring()
+        conversation = await wiring.stage.begin(None)
+        report = await wiring.stage.capture(
+            conversation.id,
+            content="x",
+            asked=f"{marker}\ud800",
+            outcome=ANSWERED,
+            disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+        )
+    finally:
+        structlog.reset_defaults()
+
+    assert report.degraded is True, "the capture degraded rather than failing the turn"
+    assert wiring.archive.recorded == {}
+    assert marker not in repr(captured.entries)
+    archived = [one for one in captured.entries if one.get("stage") == "archive"]
+    assert archived, "the refusal was reported rather than swallowed"
+    assert archived[0]["address"] == report.episode_id
+    assert archived[0]["refused"] == ("asked:value_error",)
+    assert "exc_info" not in archived[0]

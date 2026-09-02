@@ -113,6 +113,31 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _refusals_in(refusal: ValidationError) -> tuple[str, ...]:
+    """What a refused transcript entry may say about itself in a log (ADR-0225 §4).
+
+    Each refusal rendered as ``<field path>:<error code>`` and nothing else. Both
+    halves come from pydantic's own closed vocabularies — a location is a tuple of
+    field names and indices, a type is one of pydantic's error codes — so neither can
+    carry the value that was refused, which for this model is the transcript itself.
+
+    The ``msg`` and ``input`` keys are deliberately not read: ``input`` *is* the
+    refused value, and ``msg`` is rendered from a validator that may quote it.
+
+    Args:
+        refusal: What the model raised.
+
+    Returns:
+        One entry per refusal, sorted so the record is stable to compare.
+    """
+    return tuple(
+        sorted(
+            f"{'.'.join(str(part) for part in each['loc'])}:{each['type']}"
+            for each in refusal.errors()
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CaptureReport:
     """What became of one turn's durable record (ADR-0074 §3, §9 item 6).
@@ -680,7 +705,9 @@ class ConversationLifecycle:
 
         Never raises. §2's "never fails a turn and never fails a capture" is
         unconditional, so a value the archive's own model refuses degrades this
-        capture exactly as a store fault does rather than propagating.
+        capture exactly as a store fault does rather than propagating — and is
+        reported without the refusal's own text, which would carry the entry into a
+        log (§4).
         """
         if not self._archive_owed(disposition):
             return False
@@ -698,19 +725,29 @@ class ConversationLifecycle:
                 disposition=disposition,  # type: ignore[arg-type]
             )
             await self._archive.append(entry)
-        except TranscriptArchiveError, ValidationError:
+        except ValidationError as refusal:
+            # **The model's refusal is logged without the exception**, and that is
+            # the whole reason it has an arm of its own (§4, ADR-0004 §5). A
+            # `ValidationError` renders the value it refused into its own text, and
+            # here that value *is* the transcript — so `exc_info` on this path would
+            # write into a log the very content §4 exists to keep out of one, on the
+            # failure path rather than the ordinary one, which is where such a leak
+            # would sit unnoticed longest. What travels instead is a closed
+            # vocabulary of pydantic's own: which field was refused and under which
+            # error code, neither of which carries any input.
+            _log.warning(
+                "conversation_capture_degraded",
+                stage="archive",
+                address=turn.episode_id,
+                refused=_refusals_in(refusal),
+            )
+            return False
+        except TranscriptArchiveError:
             # §2: never fails a turn, never fails a capture, never retried. Logged
             # rather than swallowed, and the address is what the log carries — an
             # entry's text reaches no log, trace or audit trail (§4, ADR-0004 §5).
-            #
-            # **The construction is inside the guard, and `ValidationError` beside
-            # the store fault.** §2's clause is that the archive write never fails a
-            # capture, and a refusal from the *model* is a way for it to fail one:
-            # every value here reaches this method already typed, but "already typed"
-            # is a property of the callers rather than of this line, and the failure
-            # it would produce is the exact outcome §2 rules out — a delivered answer
-            # thrown away because the record of it could not be built. It degrades
-            # like any other archive failure and is reported the same way.
+            # `exc_info` is safe here and not above: this seam's own error names an
+            # address and a backend fault, never an entry's text (ADR-0225 §10).
             _log.warning(
                 "conversation_capture_degraded",
                 stage="archive",
