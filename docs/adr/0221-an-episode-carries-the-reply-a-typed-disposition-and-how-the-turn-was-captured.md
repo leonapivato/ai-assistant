@@ -1,7 +1,21 @@
 # 221. An episode carries the reply, a typed disposition, and how the turn was captured
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand)
 - Date: 2026-09-01
+- Partially superseded: 2026-09-02 by ADR-0223 — **§6's first clause no longer
+  holds of capture: `Provenance.derived_from_external` is stamped on the captured
+  episode from `SelectionOrigin.over(turn.memories)` for the turn whose rendering
+  it carries, threaded per call site and never computed at capture.** Only the
+  clause's opening sentence is replaced, because only that sentence is a statement
+  about *capture*; the rest of it — *"This ADR adds no mark, threads no origin
+  value to the capture point, and changes no value any component computes for that
+  field"* — is a statement about **this ADR**, and stays true of it. §6's second
+  clause, which binds lanes implementing this ADR not to cite it as authority that
+  the episode's origin is recorded, is untouched and is restated there. §13's first
+  bullet is **discharged** rather than superseded: it deferred the mark *"Fired by
+  whoever picks it up"*, and this is that pickup.
+  [ADR-0223](0223-a-captured-episode-carries-the-externality-of-the-supply-its-turn-ran-over.md)
+  §1, §3 and its closing section.
 - **Partially supersedes:**
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
   — **§3's field role, not its argument.** §3's bullet *"Not the message:
