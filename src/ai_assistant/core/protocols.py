@@ -2657,6 +2657,45 @@ class Planner(Protocol):
         boundary is now a ``Planner`` contract change taking its own ADR. Both
         widenings are flagged under golden rule 5 rather than smuggled.
 
+        **``memories`` still carries exactly those three groups, and what widens is
+        the return** (ADR-0226 §7). The planner is called *before* the loop services
+        any read request and receives what it has always received, so every clause
+        above binds on this parameter word for word. What the returned
+        :class:`~ai_assistant.core.types.ActionPlan` may now carry is a
+        ``read_request``: **at most one**, over a closed enumeration of two kinds
+        (``SIGHTED_QUERY`` and ``CITATION_HOP``), stating one further read the
+        planner judged this turn's supply too thin without. That is a third
+        widening of this contract's documented meaning, flagged under golden rule 5
+        for the same reason as the other two. It is **not** a compatibility break:
+        the signature is unchanged and the field is additive and defaulted, so an
+        implementation returning a plan without one conforms exactly as it does
+        today, and ``None`` is the true answer about such a planner rather than a
+        degradation (ADR-0226 §4).
+
+        **A planner that emits one owes three things and no more** (ADR-0226 §§1-3).
+        It emits **at most one ask of each kind**, and never a second request on the
+        same turn — that is re-planning, which ADR-0226 §12 defers. It labels a
+        ``CITATION_HOP`` by **position in this call's ``memories``**: the record at
+        1-based index *n* is labelled ``M`` followed by *n* in decimal with no
+        padding. §3 fixes that scheme for every implementation and for both sides of
+        the seam, so no planner invents a spelling, adds a per-group prefix or makes
+        it configurable, and no mapping, table or identifier crosses between
+        ``planning`` and ``orchestration``: both sides read the very ``memories``
+        sequence this call passed. And it emits **no record identifier at all** —
+        §3's invariant is that the namer may be data, or the user, or the model
+        pointing outward, never the model pointing inward, so a planner neither
+        renders an identifier to a model nor accepts one from one. A label the
+        emission names that this call's ``memories`` never rendered resolves to
+        nothing and is discarded silently by the loop (§3); a planner does not
+        pre-filter its own emission to hide that, because the drop is what ADR-0226
+        §9's audit exists to count.
+
+        **The request is a statement of what to read, never a step and never an
+        act** (ADR-0226 §4). It is not selected against ``capabilities``, not
+        resolved to a tool, not ruled on by the permission gate and reaches no
+        executor; the loop — never the planner, and never a tool — services it, and
+        a planner performs no read of its own on account of one.
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
@@ -2664,7 +2703,8 @@ class Planner(Protocol):
                 conversation's recent turns in order, then the records retrieved
                 as relevant, then the episodic supplement (ADR-0158 §4). The
                 retrieved group is composed under the assembling consumer's
-                precedence rather than as one relevance rank; see above.
+                precedence rather than as one relevance rank; see above. It is also
+                the sequence a ``CITATION_HOP`` label indexes into (ADR-0226 §3).
             capabilities: The capability vocabulary the registry advertised for
                 this turn (ADR-0211 §1) — read by the caller from the same
                 ``ToolRegistry`` object selection will resolve against, never
@@ -2672,7 +2712,9 @@ class Planner(Protocol):
                 behaviour above.
 
         Returns:
-            A frozen :class:`~ai_assistant.core.types.ActionPlan`.
+            A frozen :class:`~ai_assistant.core.types.ActionPlan`, carrying a
+            ``read_request`` where the planner asked for one more read and ``None``
+            where it did not (ADR-0226 §4).
 
         Raises:
             PlanningError: If no plan could be produced for the goal.

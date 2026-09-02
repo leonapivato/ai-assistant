@@ -5368,6 +5368,170 @@ class PlanStep(BaseModel):
     )
 
 
+class ReadKind(StrEnum):
+    """What a planner's read request asks to have read (ADR-0226 §2).
+
+    A **closed** enumeration with exactly two members. ADR-0226 §1 rules that no
+    implementation, setting or later lane adds a third without the ADR that
+    decides it, and that no lane widens an admitted kind's meaning to carry a read
+    the ADR that admitted it did not describe. §4 adds that the vocabulary is
+    **added to and never renamed**: no later ADR removes a member, renames one,
+    gives one a second spelling, or replaces this enum with a differently-named one
+    for the same question.
+
+    The pattern is ADR-0221 §5's, for its reason: a vocabulary that grows by
+    implementation grows without anyone deciding what the new member means.
+    """
+
+    SIGHTED_QUERY = "sighted_query"
+    """A query the planner composed, serviced as a relevance selection over the
+    owner's own store (ADR-0226 §2). It is a second *selection* site and ADR-0226
+    §13 records it as one against ADR-0208 §1's one-site clause."""
+
+    CITATION_HOP = "citation_hop"
+    """One or two **labels** the planner was shown, resolved in code to the records
+    they labelled and followed to those records' own ``Provenance.evidence``
+    (ADR-0226 §2). It selects nothing by relevance: it is a keyed load in ADR-0208
+    §1's own sense, "records the turn already names, fetched by identifier"."""
+
+
+#: ADR-0226 §6's cap on how many labels one ``CITATION_HOP`` ask may name.
+#:
+#: Two, because it is the figure the replay's own real arm used — "asked to name
+#: ≤2" — so the 47.6% conversion it measured is the conversion of *this* bound
+#: rather than of a looser one. The cap is what keeps the hop the capped read that
+#: §6 services first: uncapped, two beliefs at ``MAX_EVIDENCE_CITATIONS`` would be
+#: 128 records against a ``get_many`` that is contractually uncapped.
+MAX_HOP_LABELS: Final = 2
+
+
+class ReadAsk(BaseModel):
+    """One kind's part of a planner's read request (ADR-0226 §4).
+
+    A discriminated pair rather than two models: a ``SIGHTED_QUERY`` ask carries a
+    non-blank ``query`` and no labels, and a ``CITATION_HOP`` ask carries one or
+    two ``labels`` and no query. **Each of those conditions is enforced here rather
+    than by a caller** (§4) — an emission that fails any of them is not a request
+    ADR-0226 admits, and the planner that emitted it is not owed a partial reading
+    of it.
+
+    **A label's *form* is deliberately not validated.** ADR-0226 §3 gives the loop
+    the whole of label resolution and rules that a string that does not match the
+    form, an ordinal below 1 or beyond the sequence's length, and a label whose
+    record is no longer live "all resolve to nothing … discarded silently — not an
+    error, not a park, not a degradation of the turn — and recorded in §9's audit
+    as dropped". A form check here would convert exactly that case into a
+    construction failure at the emitting seam, which is the one outcome §3 refuses,
+    and it would take the drop out of the audit that exists to count it.
+
+    Attributes:
+        kind: Which of ADR-0226 §2's two reads this ask is for.
+        query: The query the planner composed, for a ``SIGHTED_QUERY`` and for
+            nothing else. Non-blank, and carried byte for byte — the loop passes it
+            to ``assemble_by_band`` as handed.
+        labels: The labels the planner was shown, for a ``CITATION_HOP`` and for
+            nothing else. One or two of them (:data:`MAX_HOP_LABELS`), in the order
+            the ask names them, which ADR-0226 §6 makes the order they are followed
+            in.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: ReadKind = Field(description="Which of ADR-0226 §2's two reads this ask is for.")
+    query: NonBlankEncodableText | None = Field(
+        default=None,
+        description="The composed query, for a SIGHTED_QUERY ask and no other (ADR-0226 §4).",
+    )
+    labels: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "The labels the planner was shown, for a CITATION_HOP ask and no other; "
+            f"at most {MAX_HOP_LABELS} of them (ADR-0226 §4, §6)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_ask_carries_exactly_its_kind_s_argument(self) -> ReadAsk:
+        """Require the one argument this ask's kind takes, and refuse the other's.
+
+        An ask carrying both would be two asks wearing one kind's name, and the
+        servicer would have to choose which half to honour — a choice ADR-0226
+        gives nobody. An ask carrying neither asks for nothing while occupying the
+        one slot its kind has.
+        """
+        if self.kind is ReadKind.SIGHTED_QUERY:
+            if self.query is None:
+                msg = "a sighted_query ask must carry a query"
+                raise ValueError(msg)
+            if self.labels:
+                msg = "a sighted_query ask must not carry labels"
+                raise ValueError(msg)
+            return self
+
+        if not self.labels:
+            msg = "a citation_hop ask must name at least one label"
+            raise ValueError(msg)
+        if len(self.labels) > MAX_HOP_LABELS:
+            msg = (
+                f"a citation_hop ask may name at most {MAX_HOP_LABELS} labels, "
+                f"got {len(self.labels)}"
+            )
+            raise ValueError(msg)
+        if self.query is not None:
+            msg = "a citation_hop ask must not carry a query"
+            raise ValueError(msg)
+        return self
+
+
+class ReadRequest(BaseModel):
+    """What a planner asked to have read into this turn's supply (ADR-0226 §1).
+
+    The whole of the envelope ADR-0226 opens: **at most one request per plan, at
+    most one ask of each kind in it, serviced once by the loop** — never by the
+    planner and never by a tool. What a serviced request returns into the supply is
+    ``MemoryRecord``s carrying their own :class:`Provenance`, "and never a payload,
+    a rendering, a summary or free text of any kind" (§1), which is the property
+    the whole direction is bought for and the reason a tool cannot be the
+    mechanism.
+
+    **A request exists only where the planner asked for something.** ADR-0226 §11
+    item 11 names the empty-request arm as the one worth stating: a ``ReadRequest``
+    admitting no ask would be a non-``None``
+    :attr:`ActionPlan.read_request`, which §8 defines as a turn the trigger fired
+    on, servicing nothing — a fire-rate numerator with no read under it. So an
+    empty ``asks`` is refused here, and "asked for no read" is spelled ``None`` on
+    the plan.
+
+    Attributes:
+        asks: One or two asks, at most one of each :class:`ReadKind`. Their order
+            here decides nothing: ADR-0226 §6 fixes the servicing order as the hop
+            first and then the sighted query, whatever order they arrive in.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asks: tuple[ReadAsk, ...] = Field(
+        description="One or two asks, at most one of each kind (ADR-0226 §1, §4)."
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_ask_and_at_most_one_of_each_kind(self) -> ReadRequest:
+        """Refuse an empty request and a second ask of a kind already asked.
+
+        Two asks of one kind is not an emission ADR-0226 §2 admits — the budget,
+        the precedence and the audit are all stated over one ask per kind — and an
+        empty one is §11 item 11's fire-rate numerator with no read under it.
+        """
+        if not self.asks:
+            msg = "a read request must carry at least one ask"
+            raise ValueError(msg)
+        kinds = [ask.kind for ask in self.asks]
+        if len(set(kinds)) != len(kinds):
+            msg = "a read request carries at most one ask of each kind"
+            raise ValueError(msg)
+        return self
+
+
 class ActionPlan(BaseModel):
     """A frozen record of what the assistant decided to do (see ADR-0014 §2).
 
@@ -5375,6 +5539,34 @@ class ActionPlan(BaseModel):
     record of a decision. Re-planning produces a *new* plan with a new ``id``
     rather than mutating one out from under an in-flight execution, so "what did
     the system decide to do, and when" stays answerable.
+
+    **A plan may also name one read the planner wanted and did not have**
+    (ADR-0226 §4). :attr:`read_request` is where that lands, and it lands *here*
+    because the request is part of what the planner decided: ADR-0014 §2 makes the
+    plan "an auditable record of a decision", and a turn on which the planner
+    judged its supply insufficient and named a read decided exactly that. The plan
+    already reaches the durable planning store and the audit surface, so the record
+    needs no second channel — which is also why the trigger's fire rate is readable
+    off persisted plans before any servicer exists (ADR-0226 §10).
+
+    **The field is additive and defaulted, and that is a decision rather than a
+    convenience** (§4). ``None`` means the planner asked for no read, which is the
+    semantically correct answer for a planner that knows nothing of this envelope:
+    every existing ``Planner`` implementation and every canonical fake keeps
+    compiling and keeps meaning what it meant. The alternative — widening
+    ``Planner.plan``'s *return* to a tuple or a wrapper — changes a Protocol's
+    signature, breaks every implementation, fake and call site at once, and buys
+    nothing this field does not. ADR-0211 §1's required, undefaulted
+    ``capabilities`` is the counter-precedent, and the difference is the failure
+    mode: an omitted vocabulary silently refuses to act at all, where an omitted
+    request means no extra read — the system exactly as it stands today, and
+    visible in ADR-0226 §9's audit as a turn on which the trigger did not fire.
+
+    **A ``ReadAsk`` is not a ``PlanStep`` and nothing drives it** (§4). It is not
+    selected against the capability vocabulary, not resolved to a tool, not ruled
+    on by the permission gate, and never reaches ``StepExecutor`` or
+    ``ExecutionState``: reading the owner's own store is not an act in the world,
+    so no lane routes it through the machinery that decides acts.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5385,6 +5577,14 @@ class ActionPlan(BaseModel):
     created_at: UtcInstant = Field(description="When the plan was produced (tz-aware).")
     rationale: EncodableText | None = Field(
         default=None, description="Why the planner chose these steps, for transparency."
+    )
+    read_request: ReadRequest | None = Field(
+        default=None,
+        description=(
+            "One read the planner asked for beside this plan, or None where it asked "
+            "for none (ADR-0226 §4). None is never read as an error, a degradation, "
+            "or an instruction to service a default read."
+        ),
     )
 
     @field_validator("steps")
@@ -5903,18 +6103,36 @@ class PlanExport(BaseModel):
     a plan whose goal has been deleted stays representable. Complete and
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
+
+    **``schema_version`` is 3 because ``ActionPlan`` gained ``read_request``**
+    (ADR-0226 §4). This document carries ``tuple[ActionPlan, ...]``, so a member of
+    it changing shape is exactly what the version exists to announce (ADR-0039 §10,
+    ADR-0014 §5) — the same reading that moved it to 2 for ``StepExecution`` and
+    moved ``ConversationExport``'s for a member gaining one field (ADR-0212 §8). A
+    defaulted field on a frozen model is still a shape change to every document
+    that carries it, and ``extra="forbid"`` is what makes the mislabelling
+    concrete: a reader validating an older-shaped document against the new
+    contract, or the reverse, rejects it.
+
+    **No migration is owed, and not because no v2 export exists** (ADR-0226 §4).
+    ``PlanStore`` offers ``export`` and no ``import``, ``restore`` or ``load``, so
+    nothing in this system ever validates a ``PlanExport`` it did not just
+    construct. ADR-0039 §10's rule carries forward unchanged and widens by one
+    value: an export of an earlier shape is not readable by this contract at any
+    version, and if an import path is ever contracted, accepting or refusing one is
+    that ADR's decision and is not settled here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[2] = Field(
-        default=2,
+    schema_version: Literal[3] = Field(
+        default=3,
         description=(
-            "Shape of this export, pinned to exactly 2 (ADR-0039 §10): an export "
-            "outlives the code that wrote it, so the label must be a fact about the "
-            "document rather than a producer's unchecked claim. ``Literal[2]`` refuses "
-            "every other value — a v1 document does not validate against this contract "
-            "at all — so the advertised version cannot be mislabelled."
+            "Shape of this export, pinned to exactly 3 (ADR-0039 §10, ADR-0226 §4): an "
+            "export outlives the code that wrote it, so the label must be a fact about "
+            "the document rather than a producer's unchecked claim. ``Literal[3]`` "
+            "refuses every other value — a v1 or v2 document does not validate against "
+            "this contract at all — so the advertised version cannot be mislabelled."
         ),
     )
     exported_at: UtcInstant
@@ -12151,25 +12369,48 @@ class StepOutcome(BaseModel):
 class TurnResult(BaseModel):
     """What one conversational turn produced (ADR-0022 §2).
 
+    **On a turn that serviced a read request this carries more than the planner
+    saw, and that is the mechanism rather than a side effect** (ADR-0226 §7). Where
+    :attr:`plan` names a ``read_request`` and the loop serviced it, the records it
+    returned are appended to :attr:`memories` as a **fourth group**, after the
+    episodic supplement, and the turn composes over that union. Nothing re-calls
+    the planner to close the gap: ADR-0226 §6 services one emission once and
+    ADR-0014 §2's frozen plan stands. The ``TurnResult`` is constructed **once**,
+    over the deduplicated union — no implementation constructs one and then edits
+    it, and none exists in an intermediate state another stage can observe.
+
     Attributes:
         goal: The objective this turn was planned against, minted from the
             utterance.
         context: The situational context assembled for the turn.
         memories: What the pipeline assembled for this turn, in the order the
-            planner is handed it (ADR-0074 §5, widened by ADR-0158 §5) — the same
-            sequence and the same **three groups** as ``Planner.plan``'s
-            ``memories``: the conversation's recent turns **first**, in order, then
-            the records retrieved as relevant, best first within that group, then
-            the episodic supplement. Each grouping is meaningful and the sequence is
-            not globally ranked. Empty on the first turn of a fresh conversation
+            planner is handed it (ADR-0074 §5, widened by ADR-0158 §5) — the
+            conversation's recent turns **first**, in order, then the records
+            retrieved as relevant, best first within that group, then the episodic
+            supplement — **followed, on a turn that serviced a read request, by the
+            records that servicing returned** (ADR-0226 §7). On every other turn it
+            is exactly the three groups ``Planner.plan``'s ``memories`` carried,
+            which is where ADR-0158 §5's sameness clause still binds; ADR-0226 §7
+            supersedes that clause **in this one respect and no other**. The three
+            original groups keep their positions, their order and their meanings,
+            and the fourth is appended whole and never interleaved. Each grouping is
+            meaningful and the sequence is not globally ranked — a consumer may rely
+            on the grouping and may not read a single relevance order across it, the
+            fourth group included. Empty on the first turn of a fresh conversation
             whose query retrieved nothing. A degraded read empties **its own group
             and no other** — except that where nothing before the supplement is
             non-``EPISODIC``, ADR-0158 §4's separator rule drops the supplement too,
             for a reason that is about the prompt's group encoding rather than about
             the failure: rendered after an unbroken episodic run it would be read as
-            this conversation's own recent turns.
+            this conversation's own recent turns. A failed or partial servicing adds
+            **nothing**: the supply stays byte for byte the one planning saw
+            (ADR-0226 §5).
 
-        plan: What the planner decided to do.
+        plan: What the planner decided to do, and — where it asked for one — the
+            read it wanted beside that (``ActionPlan.read_request``, ADR-0226 §4).
+            The plan is the *whole* of the trigger's record: a plan carrying a
+            request is a turn the trigger fired on, and one carrying none is a turn
+            it did not (ADR-0226 §8).
         memory_degraded: Whether assembling those records failed — retrieval, or
             the conversation's history, or both — making :attr:`plan` a *generic*
             answer rather than a personal one. Reported rather than swallowed: an
@@ -12183,11 +12424,14 @@ class TurnResult(BaseModel):
     context: CurrentContext = Field(description="The situational context assembled for the turn.")
     memories: tuple[MemoryRecord, ...] = Field(
         description=(
-            "History, then the retrieved beliefs, then the episodic supplement — "
-            "the order the planner is handed them in."
+            "History, then the retrieved beliefs, then the episodic supplement — the "
+            "order the planner is handed them in — then, on a turn that serviced a "
+            "read request, the records that servicing returned (ADR-0226 §7)."
         )
     )
-    plan: ActionPlan = Field(description="What the planner decided to do.")
+    plan: ActionPlan = Field(
+        description="What the planner decided to do, and the read it asked for beside it."
+    )
     memory_degraded: bool = Field(
         default=False, description="Whether assembling those records failed."
     )
