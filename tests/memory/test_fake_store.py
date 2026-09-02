@@ -15,7 +15,7 @@ import pytest
 from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreStaleError
+from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
@@ -28,7 +28,7 @@ from ai_assistant.testing.cancellation import SuspendedMidWrite
 from ai_assistant.testing.memory import _mint_position
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.testing.cancellation import SuspendedCall
@@ -237,3 +237,119 @@ async def test_exported_records_cannot_be_mutated_to_reach_stored_state() -> Non
     assert fresh is not None
     assert fresh.content == "coffee note"
     assert fresh.provenance.evidence == ()
+
+
+# --------------------------------------------------------------------------- #
+# the configured retrieval failure (issue #105)                               #
+# --------------------------------------------------------------------------- #
+
+#: The message the fake is configured to fail with, so each case asserts that the
+#: caller's own text came back rather than some generic store error.
+_BROKEN = "fake: retrieval is unavailable"
+
+
+def _broken_store() -> FakeMemoryStore:
+    return FakeMemoryStore(now=_fixed_now, failure=_BROKEN)
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(lambda store: store.get("1"), id="get"),
+        pytest.param(lambda store: store.get_many(["1"]), id="get_many"),
+        pytest.param(lambda store: store.search("coffee"), id="search"),
+        pytest.param(lambda store: store.list_beliefs(), id="list_beliefs"),
+        pytest.param(lambda store: store.walk_records("nightly", limit=1), id="walk_records"),
+    ],
+)
+async def test_every_read_raises_the_configured_failure(
+    read: Callable[[FakeMemoryStore], Awaitable[object]],
+) -> None:
+    """`failure=` breaks the whole read surface, not just `search` (issue #105).
+
+    Enumerated rather than asserted of ``search`` alone, because a consumer that
+    degrades on retrieval reads whichever of these its own path uses, and a fake
+    that broke one of five would send it back to the subclass this replaces.
+    """
+    store = _broken_store()
+    await store.add(_semantic("1", "coffee note"))
+
+    with pytest.raises(MemoryStoreError, match="retrieval is unavailable"):
+        await read(store)
+
+
+async def test_the_failure_repeats_as_a_distinct_instance_each_call() -> None:
+    # A fresh exception per call, for `FakeContextProvider`'s reason: one stored
+    # instance re-raised would accumulate a traceback across calls.
+    store = _broken_store()
+
+    raised = []
+    for _ in range(2):
+        with pytest.raises(MemoryStoreError, match="retrieval is unavailable") as caught:
+            await store.search("coffee")
+        raised.append(caught.value)
+
+    assert raised[0] is not raised[1]
+
+
+async def test_a_broken_store_still_writes_and_still_exports() -> None:
+    """The two halves a degradation case needs while retrieval is down.
+
+    A consumer that survives a failed read is owed both: the store it was handed
+    could be seeded, and what it did *not* write is assertable afterwards. Closing
+    ``export`` would leave "the turn degraded and wrote nothing" — the whole of
+    ADR-0022 §3's obligation — unprovable, so the failure deliberately stops at the
+    reads. ``export`` is ADR-0007's data-rights snapshot, not a retrieval.
+    """
+    store = _broken_store()
+
+    assert await store.add(_semantic("1", "coffee note")) == "1"
+    assert [record.id for record in await store.export()] == ["1"]
+    assert await store.delete("1") is True
+    assert await store.export() == []
+
+
+async def test_a_read_that_reaches_no_record_is_answered_rather_than_failed() -> None:
+    """The failure models the backing, so it cannot bite where the backing is untouched.
+
+    Each of these returns before the fake enters its modelled resource, exactly as
+    it does on an unbroken store — ``visits`` is what pins that it really did not
+    reach it. A fake that failed them would certify a consumer against a call the
+    real store never makes (ADR-0026 §7).
+    """
+    store = _broken_store()
+
+    assert (await store.search("   ")).records == ()
+    assert (await store.search("coffee", limit=0)).records == ()
+    assert await store.get_many([]) == {}
+    assert await store.list_beliefs(limit=0) == []
+    assert await store.list_beliefs(kinds=()) == []
+
+    assert store.resource_log.visits == 0
+
+
+async def test_an_argument_the_store_would_refuse_is_still_refused_first() -> None:
+    # A malformed argument is the caller's mistake whether or not the backing can
+    # answer, and the real stores refuse it before they touch anything. A fake that
+    # reported a store failure here would hide a test's own bug behind the outage
+    # it configured.
+    store = _broken_store()
+
+    with pytest.raises(ValueError, match="non-blank encodable text"):
+        await store.walk_records("   ", limit=1)
+    with pytest.raises(ValueError, match=r"limit must be in \[0, 2\*\*63\)"):
+        await store.list_beliefs(limit=-1)
+
+    assert store.resource_log.visits == 0
+
+
+async def test_a_failing_read_entered_the_store_before_it_failed() -> None:
+    # The call reached the backing and the backing was broken, which is the outage
+    # being modelled; a refusal at the door would be a different fault, and would
+    # take the read out of the cancellation clause's reach (ADR-0060).
+    store = _broken_store()
+
+    with pytest.raises(MemoryStoreError, match="retrieval is unavailable"):
+        await store.get("1")
+
+    assert store.resource_log.visits == 1

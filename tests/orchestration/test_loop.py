@@ -100,26 +100,15 @@ def _clock() -> datetime:
     return _NOW
 
 
-class _FailingSearchStore(FakeMemoryStore):
-    """The canonical store with retrieval broken.
+def _failing_store() -> FakeMemoryStore:
+    """The canonical store with retrieval broken (issue #105).
 
-    ``FakeMemoryStore`` has no configured failure mode the way
-    ``FakeContextProvider`` does (issue #105), and the degradation path needs
-    one. Narrowly overriding the single method under test keeps the rest of the
-    contract-correct fake rather than hand-rolling a mock of the whole store.
+    ``FakeMemoryStore(failure=...)`` since #105; this was a local subclass
+    overriding ``search`` until the canonical fake grew the configured failure mode
+    ``FakeContextProvider`` always had. Its writes and ``export`` still work, which
+    is what lets the cases below assert that a degrading consumer wrote nothing.
     """
-
-    async def search(
-        self,
-        query: str,
-        *,
-        limit: int = 10,
-        kinds: Sequence[MemoryKind] | None = None,
-        bands: Sequence[BeliefBand] | None = None,
-    ) -> MemorySearchResult:
-        """Fail the way a real store fails, whichever band was asked for."""
-        msg = "fake: retrieval is unavailable"
-        raise MemoryStoreError(msg)
+    return FakeMemoryStore(now=_clock, failure="fake: retrieval is unavailable")
 
 
 class _FailingPlanner:
@@ -463,7 +452,7 @@ async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_thirty() 
 async def test_respond_survives_a_retrieval_failure_and_says_so() -> None:
     """Losing memory costs the answer its personalisation, not its usefulness."""
     planner = FakePlanner(now=_clock)
-    loop = _loop(memory=_FailingSearchStore(now=_clock), planner=planner)
+    loop = _loop(memory=_failing_store(), planner=planner)
 
     result = await loop.respond("draft a reply to Dana")
 
@@ -632,7 +621,7 @@ async def test_learn_applies_every_proposal_in_order() -> None:
 
 
 async def test_learn_propagates_a_store_failure() -> None:
-    loop = _loop(memory=_FailingSearchStore(now=_clock))
+    loop = _loop(memory=_failing_store())
 
     with pytest.raises(MemoryStoreError, match="retrieval is unavailable"):
         await loop.learn(_preference_feedback())
@@ -1176,7 +1165,7 @@ async def test_a_failing_resolution_read_propagates_with_nothing_proposed() -> N
     ``respond`` here: a turn degrades and says so, because an answer with less context
     is still an answer.
     """
-    memory = _FailingSearchStore(now=_clock)
+    memory = _failing_store()
     processor = FakeFeedbackProcessor()
     loop = _loop(memory=memory, feedback=processor)
 
@@ -1230,7 +1219,7 @@ class _FailingEpisodicStore(FakeMemoryStore):
     """The canonical store with the *supplement's* read broken, and only it.
 
     ADR-0158 §4's failure rule is about one read of two, so a store that fails every
-    search (:class:`_FailingSearchStore`) cannot express it: what is owed is that the
+    search (:func:`_failing_store`) cannot express it: what is owed is that the
     belief composition survives a failing episodic read with ``memory_degraded``
     still unset.
     """

@@ -221,10 +221,14 @@ class FakeMemoryStore:
 
     Structurally implements
     :class:`~ai_assistant.core.protocols.MemoryStore`. Records are keyed by id;
-    adding a record whose id already exists overwrites it.
+    adding a record whose id already exists overwrites it. Beyond the contract it
+    can be configured to fail its reads, so a consumer's retrieval-degradation path
+    is testable without hand-rolling a raising subclass (issue #105); only the
+    behaviour pinned by the shared ``MemoryStore`` conformance suite is part of the
+    contract.
     """
 
-    def __init__(self, *, now: Clock = _utcnow) -> None:
+    def __init__(self, *, now: Clock = _utcnow, failure: str | None = None) -> None:
         """Create an empty store.
 
         Args:
@@ -233,9 +237,41 @@ class FakeMemoryStore:
                 :func:`~ai_assistant.core.clock.checked_clock`, exactly as the
                 real stores are: a fake looser than the contract would certify
                 consumers the real implementation rejects (ADR-0026 §7).
+            failure: If given, every read that reaches the stored records raises
+                ``MemoryStoreError`` with this message instead of answering. It lets
+                a consumer exercise the retrieval-failure path ADR-0022 §3 documents
+                — a turn that loses memory degrades and says so — against the shared
+                fake rather than a bespoke raising subclass (issue #105).
+
+                A message rather than an exception instance, for the reason
+                ``FakeContextProvider`` records: an instance parameter would make it
+                possible to configure the canonical fake to raise outside the
+                contract, and one stored instance re-raised would accumulate a
+                traceback across calls. Every call raises a fresh instance.
+
+                **It models the backing being unavailable, so it bites exactly where
+                the fake touches its records** — inside the modelled resource,
+                *after* the argument checks and after any short-circuit that reads
+                nothing (``search`` with an empty query or a non-positive ``limit``,
+                ``get_many`` with no ids, ``list_beliefs`` with ``limit=0``). An
+                argument the store would refuse anyway is the caller's mistake
+                whether or not the backing answers, and a fake that failed a call the
+                real store never makes would certify a consumer against fiction
+                (ADR-0026 §7).
+
+                **The writes and :meth:`export` are deliberately unaffected.** The
+                writes because the parameter names a broken *retrieval* path, and a
+                test still has to seed the store it is breaking. ``export`` because
+                it is how a test reads the fake's state back: what a degradation path
+                owes is that the consumer carried on *and wrote nothing*, and a
+                failure that closed the inspection window would make the second half
+                unprovable — ``tests/orchestration/test_loop.py`` asserts exactly
+                that. It is ADR-0007's data-rights snapshot rather than a retrieval,
+                which is the same distinction from the other side.
         """
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="FakeMemoryStore")
+        self._failure = failure
         self._resource = SuspendableResource()
         # The walk's never-reissued order key (ADR-0114 §1). `_sequence` only ever
         # rises: `delete`, `purge_expired` and `clear` drop entries from `_keys`
@@ -278,6 +314,21 @@ class FakeMemoryStore:
     def resource_log(self) -> ResourceLog:
         """When each call was inside the modelled resource (ADR-0060's case reads it)."""
         return self._resource.log
+
+    def _refuse_read(self) -> None:
+        """Raise the configured retrieval failure, if one was configured.
+
+        Called on the first line inside the modelled resource by every read that
+        reaches the records, so a call against a broken backing is entered and
+        *then* fails: it really did reach the store, and ``resource_log`` records
+        that it did.
+
+        Raises:
+            MemoryStoreError: Carrying the ``failure`` message passed at
+                construction, if one was given. A fresh instance per call.
+        """
+        if self._failure is not None:
+            raise MemoryStoreError(self._failure)
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.
@@ -492,8 +543,13 @@ class FakeMemoryStore:
         Routed through the modelled resource like every other method: the
         ``sqlite3`` store answers this from under its connection lock, so it is one
         of the lock sites ADR-0060's clause binds (#397).
+
+        Raises:
+            MemoryStoreError: If the fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one.
         """
         async with self._resource.held():
+            self._refuse_read()
             record = self._records.get(record_id)
             if record is None or not self._is_readable(record, self._now_utc()):
                 return None
@@ -513,6 +569,11 @@ class FakeMemoryStore:
 
         Routed through the modelled resource like every other method, so the
         cancellation clause has a real subject here too (ADR-0060, #397).
+
+        Raises:
+            MemoryStoreError: If the fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one. An empty
+                ``record_ids`` is answered without reaching either.
         """
         wanted = dict.fromkeys(record_ids)
         if not wanted:
@@ -522,6 +583,7 @@ class FakeMemoryStore:
             # would certify a consumer the real store never blocks (ADR-0026 §7).
             return {}
         async with self._resource.held():
+            self._refuse_read()
             now = self._now_utc()
             return {
                 record_id: record.model_copy(deep=True)
@@ -567,6 +629,12 @@ class FakeMemoryStore:
         read afterwards (#436). That ordering is what the suite's read-side
         input-observation cases turn on here, so the entry below must stay *after*
         both materialisations.
+
+        Raises:
+            MemoryStoreError: If the fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one. A query with no
+                terms, or a non-positive ``limit``, is answered without reaching
+                either.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
@@ -574,6 +642,7 @@ class FakeMemoryStore:
         if limit <= 0 or not query_terms:
             return MemorySearchResult(records=())
         async with self._resource.held():
+            self._refuse_read()
             now = self._now_utc()  # one reading for the whole search, not one per record
             scored: list[MemoryRecord] = []
             for record in self._records.values():
@@ -634,7 +703,9 @@ class FakeMemoryStore:
 
         Raises:
             ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
-            MemoryStoreError: If the injected clock's reading is not conforming.
+            MemoryStoreError: If the fake was constructed with a ``failure``, or the
+                injected clock's reading is not conforming. A page that selects
+                nothing is answered without reaching either.
         """
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
@@ -646,6 +717,7 @@ class FakeMemoryStore:
             return []
 
         async with self._resource.held():
+            self._refuse_read()
             now = self._now_utc()  # one reading for the whole page
             matched = [
                 record
@@ -669,11 +741,13 @@ class FakeMemoryStore:
                 not exactly an ``int`` in ``[1, 2**63)``. Both are checked on the
                 coroutine's first executed line, before the resource is held, so a
                 refused call takes nothing and changes nothing.
-            MemoryStoreError: The injected clock's reading is not a conforming one.
+            MemoryStoreError: The fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one.
         """
         _check_walk_name(walk)
         _check_walk_limit(limit)
         async with self._resource.held():
+            self._refuse_read()
             now = self._now_utc()
             after = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
             # `limit` bounds records *examined*, not records returned: a scan that
