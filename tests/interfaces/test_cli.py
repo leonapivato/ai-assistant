@@ -1768,6 +1768,7 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     evidence_elided: int = 0,
     attestation: Attestation | None = None,
     rests_on_recorded_external_content: bool = False,
+    kind: MemoryKind = MemoryKind.SEMANTIC,
 ) -> Belief:
     """One projected belief, as the façade hands it to the adapter.
 
@@ -1780,11 +1781,15 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     that ADR still builds the belief it did. They are **independent knobs rather than
     derived from the band**, because §2 adds no cross-field validator to this type and
     the surface must answer for the off-contract state as well as the ruled ones.
+
+    ``kind`` is a knob for the same reason ADR-0223 §5 needs one: a captured episode is
+    projected into this listing like anything else, and the row it renders is the one
+    that arm is about. It defaults to what every case before that ADR built.
     """
     return Belief(
         id=belief_id,
         band=band,
-        kind=MemoryKind.SEMANTIC,
+        kind=kind,
         content=content,
         confidence=confidence,
         evidence=evidence,
@@ -1808,6 +1813,7 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
     evidence_elided: int = 0,
     attestation: Attestation | None = None,
     rests_on_recorded_external_content: bool = False,
+    kind: MemoryKind = MemoryKind.SEMANTIC,
 ) -> BeliefSummary:
     """One listing row, as the façade hands it to the adapter (ADR-0085 §4a).
 
@@ -1822,7 +1828,7 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
     return BeliefSummary(
         id=belief_id,
         band=band,
-        kind=MemoryKind.SEMANTIC,
+        kind=kind,
         content=content,
         confidence=confidence,
         evidence_count=evidence_count,
@@ -2350,6 +2356,175 @@ def test_why_says_nothing_about_the_outside_when_the_predicate_is_false(
     assert "connected source" not in rendered
     assert "outside" not in rendered
     assert "1 piece(s) of evidence" in rendered, "the rest of the derived line is unchanged"
+
+
+#: The sentence a stamped **belief** gets, which ADR-0223 §5 forbids on an episode:
+#: every clause of it is false of a recorded exchange.
+_BELIEF_SENTENCE = "Some of what I worked it out from came from a connected source"
+
+#: The sentence a stamped **episode** gets instead (ADR-0223 §5's second clause).
+_EPISODIC_SENTENCE = (
+    "Some of the material this exchange was conducted over traces back to a connected source"
+)
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_a_stamped_episode_gets_the_episodic_arm_and_never_the_belief_sentence(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """ADR-0223 §5's second clause, on the CLI half of §10's eighth test.
+
+    Once ADR-0223 §1 stamps the mark on a captured episode the predicate is ``True``
+    of a record the belief sentence is false of in every clause: "the system did not
+    work the episode out, there is nothing it worked it out *from* — ``evidence`` is
+    empty by ADR-0074 §4 — and the episode's warrant is that it happened, which is
+    entirely this system's own".
+
+    So the arm is asserted in both directions. The episodic sentence is present, and
+    the belief sentence is asserted **absent** — a listing that appended both, or that
+    kept the old one for a kind nobody thought about, is the failure §5 exists to
+    prevent and a presence-only check would pass it.
+
+    **And the content is not re-attributed**, which §5 carries over from ADR-0189 §4
+    unchanged: no part of the episode is presented as a source's words. The record
+    stays this system's own account of the exchange, which is what ADR-0074 §4 makes
+    it — "the terminal citation: the thing other records cite".
+    """
+    stamped = (
+        _belief(
+            BeliefBand.DERIVED,
+            kind=MemoryKind.EPISODIC,
+            content="you asked where the office is; I answered Boston",
+            rests_on_recorded_external_content=True,
+        )
+        if render is cli._render_belief
+        else _summary(
+            BeliefBand.DERIVED,
+            kind=MemoryKind.EPISODIC,
+            content="you asked where the office is; I answered Boston",
+            rests_on_recorded_external_content=True,
+        )
+    )
+    render(stamped)
+    rendered = _flat(output.getvalue())
+    assert _EPISODIC_SENTENCE in rendered
+    assert "the record above is still my own account of what was said" in rendered
+    assert _BELIEF_SENTENCE not in rendered, "the belief sentence is false of an episode"
+    assert "warrant" not in rendered, "an episode's warrant is not a derivation to describe"
+    assert "someone else's words" not in rendered
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_an_unstamped_episodes_row_says_exactly_what_it_said_before(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """The byte-identity half of ADR-0223 §10's eighth test.
+
+    The arm is keyed on the predicate first and the kind second, so an episode nothing
+    external reached renders the row it rendered before this ADR — the pre-existing
+    oddity of explaining an episode through a belief renderer included, which §5 names
+    and deliberately does not repair ("appending this sentence turns an oddity into a
+    claim" is the whole of what it rules).
+
+    Asserted as the **exact** ``Why`` line rather than as an absence, because an arm
+    that appended a sentence with the marker missing from it would pass every
+    absence check here.
+    """
+    unstamped = (
+        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
+        if render is cli._render_belief
+        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
+    )
+    render(unstamped)
+    rendered = _flat(output.getvalue())
+    assert "Why: I worked it out, and no supporting evidence was recorded. Last revised:" in (
+        rendered
+    )
+    assert "connected source" not in rendered
+    assert "traces back" not in rendered, "and the silence is silence, not the episodic arm"
+
+
+def test_a_stamped_belief_of_another_kind_is_left_on_the_belief_sentence(
+    output: StringIO,
+) -> None:
+    """The arm is an addition, not a redirection (ADR-0223 §5, ADR-0189 §4 unnarrowed).
+
+    §5's first clause is explicit that ADR-0189 §4's third clause is "not narrowed,
+    exempted or conditioned" — so the three non-episodic kinds keep the sentence they
+    had, and a fifth ``MemoryKind`` added to ``core`` would take it too rather than
+    silently losing the disclosure. Pinned on ``PROCEDURAL`` because the semantic case
+    is the one every other test in this file already renders.
+    """
+    cli._render_belief_summary(
+        _summary(
+            BeliefBand.DERIVED,
+            kind=MemoryKind.PROCEDURAL,
+            evidence_count=1,
+            rests_on_recorded_external_content=True,
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert _BELIEF_SENTENCE in rendered
+    assert _EPISODIC_SENTENCE not in rendered
+
+
+async def test_beliefs_listed_by_episodic_kind_carry_the_episodic_arm(
+    output: StringIO,
+) -> None:
+    """ADR-0223 §10's eighth test, driven the way the documented command drives it.
+
+    ``assistant beliefs --kind episodic`` is documented in this module as the way to
+    "see captured conversation turns", and §5's chain runs from there: the façade
+    lists what it holds, ``_render_beliefs`` renders each row, and ``_why`` reaches
+    ``_why_derived`` because a captured episode's provenance is ``OBSERVED`` and
+    ``band_of`` puts that in the ``DERIVED`` band.
+
+    Both rows are listed in one call so the two sentences are asserted against **one**
+    rendering: an arm keyed on the kind is only worth anything if the row beside it is
+    unaffected, and a per-case assertion would not show that.
+
+    The stamped episode is constructed here rather than captured, which is what makes
+    this lane independent of the one landing ADR-0223 §1's stamp: the field exists on
+    ``Provenance`` today, the projection carries it kind-blind by §5's first clause,
+    and this surface has to answer for the row whether or not a producer writes one
+    yet.
+    """
+    engine = FakeAssistantEngine()
+    engine.beliefs_held["ep-1"] = _belief(
+        BeliefBand.DERIVED,
+        belief_id="ep-1",
+        kind=MemoryKind.EPISODIC,
+        content="you asked where the office is; I answered Boston",
+        rests_on_recorded_external_content=True,
+    )
+    engine.beliefs_held["ep-2"] = _belief(
+        BeliefBand.DERIVED,
+        belief_id="ep-2",
+        kind=MemoryKind.EPISODIC,
+        content="you asked what time it was; I answered half past two",
+    )
+
+    code = await cli._drive_beliefs(
+        engine, bands=None, kinds=[MemoryKind.EPISODIC], limit=50, offset=0
+    )
+
+    assert code == 0
+    rendered = _flat(output.getvalue())
+    assert rendered.count(_EPISODIC_SENTENCE) == 1, "the stamped row, and only it"
+    assert _BELIEF_SENTENCE not in rendered
+    assert "ep-2" in rendered, "and the unstamped episode is listed beside it, unchanged"
 
 
 def test_render_beliefs_reports_an_empty_page_plainly(output: StringIO) -> None:

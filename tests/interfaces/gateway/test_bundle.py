@@ -15,6 +15,7 @@ worth anything if something checks it.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -24,14 +25,17 @@ from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
+    BeliefSummary,
     ConversationDigest,
     DiscloserProvenance,
     GrantScope,
+    MemoryKind,
     NotificationCondition,
     NotificationReach,
     RoutableOperation,
     SpokenAudioFormat,
 )
+from ai_assistant.interfaces import cli
 from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import (
     _POLICY,
@@ -130,6 +134,34 @@ def _code(name: str) -> str:
     """
     without_blocks = re.sub(r"/\*.*?\*/", "", _asset(name), flags=re.DOTALL)
     return re.sub(r"^\s*//.*$", "", without_blocks, flags=re.MULTILINE)
+
+
+def _joined(block: str) -> str:
+    """The sentence a run of concatenated JavaScript string literals renders.
+
+    The page builds its longer sentences as ``"..." + "..."`` across lines, so a test
+    comparing what it says to what its sibling surface says has to put the halves back
+    together. Nothing here interprets an expression: only double-quoted literals are
+    read, which is every piece of the two sentences this is used on.
+    """
+    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', block))
+
+
+def _arm(function: str, opening: str) -> str:
+    """One arm of a two-armed renderer: the ``return`` its guard opens.
+
+    Sliced rather than searched so that "this arm says X" is decided over *that*
+    arm — a sentence counted anywhere in the function would be satisfied by the other
+    one.
+    """
+    body = function[function.index(opening) + len(opening) :]
+    return body[: body.index("\n  }") if "\n  }" in body else len(body)]
+
+
+#: The guard the page's episodic arm opens with, built from ``core``'s own vocabulary
+#: rather than spelled out: a kind renamed there fails this file instead of leaving a
+#: dead branch behind a literal nothing on the wire ever equals again.
+_EPISODIC_GUARD: Final = f'if (belief.kind === "{MemoryKind.EPISODIC.value}") {{'
 
 
 @pytest.mark.integration
@@ -3966,7 +3998,7 @@ def test_the_browser_says_a_derived_warrant_came_from_outside_on_every_count_sta
     """
     derived = _functions(_code("app.js"))["whyDerived"]
 
-    assert "outsideWarrant(belief.rests_on_recorded_external_content)" in derived
+    assert "outsideWarrant(belief)" in derived
     assert derived.count("const outside =") == 1, "constructed once"
     returns = derived.split("return ")[1:]
     assert len(returns) == 4, "the four states a derived line renders a count in"
@@ -3989,11 +4021,92 @@ def test_the_browser_says_nothing_about_the_outside_when_the_predicate_is_false(
     functions = _functions(_code("app.js"))
     outside = functions["outsideWarrant"]
 
-    assert 'return rests\n    ? " Some of what I worked it out from' in outside
-    assert ': "";' in outside, "and the false arm contributes nothing at all"
+    assert 'if (!belief.rests_on_recorded_external_content) {\n    return "";' in outside
+    assert outside.index('return "";') < outside.index(_EPISODIC_GUARD), (
+        "the silence is taken before the kind, so no arm can render a false as an "
+        "assurance and a third arm could not either (ADR-0223 §5's last clause)"
+    )
     assert "band" not in outside, "the answer is read, never recomputed from the band"
     assert "derived_from_external" not in _code("app.js"), (
         "and no client reads the raw field in the predicate's place (ADR-0106 §2)"
+    )
+
+
+def _row(*, kind: MemoryKind, stamped: bool) -> BeliefSummary:
+    """One listing row, as either surface is handed it."""
+    return BeliefSummary(
+        id="rec-1",
+        band=BeliefBand.DERIVED,
+        kind=kind,
+        content="you asked where the office is; I answered Boston",
+        confidence=0.5,
+        evidence_count=0,
+        lost_evidence=0,
+        last_updated=datetime(2026, 3, 2, 8, 30, tzinfo=UTC),
+        rests_on_recorded_external_content=stamped,
+    )
+
+
+def test_the_browser_gives_a_stamped_episode_an_arm_of_its_own() -> None:
+    """ADR-0223 §5's second clause, on the browser half of §10's eighth test.
+
+    This page lists beliefs without a kind filter, so a captured episode is one of the
+    rows it renders — and once ADR-0223 §1 stamps the mark on one, the predicate is
+    true of a record the belief sentence is false of in every clause: nothing worked
+    the episode out, there is nothing it was worked out *from* (ADR-0074 §4 leaves its
+    evidence empty by decision), and its warrant is that it happened.
+
+    Asserted in both directions and per arm, because the failure this pins is the
+    belief sentence surviving on a row it is false of — which a check for the presence
+    of the episodic sentence anywhere in the function would pass.
+    """
+    outside = _functions(_code("app.js"))["outsideWarrant"]
+    episodic = _arm(outside, _EPISODIC_GUARD)
+
+    assert "traces back to a connected source" in _joined(episodic)
+    assert "I worked it out from" not in _joined(episodic), (
+        "an episode was not worked out from anything (ADR-0223 §5's second condition)"
+    )
+    assert "warrant" not in _joined(episodic), "and it has no derivation to predicate"
+    assert "my own account of what was said" in _joined(episodic), (
+        "the content is not re-attributed to the source (§5's first condition)"
+    )
+
+
+def test_the_two_surfaces_say_the_same_two_sentences() -> None:
+    """ADR-0223 §5's third clause: both surfaces render the arm, or neither does.
+
+    "A fact stated on one surface and not on its sibling is a fact a user learns to
+    distrust on both" — so this asserts the stronger thing the clause makes available:
+    not merely that each surface says *something*, but that the browser's sentence is
+    the terminal's sentence, character for character, on both arms.
+
+    It is the one check that fails when a lane repairs one renderer and forgets the
+    other, which is the failure mode §5 was written against and the one neither file's
+    own tests can see.
+    """
+    outside = _functions(_code("app.js"))["outsideWarrant"]
+    episodic = _arm(outside, _EPISODIC_GUARD)
+    belief = outside[outside.index("\n  return (") :]
+
+    assert _joined(episodic) == cli._outside_warrant(_row(kind=MemoryKind.EPISODIC, stamped=True))
+    assert _joined(belief) == cli._outside_warrant(_row(kind=MemoryKind.SEMANTIC, stamped=True))
+
+
+def test_the_browser_leaves_an_unstamped_episode_exactly_where_it_was() -> None:
+    """The byte-identity half of ADR-0223 §10's eighth test, on this surface.
+
+    The predicate is read before the kind, so an episode nothing external reached
+    renders what it rendered before this ADR — the pre-existing oddity of explaining an
+    episode through a belief renderer included, which §5 names and deliberately does
+    not repair.
+    """
+    outside = _functions(_code("app.js"))["outsideWarrant"]
+    silence = outside[: outside.index(_EPISODIC_GUARD)]
+
+    assert _joined(silence) == "", "the false arm contributes nothing at all"
+    assert MemoryKind.EPISODIC.value not in silence, (
+        "and it is reached without asking what kind the row is"
     )
 
 
