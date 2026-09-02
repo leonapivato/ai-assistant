@@ -5692,7 +5692,14 @@ class ToolFailureKind(StrEnum):
     """The seam's own deadline passed (ADR-0029 §4)."""
 
     CANCELLED = "cancelled"
-    """Cancelled before completing (ADR-0029 §4)."""
+    """The tool's own upstream cancelled or aborted the operation (ADR-0031 §3).
+
+    A remote job the provider stopped, a batch the service abandoned. **The seam
+    never synthesises it**: a cancellation the seam observes propagates as a
+    ``CancelledError`` and never becomes a result, and a deadline the seam owns is
+    :attr:`TIMED_OUT`. Retargeted from ADR-0029 §4's "cancelled before completing",
+    which described a seam branch no conforming ``invoke`` can construct.
+    """
 
     REFUSED = "refused"
     """Attempted, and the upstream declined it."""
@@ -5731,8 +5738,10 @@ _RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
     ToolFailureKind.UNAVAILABLE: True,
     ToolFailureKind.RATE_LIMITED: True,
     ToolFailureKind.TIMED_OUT: True,
-    # True because the cancellation was ours: nothing about the call itself
-    # failed, so the same call could be issued again.
+    # True on ADR-0029 §3's general test, which is the only ground left for it:
+    # a repeat of the same call could plausibly succeed. The value is unchanged,
+    # but ADR-0029's "because the cancellation was ours" is not — under ADR-0031
+    # §3 the cancellation is the tool's upstream's, never the seam's.
     ToolFailureKind.CANCELLED: True,
     ToolFailureKind.REFUSED: False,
     ToolFailureKind.INTERNAL: False,
