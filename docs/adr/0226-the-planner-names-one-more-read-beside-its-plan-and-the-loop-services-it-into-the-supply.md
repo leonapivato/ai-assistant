@@ -601,11 +601,24 @@ inside ADR-0014 §2's plan-once model, which §12 defers rather than disturbs.
 > and the composing stage runs over that and nothing wider. Nothing is planned,
 > composed or rendered over a supply wider than the one this section returns.
 
-> **Normative.** ADR-0204 §2's evaluation — the boolean a bounded-audience turn's
-> capture records — is taken over the **whole supply including the fourth group**,
-> and is therefore taken **after** servicing. An implementation that evaluates before
-> servicing and does not re-evaluate over the union under-fires the boolean on
-> exactly the records the planner asked for.
+> **Normative.** **The servicer admits no record that would fire either term of
+> ADR-0204 §2's disjunction**: none that ADR-0199 §3 withholds from a channel of
+> unbounded audience, and none already carrying the mark ADR-0217 moved into
+> `MemoryBase.placement`. Such a record is **discarded at the servicer** — it does
+> not enter the fourth group, reaches no stage of the turn, and is counted in §9's
+> audit as dropped rather than as returned.
+
+> **Normative.** ADR-0204 §2's evaluation is therefore taken **exactly where that
+> clause puts it** — once, between retrieval and planning, over the three groups —
+> and this ADR moves it not at all. The clause above is what keeps that evaluation
+> true of the whole supply the turn ends up holding: a group that provably contains
+> no record of either class contributes nothing the evaluation could have found.
+
+> **Normative.** The admission test is ADR-0199 §3's placement applied to ADR-0199
+> §2's recorded origin, unchanged, and one field read per record for the inherited
+> mark. It is **not a second decision procedure**: nothing is decided by reading
+> `MemoryBase.content`, a facet's rendered text, a goal statement, a plan or any
+> other span of content, and the servicer issues no store query to perform it.
 
 **This section changes no ADR, and the reason is §5's channel scoping.** ADR-0203 §1
 and §2 bind an operation whose output channel's audience is unbounded; §5 refuses to
@@ -627,14 +640,28 @@ was **withdrawn** once §5 scoped the envelope off the unbounded channel, and it
 recorded here because a reader comparing drafts should see that the narrower design
 removed a clause change rather than hid one.
 
-**The ordering requirement above is the one real obligation this creates, and it is
-not book-keeping.** `orchestration/engine.py` reads the boolean *"once, immediately
-after the one evaluation that set it, so every capture below stamps the same turn's
-own value"*. If servicing lands after that read, a record the planner asked for and
-that ADR-0199 §3 would withhold sets nothing — and `BoundedAudienceSupply`'s own
-docstring says why that matters: *"#1708's laundering path runs entirely through this
-channel's captures"*, so an under-fired boolean here is a typed turn's capture
-becoming a clean input to a spoken one. The evaluation must see the fourth group.
+**The admission rule exists because the alternative was moving a privacy clause's
+timing, and that trade is not worth taking for milestone 1.** ADR-0204 §2 fixes the
+evaluation *"once, between retrieval and planning"*, and a group that arrives after
+planning is outside it. Two designs close the gap: evaluate again over the union —
+which contradicts §2's timing and its once — or admit nothing the evaluation would
+have found. The second needs no clause of ADR-0204 to move, and it is the fail-closed
+one: where the first leaves a mis-ordered implementation silently under-firing a
+boolean, the second makes the under-firing impossible because the record is not there.
+
+**What that boolean protects is worth naming, because it is why this is a blocker and
+not a nicety.** `BoundedAudienceSupply`'s own docstring says *"#1708's laundering path
+runs entirely through this channel's captures"*: a bounded turn that plans over
+withheld-class material captures a stamped episode, and the stamp is what stops a
+later spoken turn reading it back. An unstamped episode composed from a serviced
+withheld record is exactly that leak, reached by a new route.
+
+**The cost is real and is stated rather than hidden.** On a bounded channel the other
+three groups may carry withheld-class records — that is the channel working — and the
+fourth group may not. So a sighted read is slightly narrower than the read that
+precedes it, and a hop whose evidence is withheld-class returns less than the oracle
+would. §12 defers the widening, and it is a widening a later ADR can take once it is
+willing to move ADR-0204 §2's timing deliberately rather than as a side effect.
 
 **A fourth group and not a merge**, because ADR-0158 §4's argument is positional:
 *"Position is how this corpus expresses precedence into a prompt"*, and sorting kinds
@@ -681,13 +708,17 @@ a request, directly comparable to the replay's 13.6% — and the **yield**: how 
 records came back, how many survived deduplication as genuinely new, and how many the
 subtraction dropped.
 
-**The novelty rate is not precision, and conflating the two would be the easiest
-mistake this section could invite.** Novelty says a fired read returned records the
-supply did not already hold. It does **not** say the supply was insufficient, that
-the new records bore on the question, or that the reply was better for them: a
-planner can emit a broad query on a perfectly sufficed turn and get back one
-irrelevant record it had not seen, and that turn scores as novel while being a false
-fire. So novelty is an upper bound on precision and is reported as one.
+**The novelty rate is a separate yield measure and is not a bound on precision in
+either direction.** Novelty says a fired read returned records the supply did not
+already hold. It does **not** say the supply was insufficient, that the new records
+bore on the question, or that the reply was better for them. It runs above precision
+where a planner emits a broad query on a perfectly sufficed turn and gets back one
+irrelevant record it had not seen — a false fire scoring as novel. And it runs below
+precision where a genuinely insufficient supply triggers a read that correctly fires
+and returns only duplicates or nothing — a true fire scoring as zero. So no lane
+reports novelty as an upper bound, a lower bound or a proxy for precision: it measures
+what the read returned, and precision measures whether the trigger was right, and
+those are two questions.
 
 **Recall is further out of reach than precision, and for a structural reason rather
 than a missing field.** Its denominator is the turns on which a read **would** have
@@ -735,8 +766,11 @@ by making the planner ask twice.
 > serviced or declined under §5's channel scoping; for each ask, its kind, and **the
 > identifier of the plan that carries the ask itself**; how many records the
 > servicing returned; how many of those were new after deduplication; how many the
-> deduplication removed; how many labels resolved to nothing; whether the budget
-> truncated a kind; and whether the servicing failed.
+> deduplication removed; **how many §7's admission rule discarded**; how many labels
+> resolved to nothing; whether the budget truncated a kind; and whether the servicing
+> failed. The admission count is kept apart from the deduplication count: one says the
+> supply already had it, the other says its class kept it out, and a deployment
+> reading a thin fourth group needs to know which.
 
 > **Normative.** The record holds **counts, kinds and a reference**, and copies no
 > text. It does not copy the query the planner composed, the labels it named, any
@@ -865,10 +899,13 @@ to service.
    ADR-0203 §1 narrowed and no fourth one, performs no store read for the request,
    and records the emission as declined — asserted for a request of each kind, and
    asserted over the supply and the audit rather than over a call count.
-6. **A serviced record still fires ADR-0204 §2's boolean.** On a bounded-audience
-   turn, a record the servicing adds that ADR-0199 §3 would withhold sets the boolean
-   the capture records. This fails on any implementation that evaluates before
-   servicing and does not re-evaluate over the union, and it is the assertion standing
+6. **A withheld-class record never reaches the fourth group.** On a bounded-audience
+   turn whose servicing would return a record ADR-0199 §3 withholds, and one already
+   carrying `MemoryBase.placement`'s mark, neither reaches the supply, neither reaches
+   the composing stage, both are counted as dropped, and ADR-0204 §2's boolean is
+   exactly what it would have been without the request. Asserted over a supply where
+   the other three groups **do** carry such a record, so the test distinguishes the
+   admission rule from a turn that simply had none — this is the assertion standing
    between this ADR and #1708's laundering path.
 7. **The hop is serviced before the query, and the budget truncates the query.** A
    request whose hop yields records and whose query would yield more than the
@@ -940,6 +977,11 @@ to service.
   ADR that answers §2's backfill question for a planner-emitted read — plausibly by
   showing the emission is independent of the withholding, which is a measurement the
   audit this ADR builds could supply. Not fired by a lane finding spoken replies thin.
+- **Admitting a withheld-class record to the fourth group on a bounded channel** (§7).
+  Deferred because the guarantee it needs is ADR-0204 §2's evaluation covering a group
+  that arrives after planning, and §2 fixes that evaluation *"once, between retrieval
+  and planning"*. Fired by an ADR willing to move §2's timing deliberately, with the
+  record ADR-0070 §1 then requires. Not fired by a lane finding the fourth group thin.
 - **#838's coverage layer**, and whether the trigger is learnable from the supply
   alone. Fired by what §9's audit shows, or by #838's own ADR.
 - **A sampled shadow read on turns the trigger did not fire on** — the only live
@@ -1070,12 +1112,16 @@ returning the field to a default, admitting a range, or deciding a shape change 
 not move it. §4 edits one integer exactly as §10 prescribes and carries §10's
 "not readable at any version" rule forward with one more value inside it.
 
-**ADR-0204 §2 is untouched and its evaluation is relied on.** §7 requires only that it
-be taken after servicing, so the boolean it sets reflects the supply the turn actually
-ran over. That is the existing rule applied to a supply that gained a group, and
-`BoundedAudienceSupply`'s own statement of why it must not under-fire — *"#1708's
-laundering path runs entirely through this channel's captures"* — is the reason the
-ordering is normative here rather than left to a lane.
+**ADR-0204 §2 is untouched, including its timing clause, and an earlier draft of this
+ADR did not leave it so.** That draft required the evaluation to be taken *after*
+servicing, which contradicts §2's *"once, between retrieval and planning"* and would
+have owed a partial supersession of a privacy clause's timing. §7 now reaches the same
+guarantee from the other side: the servicer admits no record that would fire either
+term of §2's disjunction, so the evaluation stays exactly where §2 puts it and stays
+true of the supply the turn ends up holding. This is the same move ADR-0225 §16
+records making on ADR-0074 §8 — reaching a guarantee through an existing clause's own
+text rather than adding a conjunct to it — and it is recorded here for that section's
+reason: "we nearly amended a clause by accident" is what a later reader should see.
 
 **ADR-0158 §4 and §5 are extended in application and unchanged in text.** §4's rule
 is that the order is tail, then beliefs, then supplement, *"appended whole, never
