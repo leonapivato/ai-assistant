@@ -1,6 +1,6 @@
 # 204. A record carries whether the supply it was produced over held withheld content, and a channel of unbounded audience withholds one that does
 
-- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns) and ADR-0217 (§1's first through fourth clauses, §3's first and third clauses and §5's first and second clauses, only as they name the field that carries the answer and the values it takes — `Provenance.supplied_withheld_content` becomes `MemoryBase.placement`, whose `OWNER` reach is that field's `True`; the same records are narrowed, on the same evidence, at the same site, by the same producer — together with §7's version footing, `PROTOCOL_VERSION` moving because a member is removed from a wire-carried `core` type) and ADR-0226 (§2's timing clause alone, "once, between retrieval and planning" — the evaluation is taken once over the turn's final supply, which on a turn that serviced a planner-named read request is after that servicing and on every other turn is exactly where §2 puts it; §2's two terms, its disjunction, its "once", the set it ranges over, the field it writes and its carrying of the value to capture are untouched,; and §4's first and second clauses, only as they freeze the supply a bounded turn composes over, the `TurnResult` it returns, the reply composed for it and `TurnResult.memories`' meaning, and only on a turn whose planner emitted a read request — §4's narrowing prohibition, the plan, the step it drives and the plan persisted through `PlanStore.save_plan` all stand, and §3 stands entire)
+- Status: Partially superseded by ADR-0210 (§2's second clause, §3's fourth clause, §5's second clause and §8's tests 4 and 9, each only as it reaches an operation whose output channel's audience is unbounded — the disjunction and the fact carried to the composing stage are evaluated over the members of the turn's supply a relevance read taken with the turn's own goal statement returned, together with the turn's context facets, and not over a member the supply holds only because it stands in the conversation's own recent turns) and ADR-0217 (§1's first through fourth clauses, §3's first and third clauses and §5's first and second clauses, only as they name the field that carries the answer and the values it takes — `Provenance.supplied_withheld_content` becomes `MemoryBase.placement`, whose `OWNER` reach is that field's `True`; the same records are narrowed, on the same evidence, at the same site, by the same producer — together with §7's version footing, `PROTOCOL_VERSION` moving because a member is removed from a wire-carried `core` type) and ADR-0226 (§2's timing clause alone, "once, between retrieval and planning" — the evaluation is taken once over the turn's final supply, which on a turn that serviced a planner-named read request is after that servicing and on every other turn is exactly where §2 puts it; §2's two terms, its disjunction, its "once", the set it ranges over, the field it writes and its carrying of the value to capture are untouched; and §4's first and second clauses, only as they freeze the supply a bounded turn composes over, the `TurnResult` it returns, the reply composed for it and `TurnResult.memories`' meaning, and only on a turn whose planner emitted a read request — §4's narrowing prohibition, the plan, the step it drives and the plan persisted through `PlanStore.save_plan` all stand, and §3 stands entire)
 - Date: 2026-08-28
 - **Partially supersedes:**
   [ADR-0203](0203-on-a-channel-of-unbounded-audience-the-withholding-binds-the-whole-turn.md)
@@ -131,15 +131,19 @@
   §10 requires the lane to pin them arm for arm. §7's hub-authoritative clause is kept
   as a live condition and generalised.
 
-- **Partially superseded: 2026-09-02 by ADR-0226 — §2's timing clause, and no other
-  clause of §2 and no other section of this ADR.** `track:planning` (**#1908**) opened
+- **Partially superseded: 2026-09-02 by ADR-0226 — two scopes: §2's timing clause,
+  and §4's first and second clauses only as they freeze what a bounded turn's
+  `TurnResult` may gain. No other clause of §2, nothing else of §4, and no other
+  section of this ADR.** The two are recorded together because one change makes both,
+  and each is stated separately below. `track:planning` (**#1908**) opened
   on 2026-09-02, and its first milestone is an envelope by which the planner names one
   more read beside its plan and the loop services it into the turn's supply, after
   planning and before composing. That adds a **fourth group** to `memories` on a
   bounded-audience turn — records the turn plans nothing over but composes over, and
   which its capture is a value derived from.
 
-  **Replaced — when the evaluation is taken, and nothing else.** §2's first clause
+  **First scope — replaced: when the evaluation is taken, and nothing else about
+  §2.** §2's first clause
   rules that the turn's supply *"is evaluated against ADR-0199 §3's withholding
   **once, between retrieval and planning**"*. ADR-0226 §7 takes that evaluation once
   over the turn's **final** supply: after servicing on a turn that serviced a request,
@@ -157,8 +161,8 @@
   records the evaluation would have found, which would have bought this clause's timing
   by breaching §3's third clause and §4's first — both of which stand untouched instead.
 
-  **Not replaced — the terms, the set, the once, the field, the withholding and the
-  bounded channel.** §2's two terms and their disjunction survive whole; its *"once"*
+  **Not replaced by the first scope — the terms, the set, the once, the field, the
+  withholding and the bounded channel.** §2's two terms and their disjunction survive whole; its *"once"*
   survives in letter, so nothing evaluates twice; the set it ranges over is untouched
   and needed no widening, because ADR-0210 §1's bounded clause already ranges it *"over
   the whole supply as assembled and retrieved"* and the serviced records are part of the
@@ -167,15 +171,17 @@
   capture all bind unchanged. §1's field, as ADR-0217 moved it into
   `MemoryBase.placement`, is untouched. **§3 stands entire**, its third clause included
   — a supply site for a bounded channel still *"applies this test to nothing"*, and
-  ADR-0226's servicer applies none. **§4 stands entire**, and its clause that *"no
-  implementation narrows a bounded channel's supply on the strength of this ADR"* is
-  honoured in letter: ADR-0226 discards no record on the ground of its class, and its
-  fourth group carries withheld-class records exactly as the other three do. §5's
+  ADR-0226's servicer applies none. **§4's narrowing prohibition stands**, and its
+  clause that *"no implementation narrows a bounded channel's supply on the strength
+  of this ADR"* is honoured in letter: ADR-0226 discards no record on the ground of
+  its class, and its fourth group carries withheld-class records exactly as the other
+  three do. What §4 *does* lose is the second scope below, which is about what a
+  bounded turn may **gain** and has nothing to do with §2's timing. §5's
   ratchet, §6's residue, §7's version footing and §8's tests bind unchanged, and
   ADR-0210's and ADR-0217's own scopes are untouched in both directions.
 
-  **Also replaced — §4's freeze on a bounded turn's `TurnResult` and reply, in one
-  narrow respect.** §4's first clause rules that on such an operation *"the supply the
+  **Second scope — replaced: §4's freeze on a bounded turn's `TurnResult` and reply,
+  in one narrow respect.** §4's first clause rules that on such an operation *"the supply the
   turn runs over, the plan it produces, the step that plan drives, the `TurnResult` it
   returns, the reply composed for it and the plan persisted through
   `PlanStore.save_plan` are all exactly what they are today"*, and its second that

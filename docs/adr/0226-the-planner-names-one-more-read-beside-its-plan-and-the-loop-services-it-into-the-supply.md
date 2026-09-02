@@ -49,10 +49,12 @@
   `src/ai_assistant/core/protocols.py`: the `ActionPlan` it hands back may carry a
   read request. `Planner.plan`'s signature and its `memories` **input** are unchanged,
   it adds **no Protocol and no member to one**, and it moves no `PROTOCOL_VERSION`:
-  `ActionPlan` crosses neither `wire/` nor `service/` in the tree. **The widened
-  meaning is flagged under golden rule 5 rather than smuggled**, exactly as ADR-0158
-  §5 flagged its own, and §10 binds Lane A to extend the shared `PlannerContract`
-  conformance suite that already runs against both `Planner` implementations. The versioned surface it *does* cross is the portable
+  `ActionPlan` crosses neither `wire/` nor `service/` in the tree. **The widened return
+  is a Protocol change and is flagged as a breaking change under golden rule 5**,
+  exactly as ADR-0158 §5 flagged its own; §10 binds Lane A to extend the shared
+  `PlannerContract` conformance suite that already runs against both `Planner`
+  implementations, and separates the flag from the compatibility fact that no existing
+  implementation stops conforming. The versioned surface it *does* cross is the portable
   export, and §4 moves it. **This ADR changes no code.** §10 states what the
   implementing lanes owe; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
@@ -556,13 +558,22 @@ never be able to take the reply down with it.
 > Within the hop, labels are followed in the order the ask names them and each
 > record's evidence in the order that record stores it; within the query, records
 > arrive in the order `assemble_by_band` returns them, which is ADR-0072 §5's band
-> precedence and is already ratified. The resulting fourth group is therefore a
-> function of the request, the store and **the turn's pre-servicing supply** — the
-> last because §7 deduplicates against it and this section counts the budget after
-> that deduplication — and two conforming implementations given one request over one
-> store and one such supply produce the same group in the same order. The candidate
-> **ordering** before deduplication is fixed by the request and the store alone;
-> which candidates survive, and therefore how many slots the query is left, is not.
+> precedence and is already ratified. What this fixes is the **order and the
+> precedence**: given one request, one pre-servicing supply and one set of candidates,
+> two conforming implementations append the same records in the same order. Which
+> records survive depends on that supply as well as on the request, because §7
+> deduplicates against it and this section counts the budget after that deduplication.
+
+> **Normative.** **No cross-call read consistency is promised here, and ADR-0113 §5
+> is inherited rather than closed.** A `SIGHTED_QUERY` reaches the store through
+> `assemble_by_band`, which is several `MemoryStore.search` calls, and §5 rules that
+> *"This ADR adds no multi-band snapshot and no cross-call read consistency of any
+> kind"* and that a record changing band between two of a turn's calls *"may instead
+> be **missed** by all of them. That is accepted, not closed"*. The same is accepted
+> here: no snapshot is added, no consumer-side rule recovers a record no call
+> returned, and no lane reads a thin fourth group as evidence the store held nothing
+> more. So the ordering clause above is a statement about a fixed candidate set and
+> never a promise that two runs over a concurrently-written store see one.
 
 > **Normative.** A `CITATION_HOP` ask names **at most two labels**, and the evidence
 > of the records they resolve to is drawn under the same budget of ten. No
@@ -868,6 +879,22 @@ by making the planner ask twice.
 > ADR makes it speakable, placeable, or admissible to a channel a rationale is
 > inadmissible to. No lane infers a placement for it by inspecting it.
 
+> **Normative.** **The record is a structured log event**, emitted from
+> `ai_assistant.orchestration` at the servicing site under one fixed event key, through
+> the `structlog` seam `core/logging.py` configures. It is **Tier 2** in ADR-0004 §5's
+> classification and satisfies that tier by construction, because the clause above
+> holds it to *"identifiers, classes, and counts, never content"* — which is
+> `core/logging.py`'s own statement of the primary defence, and is why this record
+> needs no exception from the redaction net rather than relying on it.
+
+> **Normative.** This ADR adds **no audit Protocol, no audit store and no injected
+> sink**, and no lane invents one. `AuditTrail` is the permissions trail and records
+> permission decisions; this record is not one and does not go there. A **durable,
+> queryable aggregation surface** for these events is deferred by name in §12 — a
+> deployment that wants the fire rate over a retention window rather than out of its
+> logs is what fires it, and it is a decision about storage rather than about this
+> mechanism.
+
 > **Normative.** These are the fields milestone 2 **raises rather than replaces**. An
 > ADR admitting a second serviced emission per turn extends this record to account
 > per emission and keeps every field's meaning; it does not rename them, drop them,
@@ -925,11 +952,17 @@ triad exists to split and §3 has no subject here. What does exist is a `Planner
 Protocol whose documented return widens, and the corpus already carries the guardrail
 for that — a shared `PlannerContract` run against both implementations — so the clause
 above binds Lane A to it rather than leaving a widened meaning pinned by nothing. The
-widening is **not breaking**: `Planner.plan`'s signature and its `memories` input are
-unchanged, `read_request` is additive and defaulted, and an existing implementation
-that returns an `ActionPlan` without one conforms exactly as it does today (§4). It is
-flagged under golden rule 5 regardless, which is what ADR-0158 §5 did for the same
-kind of widening.
+widening **is flagged as a breaking change under golden rule 5** — *"A Protocol change
+is a breaking change. Flag it in your summary"* — and this ADR does not argue itself
+out of that classification: the documented meaning of what `Planner.plan` returns
+changes, `orchestration` consumes it, and the rule admits no semantic-widening
+exception. ADR-0158 §5 flagged its own widening the same way. What the flag does
+**not** assert is a compatibility break, and the two are separate facts worth stating
+together: `Planner.plan`'s signature and its `memories` input are unchanged, and
+`read_request` is additive and defaulted, so an existing `Planner` implementation that
+returns an `ActionPlan` without one conforms exactly as it does today (§4). The flag
+is why the conformance suite is extended; the compatibility fact is why no
+implementation has to be rewritten to keep passing it.
 
 **Lane B — the servicer, the union and the audit.** In `orchestration/`: the
 servicing of both kinds, §3's label resolution by index into the sequence the loop
@@ -973,6 +1006,22 @@ planner that emits a request nothing services — which is exactly §4's default
 from the other side, and which lets the emission's shape be reviewed against real
 prompts before any read fires. Lane B without Lane A would be a servicer with nothing
 to service.
+
+> **Normative.** §9's audit record lands with **Lane B**, and §8's every-turn
+> obligation binds from the point a servicer exists. Between the two lanes there is no
+> mechanism: a Lane A turn's `read_request` reaches no servicer, adds no record to any
+> supply, changes no reply and changes nothing a capture records. Nothing is deployed
+> that the audit cannot measure, because nothing is deployed.
+
+**And the fire rate is not dark in that window either, which is the point of §4's
+placement.** The ask is a field on the `ActionPlan`, and every turn's plan is
+persisted through `PlanStore.save_plan`. So over the Lane-A-only window the numerator
+and the denominator are both readable off the persisted plans — the turns whose plan
+carries a request, over the turns whose plan does not — which is the same measurement
+§9's record makes available live and is why §9 points at the plan for the ask rather
+than copying it. What only Lane B can add is the **yield**: what the servicing
+returned, what deduplication removed, what a label failed to resolve. Those fields
+are absent in that window because the events they describe have not happened.
 
 ### 11. The representative-input tests this decision owes
 
@@ -1025,6 +1074,11 @@ to service.
    types admit; a request whose asks are two of one kind is not either; a servicing
    whose candidates exceed ten returns ten; and a record already in the supply is
    deduplicated out with the original keeping its position, counting against nothing.
+   The ordering guarantee is asserted over a **fixed** candidate set: one request and
+   one supply over a store that returns the same candidates twice produce the same
+   group in the same order, and no test asserts that a concurrently-written store
+   does — ADR-0113 §5's accepted miss is inherited, and §6 says so rather than
+   pinning a guarantee the store does not offer.
 10. **The fourth group is appended, not interleaved, and the planner never saw it.**
     The `memories` the planner was called with carries exactly the three groups
     ADR-0158 §5 fixes; the `TurnResult` the same turn returns carries those three, in
@@ -1085,6 +1139,12 @@ to service.
   ADR that answers §2's backfill question for a planner-emitted read — plausibly by
   showing the emission is independent of the withholding, which is a measurement the
   audit this ADR builds could supply. Not fired by a lane finding spoken replies thin.
+- **A durable, queryable surface for §9's audit** — a store, a Protocol, an
+  aggregation, a retention window. §9 puts the record in the Tier 2 log, which is what
+  makes the fire rate available on day one with no contract added; what it does not
+  give is a query. Fired by a deployment that needs the figure over a retention window
+  rather than out of its logs, or by milestone 2 needing to account per emission. Not
+  fired by a lane finding logs inconvenient.
 - **#838's coverage layer**, and whether the trigger is learnable from the supply
   alone. Fired by what §9's audit shows, or by #838's own ADR.
 - **A sampled shadow read on turns the trigger did not fire on** — the only live
