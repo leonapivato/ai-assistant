@@ -867,13 +867,11 @@ def _quoted_span(value: str) -> str:
     ``source`` — however it was constructed — can open a second bullet, forge a
     second source, or reopen the "Current context:" heading.
 
-    :func:`_render_record` now applies it too, to the two spans a memory record
-    controls. It used not to: ADR-0098 §9 states that obligation separately, on the
-    prompt-assembly lane filed as #672, and the facet lane discharged §9's third
-    bullet — §2 "for any facet field that is ever rendered into a prompt" — and
-    nothing more. #672's planner half has since landed and reuses this function
-    rather than inventing a second transform, which is the point of naming it here.
-    ``observer._render_batch`` is still owed §2 and is what keeps #672 open.
+    :func:`_render_record` applies it too, to the two spans a memory record
+    controls, reusing this function rather than inventing a second transform —
+    which is the point of naming it here. ``learning/observer.py`` assembles its own
+    prompt and so holds its own copy of the same construction rather than importing
+    this one, which is golden rule 1 rather than an oversight.
 
     Args:
         value: The held string, verbatim as this system carries it.
