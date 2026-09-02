@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.types import SecretScope
+from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, SecretScope
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeSecretStore
 from ai_assistant.wire import HubEngineClient, RemoteHubEngineClient
@@ -270,15 +270,179 @@ def test_the_credential_is_prompted_for_without_echo_by_default(
     ``--credential-stdin`` exists for a scripted run; the default has to be the one
     an owner performing this once will reach for, and it must not put a Tier 0 value
     into ``argv`` or into the terminal's scrollback.
+
+    The reader is substituted rather than driven through the runner's stdin, because
+    the hidden prompt now *refuses* a standard input that is not a terminal (#1146)
+    — which is the case below, and is the whole of what a ``CliRunner`` can offer.
+    What is asserted here is that the default door is
+    :func:`~ai_assistant.interfaces.cli._prompt_for_credential` and that what comes
+    through it is stored unaltered; what that function does before it prompts is
+    asserted separately.
+    """
+    _settings(monkeypatch, tmp_path)
+    credential = mint_credential()
+    monkeypatch.setattr(cli, "_prompt_for_credential", lambda: credential)
+
+    result = CliRunner().invoke(cli.app, ["device", "enrol", HUB])
+
+    assert result.exit_code == 0, result.output
+    assert credential not in result.output
+    assert await_sync(read_enrolment(secrets)).credential.get_secret_value() == credential
+
+
+def test_the_hidden_prompt_refuses_a_standard_input_that_is_not_a_terminal(
+    tmp_path: Path, secrets: FakeSecretStore, rendered: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enrolment prompt is bounded by refusing the case where it stops being one.
+
+    ``typer.prompt(..., hide_input=True)`` is ``getpass``, which reaches for the
+    controlling terminal first and, where there is none — a container, a CI job, a
+    provisioning script — falls back to
+    :func:`~getpass.fallback_getpass`: it prints "Password input may be echoed" and
+    reads ``sys.stdin.readline()`` **unbounded**. Both halves are wrong for a Tier 0
+    value, and ADR-0124 §6's credential is one. The remedy is named rather than
+    silently substituted, because ``--credential-stdin`` is the door that is bounded
+    by construction.
+
+    Reaching this through ``device enrol`` is the point of the case: the connection
+    surface has had the refusal since PR #1144 and this surface had its own reader
+    until #1146.
     """
     _settings(monkeypatch, tmp_path)
     credential = mint_credential()
 
     result = CliRunner().invoke(cli.app, ["device", "enrol", HUB], input=f"{credential}\n")
 
+    assert result.exit_code == 1
+    flowed = " ".join(rendered.getvalue().split())
+    assert "--credential-stdin" in flowed
+    assert credential not in flowed
+    assert await_sync(secrets.get(enrolment_name())) is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "reader"),
+    [
+        (["--credential-stdin"], "_credential_from_stdin"),
+        ([], "_prompt_for_credential"),
+    ],
+    ids=["piped", "prompted"],
+)
+def test_enrolment_takes_its_credential_through_this_surface_s_own_readers(
+    tmp_path: Path,
+    secrets: FakeSecretStore,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    reader: str,
+) -> None:
+    """Which door each mode opens, which is the whole of #1146.
+
+    ``device enrol`` had a reader of its own — ``sys.stdin.readline().strip()`` for
+    the flag and a bare ``typer.prompt`` otherwise — and all three of its defects are
+    properties of *that* reader rather than of anything this command decides. So what
+    is pinned is the routing: a lane that reinstated a local read would pass every
+    behavioural case below by copying the behaviour, and would fail here.
+
+    The bounded read's request, the terminator matched as a unit and the non-terminal
+    refusal are each asserted of the readers themselves in
+    ``tests/interfaces/test_cli_connections.py``; asserting them twice would pin the
+    implementation in two places and buy nothing.
+    """
+    _settings(monkeypatch, tmp_path)
+    credential = mint_credential()
+    called: list[str] = []
+
+    def _read() -> str:
+        called.append(reader)
+        return credential
+
+    monkeypatch.setattr(cli, reader, _read)
+
+    result = CliRunner().invoke(cli.app, ["device", "enrol", HUB, *argv])
+
     assert result.exit_code == 0, result.output
-    assert credential not in result.output
+    assert called == [reader]
     assert await_sync(read_enrolment(secrets)).credential.get_secret_value() == credential
+
+
+def test_an_unterminated_enrolment_credential_is_refused_naming_only_the_bound(
+    tmp_path: Path, secrets: FakeSecretStore, rendered: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the command, and the refusal discloses nothing (ADR-0125 §6).
+
+    §6 permits naming the constant and forbids a prefix, a suffix, a truncation, a
+    digest **or a length** of what was rejected — the length in particular, because
+    "secret length is 4096" is what a size check naturally reports and it is a
+    derivation of the secret itself.
+    """
+    _settings(monkeypatch, tmp_path)
+    oversized = "x" * (SECRET_VALUE_MAX_BYTES * 4)
+
+    result = CliRunner().invoke(
+        cli.app, ["device", "enrol", HUB, "--credential-stdin"], input=oversized
+    )
+
+    assert result.exit_code == 1
+    flowed = " ".join(rendered.getvalue().split())
+    assert str(SECRET_VALUE_MAX_BYTES) in flowed
+    assert "xxxx" not in flowed
+    assert str(len(oversized)) not in flowed
+    assert await_sync(secrets.get(enrolment_name())) is None
+
+
+def test_a_padded_enrolment_credential_is_refused_rather_than_trimmed(
+    tmp_path: Path, secrets: FakeSecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0125 §3: two spellings of a secret are two different secrets (#1146).
+
+    This reader called ``strip()`` until #1146, and the safety of that rested on an
+    invariant of the *minting alphabet* — ADR-0124 §6 mints from characters with no
+    whitespace among them, so a strip could not change a conforming value. It is the
+    wrong kind of safety: it is held somewhere else entirely, it is spent at the one
+    moment a user cannot re-read the value, and what it buys is that a line the user
+    did not pipe is stored as though they had.
+
+    Padded, the value is no longer one this hub could have minted, so the act is
+    refused and nothing is written — which is the same answer ``device enrol``
+    already gives a mistyped credential.
+    """
+    _settings(monkeypatch, tmp_path)
+    credential = mint_credential()
+
+    result = CliRunner().invoke(
+        cli.app, ["device", "enrol", HUB, "--credential-stdin"], input=f" {credential} \n"
+    )
+
+    assert result.exit_code == 1
+    assert await_sync(secrets.get(enrolment_name())) is None
+
+
+def test_an_enrolment_credential_ending_in_a_carriage_return_is_kept_whole(
+    tmp_path: Path, secrets: FakeSecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminator is matched as a unit, so ``\r\n`` goes and a lone ``\r`` does not.
+
+    ``sys.stdin`` hands a **final** ``\r`` through untranslated — there is no
+    following byte to make it a newline — so a chained
+    ``removesuffix("\n").removesuffix("\r")`` would silently shorten a value that
+    ends in one. Here the two cases are distinguishable end to end: a minted
+    credential followed by ``\r\n`` is stored intact, and the same credential
+    followed by a lone ``\r`` is a different value this hub could not have minted
+    and is refused.
+    """
+    _settings(monkeypatch, tmp_path)
+    credential = mint_credential()
+
+    terminated = CliRunner().invoke(
+        cli.app, ["device", "enrol", HUB, "--credential-stdin"], input=f"{credential}\r\n"
+    )
+    assert terminated.exit_code == 0, terminated.output
+    assert await_sync(read_enrolment(secrets)).credential.get_secret_value() == credential
+
+    trailing = CliRunner().invoke(
+        cli.app, ["device", "enrol", HUB, "--credential-stdin"], input=f"{credential}\r"
+    )
+    assert trailing.exit_code == 1
 
 
 def test_enrolment_puts_the_pair_where_the_connect_path_reads_it(

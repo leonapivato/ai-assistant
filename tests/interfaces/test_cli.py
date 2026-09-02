@@ -7088,6 +7088,66 @@ def test_a_pasted_hint_sets_the_class_it_names_even_when_that_class_has_a_space(
     assert tune[:5] == ["assistant", "tune", "--class", "calendar upcoming", "--reach"]
 
 
+def test_a_long_command_hint_is_not_folded_at_the_console_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1023: Rich folds by inserting a real newline, so a folded hint pastes as two.
+
+    Rich wraps at the console's width by writing an actual line break into the
+    output rather than leaving the terminal to fold the line, so at a narrow width
+    ``assistant dismiss <long id>`` arrives on screen as ``assistant dismiss`` and
+    then the id — and copying it runs a dismissal with no argument followed by the
+    id as a command of its own. Where the argument is quoted the break lands *inside*
+    the quotes instead, and the command then names a value with a newline in it.
+    Nothing bounds these values: ``Identifier`` and ``NonBlankEncodableText`` require
+    non-blankness and encodability and nothing else.
+
+    Read off the **raw** buffer at a deliberately narrow width, because
+    :func:`_flowed` re-joins wrapped output and a test written through it cannot see
+    this at any width. The prose is asserted in the same breath and in the opposite
+    direction: what is turned off is the wrapping of the lines carrying commands, not
+    the console's wrapping, and a fix that stopped wrapping everything would pass a
+    test that only looked at the hint.
+    """
+    width = 40
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=width))
+    identifier = f"ntf-{'a' * 60}"
+
+    cli._render_notifications((_held(id=identifier),), now=AT, limit=50, offset=0)
+
+    lines = buffer.getvalue().splitlines()
+    hints = [line for line in lines if "assistant " in line]
+    assert [shlex.split(line[line.index("assistant ") :]) for line in hints] == [
+        ["assistant", "dismiss", identifier],
+        ["assistant", "tune", "--class", "upcoming_event", "--reach", "interrupt"],
+    ], "each hint is one whole line, and pastes as the one command it names"
+    assert max(len(line) for line in lines if line not in hints) <= width, (
+        "the prose around them still wraps to the console"
+    )
+
+
+def test_the_hint_printer_leaves_the_line_for_the_terminal_to_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decision #1023 asks to be taken once, asserted where it is taken.
+
+    Twelve sites print a copyable command and all of them go through
+    :func:`~ai_assistant.interfaces.cli._print_hint`; this is what that function
+    promises them. ``soft_wrap`` rather than an ``overflow`` or ``crop`` setting is
+    the load-bearing half — those **truncate** a line too long for the console, which
+    would turn a command that pastes wrongly into one that pastes silently short, and
+    a truncated hint is the one failure mode worse than a folded one.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=20))
+    line = "assistant dismiss " + "x" * 200
+
+    cli._print_hint(line)
+
+    assert buffer.getvalue() == f"{line}\n", "neither folded nor truncated"
+
+
 def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: StringIO) -> None:
     """ADR-0130 §5: declaring an expiry **is** the escalation test.
 
