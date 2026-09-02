@@ -23,10 +23,20 @@ first test below is no longer catching a copy going stale — it is catching the
 assembling the product's own bullets into a block the product would not build. The
 heading, the order, the spacing and the absence of a tail heading are all still this
 module's to hold, and the copy the equivalence used to guard is simply gone.
+
+**Since ADR-0226 §3 the equivalence holds modulo one token, and the exception is
+stated rather than absorbed.** The product opens each bullet with the record's ordinal
+label — ``M1``, ``M2``, … — because its planner may name one in a ``read_request``; the
+harness's answering prompt has no such request, so it renders the same bullets without
+one, and printing labels there would move every benchmark result to say something no
+reader of that prompt can use. :func:`_unlabelled` takes exactly that token back off
+before the comparison, and the first test asserts in both directions so the allowance
+cannot quietly widen.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -71,6 +81,29 @@ EPISODE = EpisodicMemory(
 )
 
 
+#: ADR-0226 §3's label, as the product now opens every memory bullet with it.
+#:
+#: The product labels each record by its position in the turn's ``memories`` — ``M1``,
+#: ``M2``, … — so the model can name one in a ``read_request``. The harness's answering
+#: prompt carries no such request and asks for no read, so ``render_context`` renders
+#: the same bullets *unlabelled*: a label there would be tokens the answering model has
+#: no use for, and moving every benchmark result to print them would be a cost paid for
+#: nothing.
+#:
+#: **The mirror #1189 pins therefore holds modulo this one token, and that is what is
+#: asserted below** rather than the equivalence being dropped. Stripping the label back
+#: off the product's prompt keeps every other byte under the comparison — the heading,
+#: the tag, the band, the confidence, the stance clause, the quoted spans, the order
+#: and the spacing — so the day the product's format moves in any *other* respect and
+#: the harness does not, this still fails.
+_PRODUCT_LABEL = re.compile(r"^  - M\d+ ", flags=re.MULTILINE)
+
+
+def _unlabelled(prompt: str) -> str:
+    """The product's prompt with ADR-0226 §3's ordinal labels taken back off."""
+    return _PRODUCT_LABEL.sub("  - ", prompt)
+
+
 def _product_prompt(*records: SemanticMemory | EpisodicMemory) -> str:
     """The user turn the product would assemble for these memories.
 
@@ -107,7 +140,11 @@ def test_the_block_is_the_one_the_product_would_render() -> None:
     """
     block = render_context([BELIEF, EPISODE])
 
-    assert block in _product_prompt(BELIEF, EPISODE)
+    assert block in _unlabelled(_product_prompt(BELIEF, EPISODE))
+    # And the label really is the only divergence being allowed for: unstripped, the
+    # product's own bullets carry one, so a harness that started emitting labels of its
+    # own would not silently satisfy the assertion above.
+    assert block not in _product_prompt(BELIEF, EPISODE)
 
 
 def test_the_heading_is_the_retrieved_groups_and_not_the_conversation_tails() -> None:
@@ -204,7 +241,7 @@ def test_an_episode_shows_its_instant_and_its_outcome() -> None:
     # run, so the planner heads it as the conversation tail. That state is unreachable
     # from `answer_question` — §4's separator rule drops a supplement with no belief
     # before it — so what is compared here is the record's own rendering.
-    assert f"{bullet}\n{outcome_line}" in _product_prompt(EPISODE)
+    assert f"{bullet}\n{outcome_line}" in _unlabelled(_product_prompt(EPISODE))
 
 
 def test_the_block_is_a_fraction_of_the_dump_it_replaced() -> None:

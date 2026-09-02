@@ -37,6 +37,19 @@ this prompt-level envelope only: it never reaches ``ActionPlan``, which crosses 
 subsystem boundary carrying empty ``steps`` and a ``rationale`` saying why
 (ADR-0176 §8).
 
+**Since ADR-0226 the envelope has one more, optional key, and it is not a third
+shape.** A plan or a decline may carry a ``read_request``: at most one ask of each
+of §2's two kinds, naming one further read the planner judged this turn's supply
+too thin without. It rides beside whichever shape the reply already is, it is
+serviced by the loop and never here, and it is never a step — reading the owner's
+own store is not an act in the world, so nothing about selection, permission or
+execution touches it (§4). Three properties of this module carry the decision. The
+supply is **labelled** by position, ``M1``, ``M2``, … (:func:`_label`), because §3
+rules that no record identifier is rendered to a model and none is accepted from
+one; the prompt asks for the request in :data:`_READ_REQUEST_GUIDANCE`; and
+:func:`_optional_read_request` reads one back, dropping a malformed one rather than
+spending a repair round or costing the plan.
+
 **A statement of fact is a decline** (#1695). It asks for nothing, so it wants no
 capability, and the prompt works that direction of ADR-0176 §4's test through
 explicitly — including what the rationale should say, since on a decline the
@@ -59,6 +72,7 @@ from pydantic import ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    MAX_HOP_LABELS,
     ActionPlan,
     BeliefBand,
     EpisodicMemory,
@@ -66,6 +80,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     Message,
     PlanStep,
+    ReadAsk,
+    ReadKind,
+    ReadRequest,
     Role,
     band_of,
 )
@@ -102,6 +119,15 @@ DEFAULT_PLAN_ATTEMPTS = 2
 #: reply is never lost to it; only a reply burying the envelope behind more than
 #: this many unparseable braces degrades to bounded repair.
 _MAX_EXTRACTION_MISSES = 256
+
+#: The event name every dropped read request is logged under (ADR-0226 §8).
+#:
+#: One name with a ``reason`` from a closed set of literals, so a deployment can
+#: count drops without this module writing anything the model produced into a log
+#: line: ADR-0004 §5 keeps content out of logs, and a query or a label is content.
+#: Named rather than inlined so the test asserts the obligation rather than a
+#: string spelled twice.
+_READ_REQUEST_DROPPED: Final = "planner_read_request_dropped"
 
 #: The heading the chronological conversation tail is printed under (ADR-0074 §5).
 _TAIL_HEADING: Final = "Recent conversation turns, in order:"
@@ -336,6 +362,70 @@ kind of decline; it says that this reply names no capability, and the rationale 
 what says why. Do not include step ids; they are assigned downstream."""
 
 
+#: ADR-0226's envelope, asked for in the prompt (§10's "the prompt that asks for
+#: it").
+#:
+#: **What it asks for is a judgement, and the prompt is written not to bias it.**
+#: ADR-0226 §8 makes the trigger "the planner's own judgement that this turn's
+#: supply did not suffice", expressed by emitting a request and by nothing else,
+#: and makes the live fire rate the instrument that judgement is measured by
+#: against the replay's 13.6%. A prompt that talked the model into asking would
+#: move the number this milestone exists to read. So the condition is stated as a
+#: condition — the goal turns on something the memories below do not carry — and
+#: the ordinary case is named as ordinary, in one sentence, rather than argued for.
+#:
+#: **The labels are §3's and the prohibition is the load-bearing half.** "No record
+#: identifier is rendered to a model, and none is accepted from one": the model is
+#: shown ``M1``, ``M2`` … in the block below and is told to name those and nothing
+#: else, because the failure a fabricated identifier produces is not a crash but "a
+#: system in which the model can *steer what it is shown* by naming records it
+#: never saw". A label it invents is an index, and an index outside the range it
+#: was shown resolves to nothing at the loop, so the widest possible abuse of the
+#: mechanism is asking for something already on screen.
+#:
+#: **It says what the read is not**, because a model that reads "search" reaches
+#: for a tool. The read is of the user's own stored memories, performed by this
+#: system for this turn: no tool runs, no capability is named, nothing is sent
+#: anywhere, and the request is not a step (§4). Saying so is cheaper than
+#: discovering a plan that named ``search_memory`` as a capability, which is the
+#: shape #1772 already cost this project once.
+#:
+#: A separate constant for the reason :data:`_STATED_FACT_GUIDANCE` is one: the
+#: prompt test can assert it **reaches the model** without string-matching its
+#: wording.
+_READ_REQUEST_GUIDANCE = """\
+Beside either reply you may ask for ONE more read of what this assistant already \
+remembers about the user. Most turns need none: where the memories set out in the \
+next message, together with the conversation and the context, already carry what \
+the goal turns on, ask for nothing.
+
+Where they do not — the goal turns on something the user told this assistant \
+before and none of the memories below carries it — add a `read_request` to \
+whichever object you are sending:
+
+ "read_request": {"query": "<what to look for in the user's own memories>",
+                  "labels": ["M3"]}
+
+Each memory in the next message is printed with a label — `M1`, `M2`, `M3` and so \
+on, in the order they appear. Both members of `read_request` are optional and you \
+may send either or both, but do not send an empty object and do not send the key \
+at all unless you are asking for something. `query` is matched against the user's \
+stored memories. `labels` names at most TWO of the labels printed below and asks \
+for the original exchanges those memories were drawn from — which is the way to \
+reach a conversation whose wording you could not guess.
+
+Name only labels that are actually printed in the next message, spelled exactly \
+as they are printed there. Do not write a record id, a uuid, a date or any \
+identifier of your own: anything that is not one of the labels you were shown \
+reaches nothing at all.
+
+This read is of this assistant's own memory of the user and of nothing else. No \
+tool runs for it, no capability is named by it, nothing is sent anywhere, and \
+nothing is looked up outside this system. It is not a step and it does not belong \
+in `steps`. Asking for it does not change which of the two shapes you are \
+sending, and you are still answering now from what you have."""
+
+
 def _system_prompt(capabilities: Sequence[str]) -> str:
     """Build the planning system prompt over the vocabulary advertised this turn.
 
@@ -351,7 +441,16 @@ def _system_prompt(capabilities: Sequence[str]) -> str:
     (:data:`_STATED_FACT_GUIDANCE`, :data:`_UNAVAILABLE_GUIDANCE`) sit **below** the
     rendered envelopes, because a reader meeting a direction before the shape it
     belongs to has been told what to reply before being told what a reply looks
-    like.
+    like. :data:`_READ_REQUEST_GUIDANCE` sits last for the same reason carried one
+    step further: it adds an optional key to *both* shapes and to the choice
+    between them it adds nothing, so it is read after the choice has been made.
+
+    **It is stated unconditionally, where the vocabulary is not.** ADR-0211 §6
+    makes the empty vocabulary a case the prompt must speak to, because a list that
+    admits no step changes which shape is available. An empty supply changes no
+    shape: it means no label is printed below, and ADR-0226 §3's rule — name only a
+    label actually printed — already says what that leaves askable, without this
+    function taking a second input to say it twice.
 
     Args:
         capabilities: The vocabulary the registry advertised for this turn, taken
@@ -371,6 +470,8 @@ def _system_prompt(capabilities: Sequence[str]) -> str:
             _UNAVAILABLE_GUIDANCE,
             "",
             _PROMPT_CLOSING,
+            "",
+            _READ_REQUEST_GUIDANCE,
         )
     )
 
@@ -582,8 +683,15 @@ class ModelBackedPlanner:
         it is the whole of what the persisted plan says.
 
         The envelope's keys never reach ``model_validate``: the payload is an
-        explicit five-key mapping, so ``no_capability_needed`` cannot leak into the
-        durable ``ActionPlan`` (ADR-0176 §8). That is structural, not asserted.
+        explicit six-key mapping, so ``no_capability_needed`` cannot leak into the
+        durable ``ActionPlan`` (ADR-0176 §8). That is structural, not asserted, and
+        it is why ADR-0226 §4's ``read_request`` is read by
+        :func:`_optional_read_request` into a validated model rather than passed
+        through as whatever the model wrote.
+
+        **A malformed request never costs the plan** (:func:`_optional_read_request`
+        holds the argument): it is dropped, the plan is built without one, and no
+        repair round is spent on it.
 
         Raises:
             _ExtractionError: If the text is not one of the two legal envelopes or
@@ -602,6 +710,7 @@ class ModelBackedPlanner:
                     "steps": step_payloads,
                     "created_at": self._now(),
                     "rationale": rationale,
+                    "read_request": _optional_read_request(envelope),
                 }
             )
         except ValidationError as exc:
@@ -646,6 +755,106 @@ class ModelBackedPlanner:
         except ValidationError as exc:
             msg = f"step {index} is not a valid PlanStep: {exc}"
             raise _ExtractionError(msg) from exc
+
+
+def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
+    """Read ADR-0226 §4's ``read_request`` out of one envelope, or return ``None``.
+
+    Builds at most one ask of each kind from the two optional members the prompt
+    asks for — a non-blank ``query`` becomes a ``SIGHTED_QUERY`` ask, a list of one
+    or two label strings becomes a ``CITATION_HOP`` ask — and hands them to
+    :class:`~ai_assistant.core.types.ReadRequest`, whose validators are the
+    authority on every condition §4 states. An envelope carrying no ``read_request``,
+    or one from which no ask could be built, yields ``None``, which ADR-0226 §4
+    fixes as "the planner asked for no read".
+
+    **A malformed request is dropped and never sent to bounded repair, which is a
+    decision rather than leniency.** ADR-0176's own reasoning about the decline
+    marker is directly on point: type-checking a key "would send a perfectly good
+    plan to bounded repair over a key that decides nothing on that shape", and
+    ADR-0047 §4's envelope rule is that other keys are ignored. The plan is what the
+    turn needs; the request is one additive extra whose absence is exactly the
+    system as it stands, so failing an otherwise-valid plan over it would trade the
+    turn's whole answer for its least consequential part. Each drop is logged, so
+    what is lost is visible rather than silent.
+
+    **The honest cost is named** (ADR-0226 §8). A dropped emission is recorded as a
+    turn on which the trigger did not fire, so a planner writing malformed requests
+    under-reports its own fire rate. That is why the logged counter exists: §8's
+    figure is read against the replay's 13.6%, and a deployment reading a low one
+    can see from :data:`_READ_REQUEST_DROPPED` whether the emissions were absent or
+    merely unreadable.
+
+    **Nothing here filters a label against the supply**, and that is ADR-0226 §3
+    working rather than an omission. §3 gives label resolution to the loop and rules
+    that a label outside the shown set "resolves to nothing … discarded silently"
+    and is "recorded in §9's audit as dropped". A planner that quietly dropped its
+    own out-of-range labels would empty that audit field of the very population it
+    exists to count.
+
+    Args:
+        envelope: The decoded model envelope, plan-shaped or decline-shaped.
+
+    Returns:
+        The request the planner emitted, or ``None`` where it emitted none or
+        emitted one that could not be read.
+    """
+    raw = envelope.get("read_request")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        _log.info(_READ_REQUEST_DROPPED, reason="not_an_object")
+        return None
+
+    asks: list[ReadAsk] = []
+    query = raw.get("query")
+    if query is not None:
+        if isinstance(query, str) and query.strip():
+            asks.append(ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=query))
+        else:
+            _log.info(_READ_REQUEST_DROPPED, reason="unusable_query")
+
+    labels = raw.get("labels")
+    if labels is not None:
+        asks += _hop_ask(labels)
+
+    if not asks:
+        _log.info(_READ_REQUEST_DROPPED, reason="no_usable_ask")
+        return None
+    try:
+        return ReadRequest(asks=tuple(asks))
+    except ValidationError:
+        # Belt and braces: every condition above is already the model's, so this is
+        # unreachable today. It is here because a `core` invariant this module has
+        # not anticipated must cost the request and never the plan.
+        _log.info(_READ_REQUEST_DROPPED, reason="refused_by_core")
+        return None
+
+
+def _hop_ask(labels: object) -> list[ReadAsk]:
+    """Build the ``CITATION_HOP`` ask from an envelope's ``labels``, or nothing.
+
+    The labels are taken **verbatim and in the order the model named them**, which
+    ADR-0226 §6 makes the order they are followed in. Their *form* is not checked
+    here — §3 gives that to the loop, which resolves a label by parsing its ordinal
+    and indexing the sequence it passed, and discards silently what does not
+    resolve.
+
+    Args:
+        labels: The envelope's ``labels`` member, whatever the model wrote there.
+
+    Returns:
+        A one-element list holding the ask, or an empty list where the member is
+        not a list of one or two strings (ADR-0226 §4, §6).
+    """
+    if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+        _log.info(_READ_REQUEST_DROPPED, reason="labels_not_a_list_of_strings")
+        return []
+    named = [label for label in labels if isinstance(label, str)]
+    if not named or len(named) > MAX_HOP_LABELS:
+        _log.info(_READ_REQUEST_DROPPED, reason="label_count_out_of_bounds")
+        return []
+    return [ReadAsk(kind=ReadKind.CITATION_HOP, labels=tuple(named))]
 
 
 def _render_request(
@@ -723,8 +932,8 @@ def _render_request(
         turns, retrieved = _split_conversation_tail(memories)
         if turns:
             lines.append(_TAIL_HEADING)
-            for record in turns:
-                lines.append(_render_record(record))
+            for ordinal, record in enumerate(turns, start=1):
+                lines.append(_render_record(record, label=_label(ordinal)))
                 reply = _reply_lines(record)
                 lines += reply.lines
                 eligible += reply.eligible
@@ -733,7 +942,10 @@ def _render_request(
                 lines.append("")
         if retrieved:
             lines.append(_RETRIEVED_HEADING)
-            lines += [_render_record(record) for record in retrieved]
+            lines += [
+                _render_record(record, label=_label(ordinal))
+                for ordinal, record in enumerate(retrieved, start=len(turns) + 1)
+            ]
     else:
         lines.append("No stored memories were retrieved for this goal.")
 
@@ -1045,7 +1257,48 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     )
 
 
-def _render_record(record: MemoryRecord) -> str:
+def _label(ordinal: int) -> str:
+    """ADR-0226 §3's label for the record at 1-based ``ordinal`` of ``memories``.
+
+    "The label of the record at 1-based index *n* of ``Planner.plan``'s ``memories``
+    is the ASCII string ``M`` followed by *n* in decimal with no padding. That is
+    the whole of the scheme: it is fixed here, it is the same on both sides of the
+    seam, and no later lane substitutes another spelling, adds a prefix per group,
+    or makes it configurable."
+
+    **The ordinal is what keeps the label from becoming a private protocol between
+    two subsystems** (§3). A scheme in which `planning` invented labels and
+    `orchestration` resolved them would need the two to agree on an allocation
+    appearing in no contract — a coordination golden rule 1 forbids and no test in
+    either package would catch. Deriving the label from the position in the
+    sequence the loop itself passed removes the agreement entirely: both sides read
+    the same ordered value, and the loop resolves against its own copy. **So this
+    function is not imported by `orchestration` and must not become shared** — §10
+    forbids any value crossing the two packages other than the ``memories``
+    sequence and the ``ActionPlan`` that already cross it, and the resolver writes
+    its own three lines rather than reaching for these.
+
+    **It is derived from held data and never from record content**, which is what
+    makes it non-forgeable in ADR-0098 §2's sense: the ordinal is this renderer's
+    own count, and a record's own spans are quoted by :func:`_quoted_span`, so no
+    record can write a line claiming a label — or a second record's label — of its
+    choosing.
+
+    **The label is meaningful only within the turn that rendered it** (§3), and
+    that is the correct behaviour rather than a limitation to repair: the
+    resolvable set is exactly what this turn showed, and a label that outlived its
+    turn would be an identifier by another name.
+
+    Args:
+        ordinal: The record's 1-based position in this call's ``memories``.
+
+    Returns:
+        The label, e.g. ``"M3"``.
+    """
+    return f"M{ordinal}"
+
+
+def _render_record(record: MemoryRecord, *, label: str | None = None) -> str:
     """Render one memory record as a prompt bullet, whole and non-forgeably.
 
     Three obligations meet on this function and are discharged together (#1194,
@@ -1110,8 +1363,22 @@ def _render_record(record: MemoryRecord) -> str:
     would manufacture, inside a single prompt, the day-boundary error §3 exists to
     prevent.
 
+    **The label is the caller's, and its default is what keeps the benchmark
+    harness still** (ADR-0226 §3). ``benchmarks/memory/answer.py`` imports this
+    function by name and calls it with no label, so the block it assembles is
+    byte-for-byte what it was: the harness's answering prompt carries no read
+    request, so a label there would be noise the model has no use for and a
+    benchmark result moved for nothing. The product's own assembler
+    (:func:`_render_request`) passes one for every record, which is what §3 asks of
+    a planner — the label is derived by :func:`_label` from the record's position
+    in the sequence the loop passed, and it opens the bullet so that a model
+    naming one is naming the first token it read.
+
     Args:
         record: The record to render, verbatim as this system holds it.
+        label: ADR-0226 §3's label for this record's position in the turn's
+            ``memories``, or ``None`` to render the bullet unlabelled. Held data,
+            never anything the record supplied.
 
     Returns:
         The bullet — one line, plus one continuation line for an episode that
@@ -1120,12 +1387,13 @@ def _render_record(record: MemoryRecord) -> str:
     provenance = record.provenance
     band = band_of(provenance.source)
     standing = f"{band.value}, confidence {provenance.confidence:.2f}"
-    label = f"  - [{record.kind}/{provenance.source.value}]"
+    opening = "  - " if label is None else f"  - {label} "
+    tag = f"{opening}[{record.kind}/{provenance.source.value}]"
     content = _quoted_span(record.content)
 
     if isinstance(record, EpisodicMemory):
         lines = [
-            f"{label} ({standing}) the assistant recorded this exchange at "
+            f"{tag} ({standing}) the assistant recorded this exchange at "
             f"{record.occurred_at.isoformat()}: {content}"
         ]
         if record.disposition is not None:
@@ -1135,7 +1403,7 @@ def _render_record(record: MemoryRecord) -> str:
             lines.append(f"    how it turned out: {_quoted_span(record.outcome)}")
         return "\n".join(lines)
 
-    return f"{label} ({standing}) {_STANCE[band]}: {content}"
+    return f"{tag} ({standing}) {_STANCE[band]}: {content}"
 
 
 def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
