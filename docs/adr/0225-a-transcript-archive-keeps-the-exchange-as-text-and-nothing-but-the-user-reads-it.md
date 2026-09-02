@@ -568,8 +568,22 @@ looks.
 > entries, and is the only operation beside these four.
 
 > **Normative.** The search is lexical over the text the archive stores. Whether it
-> is served by a full-text index or by a scan is the implementing lane's, and the
-> conformance suite pins the behaviour rather than the mechanism.
+> is served by a full-text index or by a scan is the implementing lane's; the
+> matching predicate is not, and the conformance suite pins the predicate rather
+> than the mechanism.
+
+> **Normative.** The predicate is a **case-insensitive substring match**, evaluated
+> separately over an entry's `asked` and over its `replied`, never across the two.
+> Both sides are normalised to Unicode NFC and case-folded under Unicode simple case
+> folding before comparison — the semantics of `str.casefold` — and the entry
+> matches where the folded, normalised query occurs as a contiguous run in either
+> folded, normalised field.
+
+> **Normative.** Nothing else is applied: no stemming, no lemmatisation, no
+> stop-word removal, no accent stripping beyond what NFC performs, no fuzzy or
+> edit-distance matching, and no minimum query length. An implementation whose index
+> cannot answer this predicate is not a conforming implementation, and the predicate
+> is not relaxed to fit one.
 
 > **Normative.** The three **enumerating** reads — the search, a conversation's
 > entries, and the unfiltered enumeration — are each bounded by a caller-supplied
@@ -604,6 +618,18 @@ looks.
 > entry, whole, paged, in the total order above, and it satisfies ADR-0004 §6's
 > export right for the archive. Any surface that later exports the memory store
 > exports the archive beside it (§5).
+
+**The predicate is named because two conforming implementations would otherwise
+diverge on ordinary input.** `Straße` and a query of `STRASSE` match under
+`str.casefold`, which folds `ß` to `ss`, and do not match under a tokenizer that
+lower-cases ASCII only; a composed `é` and a decomposed one differ byte for byte and
+are one string under NFC. Either divergence is invisible in a test suite written
+against one implementation and immediately visible to a user who switches backends —
+which is ADR-0074 §9.3's rule that a bounded default with no figure is two
+conforming implementations diverging, applied to a predicate instead of a number,
+and the same standard §7 already applies to the excerpt bound. Ordering is already
+total and recency-based (above), so no ranking function is left free to diverge
+either.
 
 **Lexical rather than semantic, and it is a property rather than a preference.**
 The never-list forbids an embedding (§4), so a vector search is not available even
@@ -766,24 +792,32 @@ mechanism is decided, and this ADR decides none of it.
 
 ### 10. The contract surface owed, and why the archive is its own subsystem
 
-> **Normative.** `core/protocols.py` gains **two** Protocols, narrow and wide.
-> `TranscriptArchiveWriter` carries §2's append and the discard of one entry by
-> address that §2's compensation performs, and carries no read.
-> `TranscriptArchive` **inherits it** and adds §5's conversation-scoped destroy,
-> §7's four reads and §6's size report. One concrete satisfies both, and the
-> composition root hands each holder exactly the seam it is entitled to (§4).
+> **Normative.** `core/protocols.py` gains **two** Protocols, and neither inherits
+> the other. `TranscriptArchiveWriter` carries §2's append and the discard of one
+> entry by address that §2's compensation performs, and carries no read.
+> `TranscriptArchive` carries that same address-scoped discard, §5's
+> conversation-scoped destroy, §7's four reads and §6's size report — and **no
+> append**. One concrete class satisfies both structurally, and the composition root
+> hands each holder exactly the seam it is entitled to (§4).
 
 > **Normative.** Every site that writes to the archive **declares** its seam as a
 > `TranscriptArchiveWriter`, as a required constructor argument with no default. A
 > composition that omits it does not type-check, and the holder cannot call a read:
 > a read on a value of that declared type fails `mypy`, whatever object was passed.
 
-> **Normative.** Which object the composition root passes is the root's discipline
-> and is not a type-level guarantee — a wide archive structurally satisfies the
-> narrow Protocol, and no Protocol can refuse a structural subtype. `app/` passes
-> the seam each collaborator is entitled to, and lane B's tests assert the wiring it
-> performs. No clause of this ADR is read as claiming that a wide object handed to a
-> writer parameter is rejected by a type checker.
+> **Normative.** No holder of `TranscriptArchive` may write to the archive. The
+> Protocol carries no `append`, and the engine acquires none: no lane adds one to
+> it, and no lane reaches the concrete class to get one (§4's package fence). §1's
+> "no other producer writes to the archive" is therefore a property of the seam the
+> engine holds and not only a rule it is asked to keep.
+
+> **Normative.** What the composition root *passes* is still the root's discipline.
+> A value declared `TranscriptArchive` does not satisfy `TranscriptArchiveWriter` —
+> it has no `append` — so handing the engine's seam to the write site fails `mypy`;
+> what still type-checks is handing the **concrete** archive, which satisfies both.
+> `app/` passes the seam each collaborator is entitled to, and lane B's tests assert
+> the wiring it performs. No clause of this ADR is read as claiming a type checker
+> rejects the concrete object at either parameter.
 
 > **Normative.** `core/types.py` gains three frozen pydantic models —
 > `TranscriptEntry`, `TranscriptHit` and `TranscriptArchiveSize` — carrying exactly
@@ -802,9 +836,9 @@ mechanism is decided, and this ADR decides none of it.
 class TranscriptEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    address: NonBlankEncodableText          # §3: the episode's own id
-    conversation_id: NonBlankEncodableText  # §1: a grouping, not the key
-    ordinal: int                            # §1: a grouping, not the key
+    address: Identifier                     # §3: the episode's own id
+    conversation_id: Identifier             # §1: a grouping, not the key
+    ordinal: int = Field(ge=FIRST_TURN_ORDINAL, lt=2**63)   # §1: ConversationTurn's own domain
     occurred_at: UtcInstant
     asked: EncodableText | None             # §1: the user's own words; None where none
     replied: EncodableText | None           # §1: the composed reply, whole; None where none
@@ -813,8 +847,8 @@ class TranscriptEntry(BaseModel):
 class TranscriptHit(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    address: NonBlankEncodableText
-    conversation_id: NonBlankEncodableText
+    address: Identifier
+    conversation_id: Identifier
     occurred_at: UtcInstant
     excerpt: EncodableText                  # §7: at most the excerpt bound
     elided: bool                            # §7: True where the bound truncated it
@@ -830,17 +864,18 @@ class TranscriptArchiveSize(BaseModel):
 
 class TranscriptArchiveWriter(Protocol):
     async def append(self, entry: TranscriptEntry) -> None: ...
-    async def discard(self, address: NonBlankEncodableText) -> bool: ...
+    async def discard(self, address: Identifier) -> bool: ...
 
-class TranscriptArchive(TranscriptArchiveWriter, Protocol):
-    async def discard_conversation(self, conversation_id: NonBlankEncodableText) -> int: ...
+class TranscriptArchive(Protocol):          # NOT a subclass of the writer: no append
+    async def discard(self, address: Identifier) -> bool: ...
+    async def discard_conversation(self, conversation_id: Identifier) -> int: ...
     async def search(
-        self, query: NonBlankEncodableText, *, limit: int = 20, offset: int = 0
+        self, query: Identifier, *, limit: int = 20, offset: int = 0
     ) -> list[TranscriptHit]: ...
     async def conversation(
-        self, conversation_id: NonBlankEncodableText, *, limit: int = 50, offset: int = 0
+        self, conversation_id: Identifier, *, limit: int = 50, offset: int = 0
     ) -> list[TranscriptEntry]: ...
-    async def entry(self, address: NonBlankEncodableText) -> TranscriptEntry | None: ...
+    async def entry(self, address: Identifier) -> TranscriptEntry | None: ...
     async def entries(self, *, limit: int = 50, offset: int = 0) -> list[TranscriptEntry]: ...
     async def size(self) -> TranscriptArchiveSize: ...
 ```
@@ -856,6 +891,12 @@ class TranscriptArchive(TranscriptArchiveWriter, Protocol):
 > `entry` takes neither. A blank or whitespace-only `query`, `address` or
 > `conversation_id` is refused with `ValueError` on every operation that takes one,
 > and is never read as "everything" — ADR-0101 §1's own rule for a blank label.
+
+> **Normative.** `TranscriptEntry.ordinal` carries `ConversationTurn.ordinal`'s own
+> domain — `[FIRST_TURN_ORDINAL, 2**63)`, the range `ConversationStore`'s own
+> refusals are stated over — and a value outside it is refused at validation. The
+> archive does not restate that domain in its own words or its own constant, and a
+> later change to `ConversationTurn`'s domain carries here without an edit.
 
 > **Normative.** Neither Protocol carries a walk, a cursor, a resumable position, an
 > embedder, a subject axis, or any operation this ADR has not named. ADR-0101 §9's
@@ -886,18 +927,29 @@ holder — and a single wide Protocol handed to it would give a turn-path collab
 all four reads, defeating §4's fence in the same breath that states it. The narrow
 seam is therefore bought against a specific failure and not for symmetry.
 
-**What the narrow seam buys, stated without over-claiming.** It is not that a
-type checker refuses the wide object at a writer parameter — Protocols are
-structural, so no narrowing can refuse a subtype, and any clause claiming otherwise
-would be false. It is that the *holder* cannot call a read: `ConversationLifecycle`
-declares a `TranscriptArchiveWriter`, so `self._archive.search(...)` fails `mypy`
-whatever was passed. That is the property gate 1 needs, and it composes with the
-package fence to become more than convention — `orchestration` may not import
-`ai_assistant.archive` at all (§4), so it cannot name the concrete class, cannot
-widen the value back, and sees exactly the members its declared Protocol has. This
-is ADR-0119 §7's own posture in its own words — one concrete satisfies every seam,
-and *"the composition root hands each collaborator exactly the seam it is entitled
-to"* — and that ADR did not claim a type check enforced the handing either.
+**Neither Protocol inherits the other, and that is the decision rather than a
+formatting choice.** The obvious shape is a wide face that *is* the narrow one plus
+more, which is what `InvocationLedger(InvocationCompleter, Protocol)` does. It is
+wrong here, and in a way that only shows up when the capability is asked what it
+grants: a wide seam inheriting the writer would hand `AssistantEngine` an `append`,
+and §1 reserves writing to capture. A future engine helper could then write to the
+archive without changing a Protocol, without crossing an import boundary, and
+without anybody noticing — the capability split defeated by the convenience that
+looked like tidiness. So the two faces overlap in the one operation both holders
+genuinely perform, the address-scoped discard, and in nothing else.
+
+**What each seam buys, stated without over-claiming.** The holder cannot call what
+its declared type does not carry: `ConversationLifecycle` declares a
+`TranscriptArchiveWriter`, so `self._archive.search(...)` fails `mypy`; the engine
+declares a `TranscriptArchive`, so `self._archive.append(...)` fails `mypy` too.
+Both directions are mechanical, and both compose with the package fence to become
+more than convention — `orchestration` may not import `ai_assistant.archive` at all
+(§4), so it cannot name the concrete class, cannot widen a value back to it, and
+sees exactly the members its declared Protocol has. What is *not* mechanical is
+which object `app/` chooses to pass, and ADR-0119 §7 leaves precisely that to the
+root in its own words: one concrete satisfies every seam, and *"the composition root
+hands each collaborator exactly the seam it is entitled to"*. That ADR did not claim
+a type check enforced the handing, and neither does this one.
 
 **Two rather than three, and this is where the count stops.** ADR-0119 needed a
 third because its purge had a third holder; here the conversation-scoped destroy and
@@ -997,12 +1049,13 @@ address, and it is discharged.
    consciously delete, which is the point of it.
 2. **The fence is mechanical, on each half that can be.** An `import-linter`
    contract fails when a pipeline package imports `ai_assistant.archive`, and passes
-   for `ai_assistant.app`. A composition omitting the write site's seam fails
-   `mypy`. A read called on the write site's declared `TranscriptArchiveWriter`
-   fails `mypy` — asserted as a type-level test, not a runtime one. And the
-   composition root's wiring is asserted directly: what `app/` hands
-   `ConversationLifecycle` is the narrow seam. No test asserts that a wide object at
-   a writer parameter is rejected, because no such rejection exists (§10).
+   for `ai_assistant.app`. A composition omitting either seam fails `mypy`. A read
+   called on a declared `TranscriptArchiveWriter` fails `mypy`, and an `append`
+   called on a declared `TranscriptArchive` fails `mypy` — both asserted as
+   type-level tests, not runtime ones. And the composition root's wiring is asserted
+   directly: what `app/` hands `ConversationLifecycle` is the narrow seam. No test
+   asserts that the *concrete* archive is rejected at either parameter, because no
+   such rejection exists (§10).
 3. **Eviction keeps and destruction destroys.** An entry survives its episode's
    expiry, its `purge_expired` reclaim, and the conversation reclaim ADR-0074 §7
    performs; and does not survive a forget of its record, a forget of its
@@ -1044,7 +1097,17 @@ address, and it is discharged.
     returns is not read as an address. And with a matched record that is
     expired-but-unpurged: its entry survives the cascade — the residue §5 names —
     and is destroyed by the archive's own address-scoped destroy.
-12. **No archive text in a log or a trace**, on the capture path and on every
+12. **The ordinal's domain is refused, not merely documented.** A
+    `TranscriptEntry` with an ordinal below `FIRST_TURN_ORDINAL`, negative, or at or
+    above `2**63` fails validation, so a forged entry cannot sort ahead of a real
+    first turn in a conversation's read.
+13. **The matching predicate, over the cases that separate implementations.**
+    `Straße` matched by `STRASSE`; a composed `é` matched by a decomposed one and
+    the reverse; an all-caps query against lower-case text and the reverse; a
+    one-character query; a query spanning the boundary between `asked` and
+    `replied`, which matches nothing. Every case runs against every conforming
+    implementation, index-backed and scan-backed alike.
+14. **No archive text in a log or a trace**, on the capture path and on every
     failure path (ADR-0004 §5).
 
 ### 14. What the implementing lanes owe
@@ -1226,6 +1289,10 @@ ADR-0208 §1; ADR-0210 §1; ADR-0221 §1, §2 and §5.
   inside `ConversationLifecycle.capture`, so a single wide seam would hand a
   turn-path collaborator all four reads in the same breath §4 forbids them. The
   narrow writer is bought against that failure.
+- **A wide Protocol inheriting the narrow one**, on `InvocationLedger`'s shape.
+  Rejected in §10, and rejected on this ADR's third review round: it would give
+  `AssistantEngine` an `append`, and §1 reserves writing to capture. The two faces
+  overlap in the one operation both holders perform and in nothing else.
 - **Three Protocols, on ADR-0119 §7's exact shape.** Rejected in §10. There the
   purge had a third holder; here the conversation-scoped destroy and every read are
   `AssistantEngine`'s alike, so the third seam would have no distinct consumer.
