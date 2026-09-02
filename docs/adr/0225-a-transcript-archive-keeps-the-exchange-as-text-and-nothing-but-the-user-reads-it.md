@@ -130,8 +130,9 @@ by name.
 
 > **Normative.** An entry carries exactly: its **address** (§3), the instant the
 > turn occurred, **what the user said**, **what the assistant said**, the turn's
-> `ExchangeDisposition`, and — as **grouping fields, not the key** — the id of the
-> conversation the turn belongs to and the turn's ordinal. It carries no other
+> `ExchangeDisposition`, which is always present (§10), and — as **grouping fields,
+> not the key** — the id of the conversation the turn belongs to and the turn's
+> ordinal. It carries no other
 > field, and in particular carries no embedding, no score, no band, no confidence,
 > no provenance and no belief.
 
@@ -399,6 +400,21 @@ a lane that wants it needs the ADR that decides it.
 > conversation destroys that conversation's entries, each in the same act and
 > neither performed by halves.
 
+> **Normative.** A **record-scoped** destruction discards the archive entry
+> **before** it destroys the memory record, and it attempts that discard whether or
+> not the store holds a live record at the id. So a failure between the two leaves a
+> record the user can still forget rather than text they were told was gone, and a
+> second attempt at the same id reaches the entry however the first one failed. No
+> implementation short-circuits a forget on an absent memory record.
+
+> **Normative.** A **conversation-scoped** destruction performs its archive discard
+> inside ADR-0074 §8's reclaim, which is idempotent and re-runs — in the deleting
+> call, at engine start, and later on the hub's schedule. §8's step 3 gains a third
+> conjunct: the index and the record are dropped once step 2 has nothing left that
+> resolves, **and the archive holds no entry for that conversation**, and the grace
+> has passed. A failed archive discard therefore keeps the tombstone alive to be
+> re-run rather than stranding a transcript behind a dropped index.
+
 > **Normative.** A **subject erasure** cascades by an enumerate-then-erase-then-
 > discard sequence, because ADR-0101 §1 gives `delete_about` the shape
 > `async def delete_about(self, about_person: EncodableText) -> int` — it returns a
@@ -448,6 +464,18 @@ text is gone. After this ADR the horizon governs the *working set* — what is
 retrieved, what is observed, what reaches a prompt, what an id resolves to — and
 destruction governs the *text*. The owner's ruling is exactly this and no more:
 retention values stay where they are, and what changes is what reaching them means.
+
+**Both orderings put the archive first, and one rule chooses both.** On the write
+the archive goes before the episode (§2); on a destruction it goes before the
+record. The rule is not "archive first" for its own sake — it is that **the residue
+of a partial failure must be the one the user can still reach and destroy.** A crash
+mid-capture leaves an episode missing, which ADR-0074 §3 already ratifies and which
+the horizon would have taken anyway. A crash mid-destruction leaves a *record*
+present, which `forget` destroys on the next attempt. The order that fails the other
+way leaves retained text after a deletion the user was told succeeded, and that is
+the one residue ADR-0004 §6 cannot tolerate. This is ADR-0074 §8's own third
+mitigation — *"the residue is visible and destroyable, not invisible"* — used as a
+design rule rather than as a consolation.
 
 **The archive's own destroy is what closes the hole the reclaim would otherwise
 open.** ADR-0074 §7 reclaims a conversation's index and record once it has no live
@@ -842,7 +870,7 @@ class TranscriptEntry(BaseModel):
     occurred_at: UtcInstant
     asked: EncodableText | None             # §1: the user's own words; None where none
     replied: EncodableText | None           # §1: the composed reply, whole; None where none
-    disposition: ExchangeDisposition | None
+    disposition: ExchangeDisposition        # §1: required; capture always has one
 
 class TranscriptHit(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -898,6 +926,16 @@ class TranscriptArchive(Protocol):          # NOT a subclass of the writer: no a
 > make `" hello"` and `"hello"` one query. An id may be stripped and a query may
 > not. No implementation, setting or later lane trims, collapses or otherwise
 > normalises a query beyond §7's NFC and case folding.
+
+> **Normative.** `TranscriptEntry.disposition` is **required** and carries no
+> `None`. The one production caller of `ConversationLifecycle.capture` computes a
+> member on every path — `_outcome_of` and `_routed_outcome_of` are total over their
+> vocabularies — so an optional field here would be a `None`-only slot with no
+> producer, which ADR-0073 §4's standing test refuses and which would recreate for a
+> parked turn exactly the ambiguity §1 carries the field to prevent. A caller that
+> supplies no disposition is recording an exchange this system did not drive, and
+> **writes no archive entry**: the archive holds what this system's own capture
+> recorded.
 
 > **Normative.** `TranscriptEntry.ordinal` carries `ConversationTurn.ordinal`'s own
 > domain — `[FIRST_TURN_ORDINAL, 2**63)`, the range `ConversationStore`'s own
@@ -1116,7 +1154,14 @@ address, and it is discharged.
     text carrying it; and a query spanning the boundary between `asked` and
     `replied`, which matches nothing. Every case runs against every conforming
     implementation, index-backed and scan-backed alike.
-14. **No archive text in a log or a trace**, on the capture path and on every
+14. **The destruction failure paths, both scopes.** A record-scoped forget whose
+    archive discard raises leaves the memory record present and reports the
+    failure; a second forget at the same id destroys the entry although the store
+    now holds no live record for it. A conversation-scoped delete whose archive
+    discard raises does not drop the index or the record, and the reclaim run again
+    finishes it. Neither path ever leaves a transcript reachable behind a dropped
+    index.
+15. **No archive text in a log or a trace**, on the capture path and on every
     failure path (ADR-0004 §5).
 
 ### 14. What the implementing lanes owe
@@ -1226,10 +1271,15 @@ for everything §2 governs. Reading a transcript is not continuing a conversatio
 this ADR gives no reclaimed id back its ability to be continued, appended to, or
 retrieved from.
 
-**ADR-0074 §8 is extended in application and unchanged in text.** Its protocol runs
-as written; §2 and §5 add one write inside the sequence and one destroy inside the
-compensation, and its accepted window is inherited, restated, and honestly described
-as widened in content rather than in reach.
+**ADR-0074 §8 is extended in application and unchanged in text, and the extension
+is named rather than slipped in.** §2 adds one write inside its capture sequence;
+§5 adds one destroy inside its compensation, one destroy inside its reclaim, and a
+third conjunct to its step 3 — the archive holds no entry for the conversation.
+Every clause §8 states about the two stores it knew binds unchanged, and a reader
+running its protocol over those two stores runs it exactly as written; what is added
+is a step and a condition over a store §8 did not have, which is what "extended in
+application" means here. Its accepted window is inherited, restated, and honestly
+described as widened in content rather than in reach.
 
 **ADR-0004 §7's "prefer references over copies where practical" is not satisfied and
 this ADR says so.** A reference would be a pointer to a record that will not exist,
