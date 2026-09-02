@@ -1,6 +1,6 @@
 # 223. A captured episode carries the externality of the supply its turn ran over
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md)
