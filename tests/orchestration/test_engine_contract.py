@@ -54,6 +54,7 @@ from assistant_engine_contract import (
     SettledParkSubject,
     SingleSlotParkSubject,
     SpendSubject,
+    TranscriptSubject,
     backwards_clock,
     near_ceiling_limit,
     overfull_invocation_rows,
@@ -61,6 +62,7 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
+    seeded_transcript_archive,
 )
 
 from ai_assistant.core.protocols import (
@@ -375,6 +377,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     plans: FakePlanStore | None = None,
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
+    archive: FakeTranscriptArchive | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -563,7 +566,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
-        archive=FakeTranscriptArchive(),
+        archive=FakeTranscriptArchive() if archive is None else archive,
     )
 
 
@@ -1049,6 +1052,24 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield ReadSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def transcripts(self) -> AsyncIterator[TranscriptSubject]:
+        """One wired engine over a seeded transcript archive, and that archive.
+
+        Built and handed over on :attr:`reads`' terms exactly: the engine holds its
+        ``TranscriptArchive`` privately, so the suite's negative controls — a refusal
+        that must leave the archive untouched, a scripted fault that must not be
+        reached — are only expressible if the case can hold the object the
+        composition wired.
+        """
+        archive = seeded_transcript_archive()
+        built = _wire(archive=archive)
+        await built.start()
+        try:
+            yield TranscriptSubject(engine=built, archive=archive)
         finally:
             await built.aclose()
 

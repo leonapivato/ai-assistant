@@ -47,6 +47,7 @@ from assistant_engine_contract import (
     SettledParkSubject,
     SingleSlotParkSubject,
     SpendSubject,
+    TranscriptSubject,
     backwards_clock,
     near_ceiling_limit,
     overfull_invocation_rows,
@@ -55,6 +56,7 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
+    seeded_transcript_archive,
     spoken_routed_park_outcome,
     spoken_step_park_outcome,
 )
@@ -404,6 +406,22 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine()
         engine.reads = trail
         return ReadSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    def transcripts(self) -> TranscriptSubject:
+        """The fake over a seeded transcript archive — the archive it relays to.
+
+        A plain attribute on :attr:`reads`' terms, and here the reason the fake holds
+        a whole ``TranscriptArchive`` rather than a dict is the sharpest of the three:
+        ADR-0225 §6 and §7 make the retention predicate, the matching predicate, the
+        total order and both size figures the **archive's** guarantees, so a fake
+        engine that reimplemented any of them would be a second implementation of a
+        rule this suite could then only compare against itself.
+        """
+        archive = seeded_transcript_archive()
+        engine = FakeAssistantEngine()
+        engine.archive = archive
+        return TranscriptSubject(engine=engine, archive=archive)
 
     @pytest.fixture
     async def spending(self) -> SpendSubject:
