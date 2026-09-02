@@ -1,7 +1,50 @@
 # 208. `recall_memory` leaves the default tool set, and the turn's supply is retrieved at one site
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0226 (§1's one-site clause alone — the turn path gains a second relevance-selection site, a planner-named sighted query the loop services after planning; §1's four other clauses, its keyed-load clause and both tool clauses among them, and every other section stand)
 - Date: 2026-08-28
+- **Partially superseded: 2026-09-02 by ADR-0226 — §1's one-site clause, and no
+  other clause of §1.** The offline replay recorded on **#1844** on 2026-09-01
+  priced a planner-named second read over pilot-5's as-run stores, and the owner
+  opened `track:planning` (**#1908**) on 2026-09-02 with that envelope as its first
+  milestone. This is the decision this ADR deferred by name: its Context says of
+  `recall_memory` that *"The useful capability the tool gestured at — a
+  planner-named second retrieval into the supply — is **#1732**, a separate decision
+  this ADR defers to by name and does not take."*
+
+  **Replaced, in one scope.** §1's one-site clause — *"On the turn path the
+  assistant's own store is read **for relevance** — records selected by their
+  bearing on the goal rather than by an identifier the turn already holds — at
+  exactly one site: the retrieval stage."* ADR-0226 §2 admits a **sighted query**:
+  the planner composes a query, and the loop runs `assemble_by_band` over it after
+  planning and before composing. That selects records by their bearing on the goal
+  rather than by an identifier, which is this clause's own definition of a relevance
+  selection, at a second site. A reader holding only this ADR would refuse to build
+  it, so ADR-0070 §1's test lands on partial supersession rather than amendment.
+
+  **Not replaced, and it is four of §1's five clauses.** The **keyed-load** clause —
+  *"A **keyed load** — records the turn already names, fetched by identifier — is
+  not a second retrieval and is untouched in both directions"* — stands, and is
+  load-bearing rather than merely spared: ADR-0226 §2's **citation hop** is exactly
+  a keyed load, a label resolved in code to a record the loop already selected whose
+  stored `Provenance.evidence` is read through `MemoryStore.get_many`, so that half
+  of the envelope needs no supersession at all and the scope above is narrowed to the
+  query for that reason. The **registry** clause and the **default-set** clause stand
+  untouched: ADR-0226 §5 admits no tool, registers nothing, and advertises no
+  capability. The clause that *"A component on the turn path that wants records the
+  supply does not hold does not obtain them by invoking a tool"* stands and is
+  honoured — the servicer is the loop, reading the store it already holds. And §1's
+  own scoping sentence, *"One site is not one call"*, is relied on by ADR-0226 §6.
+  Every other section of this ADR is untouched.
+
+  **The title over-states after this, and ADR-0070 §1 permits no rewrite of it.**
+  This ADR's title carries *"the turn's supply is retrieved at one site"*; ratified
+  text is not rewritten, so the `Status` line and this note are where a reader
+  learns, which is the mechanism ADR-0224 used on ADR-0162. The scope on the line
+  names clauses and carries no `ADR-NNNN` token, so ADR-0070 §4's extraction
+  invariant holds; the line carries a leading token and therefore no amendment
+  qualifier, per ADR-0082 §2, and none is owed. Appended note per ADR-0070 §1; no
+  text below is rewritten. This note lands in the same change as ADR-0226 itself,
+  which is the existence condition ADR-0082 §7 states. Refs #1844, #1732, #1908.
 
 ## Context
 
