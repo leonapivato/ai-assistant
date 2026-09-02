@@ -712,3 +712,83 @@ async def test_no_band_is_asked_for_more_than_the_budget() -> None:
     await assemble_by_band(store, "q", limit=30)
 
     assert [asked for _, asked in store.calls] == [30, 2, 1]
+
+
+# --- ADR-0226 §9: the page observer ------------------------------------------
+
+
+async def test_the_page_observer_is_told_what_each_bands_read_returned() -> None:
+    """ADR-0226 §9's partial-servicing field is stated over **reads**.
+
+    "A query whose second band raises after its first returned is as partial as a
+    hop that returned before a query raised, and a field keyed on asks would call
+    the one-ask case a total failure." This composition is several reads behind one
+    call, so a caller that catches its failure cannot otherwise tell the two apart —
+    which is the whole of why the observer exists.
+
+    It is told what each read **returned**, before the band filter and the
+    deduplication: the fact it carries is about the read and not about what the
+    composition kept.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record("a1", BeliefBand.ASSERTED)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(3)]],
+        }
+    )
+    pages: list[int] = []
+
+    await assemble_by_band(store, "q", limit=5, on_page=pages.append)
+
+    assert pages == [1, 0, 3]
+
+
+async def test_the_page_observer_records_the_reads_that_preceded_a_failure() -> None:
+    """The case the observer is for: a later band raising after an earlier returned.
+
+    Nothing here recovers the composition — ``assemble_by_band`` still raises, and
+    "the caller owns what a degraded retrieval means for its turn" (#805). What the
+    caller gains is the one fact ADR-0226 §9 obliges it to record.
+    """
+
+    class _FailingAttested(_ScriptedStore):
+        async def search(
+            self,
+            query: str,
+            *,
+            limit: int = 10,
+            kinds: Sequence[MemoryKind] | None = None,
+            bands: Sequence[BeliefBand] | None = None,
+        ) -> MemorySearchResult:
+            assert bands is not None
+            if bands[0] is BeliefBand.ATTESTED:
+                msg = "attested read is down"
+                raise MemoryStoreError(msg)
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+
+    store = _FailingAttested({BeliefBand.ASSERTED: [[_record("a1", BeliefBand.ASSERTED)]]})
+    pages: list[int] = []
+
+    with pytest.raises(MemoryStoreError):
+        await assemble_by_band(store, "q", limit=5, on_page=pages.append)
+
+    assert pages == [1], "the band that returned before the failure, and nothing after"
+
+
+async def test_the_composition_is_unchanged_when_no_observer_is_given() -> None:
+    """``on_page`` observes and never decides.
+
+    Its default is ``None`` and every existing caller passes none, so the assembler
+    a turn's own belief composition runs is byte-for-byte what it was.
+    """
+
+    def script() -> dict[BeliefBand, list[list[MemoryRecord]]]:
+        return {
+            BeliefBand.ASSERTED: [[_record("a1", BeliefBand.ASSERTED)]],
+            BeliefBand.DERIVED: [[_record("d1", BeliefBand.DERIVED)]],
+        }
+
+    watched = await assemble_by_band(_ScriptedStore(script()), "q", limit=5, on_page=lambda _: None)
+    unwatched = await assemble_by_band(_ScriptedStore(script()), "q", limit=5)
+
+    assert [record.id for record in watched] == [record.id for record in unwatched]
