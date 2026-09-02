@@ -1,6 +1,6 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet)
+- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet) and ADR-0226 (§5's sameness clause alone, that `TurnResult.memories` carries the same three groups in the same order as `Planner.plan`'s `memories` — on a turn whose planner emitted a read request the `TurnResult` carries those three groups, in that order, and a fourth appended after them; §5's three-group clause on `Planner.plan`, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4 is untouched)
 - Date: 2026-08-15
 - Partially superseded: 2026-08-16 by ADR-0160 — **the bound's *value* moves from
   5 to 15, the separately registered ablation arm is retired in favour of post-hoc
@@ -216,6 +216,46 @@
   (`TRACE_RECORD_SET_CAP`); ADR-0128 §1 (every eligibility predicate binds before
   the ranking cut), §2 (`capped`); ADR-0156 (the temporal anchor, the other half
   of the pilot's distillation finding).
+
+- **Partially superseded: 2026-09-02 by ADR-0226 — §5's sameness clause, and no
+  other clause of §5 and no other section of this ADR.** `track:planning` (**#1908**)
+  opened on 2026-09-02, and its first milestone lets the planner name one more read
+  beside its plan, which the loop services into the turn's supply **after** the
+  planner returns and before the `TurnResult` is constructed.
+
+  **Replaced — that the two sequences are the same, and only on a turn that
+  serviced a request.** §5 rules that *"`TurnResult.memories` carries the same three
+  groups in the same order as `Planner.plan`'s `memories`"*. The planner is called
+  first and sees three groups; the servicer runs after it; so on such a turn the
+  `TurnResult` carries those three groups, in that order and in those positions, and
+  a **fourth** appended whole after them. A reader holding only this ADR builds the
+  `TurnResult` from the planner's own sequence and has nowhere to put the serviced
+  records — they would refuse to build it — which is ADR-0070 §1's test. On a turn
+  that serviced nothing the two sequences are identical, exactly as this clause
+  requires, and that is the state of every turn until a lane ships the emission.
+
+  **Not replaced — and one clause is untouched precisely because the design was
+  redrawn to leave it so.** §5's three-group clause governs `Planner.plan`'s
+  `memories`, and that parameter still carries three groups: the planner cannot
+  receive a group produced from its own output, and an earlier draft of ADR-0226 that
+  widened it to four was both incoherent and a needless contract change. §5's
+  operative caution — that an implementation *"may rely on the grouping and may not
+  rely on a global relevance order"* — is carried word for word and extended to the
+  fourth group for `TurnResult`'s consumers. §5's degraded-read clause and its §4
+  separator exception, its episodic-bound composition constant and its `Settings`
+  prohibition, and §5's own no-Protocol-member clause all bind unchanged: ADR-0226
+  adds no member to any Protocol either. **§4 is untouched** — its order is still
+  tail, then beliefs, then supplement, *"appended whole, never interleaved"*, and a
+  group appended after the supplement disturbs neither the rule nor any existing
+  group's position; its separator rule is evaluated over what precedes the
+  supplement and is unaffected. §§1, 2, 3 and 6 are untouched entirely.
+
+  The scope on the `Status` line names a clause and carries no `ADR-NNNN` token, so
+  ADR-0070 §4's extraction invariant holds and the pair accumulates beside ADR-0160's
+  rather than replacing it; the line carries a leading token and therefore no
+  amendment qualifier, per ADR-0082 §2. Appended note per ADR-0070 §1; no text below
+  is rewritten. This note lands in the same change as ADR-0226 itself, which is the
+  existence condition ADR-0082 §7 states. Refs #1908.
 
 ## Context
 
