@@ -1683,6 +1683,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 _as_async(recipient_grants.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
+                # The transcript archive joins the same ordered shutdown as every
+                # other Tier 1 store (ADR-0225 §10, ADR-0083 ruling 4). It matters
+                # more here than the count suggests: §6 closes the archive's file set
+                # to the database and SQLite's own sidecars, and §9 makes every one of
+                # them owner-only — so a connection left open past shutdown leaves a
+                # `-wal` holding transcript pages behind, which is the one residue
+                # those two sections are jointly about.
+                #
+                # **Nothing constrains its position** among the stores: no store reads
+                # it and it reads none, and the façade drains in-flight work before
+                # any of these run, so the `forget` cascade's archive-then-memory
+                # order has already finished by the time this list is walked.
+                _as_async(archive.close),
                 # The deferral queue joins the façade's ordered shutdown (ADR-0042
                 # §2, ADR-0078 §10 item 5).
                 #
@@ -1699,19 +1712,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 #
                 # Correctness never depended on either sweep running; ADR-0078 §1's
                 # exposure cap did, and that is what has now been bought.
-                # The transcript archive joins the same ordered shutdown as every
-                # other Tier 1 store (ADR-0225 §10, ADR-0083 ruling 4). It matters
-                # more here than the count suggests: §6 closes the archive's file set
-                # to the database and SQLite's own sidecars, and §9 makes every one of
-                # them owner-only — so a connection left open past shutdown leaves a
-                # `-wal` holding transcript pages behind, which is the one residue
-                # those two sections are jointly about.
-                #
-                # **Nothing constrains its position** among the stores: no store reads
-                # it and it reads none, and the façade drains in-flight work before
-                # any of these run, so the `forget` cascade's archive-then-memory
-                # order has already finished by the time this list is walked.
-                _as_async(archive.close),
                 _as_async(deferrals.close),
                 # The grant store joins the same ordered shutdown as the other five
                 # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
