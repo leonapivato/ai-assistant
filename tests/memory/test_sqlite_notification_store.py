@@ -37,6 +37,7 @@ from notification_contract import (
 from ai_assistant.core.errors import NotificationStoreError
 from ai_assistant.core.types import (
     ClassReach,
+    NotificationCandidate,
     NotificationCondition,
     NotificationDispositionKind,
     NotificationPreferences,
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import NotificationPolicy, NotificationStore
-    from ai_assistant.core.types import NotificationCandidate
 
 _RETENTION = timedelta(days=7)
 _CAP = 100
@@ -73,6 +73,40 @@ def _interrupting() -> NotificationPreferences:
     return NotificationPreferences(
         reaches=(ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),)
     )
+
+
+def _replant_expiry(path: Path, notification_id: str, expires_at: datetime) -> None:
+    """Move one retained record's *declared* expiry, behind the store's back.
+
+    The legacy overlap ADR-0215 §2 describes cannot be reached through
+    ``NotificationStore``'s surface on a store running under that decision, and §7
+    adds no member that would let a test admit a chosen record. So it is planted —
+    but only the one field the overlap turns on, and through the store's own encoder
+    (:meth:`~pydantic.BaseModel.model_dump_json`, which ``_write`` uses for this
+    column), so the row format is stated once in the store and not a second time
+    here.
+
+    Args:
+        path: The store's database file.
+        notification_id: Whose candidate to rewrite.
+        expires_at: The expiry the planted record declares.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT candidate FROM notifications WHERE id = ?", (notification_id,)
+        ).fetchone()
+        assert row is not None
+        planted = NotificationCandidate.model_validate_json(row[0]).model_copy(
+            update={"expires_at": expires_at}
+        )
+        conn.execute(
+            "UPDATE notifications SET candidate = ? WHERE id = ?",
+            (planted.model_dump_json(), notification_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class TestSqliteNotificationPolicyContract(NotificationPolicyContract):
@@ -878,3 +912,83 @@ def test_a_failed_open_leaks_no_connection(tmp_path: Path, monkeypatch: pytest.M
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         opened[0].execute("SELECT 1")
+
+
+async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_record(
+    tmp_path: Path,
+) -> None:
+    """ADR-0215 §2's whole-population lookup, against the pair it was written for.
+
+    §2 is normative that the lookup "reads **every** record the store retains under
+    the offered key, and rules the offer ``DROP`` where any one of them speaks at
+    the ruling instant. No implementation may narrow that to a single record — the
+    most recently admitted or any other." Every arm in the shared suite is taken on
+    a store that has only ever run under ADR-0215, where at most one record per key
+    ever speaks, so a backend that read the most recently admitted row alone would
+    pass all of them (#1814).
+
+    The pair that separates the two is a *legacy* overlap, and §2 says exactly how
+    it arises: "A store that ran under ADR-0130 §8 admitted a second record for a
+    key the moment the first was dismissed; where that first record's candidate
+    declared the *later* expiry, both of the pair speak under §1 until the earlier
+    horizon passes." It is unreachable through ``NotificationStore``'s own surface
+    under this decision — a suppressing record makes every offer of its key a
+    ``DROP``, and a ``DROP`` writes nothing — and §7 adds no way to admit a chosen
+    record, so the pair is planted in this backend's own storage. That is why the
+    case lives here and beside the fake rather than in the shared suite: §7 records
+    that the suite "could not pin it in any case".
+
+    **Only the one column the overlap needs is rewritten, and through the encoder
+    the store itself writes with**, so this test is not a second spelling of the row
+    format: the stored candidate is decoded, its declared expiry moved out, and the
+    same ``model_dump_json`` put back.
+    """
+    clock = MutableClock()
+    path = tmp_path / "notifications.db"
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=path, now=clock, retention=_RETENTION, cap=_CAP
+    )
+    policy = DefaultNotificationPolicy()
+    try:
+        # The older record, admitted and dismissed the way ADR-0130 §8 left the key
+        # free. Its declared expiry is moved out below, to the `late` horizon.
+        early = NOW + timedelta(hours=1)
+        older = await store.admit(candidate(key="k1", expires_at=early), policy=policy)
+        assert older.notification_id is not None
+        assert await store.dismiss(older.notification_id) is True
+
+        # The younger record, admitted for the same key once the older stopped
+        # speaking — which is what ADR-0130 §8 permitted the instant it was
+        # dismissed, and what this store does at the earlier record's expiry.
+        clock.at = early
+        younger = await store.admit(
+            candidate(key="k1", expires_at=early + timedelta(hours=1), noticed_at=early),
+            policy=policy,
+        )
+        assert younger.notification_id is not None
+        assert younger.kind is not NotificationDispositionKind.DROP
+
+        # The overlap, planted: the *older* record now declares the *later* expiry.
+        late = NOW + timedelta(hours=10)
+        _replant_expiry(path, older.notification_id, late)
+
+        # Between the two horizons. The younger record — the most recently admitted
+        # — has perished and speaks for nothing; the older one speaks until `late`.
+        clock.at = early + timedelta(hours=2)
+        held = {record.id: record for record in await store.held()}
+        assert set(held) == {older.notification_id, younger.notification_id}
+        assert held[younger.notification_id].speaks_for_its_key_at(clock.at) is False
+        assert held[older.notification_id].speaks_for_its_key_at(clock.at) is True
+
+        offered = await store.admit(
+            candidate(key="k1", expires_at=late + timedelta(hours=1), noticed_at=clock.at),
+            policy=policy,
+        )
+
+        # A lookup narrowed to the most recently admitted row would admit this.
+        assert offered.kind is NotificationDispositionKind.DROP
+        assert offered.reason is NotificationCondition.DUPLICATE
+        assert offered.notification_id is None
+        assert len(await store.held()) == 2  # a DROP writes no record
+    finally:
+        store.close()

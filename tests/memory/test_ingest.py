@@ -1843,6 +1843,34 @@ class _MovesTheTargetBeforeAWrite(_RecordingStore):
         return await super().write_atomic(writes)
 
 
+class _DeletesTheTargetBeforeAWrite(_RecordingStore):
+    """A store that **destroys** a record immediately before the ingestor's write.
+
+    :class:`_MovesTheTargetBeforeAWrite`'s other limb, and the one ADR-0219 §3 puts
+    under the same refusal: "a row deleted between the caller's read and its write
+    is a lost update of the starkest kind". The competitor there rewrites the target
+    and every re-run therefore re-rules ``REINFORCE`` over a conflict set that still
+    holds it; here the target is gone by the time the re-run searches, so the re-run
+    is the only case in which the cycle reaches a **different kind** (#1853).
+
+    Args:
+        target_id: The record destroyed before a perturbed write.
+        limit: How many of the ingestor's writes to perturb. ``1`` refuses the
+            first attempt and lets the re-run land.
+    """
+
+    def __init__(self, *, target_id: str, limit: int = 1) -> None:
+        super().__init__()
+        self._target_id = target_id
+        self._limit = limit
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Destroy the target, then delegate — so the conditional write meets no row."""
+        if len(self.batches) < self._limit:
+            await self.delete(self._target_id)
+        return await super().write_atomic(writes)
+
+
 class _RefusesEveryWrite(_RecordingStore):
     """A store that records each batch and then fails it — never as *stale*.
 
@@ -1868,6 +1896,10 @@ class _CountingPolicy:
     def __init__(self) -> None:
         self._inner = DefaultMemoryPolicy()
         self.rulings = 0
+        #: What it ruled, in order, beside how often it was asked. The count says the
+        #: re-run re-decided; only the kinds say it re-decided to something *else*,
+        #: which is the deleted-target case and no other (#1853).
+        self.kinds: list[MemoryDecisionKind] = []
 
     async def decide(
         self,
@@ -1876,9 +1908,11 @@ class _CountingPolicy:
         conflicts: Sequence[MemoryRecord],
         relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
-        """Count the call and delegate the ruling."""
+        """Count the call, keep the kind, and delegate the ruling."""
         self.rulings += 1
-        return await self._inner.decide(proposal, conflicts=conflicts, relations=relations)
+        decision = await self._inner.decide(proposal, conflicts=conflicts, relations=relations)
+        self.kinds.append(decision.kind)
+        return decision
 
 
 def _conditional(batch: tuple[MemoryWrite, ...]) -> dict[str, int | None]:
@@ -2238,6 +2272,62 @@ async def test_a_stale_supersede_re_runs_and_retires_the_target_it_re_read() -> 
     assert retired.validity.valid_until == _fixed_now()
     assert retired.provenance.confidence == 0.7  # the competitor's record, retired
     assert await store.get("corrected") is not None
+
+
+async def test_a_fold_whose_target_was_deleted_re_rules_instead_of_re_folding() -> None:
+    """ADR-0219 §5's re-run reaching a **different ruling**, which is #1853's gap.
+
+    §3 makes an absent id the same refusal as a moved one, so the bounded re-run has
+    a second entry: the target is gone rather than merely changed. Every arm above
+    perturbs the target by rewriting it, so each re-run re-rules ``REINFORCE`` and
+    re-folds, and none of them separates "the whole cycle ran again" from "the write
+    ran again" by anything but a count.
+
+    Here it is separated by the ruling itself. §5 has the re-run redo "conflict
+    detection, the policy's ruling, and the fold", and with the target destroyed the
+    re-run's search returns nothing, the policy rules ``ACCEPT`` over an empty
+    conflict set, and the proposal is installed at its own id. An implementation that
+    re-ran only the write, or only the fold, would carry the first attempt's
+    ``REINFORCE`` into the re-run and name a target that no longer exists — which
+    ``_apply`` refuses as "fold target ... is not among the conflicts" — instead of
+    reaching the ruling the store now supports.
+
+    Nothing is lost and nothing is duplicated at the vanished id: two attempts, one
+    landed write, the deleted record still gone.
+    """
+    store = _DeletesTheTargetBeforeAWrite(target_id="e")
+    await _plant_episodes(store, "ev1", "ev2")
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    target = await store.get("e")
+    assert target is not None
+    policy = _CountingPolicy()
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=policy, now=_fixed_now
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+    )
+
+    # The ruling *changed* across the re-run — the property no other arm can assert.
+    assert policy.kinds == [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.ACCEPT]
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT
+    assert result.record_id == "new"
+    assert len(store.batches) == 2  # the refused fold, then the re-run's install
+
+    # The first attempt was the conditional fold at the target the search returned;
+    # the re-run's is an unconditional install at the proposal's own id, which is
+    # what a ruling of a different kind produces.
+    first = store.batches[0]
+    assert [write.mode for write in first] == [MemoryWriteMode.IF_UNCHANGED]
+    assert _conditional(first) == {"e": target.revision}
+    assert [write.record.id for write in store.batches[1]] == ["new"]
+    assert MemoryWriteMode.IF_UNCHANGED not in {write.mode for write in store.batches[1]}
+
+    assert await store.get("e") is None  # destroyed, and not resurrected by the fold
+    installed = await store.get("new")
+    assert installed is not None
+    assert set(installed.provenance.evidence) == {"ev2"}  # the proposal's own, unfolded
 
 
 async def test_only_a_stale_refusal_earns_the_re_run() -> None:
