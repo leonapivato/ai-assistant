@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -57,7 +57,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.reads import (
-    ServicedRead,
     Servicing,
     TriggerOutcome,
     TurnReadAudit,
@@ -272,15 +271,6 @@ RESOLUTION_KINDS: tuple[MemoryKind, ...] = (
 #: ``MemoryStore.search``'s own default is the same number, which is the width this
 #: corpus already treats as "a page".
 _DEFAULT_RESOLUTION_LIMIT = 10
-
-
-#: What ADR-0226 §9's record says of a servicing that did not return.
-#:
-#: A cancellation, or any failure the servicer does not itself degrade, leaves the
-#: turn without a result to record — and §9's counts are "taken over a servicing that
-#: completed". So the failure fields are what such a turn carries, and every count is
-#: zero, which is exactly what §5's discard makes true of it.
-_INTERRUPTED: Final = ServicedRead(failed=True)
 
 
 def _narrowed(
@@ -799,21 +789,13 @@ class LearningLoop:
                 # `TurnResult` is constructed. `memories` here is the very
                 # sequence the planner was passed, which is both §3's label space
                 # and §7's deduplication set.
-                # Marked failed *before* the await and overwritten by what the
-                # servicing returns, so an await that never returns cannot be
-                # audited as a completed servicing (ADR-0226 §9). A cancellation
-                # is the case that matters — it is not a `MemoryStoreError`, so it
-                # passes through the servicer's degradation and out of this turn,
-                # and `respond`'s `finally` would otherwise record a fired,
-                # serviced, zero-yield turn: a true fire with no read under it,
-                # counted in §8's novelty denominator. This says the honest thing
-                # instead, and says it about *every* non-returning path rather than
-                # about the ones an author thought of. `failed_after_read_returned`
-                # stays `False` because nothing here knows otherwise, which is the
-                # conservative half of §9's pair — and §5 discarded whatever had
-                # returned in any case.
-                audit.read = _INTERRUPTED
-                audit.read = await service_read_request(self._memory, request, supply=memories)
+                # The servicer *writes* its record rather than returning one, on
+                # every path out of it — including the one a cancellation carries
+                # away, which is not a `MemoryStoreError` and so reaches neither its
+                # degradation nor a `return` here. ADR-0226 §9's record is emitted
+                # from `respond`'s `finally` regardless, so a servicing that never
+                # finished must not leave one saying it completed.
+                await service_read_request(self._memory, request, supply=memories, audit=audit)
                 # §7: appended whole after the episodic supplement, never
                 # interleaved. The three groups keep their positions, their order
                 # and their meanings.

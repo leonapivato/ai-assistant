@@ -55,6 +55,7 @@ from ai_assistant.orchestration.reads import (
     READ_BUDGET,
     Servicing,
     TriggerOutcome,
+    TurnReadAudit,
     resolve_label,
     service_read_request,
 )
@@ -300,6 +301,71 @@ class _SuspendingPlanner:
             created_at=_NOW,
             read_request=self._request,
         )
+
+    async def armed(self) -> LoopSuspension:
+        """Wait until the suspension is in place, and hand it to the case."""
+        await self._armed.wait()
+        assert self.held is not None
+        return self.held
+
+
+class _SuspendAfterKeyedLoad(FakeMemoryStore):
+    """Holds the store call that follows a keyed load which *returned* records.
+
+    ADR-0226 §9's second failure field is about a read that had already returned
+    when the servicing failed, so the interesting cancellation is not the first
+    store call but the one after a hop has come back. Arming from inside
+    ``get_many`` — after it has left the modelled resource — is the only place a
+    case can open that window, because nothing between the hop and the query is a
+    seam a test holds.
+    """
+
+    def __init__(self, *, now: Clock = _clock) -> None:
+        super().__init__(now=now)
+        self.held: LoopSuspension | None = None
+        self._armed = asyncio.Event()
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        resolved = await super().get_many(record_ids)
+        self.held = self.suspend_next_operation()
+        self._armed.set()
+        return resolved
+
+    async def armed(self) -> LoopSuspension:
+        """Wait until the suspension is in place, and hand it to the case."""
+        await self._armed.wait()
+        assert self.held is not None
+        return self.held
+
+
+class _SuspendAfterNthSearch(FakeMemoryStore):
+    """Holds the search that follows the ``nth`` one, once that one has returned.
+
+    The query's own composition is several reads, so this is how a case reaches
+    §9's partial shape without a hop: an earlier band returns, and the next is held.
+    """
+
+    def __init__(self, *, nth: int, now: Clock = _clock) -> None:
+        super().__init__(now=now)
+        self.calls = 0
+        self._nth = nth
+        self.held: LoopSuspension | None = None
+        self._armed = asyncio.Event()
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        found = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        self.calls += 1
+        if self.calls == self._nth:
+            self.held = self.suspend_next_operation()
+            self._armed.set()
+        return found
 
     async def armed(self) -> LoopSuspension:
         """Wait until the suspension is in place, and hand it to the case."""
@@ -1639,6 +1705,7 @@ async def test_no_caller_can_raise_the_budget() -> None:
             memory,
             _query("billing schedule notes"),
             supply=(),
+            audit=TurnReadAudit(),
             budget=100,  # type: ignore[call-arg]  # the point of the case
         )
 
@@ -1753,3 +1820,65 @@ def test_the_two_postures_are_the_only_two_and_cannot_be_subclassed() -> None:
         BoundedAudienceSupply,
         UnboundedAudienceSupply,
     }
+
+
+async def test_a_cancellation_after_the_hop_returned_records_the_partial_fact() -> None:
+    """§9's pair, on the path §5 does not degrade.
+
+    The hop's keyed load returns; the sighted query's first band is then cancelled.
+    Nothing reached the turn — §5 discards a partial read with the rest — but the
+    record must still say *that a read had already returned when the failure landed*,
+    which is the only thing distinguishing a partial servicing from a total one.
+    Reporting by return value cannot carry that fact off a path that does not return,
+    which is why the servicer writes its record instead.
+    """
+    memory = _SuspendAfterKeyedLoad()
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await memory.add(_belief("cited-1", "an earlier exchange"))
+    planner = FakePlanner(now=_clock, read_request=_both("earlier exchange", "M1"))
+    loop = _loop(memory, planner=planner)
+
+    with structlog.testing.capture_logs() as captured:
+        turn = asyncio.ensure_future(loop.respond("billing schedule", narrow=_bounded()))
+        held = await memory.armed()
+        await held.reached()
+        turn.cancel()
+        held.release()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    record = _record(captured)
+    assert record["failed"] is True
+    assert record["failed_after_read_returned"] is True
+    assert record["returned"] == 0
+    assert record["new"] == 0
+
+
+async def test_a_cancellation_after_a_query_band_returned_records_the_partial_fact() -> None:
+    """The same, over a request carrying only a ``SIGHTED_QUERY``.
+
+    §9 states the field over **reads** and not over asks precisely because this shape
+    exists: one ask, several ``MemoryStore.search`` calls, and a failure between two
+    of them that a field keyed on asks would call total. The fourth search is the
+    servicing's own first band — the turn's belief composition has already read three.
+    """
+    memory = _SuspendAfterNthSearch(nth=4)
+    await memory.add(
+        _belief("belief-1", "billing schedule notes", source=MemorySource.USER_ASSERTED)
+    )
+    planner = FakePlanner(now=_clock, read_request=_query("billing schedule notes"))
+    loop = _loop(memory, planner=planner)
+
+    with structlog.testing.capture_logs() as captured:
+        turn = asyncio.ensure_future(loop.respond("billing schedule", narrow=_bounded()))
+        held = await memory.armed()
+        await held.reached()
+        turn.cancel()
+        held.release()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    record = _record(captured)
+    assert record["failed"] is True
+    assert record["failed_after_read_returned"] is True
+    assert record["returned"] == 0
