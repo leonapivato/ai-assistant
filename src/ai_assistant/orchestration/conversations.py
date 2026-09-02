@@ -339,7 +339,7 @@ class ConversationLifecycle:
 
     # --- capture (§3, §4, §8) ------------------------------------------------
 
-    async def capture(  # noqa: PLR0913 — the conversation, the rendering, the reply, what became of the pass, the binding a park recorded, the turn's disclosure evaluation, how its user material reached this system, and its delivery; every one is a distinct fact about the turn being recorded
+    async def capture(  # noqa: PLR0913 — the conversation, the rendering, the reply, what became of the pass, the binding a park recorded, the turn's disclosure evaluation, how its user material reached this system, what its supply rested on, and its delivery; every one is a distinct fact about the turn being recorded
         self,
         conversation_id: str,
         *,
@@ -349,6 +349,7 @@ class ConversationLifecycle:
         parked: ParkedBinding | None = None,
         supplied_withheld: bool = False,
         modality: Modality = Modality.TEXT,
+        derived_from_external: bool = False,
         delivery: SpokenDelivery | None = None,
     ) -> CaptureReport:
         """Record one turn: the index entry first, then its episode (§3).
@@ -430,6 +431,21 @@ class ConversationLifecycle:
                 method can no more derive it than it can derive ``content``. It says
                 nothing about the assistant's own contributions to the record — not
                 the plan rationale in ``content``, not the reply in ``outcome``.
+            derived_from_external: Whether the supply the turn ran over held a record
+                resting on recorded external content (ADR-0223 §1) — the disjunction
+                of ``rests_on_recorded_external_content`` over what that turn
+                selected, which is the same boolean the pass handed the egress seam
+                (§2). **Handed to capture, not computed here**, for
+                ``supplied_withheld``'s own reason and at the same sites: this stage
+                holds no supply, reads no record and evaluates no predicate over any
+                selection, so "capture judges nothing" holds for this field too.
+                ``False`` where the pass carried no turn — a routed pass, a routed
+                park's resolution and a resumption recovered from durable state — and
+                it is true of what those episodes hold rather than a default they
+                fall back on (§3). A ``True`` says *the supply this turn ran over held
+                a record whose recorded origin is external*; a ``False`` says *no
+                record in that supply carried the marker*, never *no external content
+                was involved* (§7).
             delivery: What is known about this turn's spoken answer having been
                 played, written onto the index row this allocates (ADR-0205 §4).
                 ``converse_spoken`` supplies ``SpokenDelivery(state=UNKNOWN)`` —
@@ -473,6 +489,7 @@ class ConversationLifecycle:
             now=turn.occurred_at,
             supplied_withheld=supplied_withheld,
             modality=modality,
+            derived_from_external=derived_from_external,
         )
         try:
             await self._memory.write_atomic(
@@ -573,7 +590,7 @@ class ConversationLifecycle:
             _log.warning("conversation_capture_compensation_failed", exc_info=True)
         return CaptureReport(conversation_id=turn.conversation_id, degraded=True)
 
-    def _episode(  # noqa: PLR0913 — the turn, the rendering, the reply, what became of the pass, the instant both writes share, the disclosure evaluation and the modality; every one is a distinct fact about the turn being recorded
+    def _episode(  # noqa: PLR0913 — the turn, the rendering, the reply, what became of the pass, the instant both writes share, the disclosure evaluation, the modality and the origin mark; every one is a distinct fact about the turn being recorded
         self,
         turn: ConversationTurn,
         *,
@@ -583,6 +600,7 @@ class ConversationLifecycle:
         now: datetime,
         supplied_withheld: bool,
         modality: Modality,
+        derived_from_external: bool,
     ) -> EpisodicMemory:
         """Build the one ``EpisodicMemory`` a turn deposits (§4).
 
@@ -611,9 +629,10 @@ class ConversationLifecycle:
         not a question about it. Writing ``occurred_at`` into the field instead
         would make every episode in the store claim a currency it has no use for.
 
-        **``placement``, ``disposition`` and ``capture`` are the three fields this
-        method neither defaults nor decides** (ADR-0204 §2, ADR-0217 §1, ADR-0221 §2
-        and §5). Each is stamped from a value the pipeline computed and carried here,
+        **``placement``, ``disposition``, ``capture`` and the provenance's origin mark
+        are the four fields this method neither defaults nor decides** (ADR-0204 §2,
+        ADR-0217 §1, ADR-0221 §2 and §5, ADR-0223 §1). Each is stamped from a value the
+        pipeline computed and carried here,
         so "capture judges nothing" holds exactly as it does for ``content``: this
         method reads no record, no supply and no channel, and every other field
         ADR-0074 §4 fixes is stamped as it always was. What ``placement`` writes is
@@ -635,14 +654,24 @@ class ConversationLifecycle:
         carries the parked turn's, and this method is handed the answer rather than
         deriving one.
 
-        **``provenance.derived_from_external`` stays at its ``False`` default**
-        (ADR-0221 §6). Capture stamps no origin mark, threads no origin value to this
-        point, and changes no value any component computes for that field. The mark is
-        owed and is owed its own decision: stamping it would change the composing
-        prompt's origin phrase and would remove ADR-0181 §5's automatic ``ALLOW`` for
-        later turns' egress calls, and neither is a memory-record question. No lane
-        cites ADR-0221 as authority that this episode's origin is recorded, or that
-        ADR-0098 §5's recorded-origin gap is narrower than that section states.
+        **``provenance.derived_from_external`` is stamped from the value the pipeline
+        threaded** (ADR-0223 §1, partially superseding ADR-0221 §6's first sentence).
+        It is the disjunction of ``rests_on_recorded_external_content`` over the
+        records the turn whose rendering this episode carries actually selected —
+        computed once per pass by the component that made the selection, and carried
+        here as data exactly as ``content`` is. This method evaluates no predicate,
+        holds no supply and reads no record to obtain it, and a capture site with no
+        turn to thread from states ADR-0223 §3's third case in code rather than
+        falling back on a default.
+
+        **What the mark says, and what no reader may make it say** (ADR-0223 §7,
+        inheriting ADR-0098 §5 and ADR-0106 §1 verbatim). A ``True`` says *the supply
+        this turn ran over held a record whose recorded origin is external*. A
+        ``False`` says *no record in that supply carried the marker* — never *no
+        external content was involved*, and never *nothing external influenced this
+        exchange*. Nothing here detects external content embedded in text whose
+        recorded origin is not external, and no lane cites ADR-0223 as authority that
+        it does or that ADR-0098 §5's corridor has narrowed.
 
         **The instant is this turn's own**, which is ADR-0217 §1's producer
         obligation discharged at the one site that can: "every derivation this system
@@ -664,6 +693,7 @@ class ConversationLifecycle:
                 source=MemorySource.OBSERVED,
                 confidence=CAPTURE_CONFIDENCE,
                 last_updated=now,
+                derived_from_external=derived_from_external,
                 # `last_confirmed_at` left at its `None` default — see above.
             ),
             placement=(
