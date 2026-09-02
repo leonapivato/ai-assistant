@@ -65,6 +65,7 @@ from ai_assistant.core.types import (
     TranscriptArchiveSize,
     TranscriptEntry,
     TranscriptHit,
+    describe_untrusted,
 )
 
 if TYPE_CHECKING:
@@ -209,6 +210,33 @@ def excerpt_of(text: str) -> tuple[str, bool]:
     # prefix of a valid UTF-8 encoding contains no other invalid byte, so this is
     # the codepoint-boundary cut rather than a lossy decode.
     return encoded[:TRANSCRIPT_EXCERPT_BYTES].decode("utf-8", errors="ignore"), True
+
+
+def _check_retention(retention: timedelta | None) -> None:
+    """Refuse a retention that is not ``None`` or a strictly positive duration.
+
+    ADR-0225 §6 gives the setting the shape ``timedelta | None`` with ``None``
+    meaning *keep forever*; ``core.config.Settings`` refuses the rest at load with
+    ``gt=timedelta(0)``, and this is the same refusal at the constructor, on the
+    ground ``SqliteConversationStore`` states for its own: the class is public and a
+    guard that only fires when a caller remembered to ask is not a guard.
+
+    ``isinstance`` and then the comparison, in that order and not the reverse: a
+    non-duration reaches ``<=`` and raises ``TypeError``, which is not what this
+    constructor documents.
+
+    Args:
+        retention: The value to check.
+
+    Raises:
+        ValueError: If it is neither ``None`` nor a strictly positive ``timedelta``.
+    """
+    if retention is None:
+        return
+    if not isinstance(retention, timedelta) or retention <= timedelta(0):
+        described = describe_untrusted(retention)
+        msg = f"retention must be a strictly positive timedelta or None, got {described}"
+        raise ValueError(msg)
 
 
 def check_page(limit: int, offset: int) -> None:
@@ -373,9 +401,18 @@ class SqliteTranscriptArchive:
                 naive or indeterminate reading can be caught (ADR-0026 §7).
 
         Raises:
+            ValueError: If ``retention`` is set and is not a strictly positive
+                ``timedelta``. Checked here rather than trusted from configuration,
+                for the reason ``SqliteConversationStore`` checks its own: this class
+                is public, anyone may construct one directly, and a guard that only
+                fires when a caller remembered to ask is not a guard. A negative
+                horizon would put the floor *after* the reading and hide entries that
+                are plainly live; a value that is not a duration at all would reach
+                the arithmetic and raise something this seam does not document.
             TranscriptArchiveError: If the database cannot be opened or its schema
                 cannot be created.
         """
+        _check_retention(retention)
         self._path = path if path == ":memory:" else str(Path(path))
         self._retention = retention
         self._clock = checked_clock(now, owner="SqliteTranscriptArchive")

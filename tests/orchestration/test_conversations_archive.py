@@ -35,7 +35,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import Conversation, MemoryWrite
+    from ai_assistant.core.types import Conversation, ConversationTurn, MemoryWrite
 
 AT = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 DAY = timedelta(days=1)
@@ -719,3 +719,47 @@ async def test_an_unverifiable_capture_keeps_both_writes() -> None:
 
     assert report.degraded is False
     assert len(wiring.archive.recorded) == 1
+
+
+async def test_a_value_the_archives_model_refuses_degrades_rather_than_failing() -> None:
+    """ADR-0225 §2's clause is unconditional: never a turn, never a capture.
+
+    Every value reaching the entry is already typed by the model it came off, but
+    "already typed" is a property of the callers rather than of the construction —
+    and the failure a refusal would produce is exactly the outcome §2 rules out: a
+    delivered answer thrown away because the record of it could not be built.
+
+    Provoked through the one field whose domain the *index row* supplies rather than
+    a `core` model's validator: a store handing back an ordinal outside
+    ``ConversationTurn``'s domain makes ``TranscriptEntry`` refuse the entry, where
+    ADR-0225 §10 puts the refusal deliberately (§13 item 12).
+    """
+    wiring = Wiring()
+
+    class Forging(FakeConversationStore):
+        async def append(self, conversation_id: str, **kwargs: object) -> ConversationTurn:
+            turn = await super().append(conversation_id, **kwargs)  # type: ignore[arg-type]
+            return turn.model_copy(update={"ordinal": 2**63})
+
+    stage = ConversationLifecycle(
+        conversations=Forging(now=wiring.clock, retention=RETENTION),
+        memory=wiring.memory,
+        archive=wiring.archive,
+        archive_enabled=True,
+        retention=RETENTION,
+        now=wiring.clock,
+    )
+    started = await stage.begin(None)
+
+    report = await stage.capture(
+        started.id,
+        content="x",
+        asked=SAID,
+        outcome=ANSWERED,
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+    )
+
+    assert report.degraded is True, "the capture is degraded, and the turn is not failed"
+    assert wiring.archive.recorded == {}
+    assert report.episode_id is not None
+    assert await wiring.memory.get(report.episode_id) is not None, "the episode still landed"

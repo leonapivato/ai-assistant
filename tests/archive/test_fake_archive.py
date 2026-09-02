@@ -172,3 +172,32 @@ async def test_a_horizon_before_the_calendar_answers_rather_than_raising(
     assert await archive.entry("c1:1") is not None
     assert [hit.address for hit in await archive.search("Ravensworth")] == ["c1:1"]
     assert (await archive.size()).entries == 1
+
+
+@pytest.mark.parametrize(
+    "retention",
+    [timedelta(0), timedelta(days=-1), "P30D", 30, True],
+    ids=["zero", "negative", "a-string", "an-int", "a-flag"],
+)
+def test_a_retention_that_is_not_a_positive_duration_is_refused(retention: object) -> None:
+    """The constructor's own guard, on ADR-0225 §6's shape (``timedelta | None``).
+
+    ``core.config.Settings`` refuses these at load with ``gt=timedelta(0)``, and this
+    is the same refusal one layer down — for the reason ``SqliteConversationStore``
+    states for its own: the class is public, anyone may construct one directly, and a
+    guard that only fires when a caller remembered to ask is not a guard.
+
+    **Zero and negative are not the same fault and both matter.** A zero horizon
+    hides every entry the instant it is written; a negative one puts the floor
+    *after* the reading and hides entries that are plainly live. Neither is a value
+    §6 admits, and both would look like a working archive that had quietly stopped
+    answering. ``True`` is here because ``bool`` is an ``int`` subclass and the
+    non-duration arm is what catches it.
+    """
+    with pytest.raises(ValueError, match="retention"):
+        FakeTranscriptArchive(retention=retention)  # type: ignore[arg-type]
+
+
+def test_keeping_forever_is_admitted() -> None:
+    """``None`` is §6's default and its whole spelling for "keep forever"."""
+    assert FakeTranscriptArchive(retention=None).recorded == {}
