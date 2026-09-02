@@ -554,6 +554,39 @@ def test_the_destroy_says_it_touches_no_belief(
     assert "'assistant forget' is the command for that" in screen
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["transcript", "forget", "c1:1"],
+        ["transcript", "forget-conversation", "c1"],
+    ],
+)
+def test_a_deletion_preview_is_an_archive_read_and_owes_both_obligations(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    """§6 and §8 reach the destroys' previews, because a preview *is* a rendered read.
+
+    Both clauses are keyed on rendering rather than on a command's name — §8 binds "a
+    surface rendering archive content" and §6 "every surface that renders any archive
+    read" — and each ceremony reads the thing it is about and prints it. This was the
+    round-1 blocker: the four reads carried both and the two previews carried neither,
+    which left the rendering a user studies hardest outside the obligations, and left
+    the figure absent from the moment it is most decision-relevant.
+
+    Asserted on the **declining** path, so the case is about what was shown before the
+    answer was taken rather than about anything the destruction did.
+    """
+    engine = _engine(_entry())
+
+    code, screen = _run(output, monkeypatch, engine, argv, stdin="n\n")
+
+    assert code == 0
+    assert _NOTICE[0] in screen
+    assert "Archive:" in screen
+    assert "1 turn readable" in screen
+    assert "c1:1" in engine.archive.recorded
+
+
 # --- ADR-0042 §7: one error boundary ----------------------------------------
 
 
