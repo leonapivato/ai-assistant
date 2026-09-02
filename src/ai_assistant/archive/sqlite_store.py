@@ -142,6 +142,19 @@ def _to_micros(instant: datetime) -> int:
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
+def _span_micros(span: timedelta) -> int:
+    """Return ``span`` as whole microseconds, by the same integer arithmetic.
+
+    Paired with :func:`_to_micros` so a horizon can be taken **in microseconds**
+    rather than by subtracting a ``timedelta`` from a ``datetime``: that subtraction
+    raises ``OverflowError`` for any reading close enough to ``datetime.min``, and
+    ``checked_clock`` admits such a reading — it refuses a naive or indeterminate
+    one, not an early one. A read that crashed on the clock rather than answering
+    would take every one of ADR-0225 §7's four reads down with it.
+    """
+    return (span.days * 86_400 + span.seconds) * 1_000_000 + span.microseconds
+
+
 def _from_micros(micros: int) -> datetime:
     """Return the instant ``micros`` names, as the UTC value it was stored from."""
     return _EPOCH + timedelta(microseconds=micros)
@@ -480,6 +493,8 @@ class SqliteTranscriptArchive:
 
         With no retention there is no floor, and the sentinel is the smallest value
         a stored key can take rather than a branch every query would have to carry.
+        The arithmetic is integer microseconds throughout, so no reading and no
+        retention this seam admits can make a read raise instead of answering.
 
         Raises:
             TranscriptArchiveError: If the clock reading is naive, indeterminate, or
@@ -491,7 +506,14 @@ class SqliteTranscriptArchive:
             reading = self._clock()
         except ClockReadingError as exc:
             raise TranscriptArchiveError(str(exc)) from exc
-        return _to_micros(reading - self._retention)
+        # In microseconds rather than as `reading - self._retention`, and clamped to
+        # the smallest value a SQLite bind takes. Both halves are about a horizon
+        # that falls off the end of the representable range: `datetime` subtraction
+        # raises `OverflowError` below `datetime.min`, and `timedelta.max` is wide
+        # enough to put the floor below the signed 64-bit bind range from any
+        # reading at all. A floor no stored instant can precede hides nothing, which
+        # is the right answer for a horizon longer than the calendar.
+        return max(_to_micros(reading) - _span_micros(self._retention), -_PAGE_BOUND)
 
     # --- the writer seam (§2, §5) -------------------------------------------
 

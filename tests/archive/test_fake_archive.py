@@ -14,6 +14,7 @@ through, and the seam disjointness that makes the two fakes two fakes.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,8 +29,6 @@ from ai_assistant.core.protocols import TranscriptArchive, TranscriptArchiveWrit
 from ai_assistant.testing import FakeTranscriptArchive, FakeTranscriptArchiveWriter
 
 if TYPE_CHECKING:
-    from datetime import timedelta
-
     from ai_assistant.core.types import TranscriptEntry
 
 
@@ -131,3 +130,45 @@ async def test_reopening_the_fake_shares_its_storage_rather_than_copying_it() ->
     assert [one.address for one in await twin.entries()] == ["c1:1"]
     assert await twin.discard("c1:1") is True
     assert await archive.entries() == []
+
+
+async def test_the_users_half_is_this_fakes_choice_on_a_two_sided_match() -> None:
+    """ADR-0225 §7 leaves the window to the implementation; this records the fake's.
+
+    Kept out of the shared suite for the reason ``test_sqlite_archive.py`` records:
+    §7 fixes the bound and the never-both clause and leaves *which* half, so a shared
+    assertion would narrow the seam past the ADR. The fake makes the same choice the
+    durable store makes — deliberately, since the fake stands in for it — and this is
+    where that is written down rather than assumed.
+    """
+    archive = FakeTranscriptArchive(now=lambda: NOW)
+    archive.hold(entry(asked="Ravensworth asked", replied="Ravensworth said"))
+
+    hit = (await archive.search("Ravensworth"))[0]
+
+    assert hit.excerpt == "Ravensworth asked"
+
+
+@pytest.mark.parametrize(
+    "retention", [timedelta(days=4), timedelta.max], ids=["past-the-calendar", "unrepresentable"]
+)
+async def test_a_horizon_before_the_calendar_answers_rather_than_raising(
+    retention: timedelta,
+) -> None:
+    """The fake is total over the same clocks the durable store is (ADR-0225 §6).
+
+    ``checked_clock`` admits a reading near ``datetime.min``, and subtracting a
+    retention from one raises ``OverflowError``. A fake that crashed where the store
+    answered would be exactly the divergence the shared suite exists to prevent,
+    arriving through the one path the suite's own fixed clock cannot reach — so it is
+    asserted here, against both ends of the same edge.
+    """
+    early = datetime.min.replace(tzinfo=UTC) + timedelta(days=1)
+    archive = FakeTranscriptArchive(retention=retention, now=lambda: early)
+    archive.hold(entry(at=early, asked="Ravensworth"))
+
+    assert [one.address for one in await archive.entries()] == ["c1:1"]
+    assert [one.address for one in await archive.conversation("c1")] == ["c1:1"]
+    assert await archive.entry("c1:1") is not None
+    assert [hit.address for hit in await archive.search("Ravensworth")] == ["c1:1"]
+    assert (await archive.size()).entries == 1
