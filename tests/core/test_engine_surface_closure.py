@@ -825,7 +825,6 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     outright, and ADR-0177 §1's browser enumeration stands at thirty-one, since
     ``next_notification`` "is not one" of those and ADR-0206 §2 keeps it that way.
 
-    **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     **ADR-0219 §6 is under the first limb alone**, and moves only the version, to 22
     against the same forty methods — the first entry here whose ground is an **error
     class** rather than a method, an argument or a result. ``core/errors.py`` gains
