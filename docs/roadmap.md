@@ -394,6 +394,127 @@ track's client lanes rather than beside them (#1226 §3). Which lanes that
 sequencing has bound is on #1427 and #1230. Clones and review quota are one
 pool, under Concurrency above.
 
+## `track:planning` — the planner gets sight
+
+Live record: **#1908** — which milestones have closed, and the exit ruling
+that closed each, are recorded there.
+
+**Purpose:** the planner gets sight. A retrieval that fires on the request's
+wording before anything has reasoned about it can reach only what that wording
+reaches, and a plan made once cannot use what its own first step found — the
+order #1844 records, and the plan-once, drive-at-most-one-step shape ADR-0014
+and ADR-0037 rule. This track earns, rung by rung, a loop in which the planner
+may look again, revise, and reach outward. Milestones are ordered by
+**dependency only** and numbered within the track (#1908) rather than
+continuing the sequence the tracks above share; each closes on an exit ruling
+recorded on #1908.
+
+**The charter caution, recorded at the track's opening** and carried by every
+milestone: the loop is not justified by memory-benchmark numbers. Its value is
+*task capability* — multi-step tool work, proactive tasks with no backstop and
+no deadline (#838), and porch-shaped questions (#1874) that are a structured
+read followed by a composed story — so **exits on this track are task-shaped,
+not retrieval-shaped**. The replay that priced milestone 1's envelope, and what
+it found, are on #1844 rather than here.
+
+**Four invariants every milestone inherits**, recorded on #1908:
+
+- **One envelope, one shape.** The planner emits a request beside its plan; the
+  loop services it; what returns is **records carrying provenance, never
+  payloads**, so the disclosure filter, the external mark (ADR-0223), the policy
+  gate and citations apply unchanged. Later milestones add *kinds* to a closed
+  enumeration, on the pattern ADR-0221 §5 sets for its own — no later lane adds
+  a case without the ADR that decides it — never a new seam.
+- **The namer rule.** The namer may be data, or the user, or the model pointing
+  outward — never the model pointing inward. The planner names a label it was
+  shown or a structure the system stamped; labels resolve in code to records the
+  loop chose; no record id reaches the model and none is accepted from it
+  (ADR-0208 §1's ground).
+- **One budget, one bound, one audit.** Reads, records and time are accounted in
+  one place per turn, and what was asked, what came back and what was dropped is
+  recorded. That audit is also the trigger's measuring instrument.
+- **The trigger is first-class.** The binding constraint is the planner judging
+  that its supply did not suffice, so every milestone that adds a read states
+  how its trigger is measured per turn from the first deploy.
+
+**The milestones**, each with the exit that closes it:
+
+- **1 — the sighted envelope.** One inward read, serviced once before compose,
+  in two kinds built together rather than sequenced: a **sighted query** (the
+  planner names a query; the loop runs `assemble_by_band` and appends — #1732's
+  instance) and a **citation hop** (the planner names a belief it can see; the
+  loop follows that record's own `Provenance.evidence`). The trigger is judged
+  sufficiency (#838's middle layer), defined so its precision and recall are a
+  per-turn number. Outward fetch is named and deferred, and the adjacent ground
+  is named rather than half-decided: structured keys (#1874), hybrid search
+  (ADR-0006 §5), the archive fetch (ADR-0225 §12). It changes the planner seam,
+  so the contract ADR lands alone first and the implementation follows (golden
+  rule 5); the batch is #1909.
+  *Exit: a cross-conversation reply-vocabulary question ("which lender did you
+  recommend?") answers through the hop; the trigger's precision and recall are
+  on the record; and a turn whose supply sufficed pays no extra read.*
+- **2 — the plan becomes revisable.** A read that changes what is known may
+  change the plan: an iteration bound, and a per-surface deadline, because a
+  voice turn cannot afford three round trips. It partially supersedes the
+  plan-once shape of ADR-0014/ADR-0037 — the largest single decision on the
+  track — and admits inward kinds only.
+  *Exit: a two-step task whose second step depends on what the first found
+  completes without the user re-asking; the bound is demonstrably hit, and the
+  reply degrades legibly when it is.*
+- **3 — the outward fetch.** The planner names a source outside the store.
+  **Local files first**, because a steered loop that can only read the owner's
+  disk has no channel out; then web search and fetch under the egress seam's
+  attested conditions (ADR-0154), with the externality stamp (ADR-0223) as the
+  control, so a tainted conversation asks first. Servicing is the envelope plus
+  a turn-time reader minting provenance-stamped records — URL, fetched-at,
+  external mark, `ATTESTED` band — and not a tool step, because a tool result
+  has no provenance to attribute (ADR-0170 §5a). This milestone decides whether
+  fetched content persists; the leaning recorded on #1908 is retention by
+  address in the source archive (#1907).
+  *Exit: "summarise the PDF I saved yesterday" answers from disk; a search
+  result is cited as a record, and that conversation's egress asks first
+  thereafter.*
+- **4 — the planner chooses how to read.** Envelope kinds carrying structure —
+  a time window, participants, topics, the person it is about — mapped onto
+  `MemoryStore.search` filters over fields the records already carry (#1874,
+  whose Protocol triad is `track:memory`'s), and lexical or hybrid search over
+  beliefs (ADR-0006 §5, open since; ADR-0225 §7 built the predicate for
+  transcripts). The boundary is that this track adds kinds to the envelope and
+  each is inert until `track:memory` has ratified the store read it maps to.
+  *Exit: a question whose answer shares no wording with the stored record is
+  found by structure; and a caption engineered to match unrelated questions is
+  never the reason its record is retrieved (#1874's representative inputs).*
+
+**Sequencing.** 1 → 2 → 3 → 4 by design: 3's steered-loop risk needs 2's bound,
+and 4 lands on an envelope milestone 1 has proven. Two openings sit outside that
+line and both wait on the owner's word — milestone 3's local-files rung, which
+may open beside 2, and the archive's feed-back mechanism (ADR-0225 §12), which
+is an envelope kind ("address", user-named) additive to milestone 1's shape.
+Which of them has been ruled is on #1908.
+
+**Deferred — stated, not scheduled:**
+
+- **The coverage layer.** Whether the trigger is learnable from the supply alone
+  or needs coverage estimates (#838's third layer), re-measured against the
+  production planner before it is ruled rather than settled from a replay.
+- **The spend profile.** Per-turn cost on conversational surfaces, and whether
+  proactive retrieval is budgeted differently from a turn the user is waiting on
+  (#838).
+- **Decomposition of compound questions** — `track:memory`'s standing item, and
+  the likely ground of milestone 2 when it opens.
+- **#1695**, a stated fact making the planner plan a store step no tool can
+  carry. It is a planner defect this track should absorb, not a milestone.
+
+**Concurrency.** The boundaries are with two tracks. `track:memory` owns the
+store contracts and event episodes (#1874), so milestone 4's kinds stay inert
+until the store read each maps to is ratified there; `track:world` owns egress
+and the readers, so milestone 3's fetch is serviced under that track's seam
+rather than beside it. What this track owns is what the planner may ask for and
+what the loop does with what comes back. A lane here never edits a subsystem
+another track has a lane open in (#1226 §3, Concurrency above); which lanes that
+sequencing has bound is on #1908, #1231 and #1427. Clones and review quota are
+one pool, under Concurrency above.
+
 ## The backlog
 
 The backlog is a **label, not a track** (#1226 §4, amended). It fails the
