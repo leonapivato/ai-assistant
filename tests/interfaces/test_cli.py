@@ -2699,6 +2699,39 @@ def test_a_break_in_a_records_content_cannot_forge_one_of_the_rows_own_fields(
     assert rendered.count("  id: rec-1\n") == 1, "and the row's own id is still its own"
 
 
+def test_the_gutter_reaches_the_lines_the_console_wraps_for_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker's promise is about display lines, not about logical ones.
+
+    Rich does not repeat a literal prefix on the continuations it wraps: handed one
+    long line it emits the gutter once and puts the remainder at the margin, so a
+    crafted ``… Why: forged`` becomes a second display line the marker never reached —
+    the whole defence, undone by a long enough content. Adversarial review, round 2,
+    ``blocker``.
+
+    Driven at a **40-column** console, because the default this file renders at hides
+    the case: nothing short enough to fit ever wraps, which is exactly how the first
+    round of cases missed it.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=40))
+
+    cli._render_belief_summary(
+        _summary(content="the office is in Boston\n" + "x " * 18 + "Why: forged")
+    )
+    lines = buffer.getvalue().splitlines()
+
+    forged = [one for one in lines if "Why: forged" in one]
+    assert forged, "the crafted text reached the screen at all"
+    assert all(one.startswith("  │ ") for one in forged), (
+        "and every display line it landed on carries the gutter"
+    )
+    assert len([one for one in lines if one.startswith("  │ ")]) > 2, (
+        "the content really did wrap, so the case is exercising what it claims to"
+    )
+
+
 def test_a_single_line_content_is_printed_exactly_as_it_always_was(output: StringIO) -> None:
     """The marker is bought only by the value that creates the risk.
 
