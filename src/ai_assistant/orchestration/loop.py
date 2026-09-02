@@ -55,6 +55,12 @@ from ai_assistant.core.types import (
     TurnResult,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.reads import (
+    Servicing,
+    TriggerOutcome,
+    TurnReadAudit,
+    service_read_request,
+)
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
@@ -251,6 +257,35 @@ RESOLUTION_KINDS: tuple[MemoryKind, ...] = (
 #: ``MemoryStore.search``'s own default is the same number, which is the width this
 #: corpus already treats as "a page".
 _DEFAULT_RESOLUTION_LIMIT = 10
+
+
+def _narrowed(
+    narrow: SupplyFilter | None,
+    context: CurrentContext,
+    memories: tuple[MemoryRecord, ...],
+    retrieved_ids: frozenset[str],
+) -> tuple[CurrentContext, tuple[MemoryRecord, ...]]:
+    """Apply the supply filter, or leave the supply alone where there is none.
+
+    One function rather than two ``if narrow is not None`` sites, because
+    :meth:`LearningLoop._turn` now applies the filter at one of **two** positions —
+    before planning on an unbounded-audience turn, after the servicing on a bounded
+    one (ADR-0226 §7) — and ADR-0204 §2's "once" is a property of the pair. Two
+    hand-written applications is how a later edit gets a turn evaluated twice, or
+    not at all.
+
+    Args:
+        narrow: The filter, or ``None`` to run over everything assembled.
+        context: The context the turn assembled.
+        memories: The supply, in its groups.
+        retrieved_ids: The ids this turn's relevance reads returned (ADR-0210 §1).
+
+    Returns:
+        What the rest of the turn may run over.
+    """
+    if narrow is None:
+        return context, memories
+    return narrow(context, memories, retrieved_ids)
 
 
 def _utcnow() -> datetime:
@@ -473,6 +508,67 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
+        bounded_audience: bool = False,
+    ) -> TurnResult:
+        """Run one turn, and record what its planner asked to have read.
+
+        The turn itself is :meth:`_turn`, which this method wraps for one reason:
+        **ADR-0226 §9's record is written once per turn and is conditioned on
+        nothing.** "A turn that fired and then failed for any reason still
+        contributes its numerator; a turn that did not fire still contributes its
+        denominator; and a turn that never reached the planner's judgement (§8)
+        contributes to neither and is recorded as not reached." A ``finally`` is
+        what makes that true of *every* exit rather than of the ones an author
+        thought of: the planner raising, the registry raising above it, a blank
+        utterance, a failing context assembly, a cancellation. Each ends the turn
+        without a plan, so each is §8's third outcome — recorded, and then the
+        original failure goes on propagating unchanged.
+
+        **The record is written here and the servicing decision is made below**,
+        which is the order §9 permits — "at any point in the turn after the
+        servicing decision is known". What §9 forbids is the reverse: a record
+        gated on the plan being persisted or on capacity being admitted, both of
+        which happen *above* this method in
+        :meth:`~ai_assistant.orchestration.engine.Engine._run_turn` and would
+        "silently drop exactly the turns most worth counting".
+
+        Args:
+            utterance: What the user said (:meth:`_turn`).
+            history: The conversation's recent turns (:meth:`_turn`).
+            history_degraded: Whether reading that history failed (:meth:`_turn`).
+            narrow: The supply filter, or ``None`` (:meth:`_turn`).
+            bounded_audience: Whether this operation's output channel has a
+                **bounded** audience (:meth:`_turn`).
+
+        Returns:
+            The turn's goal, context, assembled memories and plan.
+
+        Raises:
+            PlanningError: As :meth:`_turn` raises it.
+            ContextError: As :meth:`_turn` raises it.
+        """
+        audit = TurnReadAudit()
+        try:
+            return await self._turn(
+                utterance,
+                history=history,
+                history_degraded=history_degraded,
+                narrow=narrow,
+                bounded_audience=bounded_audience,
+                audit=audit,
+            )
+        finally:
+            audit.emit()
+
+    async def _turn(  # noqa: PLR0913  # the utterance, the tail and its health, the filter, the channel's audience and the turn's own record; every one is a distinct fact about this turn
+        self,
+        utterance: str,
+        *,
+        history: Sequence[MemoryRecord],
+        history_degraded: bool,
+        narrow: SupplyFilter | None,
+        bounded_audience: bool,
+        audit: TurnReadAudit,
     ) -> TurnResult:
         """Run one turn: intent, context, memory retrieval, planning.
 
@@ -544,6 +640,36 @@ class LearningLoop:
         fact about this method's I/O and not about what a caller then chose to be
         supplied (ADR-0203 §3).
 
+        **And the planner may ask for one more read, which this method services
+        into a fourth group** (ADR-0226). The plan comes back carrying at most one
+        :class:`~ai_assistant.core.types.ReadRequest`; where the operation's
+        channel audience is bounded,
+        :func:`~ai_assistant.orchestration.reads.service_read_request` follows it
+        — the citation hop first, then the sighted query, sharing one budget of ten
+        records the supply did not already hold — and the records it returns are
+        **appended whole** after the episodic supplement, never interleaved (§7).
+        ``memories`` therefore has four groups on such a turn and three on every
+        other, which is the one respect in which ADR-0158 §5's sameness clause is
+        superseded: ``Planner.plan``'s ``memories`` still carries exactly three,
+        because the planner is called before the servicer and cannot be handed a
+        group produced from its own output.
+
+        **On an operation whose channel audience is unbounded the request is not
+        serviced at all** (ADR-0226 §5). ADR-0203 §2 forbids a read that replaces
+        what the subtraction removed, and on such a turn the planner judges
+        sufficiency over a supply the subtraction has already thinned — so the read
+        it emits is shaped by what was withheld even though the planner never saw
+        it. The emission is still recorded, because what is scoped is the servicing.
+
+        **The withholding evaluation moves with the fourth group and does not run
+        twice** (ADR-0226 §7, superseding ADR-0204 §2's timing clause alone).
+        ``narrow`` is applied **once** on every turn: after the servicing where one
+        was possible, and exactly where ADR-0203 §1 puts it everywhere else. A
+        second application would disjoin two evaluations' results, which §7 forbids
+        in terms; an evaluation taken before the servicing would under-fire "on
+        exactly the records the planner asked for", which is #1708's laundering path
+        reopened by a new route.
+
         Args:
             utterance: What the user said. It becomes the goal's statement
                 unrewritten — trimmed of surrounding whitespace, and otherwise
@@ -566,6 +692,24 @@ class LearningLoop:
                 the filter that evaluates the same predicate and removes nothing
                 (ADR-0204 §2, §4). ``None`` remains valid and plans over
                 everything: this method is the seam, not the policy.
+            bounded_audience: Whether this operation's output channel has a
+                **bounded** audience (ADR-0199 §1). It decides two things and is a
+                declaration rather than a judgement: a read request is serviced
+                only where it is ``True`` (ADR-0226 §5), and ``narrow`` is applied
+                after the servicing rather than before the planner, so ADR-0204
+                §2's evaluation is taken once over the turn's final supply
+                (ADR-0226 §7). The two go together: on a bounded channel the
+                filter subtracts nothing, so moving it costs the planner nothing,
+                and on an unbounded one nothing is serviced and the filter stays
+                exactly where ADR-0203 §1 puts it. It defaults to ``False``
+                because that is the fail-closed answer for a caller that declares
+                no audience — a caller passing ``None`` for ``narrow`` has
+                declared no posture at all, and §5 refuses rather than guesses.
+                :meth:`~ai_assistant.orchestration.engine.Engine._run_turn`
+                derives it from the supply object it already mints, so the
+                declaration cannot drift from the filter it belongs to.
+            audit: ADR-0226 §9's record for this turn, filled in as the stages
+                run and emitted by :meth:`respond` on every exit.
 
         Returns:
             The turn's goal, context, assembled memories and plan — each of them
@@ -598,12 +742,13 @@ class LearningLoop:
         # position, where no boundary can distinguish it from a record the tail
         # merely happened to hold (§1's second clause).
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
-        # ADR-0203 §1: between retrieval and planning, and applied to the context as
-        # well as to the records — a facet no ADR has placed is withheld from the
-        # planner exactly as an unplaced record is. Everything after this line, this
-        # method's own return value included, runs over what it returned.
-        if narrow is not None:
-            context, memories = narrow(context, memories, retrieved_ids)
+        if not bounded_audience:
+            # ADR-0203 §1: between retrieval and planning, and applied to the
+            # context as well as to the records — a facet no ADR has placed is
+            # withheld from the planner exactly as an unplaced record is.
+            # Everything after this line, this method's own return value
+            # included, runs over what it returned.
+            context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         # ADR-0211 §3: read within the turn, from the registry selection resolves
         # against, and immediately before the call — so the plan is judged against
         # the vocabulary as it stood at this read. Nothing is withheld from it and
@@ -616,6 +761,37 @@ class LearningLoop:
         plan = await self._planner.plan(
             goal, context=context, memories=memories, capabilities=capabilities
         )
+        # ADR-0226 §8: the trigger *is* the emission, so the plan carrying a
+        # request is the whole of what "the trigger fired" means. Read once, above
+        # the branch, because every arm below reports it.
+        request = plan.read_request
+        audit.trigger = TriggerOutcome.NOT_FIRED if request is None else TriggerOutcome.FIRED
+        if request is not None:
+            audit.kinds = tuple(ask.kind for ask in request.asks)
+            # ADR-0226 §5: what is scoped is the **servicing** and never the
+            # emission, so a planner on an unbounded-audience turn is not told
+            # its request will not be serviced and nothing suppresses it — the
+            # trigger goes on being measured on every channel, and the audit
+            # records the emission and that it was declined.
+            audit.servicing = Servicing.SERVICED if bounded_audience else Servicing.DECLINED
+        if bounded_audience:
+            if request is not None:
+                # ADR-0226 §5: after the planner returns and before the
+                # `TurnResult` is constructed. `memories` here is the very
+                # sequence the planner was passed, which is both §3's label space
+                # and §7's deduplication set.
+                audit.read = await service_read_request(self._memory, request, supply=memories)
+                # §7: appended whole after the episodic supplement, never
+                # interleaved. The three groups keep their positions, their order
+                # and their meanings.
+                memories += audit.read.records
+            # ADR-0226 §7, superseding ADR-0204 §2's timing clause and nothing
+            # else of §2: one evaluation, over the turn's **final** supply. On a
+            # bounded-audience operation the filter subtracts nothing (ADR-0204
+            # §4), so the planner above saw exactly what it would have seen with
+            # the filter applied ahead of it — what moves is *when* the evaluation
+            # is taken, so that it sees the group the planner asked for.
+            context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         return TurnResult(
             goal=goal,
             context=context,
