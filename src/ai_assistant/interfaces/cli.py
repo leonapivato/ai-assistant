@@ -7283,6 +7283,40 @@ def _forget_warning(band: BeliefBand) -> str:
             assert_never(band)
 
 
+def _render_content(content: str) -> None:
+    r"""Print a row's canonical content, its own line breaks intact (#1890).
+
+    **A captured episode is the first listed record whose content is legitimately
+    more than one line.** ``_exchange_of`` writes it as "The user asked: …" and "The
+    assistant's plan: …" separated by a ``\n``, and this row rendered that break as
+    ``\ufffd`` — because :func:`_safe` replaces ``\n`` by default, which is #1336's
+    fix in the direction that damaged this surface rather than protected it.
+
+    **The default is still right for every value this module interpolates, and this
+    one is not interpolated.** :func:`_safe`'s reason for eating a newline is that
+    almost every value here shares its line with adapter-authored text — ``Why:``,
+    ``id:``, a numbered step — so a break in it forges a *second* line indistinguishable
+    from one the CLI wrote. The content is the one field of this row printed as a block
+    of its own, which is exactly the carve-out :func:`_safe_prose` was written for on
+    the reply path (#1336), and the same argument applies here unchanged.
+
+    **The indent is re-applied per line rather than only to the first**, which is what
+    keeps the block a block: a bare ``print`` of the neutralised value would leave the
+    second line hard against the margin, outdented past every label in the row, and a
+    reader would take it for a new record rather than the rest of this one.
+
+    Rich markup is escaped over the **whole** value before it is split, never per
+    line, for the reason :func:`_safe_prose` records: Rich's tag pattern matches
+    across a newline, so ``[red\nbold]`` survives per-line escaping intact and is then
+    consumed as markup. Splitting *after* the escape cannot resurrect it.
+
+    Args:
+        content: The record's canonical text, as the engine carries it.
+    """
+    for text_line in _safe_prose(content).split("\n"):
+        console.print(f"  {text_line}")
+
+
 def _render_belief_summary(summary: BeliefSummary) -> None:
     """Render one row of the **listing** (ADR-0077 §6, ADR-0085 §4a).
 
@@ -7325,6 +7359,10 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
     which is why the two views share this renderer rather than one of them needing
     its own.
 
+    **The content is printed as a block whose every line carries the row's indent**
+    (:func:`_render_content`), because an episode's content is legitimately two lines
+    and this row used to render the break between them as ``\ufffd`` (#1890).
+
     Engine-supplied text — the content and the id — is neutralised for this
     terminal like any other (``_safe``, ADR-0042 §4). The band and kind are this
     system's own closed vocabularies, not carried data.
@@ -7333,7 +7371,7 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
         f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
         f"confidence {belief.confidence:.2f}"
     )
-    console.print(f"  {_safe(belief.content)}")
+    _render_content(belief.content)
     console.print(f"  [dim]Why:[/] {_why(belief)}")
     console.print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
     if belief.valid_until is not None:
