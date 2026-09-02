@@ -545,6 +545,36 @@ it is about, and there is no field on an entry for a match to be made against.
 > write and destroys nothing: entries already held stay, stay searchable and stay
 > destroyable, so a configuration change is never a silent deletion.
 
+> **Normative.** A finite retention is enforced **at the read**, and that is what
+> makes it a guarantee rather than a schedule. An entry whose `occurred_at` is
+> strictly older than *the instant of the read minus the retention in force at that
+> read* is treated as already evicted: no read returns it, none of the four counts it,
+> and it is hidden whether or not anything has physically reclaimed it, whether or not
+> the archive has been written to since, and on a process that has run no sweep at
+> all. This is ADR-0007 §2's own rule for a record past `expires_at` — *"treated as
+> already forgotten"* whether or not `purge_expired` has run, so *"the privacy
+> guarantee does not depend on a background job"* — inherited deliberately and for the
+> same reason.
+
+> **Normative.** Physical reclamation is therefore permitted at any point of the
+> implementation's choosing and is **obliged nowhere**: no sweep, schedule or hub job
+> is required by this decision, and reclamation may remove only entries the read-time
+> predicate already hides. The archive stores no expiry stamp of its own; the
+> predicate is evaluated against the setting in force at the read, which is why
+> **shortening** the retention takes effect on the next read everywhere.
+
+> **Normative.** **Lengthening** it undertakes nothing in the other direction: what
+> reclamation has already taken is gone, and no clause here promises a hidden entry
+> back. That is named rather than claimed away — the setting is a floor on what is
+> hidden, not a guarantee about what is kept, and a user who wants everything kept
+> leaves it unset, which is the default.
+
+> **Normative.** The **destroys** reach what the reads hide. An entry past the
+> retention and not yet reclaimed still yields to the address- and
+> conversation-scoped destroys, exactly as §5's residue clause has the archive's own
+> destroy reach the entry of an expired-but-unpurged record. A destruction is never
+> refused on the ground that a read would not have shown it.
+
 > **Normative.** This ADR sets no size or count cap on the archive. ADR-0007 §5's
 > deferral of eviction policy is inherited whole and is not answered here.
 
@@ -572,11 +602,19 @@ it is about, and there is no field on an entry for a match to be made against.
 > again (the arithmetic below), so an accounting that excluded it would understate the
 > archive by roughly half, and would understate an un-checkpointed log without bound.
 
+> **Normative.** The two figures therefore answer different questions and are allowed
+> to disagree. `entries` is what the reads would return — so an entry hidden by the
+> retention above is not counted — while `stored_bytes` is what is on the disk, hidden
+> and unreclaimed entries included. That gap is the point rather than an inconsistency
+> to be smoothed away: the figure that fires the deferred cap is the one that measures
+> the storage, and a report that netted the two would hide exactly the growth the cap
+> exists to catch.
+
 > **Normative.** An implementation holding no files of its own — the canonical fake —
 > reports by the same standard rather than reporting zero: the bytes its entries
-> occupy in whatever it holds them in. A figure of zero over a populated archive is
-> not a conforming answer for any implementation, and a fake that gave one would make
-> the conformance case vacuous.
+> occupy in whatever it holds them in. A `stored_bytes` of zero over an archive
+> holding entries is not a conforming answer for any implementation, and a fake that
+> gave one would make the conformance case vacuous.
 
 **The `None` default is the deliberate opposite of ADR-0074 §7's, and the reason it
 does not contradict §7 is that §7's argument is about a different store.** §7
@@ -930,8 +968,8 @@ class TranscriptHit(BaseModel):
 class TranscriptArchiveSize(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    entries: int                            # §6: what the surface reports, unasked
-    stored_bytes: int                       # §6: every byte the archive's files occupy on disk
+    entries: int = Field(ge=0)              # §6: what the reads would return, unasked
+    stored_bytes: int = Field(ge=0)         # §6: what the archive's files occupy on disk
 
 
 # core/protocols.py — narrow, then wide
@@ -983,6 +1021,16 @@ class TranscriptArchive(Protocol):          # AssistantEngine's seam; NOT a subc
 > supplies no disposition is recording an exchange this system did not drive, and
 > **writes no archive entry**: the archive holds what this system's own capture
 > recorded.
+
+> **Normative.** Both fields of `TranscriptArchiveSize` are `ge=0` and a negative
+> value is refused at validation, because neither is a quantity any implementation can
+> be in a state to report: a store holds no negative number of entries and occupies no
+> negative number of bytes, and an impossible figure crossing the local API to a
+> surface that renders it is worse than an error. Neither carries an **upper** bound,
+> and that is decided rather than overlooked: `ordinal`'s `lt=2**63` is anchored in
+> `ConversationStore`'s own refusals (below), and there is no store-side refusal to
+> anchor a ceiling on a count or a byte total — inventing one would be exactly the
+> unargued number §6 declines to invent for a cap.
 
 > **Normative.** `TranscriptEntry.ordinal` carries `ConversationTurn.ordinal`'s own
 > domain — `[FIRST_TURN_ORDINAL, 2**63)`, the range `ConversationStore`'s own
@@ -1173,10 +1221,15 @@ address, and it is discharged.
    statement and never `content`; a turn whose plan carried a rationale archives no
    part of it; a routed pass archives its utterance; a recovered resumption and a
    parked step's resolution archive no user words.
-8. **Both settings.** An unset configuration keeps entries forever; a finite
-   `transcript_archive_retention` evicts past it; `transcript_archive_enabled` set
-   false stops the write and destroys nothing, and the reads still serve what is
-   there.
+8. **Both settings, and the retention at the read.** An unset configuration keeps
+   entries forever; a finite `transcript_archive_retention` evicts past it;
+   `transcript_archive_enabled` set false stops the write and destroys nothing, and
+   the reads still serve what is there. And the enforcement point specifically: an
+   entry aged past a finite retention is returned by **none** of the four reads and
+   counted by neither figure of the size report, on an archive that has had **no
+   write and no sweep** since — the case a sweep-only implementation passes and a
+   read-time one does not; a shortened retention hides more on the very next read; and
+   that same hidden entry still yields to both destroys.
 9. **The reads are bounded and ordered.** A limit of zero or below and a negative
    offset each raise `ValueError` on the three reads that take them, and `entry`
    takes neither; a blank `query`, `address` or `conversation_id` raises
@@ -1234,6 +1287,8 @@ address, and it is discharged.
     Shared, over every conforming implementation: `entries` tracks appends and both
     destroys exactly, `stored_bytes` is positive over a populated archive and rises
     with what is stored, and neither figure is obtained by reading an entry. Against
+    `TranscriptArchiveSize` refuses a negative `entries` or `stored_bytes` at
+    validation, and an empty archive reports `entries` zero. Against
     the SQLite implementation specifically: the figure is asserted **against the
     archive's files on disk**, index and write-ahead log included, so an accounting
     that summed entry lengths or read the main database file alone fails it. And the
