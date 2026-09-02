@@ -792,9 +792,22 @@ supplement, and a group appended after it leaves that condition untouched.
 > Such a turn is in neither the fire rate's numerator nor its denominator; it is
 > counted on its own, so that a deployment can see how many turns the instrument took
 > no reading from rather than have them silently dilute the rate. A turn whose planner
-> **did** return a plan carrying no request judged the supply sufficient, and that is a
-> non-firing exactly as above: what separates the two is whether the judgement
-> happened, not whether the turn went on to succeed.
+> **did** return a plan carrying no request is recorded as a non-firing exactly as
+> above: what separates it from a not-reached turn is that the planner returned, not
+> that the turn went on to succeed.
+
+> **Normative.** **The fire rate is a property of the planner a deployment runs, and
+> no lane reports one without saying which planner produced it.** §4's field is
+> additive and defaulted, so a `Planner` that knows nothing of this envelope conforms
+> and returns no request on every turn; its non-firings are **constant rather than
+> judged**, and the 0% such a deployment would read is a true statement about that
+> planner rather than a reading of a trigger that is not there. The record carries no
+> per-turn distinction between that and a judged non-firing, because one would have to
+> be declared at the `Planner` seam — a Protocol addition this decision does not need
+> and golden rule 5 puts behind its own ADR — and §12 defers it with what fires it.
+> What keeps the live figure honest meanwhile is §10's order and this deployment's
+> composition: `app/composition.py` wires exactly one `Planner`, and it is the one
+> Lane A makes envelope-aware before Lane B's servicer and its audit exist at all.
 
 > **Normative.** Every figure this audit supports is computed **over a population of
 > turns** and is never a per-turn quantity. A turn contributes to a numerator or a
@@ -879,9 +892,13 @@ by making the planner ask twice.
 > channel scoping; for each ask, its **kind**; how many records the servicing returned;
 > how many of those were new after deduplication; how many the deduplication removed;
 > how many labels resolved to nothing; whether the budget truncated a kind; whether the
-> servicing failed; and, where it failed, whether an earlier ask had already returned
-> records before it did. No count here is of a record the servicer refused on the
-> ground of its class, because §7 admits no such refusal.
+> servicing failed; and, where it failed, whether **any read it had already performed
+> had returned records** when it did. That second failure field is stated over reads
+> and not over asks, because §6's sighted query is *several* `MemoryStore.search`
+> calls: a query whose second band raises after its first returned is as partial as a
+> hop that returned before a query raised, and a field keyed on asks would call the
+> one-ask case a total failure. No count here is of a record the servicer refused on
+> the ground of its class, because §7 admits no such refusal.
 
 > **Normative.** **Every count above is taken over a servicing that completed, and
 > never over a store call whose result §5 discarded.** §5 makes the servicing
@@ -892,11 +909,12 @@ by making the planner ask twice.
 > anywhere. *"How many records the servicing returned"* is therefore what a completed
 > servicing carried into the union before deduplication, and it is never a per-ask
 > tally of what each store call handed back. What represents a partial servicing is the
-> **pair of failure fields** — that the servicing failed, and that it failed after an
-> earlier ask had already returned — and that pair is deliberately the whole of it: a
-> count of discarded records would report a yield on a turn §5 defines as having
-> received none, and would make the novelty rate of §8 a figure about reads the prompt
-> never saw. §11's fourteenth test asserts both halves.
+> **pair of failure fields** — that the servicing failed, and that a read it had
+> already performed had returned records when it did — and that pair is deliberately
+> the whole of it: a count of discarded records would report a yield on a turn §5
+> defines as having received none, and would make §8's novelty rate a figure about
+> reads the prompt never saw. §11's fourteenth test asserts both halves, over a
+> failure between asks and a failure inside one.
 
 > **Normative.** The record holds **counts and kinds**, and copies no text. It does
 > not copy the query the planner composed, the labels it named, any `content` span,
@@ -1203,16 +1221,19 @@ are absent in that window because the events they describe have not happened.
 14. **A failed servicing degrades and does not fail, and a partial one leaves nothing
     behind.** A store that raises during servicing leaves the turn composing from the
     supply planning saw, reports the degradation, records what was asked and that
-    nothing returned, and parks nothing. Asserted twice: once where the first store
-    call raises, and once where a request carrying **both** kinds has its hop return
-    records and its query then raise. The second is the arm that distinguishes §5's
-    *"failed **or partial** read leaves the supply as planning saw it"* from a
-    best-effort servicer — the successful hop's records do **not** reach the fourth
-    group, the supply is byte-for-byte the three groups planning saw, and the audit
-    records the degradation with no returned or new count rather than the hop's — and
-    records that the failure came after an earlier ask had already returned, which is
-    the pair of failure fields §9 names and the only thing distinguishing this arm's
-    record from the first's.
+    nothing returned, and parks nothing. Asserted three times: once where the **first**
+    store call raises; once where a request carrying **both** kinds has its hop return
+    records and its query then raise; and once where a request carrying **only** a
+    `SIGHTED_QUERY` has a later band of `assemble_by_band` raise after an earlier band
+    returned records. The last two are the arms that distinguish §5's *"failed **or
+    partial** read leaves the supply as planning saw it"* from a best-effort servicer,
+    and the third is the one a failure field keyed on asks would get wrong: in each,
+    the records that did come back do **not** reach the fourth group, the supply is
+    byte-for-byte the three groups planning saw, and the audit records the degradation
+    with no returned or new count rather than the successful read's — while recording
+    that a read had already returned when the failure landed, which is §9's pair of
+    failure fields and the only thing distinguishing these two records from the
+    first's.
 15. **The plan is still frozen and still auditable.** A plan carrying a request
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
@@ -1280,6 +1301,14 @@ are absent in that window because the events they describe have not happened.
   mechanism §8 identifies for a recall denominator, and a real per-turn spend on
   turns the system has no reason to think need one. Fired by a decision that the
   recall figure is worth that cost, which this ADR does not take.
+- **A per-turn distinction between a judged non-firing and a `Planner` that does not
+  implement the emission at all** (§8). It would have to be declared at the `Planner`
+  seam, which is a Protocol addition golden rule 5 puts behind its own ADR, and this
+  system wires exactly one planner — `app/composition.py` constructs
+  `ModelBackedPlanner` and nothing else — so the attribution is a fact about the
+  configuration rather than about a turn. Fired by a deployment running more than one
+  `Planner`, or a third-party one, where a fire rate has to be attributed across them.
+  Not fired by a lane wanting a tidier field.
 - **A second serviced emission, a configurable read count, or a per-surface
   deadline.** #1908 names the deadline as milestone 2's — *"a voice turn cannot
   afford three round trips"* — and §6 fixes the count at one until an ADR moves it.
