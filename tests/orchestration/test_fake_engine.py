@@ -787,6 +787,50 @@ def test_the_payload_limit_is_guarded_exactly_as_the_concrete_engine_guards_it()
     assert FakeAssistantEngine(max_payload_bytes=1) is not None
 
 
+def test_an_int_subclass_that_answers_its_own_comparisons_is_refused_as_a_limit() -> None:
+    """The guard is an allowlist of the exact ``int``, so a subclass cannot slip past.
+
+    A denylist naming ``bool`` closes one case of a class. This is another, and it is
+    the one that makes the limit non-binding rather than merely wrong: Python gives a
+    *subclass's* reflected comparison priority, so a value overriding ``__gt__``
+    answers every ``size > limit`` the double performs, and overriding ``__lt__``
+    walks through the positivity check on the way in. The two together are a
+    contract limit nothing is ever over, on a double whose whole job is to make a
+    consumer's tests mean something.
+    """
+
+    class _NonBinding(int):
+        def __lt__(self, other: object) -> bool:
+            return False
+
+        def __gt__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
+        FakeAssistantEngine(max_payload_bytes=_NonBinding(0))
+    with pytest.raises(TypeError, match="max_outstanding_confirmations must be an integer"):
+        FakeAssistantEngine(max_outstanding_confirmations=_NonBinding(0))
+
+
+def test_a_knob_that_cannot_describe_itself_still_gets_the_documented_refusal() -> None:
+    """The diagnostic must not be able to destroy the diagnosis (#1686).
+
+    The refusal interpolates the offending value, so a value whose ``__repr__`` raises
+    would otherwise replace the documented ``TypeError`` with whatever that
+    ``__repr__`` threw — from inside the ``raise`` that reports it. ``core.types``
+    already owns the non-throwing renderer for exactly this, and the placeholder it
+    falls back to is what the caller sees.
+    """
+
+    class _Unspeakable:
+        def __repr__(self) -> str:
+            msg = "this value refuses to describe itself"
+            raise RuntimeError(msg)
+
+    with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
+        FakeAssistantEngine(max_payload_bytes=_Unspeakable())  # type: ignore[arg-type]
+
+
 async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
     """A resume that carries neither a turn nor a step leaves a client nothing.
 

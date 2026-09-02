@@ -152,6 +152,7 @@ from ai_assistant.core.types import (
     TraceOutcome,
     TurnOutcome,
     band_of,
+    describe_untrusted,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
@@ -446,8 +447,26 @@ def _check_positive_int(value: int, *, name: str) -> None:
     silently* rather than loudly when it cannot bind: ``float("nan")`` compares
     ``False`` against every ``>``, so a bound built from one admits everything while
     the engine reports health, and a ``float`` count truncates somewhere later
-    instead. ``bool`` is excluded because it is an ``int`` subclass and a flag is not
-    a count — and as a byte bound it is a one-byte one, which nothing fits inside.
+    instead.
+
+    **An allowlist of the exact ``int``, not a denylist naming ``bool``**, which is
+    the rule ``core.config``'s own integer-setting validator states in these words:
+    "every value this refuses — ``bool``, and any other ``int`` subclass whose
+    instances mean something other than their integer value — is precisely an
+    ``isinstance`` match". A ``bool`` is the familiar case (a flag is not a count,
+    and as a byte bound it is a one-byte one), but it is not the only one and the
+    denylist form cannot close the class: an ``int`` subclass overriding ``__lt__``
+    passes a positivity check, and — because Python gives a subclass's *reflected*
+    comparison priority — one overriding ``__gt__`` then answers every
+    ``size > limit`` this engine performs, which is the fail-open this guard exists
+    to prevent. ``numpy.bool_`` is the other end of the same class: a flag by any
+    reading, not a ``bool`` subclass, and producible here (ADR-0024's embedder).
+
+    The refusal describes the value through :func:`describe_untrusted` rather than
+    ``repr``, because the value is untrusted at exactly this seam: an object whose
+    ``__repr__`` raises would otherwise destroy the diagnosis from inside the
+    message that reports it, and the caller would see that object's exception in
+    place of the ``TypeError`` this constructor documents.
 
     Written once so the three guards are identical **by construction** rather than by
     copy. The canonical fake holds its own copies of these arguments to the same
@@ -460,11 +479,12 @@ def _check_positive_int(value: int, *, name: str) -> None:
         name: The parameter's name, which is what the refusal names.
 
     Raises:
-        TypeError: If it is not an integer, ``bool`` included.
+        TypeError: If it is not an exact ``int`` — ``bool`` and every other
+            subclass included.
         ValueError: If it is not positive.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"{name} must be an integer, got {value!r}"
+    if type(value) is not int:
+        msg = f"{name} must be an integer, got {describe_untrusted(value)}"
         raise TypeError(msg)
     if value < 1:
         msg = f"{name} must be positive, got {value}"
@@ -2323,7 +2343,8 @@ class Engine:
         Raises:
             TypeError: If ``max_outstanding_confirmations``,
                 ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is not an
-                integer. A ``bool`` is excluded
+                **exact** ``int`` (:func:`_check_positive_int`, which carries the
+                reasoning). A ``bool`` is the named case
                 (it is an ``int`` subclass and a flag is not a count), and a
                 ``float`` like ``1.5`` is refused rather than compared — the same
                 guard shape ``LearningLoop`` uses for its own count. On the two
@@ -5841,16 +5862,34 @@ class Engine:
                 enumeration before a value comparison is ever reached. That is a
                 malformed argument like any other, and the declared refusal is the
                 one both implementations and the Protocol document, so it is
-                translated rather than allowed to escape undeclared (#1762).
+                translated rather than allowed to escape undeclared (#1762) — as is
+                every other way coercing a member can fail, since each of them is one
+                way of saying it is not a format. A member whose ``__repr__`` raises
+                is the case that makes the totality load-bearing: the enumeration
+                interpolates the value while *constructing* its own ``ValueError``,
+                so that object's exception replaces the refusal before any narrower
+                clause could see one. This method's own message describes the member
+                through :func:`describe_untrusted` for the other half of the same
+                promise.
         """
         named: list[SpokenAudioFormat] = []
         for member in plays:
             try:
                 named.append(SpokenAudioFormat(member))
-            except ValueError, TypeError:
+            # Every way this can fail is one way of saying "that is not a format", so
+            # the translation is total rather than an enumeration of the failures seen
+            # so far. ``ValueError`` is the ordinary one; an *unhashable* member raises
+            # ``TypeError`` from the lookup that precedes the value comparison (#1762);
+            # and a member whose ``__repr__`` raises does so from inside CPython's own
+            # ``enum.__new__``, which interpolates it while *constructing* the
+            # ``ValueError`` — so there is no ``ValueError`` to catch at all, and a
+            # narrower clause would let that object's exception out in place of the
+            # refusal the Protocol and both implementations document.
+            except Exception:  # a value that cannot be coerced is malformed, however it failed
                 readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
                 msg = (
-                    f"plays names the formats the caller can render, and {member!r} is "
+                    f"plays names the formats the caller can render, and "
+                    f"{describe_untrusted(member)} is "
                     f"not one of them; this build declares {readable}. A malformed "
                     f"argument is refused before the acknowledgement is applied and "
                     f"before any entry is selected (ADR-0131 §4, ADR-0206 §7)"

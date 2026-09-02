@@ -3300,6 +3300,49 @@ async def test_a_payload_limit_that_could_not_bind_is_refused_at_construction(
         Harness(max_payload_bytes=unusable)  # type: ignore[arg-type]  # the point of the test
 
 
+async def test_an_int_subclass_that_answers_its_own_comparisons_is_refused_as_a_limit() -> None:
+    """The guard allowlists the exact ``int``, which is what closes the class.
+
+    A denylist naming ``bool`` closes one case of it. This is the case that leaves the
+    limit *non-binding* rather than merely wrong, and it is reachable with two dunder
+    overrides: ``__lt__`` walks the value through the positivity check on the way in,
+    and — because Python gives a **subclass's** reflected comparison priority over the
+    left operand's own — ``__gt__`` then answers every ``size > limit`` this engine
+    performs. The result is ADR-0085 §8c's limit present in the constructor and absent
+    everywhere it is measured against, with the engine reporting health throughout,
+    which is exactly the failure this guard exists to prevent.
+    """
+
+    class _NonBinding(int):
+        def __lt__(self, other: object) -> bool:
+            return False
+
+        def __gt__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
+        Harness(max_payload_bytes=_NonBinding(0))
+
+
+async def test_a_knob_that_cannot_describe_itself_still_gets_the_documented_refusal() -> None:
+    """The diagnostic must not be able to destroy the diagnosis.
+
+    The refusal interpolates the offending value, so a value whose ``__repr__`` raises
+    would replace the documented ``TypeError`` with whatever that ``__repr__`` threw —
+    raised from inside the ``raise`` that reports it, which is the shape
+    ``core.types.describe_untrusted`` exists to close and which this guard reaches for
+    rather than restating.
+    """
+
+    class _Unspeakable:
+        def __repr__(self) -> str:
+            msg = "this value refuses to describe itself"
+            raise RuntimeError(msg)
+
+    with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
+        Harness(max_payload_bytes=_Unspeakable())  # type: ignore[arg-type]  # the point of the test
+
+
 async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
     """A raising closer must not skip the resources after it (§2 releases every one)."""
     closed: list[str] = []

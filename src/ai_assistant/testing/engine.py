@@ -106,6 +106,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
     Warrant,
+    describe_untrusted,
     encodable_text,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
@@ -206,17 +207,27 @@ def _check_positive_int(value: int, *, name: str) -> None:
     table on the first settlement, and ``float("nan")`` as a byte limit compares
     ``False`` against every ``>``, so nothing is ever over it.
 
+    **The exact ``int``, allowlisted**, and the untrusted value described through
+    :func:`describe_untrusted` rather than ``repr`` — both for the reasons the
+    concrete engine's guard states at length, and here for one more: whichever of the
+    two a consumer tests against, the class it must handle has to be the same one
+    (ADR-0084 §4). An ``int`` subclass overriding its comparisons would make a byte
+    limit non-binding on the double exactly as it would on the engine, and a hostile
+    ``__repr__`` would replace the documented ``TypeError`` with its own exception on
+    the double exactly as it would there.
+
     Args:
         value: The knob as the caller passed it.
         name: The parameter's name, which is what the refusal names.
 
     Raises:
-        TypeError: If it is not an integer, ``bool`` included — it is an ``int``
-            subclass, and a flag is neither a count nor a byte bound.
+        TypeError: If it is not an exact ``int`` — ``bool`` included, since it is an
+            ``int`` subclass and a flag is neither a count nor a byte bound, and
+            every other subclass with it.
         ValueError: If it is not positive.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"{name} must be an integer, got {value!r}"
+    if type(value) is not int:
+        msg = f"{name} must be an integer, got {describe_untrusted(value)}"
         raise TypeError(msg)
     if value < 1:
         msg = f"{name} must be positive, got {value}"
@@ -302,10 +313,11 @@ class FakeAssistantEngine:
 
         Raises:
             TypeError: If ``max_outstanding_confirmations`` or ``max_payload_bytes``
-                is not an integer. A
-                ``bool`` is excluded — it is an ``int`` subclass, and a flag is not a
-                count — and a ``float`` like ``1.5`` is refused rather than compared,
-                which is the guard the concrete engine states in these words.
+                is not an **exact** ``int``. A
+                ``bool`` is the named case — it is an ``int`` subclass, and a flag is
+                not a count — and a ``float`` like ``1.5`` is refused rather than
+                compared, which is the guard the concrete engine states in these
+                words (:func:`_check_positive_int`).
             ValueError: If either is not positive.
         """
         _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
@@ -1333,15 +1345,24 @@ class FakeAssistantEngine:
         # value comparison happens, and that is a malformed argument like any other.
         # Letting it escape would answer a malformed `plays` with an undeclared class
         # here and the documented one there, which is the divergence ADR-0084 §4
-        # forbids (#1762).
+        # forbids (#1762). The member is described through ``describe_untrusted`` for
+        # the second half of the same promise: a value whose ``__repr__`` raises must
+        # not be able to destroy the diagnosis from inside the message reporting it.
         wanted: list[SpokenAudioFormat] = []
         for member in plays:
             try:
                 wanted.append(SpokenAudioFormat(member))
-            except ValueError, TypeError:
+            # Total, for the concrete engine's reason and in its shape: ``ValueError``
+            # is the ordinary failure, an unhashable member raises ``TypeError`` from
+            # the lookup before it, and a member whose ``__repr__`` raises does so from
+            # inside CPython's ``enum.__new__`` while it builds its own ``ValueError``,
+            # so there is no ``ValueError`` to catch. Every one of them says the same
+            # thing about the argument.
+            except Exception:  # a value that cannot be coerced is malformed, however it failed
                 readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
                 msg = (
-                    f"plays names the formats the caller can render, and {member!r} is "
+                    f"plays names the formats the caller can render, and "
+                    f"{describe_untrusted(member)} is "
                     f"not one of them; this build declares {readable} (ADR-0206 §1, §7)"
                 )
                 raise ValueError(msg) from None
