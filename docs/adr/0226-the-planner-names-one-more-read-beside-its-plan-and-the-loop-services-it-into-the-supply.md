@@ -531,23 +531,39 @@ supplement, and a group appended after it leaves that condition untouched.
 > is `None` is a turn it did not.
 
 > **Normative.** Every turn writes §9's audit record, **whether or not the trigger
-> fired**. A record is written for a turn that asked for nothing, and it says so. An
-> instrument that only records its positives cannot measure a fire rate.
+> fired**, and that record carries the inputs the trigger's precision and recall are
+> computed **from**. A record is written for a turn that asked for nothing, and it
+> says so. An instrument that only records its positives cannot measure a fire rate.
+
+> **Normative.** Those figures are computed **over a population of turns** and are
+> never a per-turn quantity. A turn contributes inputs to a numerator or a
+> denominator; it does not carry a precision or a recall of its own, and a turn on
+> which the trigger rightly did not fire has neither. No lane reports either figure
+> as a property of a single turn.
 
 > **Normative.** No lane makes the trigger's firing conditional on a setting, a
 > channel, a surface or a deployment flag. It fires where the planner judges the
 > supply short, and its rate is therefore a property of the planner that the audit
 > measures rather than a property of the configuration.
 
-**What the live audit yields per turn from the first deploy, and what it does not.**
-It yields the **fire rate** — the share of turns emitting a request, directly
-comparable to the replay's 13.6% — and the **yield**: how many records came back,
-how many survived deduplication as genuinely new, and how many the subtraction
-dropped. It does **not** yield precision and recall. Those require ground truth about
-whether the answer was in the prompt, the replay had it because LoCoMo ships gold
-records, and a live turn has none. **This ADR says so rather than promising a number
-the instrument cannot produce**, because a decision that claimed otherwise would be
-discovered to have claimed it at the first attempt to report.
+**What the live audit yields, and what it does not.** Per turn it records inputs;
+over a population of turns those inputs yield the **fire rate** — the share emitting
+a request, directly comparable to the replay's 13.6% — and the **yield**: how many
+records came back, how many survived deduplication as genuinely new, and how many the
+subtraction dropped.
+
+**Precision has a live estimator and recall does not, and the asymmetry is stated
+because it decides what a later lane may conclude.** A fired request that returned
+records the supply did not already hold is direct evidence the supply *was*
+extendable, so the fired population can be scored against itself from §9's record
+alone. Recall's denominator is the turns on which a read **would** have helped — and
+on a turn where the trigger did not fire, nothing looked, so the system never learns
+whether it should have. Closing that gap needs either a labelled corpus, which the
+replay had because LoCoMo ships gold records and a live turn has not, or a sampled
+shadow read on non-fired turns, which is a spend decision this ADR does not take
+(§12). **This ADR states the limit rather than promising a figure the instrument
+cannot produce**, because a decision that claimed otherwise would be discovered to
+have claimed it at the first attempt to report.
 
 **What the live figures are read against is the replay, and that is the point of
 deploying rather than re-measuring.** The replay's arms *"ran on sonnet-5, a floor"*
@@ -731,6 +747,10 @@ to service.
   about how a question is split, not a larger budget. #1908 places it at milestone 2.
 - **#838's coverage layer**, and whether the trigger is learnable from the supply
   alone. Fired by what §9's audit shows, or by #838's own ADR.
+- **A sampled shadow read on turns the trigger did not fire on** — the only live
+  mechanism §8 identifies for a recall denominator, and a real per-turn spend on
+  turns the system has no reason to think need one. Fired by a decision that the
+  recall figure is worth that cost, which this ADR does not take.
 - **A second serviced emission, a configurable read count, or a per-surface
   deadline.** #1908 names the deadline as milestone 2's — *"a voice turn cannot
   afford three round trips"* — and §6 fixes the count at one until an ADR moves it.
@@ -753,15 +773,42 @@ same claim; ADR-0070 §1 permits no rewrite of ratified text, so the Status line
 a dated header note are where a reader learns, which is the mechanism ADR-0224 used
 on ADR-0162.
 
-**Its four other clauses stand, and two of them are why this decision is shaped as it
-is.** The tool clauses — that `recall_memory` is not in the default registry, and
+**Its four other clauses stand, and two of them are why this decision is shaped as
+it is.** The tool clauses — that `recall_memory` is not in the default registry, and
 that no lane registers a store-reading tool into any registry the turn path selects
 from — are honoured by §5 rather than merely avoided: this envelope is not a tool,
 and *"A component on the turn path that wants records the supply does not hold does
 not obtain them by invoking a tool"* is satisfied by a loop that reads the store it
-already holds. And ADR-0208 anticipated exactly this decision, deferring *"a
-planner-named second retrieval into the supply"* to #1732 by name — so this is the
-decision that ADR reserved rather than one that surprises it.
+already holds.
+
+**ADR-0208 §8 deferred this decision, and §8 is discharged here rather than
+overridden — the two are separate facts and #1913 asks for both to be stated.** §8
+defers *"A planner-requested second retrieval into the supply — the useful half"* to
+#1732 by name, and ADR-0208's own honest statement adds that it *"is not that
+decision and may not be read as prejudging it in either direction."* So the sighted
+query is the decision ADR-0208 reserved, not a breach of it. **That does not make
+§1's clause inapplicable**, and this ADR declines the easier reading: §1 is stated
+unconditionally, a reader holding only ADR-0208 would still refuse to open a second
+relevance site, and ADR-0070 §1's test is about what a reader would do rather than
+about what an author foresaw. A deferral of the *decision* and a normative clause
+that forecloses it in the meantime are both real, so the deferral is discharged
+**and** the clause is superseded — in that order, and neither instead of the other.
+
+**§8's prohibition binds this ADR, and is obeyed.** Its deferral ends *"Nothing in
+this ADR is cited toward that decision in either direction"*, so ADR-0208 is not an
+argument here for building the envelope and this ADR does not offer it as one. The
+justification is #1844's replay and #1908's charter, stated in Context and resting
+on neither. ADR-0208 is cited only for what its clauses **rule**: the one-site clause
+it loses, the keyed-load clause it keeps, the tool clauses §5 honours, and its
+scoping sentence that *"One site is not one call"*.
+
+**And §8 names five questions #1732 carries, each of which this ADR answers**, which
+is what discharging the deferral means concretely: *"the envelope question"* (§§1–2),
+*"the one-per-turn bound"* (§6), *"the ADR-0170 §2 reading a loop-level second read
+needs"* (§5), *"where the disclosure filter runs over the union"* (§7), and *"the
+measurement that should decide whether it is worth building at all"* (§8 here, read
+with Context's pricing and the owner's ruling that the live audit is the instrument).
+#1913 closes against this section.
 
 **ADR-0208 §1's keyed-load clause is untouched and load-bearing.** It rules that *"A
 **keyed load** — records the turn already names, fetched by identifier — is not a
