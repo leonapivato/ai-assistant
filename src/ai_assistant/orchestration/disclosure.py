@@ -118,7 +118,7 @@ nothing that holds one (ADR-0004 §3 keeps Tier 0 in the keyring).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, final
 
 from ai_assistant.core.types import (
     BeliefBand,
@@ -276,6 +276,7 @@ def _withheld_over_whole_supply(
     )
 
 
+@final
 @dataclass(slots=True)
 class UnboundedAudienceSupply:
     """One turn's subtraction, and the bare fact that it happened (ADR-0203 §1, §3).
@@ -344,6 +345,7 @@ class UnboundedAudienceSupply:
         return narrowed, kept
 
 
+@final
 @dataclass(slots=True)
 class BoundedAudienceSupply:
     """One turn's evaluation on a channel whose audience is bounded (ADR-0204 §2, §4).
@@ -419,8 +421,19 @@ class BoundedAudienceSupply:
 
 #: The two postures one conversational operation's supply can take, and there are
 #: exactly two: ADR-0199 §1 fixes the posture as a function of the output channel's
-#: audience alone, and ADR-0204 §2 makes the *evaluation* common to both. A turn is
-#: handed one of these between retrieval and planning
+#: audience alone, and ADR-0204 §2 makes the *evaluation* common to both.
+#:
+#: **Both members are ``@final``, which makes the union closed rather than merely
+#: described** — and since ADR-0226 §5 that is load-bearing rather than tidy.
+#: :meth:`~ai_assistant.orchestration.loop.LearningLoop._turn` reads the posture off
+#: the object it was handed in order to decide whether a planner's read request is
+#: serviced, so a third class claiming one of these postures while behaving as the
+#: other would service a request on the channel §5 refuses. ``@final`` is what stops
+#: one being written: `mypy` refuses the subclass at the point it is declared, over
+#: `src/` and `tests/` alike, and the loop's own test is exact besides. A genuine
+#: third posture is a new *audience*, which ADR-0199 §1 puts behind its own decision.
+#:
+#: A turn is handed one of these between retrieval and planning
 #: (:data:`~ai_assistant.orchestration.loop.SupplyFilter`), and its capture reads the
 #: recorded fact off the same object afterwards.
 type TurnSupply = UnboundedAudienceSupply | BoundedAudienceSupply
