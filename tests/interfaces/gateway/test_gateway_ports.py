@@ -123,3 +123,38 @@ def test_another_process_is_handed_nothing_out_of_this_ones_block() -> None:
     theirs, port = (int(field) for field in reported.stdout.split())
     assert theirs != base
     assert not base < port < base + gateway_ports.BLOCK_SIZE
+
+
+def test_a_forked_child_is_handed_nothing_out_of_its_parents_block() -> None:
+    """The one door a claim does not close by itself (adversarial review, round 1).
+
+    The case above execs a fresh interpreter, which imports the module and claims
+    for itself; a ``fork`` does neither. The child starts holding a *copy* of the
+    parent's base, the parent's offset and a descriptor onto the parent's own claim
+    socket, so an allocator that trusted what it was holding would hand parent and
+    child the same port — this module's collision, arriving by inheritance.
+
+    Three modules of this suite fork already, so this is a property to hold rather
+    than a hypothetical to note. The child reports through a pipe and leaves by
+    ``os._exit``, so it runs none of the parent's teardown.
+    """
+    base = gateway_ports.claimed_block()
+    if base is None:
+        pytest.skip("no block could be claimed here, so the fallback is an ephemeral probe")
+    ours = gateway_ports.free_port()
+    read_fd, write_fd = os.pipe()
+
+    child = os.fork()
+    if child == 0:  # pragma: no cover - the child never reports coverage
+        os.close(read_fd)
+        with os.fdopen(write_fd, "w") as pipe:
+            pipe.write(f"{gateway_ports.claimed_block()} {gateway_ports.free_port()}")
+        os._exit(0)
+    os.close(write_fd)
+    with os.fdopen(read_fd) as pipe:
+        theirs, port = (int(field) for field in pipe.read().split())
+    os.waitpid(child, 0)
+
+    assert theirs != base
+    assert port != ours
+    assert not base < port < base + gateway_ports.BLOCK_SIZE

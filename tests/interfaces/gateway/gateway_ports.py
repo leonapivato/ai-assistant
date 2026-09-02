@@ -20,7 +20,11 @@ one function over, and it is checked here rather than assumed
 (``test_gateway_ports.py``). So the claim is exclusive against every other process
 on this machine, and every port handed out afterwards comes from inside the claimed
 block. Two workers of one distributed run cannot be handed the same number, and
-neither can two concurrent runs — ``just test-fast`` admits three at once.
+neither can two concurrent runs — ``just test-fast`` admits three at once. Nor can
+a **forked** child, which inherits a claim instead of making one and is therefore
+the one door a claim does not close by itself: the claim is remembered against the
+process that made it, and a child that finds a stranger's claim lets it go and
+claims its own (:meth:`_Block.base`).
 
 **Claimed rather than computed from ``PYTEST_XDIST_WORKER``.** Deriving the block
 from the worker id is the shape issue #1894 names third, and it closes the
@@ -202,18 +206,43 @@ class _Block:
     def __init__(self) -> None:
         self._claim: socket.socket | None = None
         self._base: int | None = None
-        self._searched = False
+        self._claimed_by: int | None = None
         self._offset = 0
 
     @property
     def base(self) -> int | None:
-        """The first port of the claimed block, claiming one if none is held yet."""
-        if not self._searched:
-            self._searched = True
+        """The first port of this process's block, claiming one if none is held yet.
+
+        **Keyed on the process id, so a fork does not inherit a claim.** A child of
+        ``os.fork()`` starts with a copy of everything below — the same base, the
+        same offset, and a descriptor onto the *parent's* claim socket — and would
+        therefore hand out the parent's next port as if it were its own. That is the
+        collision this module exists to remove, arriving through the one door a
+        claim does not close, and this suite already forks in three modules. So the
+        claim is remembered against the process that made it: a mismatch means this
+        process inherited it rather than made it, and it claims afresh.
+        """
+        here = os.getpid()
+        if self._claimed_by != here:
+            self._let_go_of_what_was_inherited()
+            self._claimed_by = here
             claimed = _claim_a_block()
             if claimed is not None:
                 self._claim, self._base = claimed
         return self._base
+
+    def _let_go_of_what_was_inherited(self) -> None:
+        """Drop a parent's claim, so this process starts from nothing held.
+
+        Closing the descriptor releases *this* process's copy and leaves the parent
+        listening on its own, which is what keeps the block the parent claimed
+        unavailable to the fresh claim made a moment later.
+        """
+        if self._claim is not None:
+            self._claim.close()
+        self._claim = None
+        self._base = None
+        self._offset = 0
 
     def next_port(self) -> int:
         """The next free port of the block, or an ephemeral one where there is none.
