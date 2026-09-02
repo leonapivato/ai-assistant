@@ -3278,6 +3278,28 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
         )
 
 
+@pytest.mark.parametrize("unusable", [float("nan"), float("inf"), 1.5, True, 0, -1])
+async def test_a_payload_limit_that_could_not_bind_is_refused_at_construction(
+    unusable: object,
+) -> None:
+    """ADR-0085 §8c's limit is guarded where it is injected, like its two siblings.
+
+    ``Settings`` refuses a bad ``hub_max_frame_bytes`` at load and the composition
+    root derives this argument from it, so no shipped path reaches here — but this is
+    a **constructor** argument on a class tests and future roots build directly, and
+    the failure is the silent kind: ``float("nan")`` compares ``False`` against every
+    ``>``, so an engine built with one would measure every argument and every result
+    against a ceiling nothing can exceed while reporting health. A limit that cannot
+    bind is not a laxer limit but an absent one, and this one is absent across the
+    *whole* promoted surface rather than one method of it (#1686).
+
+    ``True`` earns its place twice over: it is an ``int`` subclass a flag would slip
+    through as, and as a limit it is one byte, which no envelope fits inside.
+    """
+    with pytest.raises((TypeError, ValueError), match="max_payload_bytes"):
+        Harness(max_payload_bytes=unusable)  # type: ignore[arg-type]  # the point of the test
+
+
 async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
     """A raising closer must not skip the resources after it (§2 releases every one)."""
     closed: list[str] = []

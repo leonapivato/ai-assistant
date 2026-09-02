@@ -193,6 +193,36 @@ _CONFIDENCE = 0.9
 _DEFAULT_MAX_OUTSTANDING: Final = 1024
 
 
+def _check_positive_int(value: int, *, name: str) -> None:
+    """Refuse a constructor knob that is not a positive integer.
+
+    The concrete engine's guard, in its words and with its classes, because ADR-0084
+    §4's substitutability runs in **both** directions: a double admitting a
+    configuration no engine admits lets a consumer's tests pass over one production
+    cannot be built into, and a double refusing the same value as a different class
+    makes the two disagree about what kind of failure it is — the half a positivity
+    check on its own leaves open. Unrefused, the value surfaces later and as
+    something else: ``1.5`` bounds a retention at two, ``0`` discards from an empty
+    table on the first settlement, and ``float("nan")`` as a byte limit compares
+    ``False`` against every ``>``, so nothing is ever over it.
+
+    Args:
+        value: The knob as the caller passed it.
+        name: The parameter's name, which is what the refusal names.
+
+    Raises:
+        TypeError: If it is not an integer, ``bool`` included — it is an ``int``
+            subclass, and a flag is neither a count nor a byte bound.
+        ValueError: If it is not positive.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be an integer, got {value!r}"
+        raise TypeError(msg)
+    if value < 1:
+        msg = f"{name} must be positive, got {value}"
+        raise ValueError(msg)
+
+
 @dataclass(frozen=True, slots=True)
 class _Settled:
     """What one answered continuation token still names (ADR-0198 §1).
@@ -251,6 +281,9 @@ class FakeAssistantEngine:
                 A conformance test sets it small so the boundary is cheap to reach;
                 the default is ADR-0084 §3's 16 MiB frame size less §8b's 512-byte
                 envelope reserve, which is what a deployment gets by saying nothing.
+                Guarded exactly as the concrete engine guards it, for the reason
+                below: a limit that cannot bind fails *open* across every argument
+                check and every result check this double performs (#1686).
             max_outstanding_confirmations: The ceiling ADR-0198 §4 reuses as the
                 bound on :attr:`settled`. This fake parks by a lever rather than by
                 admitting a turn, so the ceiling's *backpressure* half has nothing
@@ -268,26 +301,18 @@ class FakeAssistantEngine:
                 first settlement.
 
         Raises:
-            TypeError: If ``max_outstanding_confirmations`` is not an integer. A
+            TypeError: If ``max_outstanding_confirmations`` or ``max_payload_bytes``
+                is not an integer. A
                 ``bool`` is excluded — it is an ``int`` subclass, and a flag is not a
                 count — and a ``float`` like ``1.5`` is refused rather than compared,
                 which is the guard the concrete engine states in these words.
-            ValueError: If it is not positive.
+            ValueError: If either is not positive.
         """
-        if isinstance(max_outstanding_confirmations, bool) or not isinstance(
-            max_outstanding_confirmations, int
-        ):
-            msg = (
-                "max_outstanding_confirmations must be an integer, got "
-                f"{max_outstanding_confirmations!r}"
-            )
-            raise TypeError(msg)
-        if max_outstanding_confirmations < 1:
-            msg = (
-                "max_outstanding_confirmations must be positive, got "
-                f"{max_outstanding_confirmations}"
-            )
-            raise ValueError(msg)
+        _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
+        # ADR-0085 §8c's limit, guarded on the same terms — the widest of the two,
+        # since every argument check and every result check this double performs
+        # measures against this one number (#1686).
+        _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._max_payload_bytes = max_payload_bytes
         self._max_outstanding = max_outstanding_confirmations
         #: The notification surface's whole state, public so a consumer can
@@ -1303,11 +1328,17 @@ class FakeAssistantEngine:
         # ADR-0087 §7's decode-validate order turns a member's value into the member
         # before the hub sees it, so a caller spelling one is conforming and this
         # double must not be stricter than the client it stands in for (ADR-0084 §4).
+        # ``TypeError`` beside ``ValueError`` for the concrete engine's reason: an
+        # *unhashable* member makes the enumeration's own lookup raise before any
+        # value comparison happens, and that is a malformed argument like any other.
+        # Letting it escape would answer a malformed `plays` with an undeclared class
+        # here and the documented one there, which is the divergence ADR-0084 §4
+        # forbids (#1762).
         wanted: list[SpokenAudioFormat] = []
         for member in plays:
             try:
                 wanted.append(SpokenAudioFormat(member))
-            except ValueError:
+            except ValueError, TypeError:
                 readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
                 msg = (
                     f"plays names the formats the caller can render, and {member!r} is "

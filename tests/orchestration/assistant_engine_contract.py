@@ -2041,8 +2041,25 @@ class AssistantEngineContract(ABC):
         rendered = delivery.spoken_rendering is SpokenRendering.RENDERED
         assert (delivery.spoken is not None) is rendered
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            # A media type that names **no member**, which is what both
+            # implementations refuse. A member's own *value* is not malformed:
+            # ADR-0087 §7's decode-validate order turns one into the member over
+            # the wire, so an in-process engine that refused it would be stricter
+            # than the client standing in for it (ADR-0084 §4).
+            ("audio/ogg;codecs=vorbis",),
+            # An **unhashable** member, which fails the enumeration's lookup before
+            # any value comparison and so used to escape as an undeclared
+            # ``TypeError`` from both implementations (#1762). It is malformed on
+            # exactly the same ground and earns exactly the same refusal.
+            ([],),
+        ],
+        ids=["names-no-member", "unhashable"],
+    )
     async def test_a_malformed_plays_is_refused_and_leaves_the_entry_deliverable(
-        self, speaking_engine: AssistantEngine
+        self, speaking_engine: AssistantEngine, malformed: tuple[object, ...]
     ) -> None:
         """ADR-0206 §7, ADR-0131 §4: refused before any outbox state changes.
 
@@ -2054,12 +2071,7 @@ class AssistantEngineContract(ABC):
         """
         with pytest.raises(self.refuses_a_malformed_argument_with):
             await speaking_engine.next_notification(
-                # A media type that names **no member**, which is what both
-                # implementations refuse. A member's own *value* is not malformed:
-                # ADR-0087 §7's decode-validate order turns one into the member over
-                # the wire, so an in-process engine that refused it would be stricter
-                # than the client standing in for it (ADR-0084 §4).
-                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
+                plays=malformed,  # type: ignore[arg-type]  # the malformed value is the subject
                 budget=timedelta(0),
             )
 
