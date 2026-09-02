@@ -1,6 +1,6 @@
 # 225. A transcript archive keeps the exchange as text, and nothing but the user reads it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-02
 
 ## Context
