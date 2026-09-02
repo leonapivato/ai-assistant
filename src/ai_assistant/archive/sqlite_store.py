@@ -797,6 +797,21 @@ class SqliteTranscriptArchive:
         In memory there are no files, and §6 requires the same standard rather than
         a zero: ``page_count * page_size`` is what the entries occupy in what holds
         them, and a populated archive therefore never reports zero.
+
+        **The database and its sidecars are not stat-ed under the same tolerance**,
+        because they answer different questions. A sidecar that is absent is the
+        ordinary case — a cleanly closed database has none — so it contributes
+        nothing. The database is not optional, and an unreadable one is the single
+        way this method could produce the answer §6 names as conforming for no
+        implementation: ``stored_bytes`` of zero over an archive holding entries.
+        The connection outlives the directory entry — a POSIX file another process
+        unlinks or moves stays whole for an open descriptor — so ``entries`` keeps
+        counting from a file no path reaches, and a swallowed ``stat`` would report
+        the two side by side. Raising is what the seam already documents for a read
+        it cannot answer, and it is the answer the deferred cap can act on.
+
+        Raises:
+            TranscriptArchiveError: If the database file cannot be measured.
         """
         if self._path == ":memory:":
             with self._transaction("measure the transcript archive", immediate=False) as conn:
@@ -804,14 +819,17 @@ class SqliteTranscriptArchive:
                 size = int(conn.execute("PRAGMA page_size").fetchone()[0])
             return pages * size
         database = Path(self._path)
-        total = 0
-        for name in (database, *(database.with_name(database.name + s) for s in _SIDECARS)):
+        try:
+            total = database.stat().st_size
+        except OSError as exc:
+            msg = f"failed to measure the transcript archive at {self._path!r}: {exc}"
+            raise TranscriptArchiveError(msg) from exc
+        for suffix in _SIDECARS:
             try:
-                total += name.stat().st_size
+                total += database.with_name(database.name + suffix).stat().st_size
             except OSError:
-                # A sidecar that is absent — the ordinary case for a database with
-                # no open transaction — contributes nothing. A file that vanished
-                # between the listing and the stat is the same answer.
+                # Absent, or gone between the listing and the stat: the same answer
+                # either way, and the ordinary one for a quiescent database.
                 continue
         return total
 
