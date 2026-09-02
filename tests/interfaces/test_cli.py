@@ -2428,19 +2428,37 @@ def test_a_stamped_episode_gets_the_episodic_arm_and_never_the_belief_sentence(
         pytest.param(cli._render_belief_summary, id="summary"),
     ],
 )
-def test_an_unstamped_episodes_row_says_exactly_what_it_said_before(
+def test_an_unstamped_episodes_row_is_the_episodic_line_and_nothing_more(
     render: Callable[[Any], None], output: StringIO
 ) -> None:
-    """The byte-identity half of ADR-0223 §10's eighth test.
+    """The no-drift half of ADR-0223 §10's eighth test, re-pinned to a moved baseline.
 
-    The arm is keyed on the predicate first and the kind second, so an episode nothing
-    external reached renders the row it rendered before this ADR — the pre-existing
-    oddity of explaining an episode through a belief renderer included, which §5 names
-    and deliberately does not repair ("appending this sentence turns an oddity into a
-    claim" is the whole of what it rules).
+    §10's eighth test asked that "an unstamped episode's row is byte-identical to
+    today's", and this case is what asserted it. **That pin was the stamp lane's
+    no-drift guard, not a ratification of the sentence it happened to pin**, and this
+    case is re-pointed at the line #1891 gives the row rather than deleted:
 
-    Asserted as the **exact** ``Why`` line rather than as an absence, because an arm
-    that appended a sentence with the marker missing from it would pass every
+    * §10's numbered list is introduced as "the representative-input tests this
+      decision owes", and — unlike the three clauses above it in that section — carries
+      no ``> **Normative.**`` marker. It is the evidence ADR-0223 owes, and the
+      evidence it owed was that a lane adding an arm for *stamped* episodes left the
+      other arm where it found it.
+    * ADR-0223 §5 says in terms what it thought of the sentence it was pinning: the
+      belief line on an episode is "a pre-existing oddity of rendering an episode
+      through a belief renderer", which appending the external sentence would turn
+      "into a claim". §5 declines to repair the oddity — it does not bless it, and an
+      ADR that calls a line an oddity has not decided that line is correct.
+    * §10's third normative clause forbids discharging either arm "by suppressing the
+      fact". Nothing here suppresses it: the stamped row keeps ADR-0223 §5's sentence,
+      character for character, and the head sentence in front of it is the one thing
+      §5 left to the surface (ADR-0189 §4 "states what a surface conveys and leaves the
+      wording to it"; ADR-0072 §6 says the same).
+
+    So the property this case now holds is the same property, over the new baseline:
+    an episode nothing external reached says the episodic line **and only** the
+    episodic line, with no trace of the arm that belongs to a stamped row. Asserted as
+    the exact ``Why`` line rather than as an absence, for the reason it always was — an
+    arm that appended a sentence with the marker missing from it would pass every
     absence check here.
     """
     unstamped = (
@@ -2450,11 +2468,105 @@ def test_an_unstamped_episodes_row_says_exactly_what_it_said_before(
     )
     render(unstamped)
     rendered = _flat(output.getvalue())
-    assert "Why: I worked it out, and no supporting evidence was recorded. Last revised:" in (
-        rendered
-    )
+    assert (
+        "Why: this records an exchange that happened — I captured it at the time, so "
+        "there was nothing to work out and nothing to weigh. The line above files it "
+        "among my beliefs because that is where a captured turn sits, and the "
+        "confidence there is a standing figure rather than a measure of doubt that it "
+        "happened. Last revised:"
+    ) in rendered
     assert "connected source" not in rendered
     assert "traces back" not in rendered, "and the silence is silence, not the episodic arm"
+    assert "I worked it out" not in rendered, "the derived line is false of a recorded turn"
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_an_episode_is_explained_as_a_record_and_never_as_a_derivation(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """#1891: an episode's ``Why`` is that it happened (ADR-0075 §2).
+
+    A captured turn carries ``OBSERVED`` provenance, so ``band_of`` files it in the
+    ``DERIVED`` band and it used to be explained by the derived line — "I worked it
+    out, and no supporting evidence was recorded". ADR-0075 §2 is what that
+    contradicts: recording an exchange "is true because it happened, a policy has
+    nothing to weigh". So the row says it was recorded, says nothing was worked out,
+    and does not offer the empty evidence list as a deficiency — ADR-0074 §4 leaves an
+    episode's ``evidence`` empty **by decision**.
+
+    Asserted in both directions, because a line that added an honest sentence and kept
+    the false one would pass a presence-only check.
+    """
+    render(
+        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
+        if render is cli._render_belief
+        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
+    )
+    rendered = _flat(output.getvalue())
+
+    assert "this records an exchange that happened" in rendered
+    assert "I captured it at the time" in rendered
+    assert "I worked it out" not in rendered
+    assert "no supporting evidence was recorded" not in rendered, (
+        "an empty evidence list is ADR-0074 §4's decision, not a shortfall to report"
+    )
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_an_episodes_row_still_carries_its_band_and_confidence_and_says_what_they_are(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """#1891's open display question, answered: the heading stays and the line explains it.
+
+    ADR-0073 §4 requires **every** row to convey its band — "never omitted, never
+    implied by position alone" — and its confidence, and grants no kind an exemption;
+    ADR-0072 §6 rules the same of anything rendered as a belief. So the fix for the
+    belief vocabulary is not to drop the two fields but to stop the row implying that
+    the 0.90 is how sure this system is that the conversation took place: ADR-0074 §4
+    sets it at capture and documents it as standing rather than certainty.
+
+    Pinned as *both* halves. The header is asserted present because a later lane
+    reading only the ``Why`` line might take it for dead weight, and the sentence that
+    disarms it is asserted present because the header without it is exactly what #1891
+    reported.
+    """
+    render(
+        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, confidence=0.9)
+        if render is cli._render_belief
+        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, confidence=0.9)
+    )
+    rendered = _flat(output.getvalue())
+
+    assert "derived · episodic · confidence 0.90" in rendered
+    assert "the confidence there is a standing figure rather than a measure of doubt" in (rendered)
+
+
+def test_a_derived_belief_of_another_kind_keeps_the_line_it_had(output: StringIO) -> None:
+    """The episodic arm is a branch off the derived one, never a replacement.
+
+    ADR-0073 §4's derived floor — the band, the citation count, and never a warrant
+    the surface cannot show — is untouched for the three kinds that are beliefs, and a
+    fifth ``MemoryKind`` added to ``core`` would take the belief line rather than
+    silently inheriting an episode's. Pinned on ``PROCEDURAL`` because the semantic
+    case is what every other case in this file renders.
+    """
+    cli._render_belief_summary(_summary(BeliefBand.DERIVED, kind=MemoryKind.PROCEDURAL))
+    rendered = _flat(output.getvalue())
+
+    assert "Why: I worked it out, and no supporting evidence was recorded." in rendered
+    assert "this records an exchange that happened" not in rendered
 
 
 def test_a_stamped_belief_of_another_kind_is_left_on_the_belief_sentence(

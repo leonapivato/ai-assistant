@@ -4093,6 +4093,71 @@ def test_the_two_surfaces_say_the_same_two_sentences() -> None:
     assert _joined(belief) == cli._outside_warrant(_row(kind=MemoryKind.SEMANTIC, stamped=True))
 
 
+def test_the_browser_explains_an_episode_as_a_record_and_never_as_a_derivation() -> None:
+    """#1891 on this surface: an episode's ``Why`` is that it happened (ADR-0075 §2).
+
+    This page lists beliefs with no kind filter, so a captured turn is one of the rows
+    it renders — and ``whyHeld`` used to hand it to ``whyDerived``, whose line is false
+    of it in every clause: nothing worked it out, and there is nothing it was worked out
+    *from* because ADR-0074 §4 leaves an episode's evidence empty by decision.
+
+    Asserted over ``whyEpisodic``'s own body rather than over the file, because a
+    sentence counted anywhere in the script would be satisfied by the terminal's copy
+    of it landing in some other function.
+    """
+    functions = _functions(_code("app.js"))
+    held = functions["whyHeld"]
+    episodic = _joined(functions["whyEpisodic"])
+
+    assert _EPISODIC_GUARD in held, "the kind is asked before the derived line is reached"
+    assert held.index(_EPISODIC_GUARD) < held.index("return whyDerived(belief);")
+    assert "This records an exchange that happened" in episodic
+    assert "I worked it out" not in episodic
+    assert "no supporting evidence was recorded" not in episodic
+
+
+def test_the_browser_keeps_the_episodes_heading_and_says_what_it_is() -> None:
+    """#1891's display question, answered the same way on both surfaces.
+
+    ADR-0073 §4 requires every row to convey its band and its confidence and exempts no
+    kind, and on *this* surface the heading carries a second load the terminal's does
+    not: the three band checkboxes are what selected the rows, so a row that stopped
+    naming its band would stop saying which box it arrived under. So
+    ``renderBeliefFields`` is unchanged and the ``Why`` line is what disarms the
+    figure — ADR-0074 §4 sets an episode's confidence at capture and documents it as
+    standing rather than certainty.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "confidence ${belief.confidence.toFixed(2)}" in functions["renderBeliefFields"], (
+        "the confidence is still rendered (ADR-0073 §4)"
+    )
+    assert "${bandWords(belief.band)}" in functions["renderBeliefFields"], (
+        "and so is the band, which is also the filter the row arrived under"
+    )
+    assert "a standing figure rather than a measure of doubt" in _joined(functions["whyEpisodic"])
+
+
+def test_the_two_surfaces_explain_an_episode_in_the_same_words() -> None:
+    """ADR-0223 §5's third clause held to over the head sentence too.
+
+    "A fact stated on one surface and not on its sibling is a fact a user learns to
+    distrust on both" — and the reason a captured turn is not a derivation is such a
+    fact. So the browser's sentence is the terminal's, character for character, save
+    the leading capital: this page capitalises every ``Why:`` line (its asserted arm
+    reads "You told me…") and the terminal capitalises none of them (its reads "you
+    told me…"), which is a convention that predates this lane on both files.
+
+    Read with the mark **unset**, so the comparison is over the head sentence this lane
+    wrote and not over ADR-0223 §5's sentence, which its own case already pins.
+    """
+    browser = _joined(_functions(_code("app.js"))["whyEpisodic"])
+    terminal = cli._why_episodic(_row(kind=MemoryKind.EPISODIC, stamped=False))
+
+    assert terminal[0].islower(), "the terminal's Why line continues its label"
+    assert browser == terminal[0].upper() + terminal[1:]
+
+
 def test_the_browser_leaves_an_unstamped_episode_exactly_where_it_was() -> None:
     """The byte-identity half of ADR-0223 §10's eighth test, on this surface.
 

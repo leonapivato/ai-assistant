@@ -7100,6 +7100,62 @@ def _why_derived(belief: Belief | BeliefSummary) -> str:
     return head + ceiling + _outside_warrant(belief)
 
 
+def _why_episodic(belief: Belief | BeliefSummary) -> str:
+    """Why a captured **episode** is held: because it happened (#1891, ADR-0075 §2).
+
+    An episode reaches this listing through the documented ``assistant beliefs --kind
+    episodic``, and its provenance is ``OBSERVED``, so ``band_of`` files it in the
+    ``DERIVED`` band and it used to be explained by :func:`_why_derived`: *"I worked it
+    out, and no supporting evidence was recorded."* Every clause of that is false of a
+    recorded turn. Nothing worked it out; there is nothing it was worked out *from*,
+    because ADR-0074 §4 leaves an episode's ``evidence`` empty **by decision** rather
+    than by accident; and "no supporting evidence was recorded" reads as a deficiency
+    where there is none to report. ADR-0075 §2 is the doctrine the old line
+    contradicts: recording that an exchange happened "is true because it happened, a
+    policy has nothing to weigh".
+
+    **The header above the line is deliberately not changed, and that is this lane's
+    answer to #1891's open display question.** ADR-0073 §4 requires *every* row to
+    convey its band — "never omitted, never implied by position alone" — and its
+    confidence, with no exemption for a kind; ADR-0072 §6 says the same of anything
+    rendered as a belief. The sibling page goes further: its rows are what the user's
+    own band checkboxes selected, so a row that stopped naming its band would stop
+    saying which box it arrived under. So the band and the confidence stay, and this
+    line says what they are — a filing, and a standing figure (ADR-0074 §4 sets it at
+    capture and documents it as "standing rather than certainty") — rather than
+    letting the row imply that the system is 90% sure the conversation took place.
+
+    **The externality sentence is appended here exactly as it is appended to a
+    belief**, through the same :func:`_outside_warrant`, so ADR-0223 §5's arm survives
+    this rewording unaltered: its first clause is that the fact is never omitted for an
+    episode, its second fixes the wording, and neither is touched by giving the head
+    sentence in front of it an honest voice. Appended once, at the single exit, for the
+    reason :func:`_why_derived` appends it once — a second exit is a second chance to
+    forget it.
+
+    **And it is reached only from the ``DERIVED`` band**, which keeps ADR-0189 §4's
+    clause exactly where that ADR put it: the externality sentence is owed "where the
+    projected record's band is ``DERIVED``", so routing on the kind *inside* the band
+    match cannot render it on a band the clause does not reach. No episode is written
+    into another band today — capture stamps ``OBSERVED`` — and if one ever were, the
+    band's own sentence is what it would get, which is the same conservative direction
+    :func:`_why` takes everywhere else.
+
+    Args:
+        belief: The projected row being explained.
+
+    Returns:
+        The reason, with ADR-0223 §5's clause where the mark is set.
+    """
+    return (
+        "this records an exchange that happened — I captured it at the time, so "
+        "there was nothing to work out and nothing to weigh. The line above files it "
+        "among my beliefs because that is where a captured turn sits, and the "
+        "confidence there is a standing figure rather than a measure of doubt that "
+        "it happened."
+    ) + _outside_warrant(belief)
+
+
 def _why(belief: Belief | BeliefSummary) -> str:
     """Why this belief is held — band-dependent (ADR-0073 §4).
 
@@ -7120,6 +7176,11 @@ def _why(belief: Belief | BeliefSummary) -> str:
       support is *entirely* gone says so, and says that it is still held — because it
       is not retired, and a line implying otherwise would misdescribe what the user
       can still do with it.
+    * **Derived, and a captured episode** — :func:`_why_episodic`, because an
+      episode is not a derivation and the derived line is false of it in every clause
+      (#1891, ADR-0075 §2). The kind is asked **inside** the band's arm rather than
+      before the match, so ADR-0189 §4's externality clause stays bound to the
+      ``DERIVED`` band where that ADR put it.
     * **Attested** — the reporting source is **named**, the instant that source said
       the fact was current is stated on *its* clock, and the line still says outright
       that ``Last revised`` is the assistant's clock rather than the source's
@@ -7174,6 +7235,8 @@ def _why(belief: Belief | BeliefSummary) -> str:
         case BeliefBand.ASSERTED:
             return "you told me, and your own word is the whole of it."
         case BeliefBand.DERIVED:
+            if belief.kind is MemoryKind.EPISODIC:
+                return _why_episodic(belief)
             return _why_derived(belief)
         case BeliefBand.ATTESTED:
             if belief.attestation is None:
@@ -7258,8 +7321,9 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
     number is not carried here at all, which is what stops two surfaces quoting
     different figures for one belief.
 
-    The ``Why`` line reads only the counts, which both types carry — which is why
-    the two views share this renderer rather than one of them needing its own.
+    The ``Why`` line reads only the counts and the kind, which both types carry —
+    which is why the two views share this renderer rather than one of them needing
+    its own.
 
     Engine-supplied text — the content and the id — is neutralised for this
     terminal like any other (``_safe``, ADR-0042 §4). The band and kind are this
