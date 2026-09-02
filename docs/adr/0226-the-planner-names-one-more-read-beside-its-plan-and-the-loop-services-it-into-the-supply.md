@@ -863,41 +863,29 @@ by making the planner ask twice.
 ### 9. The audit record
 
 > **Normative.** Each turn records: whether a request was emitted; whether it was
-> serviced or declined under §5's channel scoping; for each ask, its kind, and **the
-> identifier of the plan that carries the ask itself**, under the conditions below;
-> how many records the
-> servicing returned; how many of those were new after deduplication; how many the
-> deduplication removed; how many labels resolved to nothing; whether the budget
-> truncated a kind; and whether the servicing failed. No count here is of a record
-> the servicer refused on the ground of its class, because §7 admits no such refusal.
+> serviced or declined under §5's channel scoping; for each ask, its **kind**; how
+> many records the servicing returned; how many of those were new after deduplication;
+> how many the deduplication removed; how many labels resolved to nothing; whether the
+> budget truncated a kind; and whether the servicing failed. No count here is of a
+> record the servicer refused on the ground of its class, because §7 admits no such
+> refusal.
 
-> **Normative.** The record holds **counts, kinds and a reference**, and copies no
-> text. It does not copy the query the planner composed, the labels it named, any
-> `content` span, any excerpt or any rendering. The ask is already durable on the
-> plan (§4), and the record points at it.
+> **Normative.** The record holds **counts and kinds**, and copies no text. It does
+> not copy the query the planner composed, the labels it named, any `content` span,
+> any excerpt or any rendering. The ask stays durable on the frozen `ActionPlan` (§4)
+> and the record neither copies it nor points at it.
 
-> **Normative.** **What makes the record joinable is the ambient correlation
+> **Normative.** **The only identifier the record carries is the ambient correlation
 > identifier**, ADR-0119 §4's, which `core/correlation.py` mints and which *"cannot be
 > supplied"*, and which `core/logging.py`'s `merge_contextvars` already puts on every
-> event. Joinability never depends on the plan reference.
+> event. It carries **no plan identifier, no goal identifier and no record
+> identifier** — no value whose provenance is a caller's rather than this system's.
 
-> **Normative.** **The plan reference is carried only where this system minted the
-> identifier it would log**, and is otherwise omitted. `Identifier` is a permissive
-> type — any non-blank encodable string satisfies it — so a `Planner` supplying
-> `alice@example.test` as a plan id would put Tier 1 content into a Tier 2 event.
-> `planning/planner.py` composes plan ids from `uuid4`, and the record carries the
-> reference **only** where the value is one of those; where it is not, the record says
-> the reference was withheld and carries the counts and the correlation id alone. No
-> lane logs an identifier of unknown provenance, and no lane relies on ADR-0004 §5's
-> redaction net to make one safe: that net catches a key someone named sensitively and
-> `core/logging.py` says so — *"it cannot catch Tier 1 data logged under an innocuous
-> name"*.
-
-> **Normative.** The record is emitted **once per turn, after the turn's plan has been
-> persisted** where the turn persists one. Where `PlanStore.save_plan` did not
-> succeed, the reference is omitted and the record says so, so no event points at a
-> plan a reader cannot fetch. The counts, the kinds and the fired/not-fired fact are
-> emitted either way: the fire rate never depends on the plan being resolvable.
+> **Normative.** The record is emitted **once per turn**, at any point in the turn
+> after the servicing decision is known, and its emission is conditioned on nothing:
+> not on the plan being persisted, not on the turn completing, and not on capacity
+> being admitted. A turn that fired and then failed for any reason still contributes
+> its numerator, and a turn that did not fire still contributes its denominator.
 
 > **Normative.** The event is emitted at **`INFO`**, and the every-turn obligation
 > binds the **emitting code** rather than any deployment's log configuration. A
@@ -939,17 +927,39 @@ anything new — is unanswerable retrospectively. Recording the not-fired turns 
 turns a log into a denominator, and recording the declined ones is what keeps §5's
 channel scoping visible rather than silent.
 
-**The reference rather than a copy is ADR-0004 §7's minimisation taken seriously, and
-it closes a hole an earlier draft of this section had.** That draft retained the
-planner's own query text on the ground that it is the planner's composition rather
-than a record's content. But nothing bounds what a planner may put in a query: it
-reads the rendered supply, so a query may quote a sensitive span of a record verbatim,
-and the clause forbidding record content and the clause retaining the query would then
-contradict each other on the same bytes. Pointing at the plan removes the contradiction
-by removing the second copy: the ask is retained exactly once, on the frozen
-`ActionPlan` the planning store already keeps, under whatever retention that record
-has. A later reader who wants to judge whether a reformulation was any good reads it
-there.
+**Counts and no copy is ADR-0004 §7's minimisation taken seriously, and it closes a
+hole an earlier draft of this section had.** That draft retained the planner's own
+query text on the ground that it is the planner's composition rather than a record's
+content. But nothing bounds what a planner may put in a query: it reads the rendered
+supply, so a query may quote a sensitive span of a record verbatim, and the clause
+forbidding record content and the clause retaining the query would then contradict
+each other on the same bytes. Not copying it removes the contradiction: the ask is
+retained exactly once, on the frozen `ActionPlan` the planning store already keeps,
+under whatever retention that record has. A later reader who wants to judge whether a
+reformulation was any good reads it there.
+
+**And the record does not point at that plan either, which two review rounds are the
+reason for.** A pointer would have to be `ActionPlan.id`, and `Identifier` admits any
+non-blank encodable string, so a `Planner` — or `ModelBackedPlanner`'s own injectable
+id factory — may supply one carrying content, which in a Tier 2 event is a Tier 1
+leak. A draft answered that by logging the identifier only where this system minted
+it; that is **not implementable**, because provenance cannot be recovered from the
+value: a third-party planner may return a UUID-shaped id and the trusted factory may
+be configured to return an address, so any format test either emits an untrusted value
+or suppresses a trusted one. Carrying unforgeable provenance would mean putting it on
+the contract, which is a Protocol change this decision does not need. So the record
+carries no plan identifier at all. Joinability was never the pointer's job — the
+correlation id is on this event and on every other line of the same turn — and what is
+genuinely lost is the hop from an audit event to the plan's ask text, which §12 defers
+along with the durable surface that would make such a join worth building.
+
+**Emitting unconditionally is what keeps the denominator honest.** A record gated on
+the plan being persisted, or on the turn completing, would silently drop exactly the
+turns most worth counting: `AssistantEngine` admits and reserves capacity **after** the
+loop has planned, so a full system rejects a turn whose planner had already fired, and
+a `PlanStore.save_plan` failure loses another. Under a gated record the fire rate would
+read low by exactly the number of turns that went wrong. The record owes nothing to
+those later stages, because it carries no reference into them.
 
 **And naming the query's class is what stops the same laundering ADR-0203 §1
 diagnosed.** That decision's reason is that *"a model completion is unplaceable"*, and
@@ -1001,8 +1011,8 @@ implementation has to be rewritten to keep passing it.
 servicing of both kinds, §3's label resolution by index into the sequence the loop
 passed, §5's channel scoping and degradation posture, §6's budget and cross-kind
 precedence, §7's deduplication, fourth group and post-servicing evaluation, and §9's
-audit record — including its emission point, which is after the turn's plan is
-persisted rather than at the servicing site, and its conditional plan reference.
+audit record — including that it is emitted once per turn and gated on nothing that
+happens after the servicing decision.
 
 > **Normative.** Neither lane invents a second label scheme, a shared label table, or
 > any value crossing `planning` and `orchestration` other than the `memories`
@@ -1052,8 +1062,8 @@ placement.** The ask is a field on the `ActionPlan`, and every turn's plan is
 persisted through `PlanStore.save_plan`. So over the Lane-A-only window the numerator
 and the denominator are both readable off the persisted plans — the turns whose plan
 carries a request, over the turns whose plan does not — which is the same measurement
-§9's record makes available live and is why §9 points at the plan for the ask rather
-than copying it. What only Lane B can add is the **yield**: what the servicing
+§9's record makes available live, and is why §9 needs to carry neither the ask nor a
+pointer to it. What only Lane B can add is the **yield**: what the servicing
 returned, what deduplication removed, what a label failed to resolve. Those fields
 are absent in that window because the events they describe have not happened.
 
@@ -1105,16 +1115,16 @@ are absent in that window because the events they describe have not happened.
    the planner's query string appears anywhere in it; and the ask it points at is
    readable on the plan. Asserted at the emitting seam through a capturing processor,
    so the test is about the code's obligation and not about a configured level.
-9. **The audit carries no identifier this system did not mint.** A turn whose
-   `Planner` returns a plan whose id is not one `planning/planner.py` would have
-   minted — an address-shaped string is the case worth writing — emits a record with
-   the counts and the ambient correlation id and **no** plan reference, and that
-   string appears nowhere in the event. A turn whose plan id is minted carries the
-   reference.
-10. **A plan the store did not keep is not referenced.** A turn whose
-    `PlanStore.save_plan` fails still emits its record — the fired fact, the kinds and
-    the counts — with the reference omitted and the omission recorded, so no event
-    points at a plan a reader cannot fetch and the fire rate is unaffected.
+9. **The audit carries no identifier a caller supplied.** A turn whose `Planner`
+   returns a plan whose id is an address-shaped string emits a record in which that
+   string appears nowhere — no plan id, no goal id, no record id — and the ambient
+   correlation id is the only identifier on the event. Asserted over the emitted
+   event's own fields, not over the redaction net.
+10. **A turn that fired and then failed still counts.** Two cases, each emitting
+    exactly one record carrying the fired fact and the servicing counts: a turn
+    rejected for capacity, which `AssistantEngine` decides **after** the loop has
+    planned and serviced, and a turn whose `PlanStore.save_plan` raises. Neither
+    suppresses the record, so neither depresses the fire rate.
 11. **The budget and the bounds hold.** A hop naming three labels is not a request the
     types admit; a request whose asks are two of one kind is not either; a servicing
     whose candidates exceed ten returns ten; and a record already in the supply is
@@ -1184,12 +1194,17 @@ are absent in that window because the events they describe have not happened.
   ADR that answers §2's backfill question for a planner-emitted read — plausibly by
   showing the emission is independent of the withholding, which is a measurement the
   audit this ADR builds could supply. Not fired by a lane finding spoken replies thin.
-- **A durable, queryable surface for §9's audit** — a store, a Protocol, an
-  aggregation, a retention window. §9 puts the record in the Tier 2 log, which is what
-  makes the fire rate available on day one with no contract added; what it does not
-  give is a query. Fired by a deployment that needs the figure over a retention window
-  rather than out of its logs, or by milestone 2 needing to account per emission. Not
-  fired by a lane finding logs inconvenient.
+- **A durable, queryable surface for §9's audit, and with it a join from an audit
+  event to the plan whose ask it describes** — a store, a Protocol, an aggregation, a
+  retention window. §9 puts the record in the Tier 2 log, which is what makes the fire
+  rate available on day one with no contract added; what it does not give is a query,
+  and it deliberately carries no plan identifier, because provenance for one cannot be
+  established from an `Identifier` value and putting it on the contract is a Protocol
+  change this decision does not need. A design that wants the join adds trustworthy
+  provenance at the seam and decides where the record lives, together. Fired by a
+  deployment that needs the figure over a retention window rather than out of its logs,
+  or by milestone 2 needing to account per emission. Not fired by a lane finding logs
+  inconvenient.
 - **#838's coverage layer**, and whether the trigger is learnable from the supply
   alone. Fired by what §9's audit shows, or by #838's own ADR.
 - **A sampled shadow read on turns the trigger did not fire on** — the only live
