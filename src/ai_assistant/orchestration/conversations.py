@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -676,26 +677,40 @@ class ConversationLifecycle:
             was owed, and ``False`` where the write failed — the caller distinguishes
             the two through :meth:`_archive_owed`, because only the second degrades
             the capture.
+
+        Never raises. §2's "never fails a turn and never fails a capture" is
+        unconditional, so a value the archive's own model refuses degrades this
+        capture exactly as a store fault does rather than propagating.
         """
         if not self._archive_owed(disposition):
             return False
-        entry = TranscriptEntry(
-            address=turn.episode_id,
-            conversation_id=turn.conversation_id,
-            ordinal=turn.ordinal,
-            occurred_at=turn.occurred_at,
-            asked=asked,
-            replied=outcome,
-            # Narrowed by `_archive_owed` above, which is what `disposition is not
-            # None` there buys: the field is required and carries no `None` (§10).
-            disposition=disposition,  # type: ignore[arg-type]
-        )
         try:
+            entry = TranscriptEntry(
+                address=turn.episode_id,
+                conversation_id=turn.conversation_id,
+                ordinal=turn.ordinal,
+                occurred_at=turn.occurred_at,
+                asked=asked,
+                replied=outcome,
+                # Narrowed by `_archive_owed` above, which is what `disposition is
+                # not None` there buys: the field is required and carries no `None`
+                # (§10).
+                disposition=disposition,  # type: ignore[arg-type]
+            )
             await self._archive.append(entry)
-        except TranscriptArchiveError:
+        except TranscriptArchiveError, ValidationError:
             # §2: never fails a turn, never fails a capture, never retried. Logged
             # rather than swallowed, and the address is what the log carries — an
             # entry's text reaches no log, trace or audit trail (§4, ADR-0004 §5).
+            #
+            # **The construction is inside the guard, and `ValidationError` beside
+            # the store fault.** §2's clause is that the archive write never fails a
+            # capture, and a refusal from the *model* is a way for it to fail one:
+            # every value here reaches this method already typed, but "already typed"
+            # is a property of the callers rather than of this line, and the failure
+            # it would produce is the exact outcome §2 rules out — a delivered answer
+            # thrown away because the record of it could not be built. It degrades
+            # like any other archive failure and is reported the same way.
             _log.warning(
                 "conversation_capture_degraded",
                 stage="archive",

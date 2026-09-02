@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     TranscriptArchiveSize,
     TranscriptEntry,
     TranscriptHit,
+    describe_untrusted,
 )
 
 if TYPE_CHECKING:
@@ -78,6 +79,23 @@ def _excerpt_of(text: str) -> tuple[str, bool]:
     if len(encoded) <= TRANSCRIPT_EXCERPT_BYTES:
         return text, False
     return encoded[:TRANSCRIPT_EXCERPT_BYTES].decode("utf-8", errors="ignore"), True
+
+
+def _check_retention(retention: timedelta | None) -> None:
+    """Refuse a retention that is not ``None`` or a strictly positive duration.
+
+    ADR-0225 §6's shape, refused here as the durable store refuses it — the fake
+    stands in for that store, so the two must be constructible on the same values.
+
+    Raises:
+        ValueError: If it is neither ``None`` nor a strictly positive ``timedelta``.
+    """
+    if retention is None:
+        return
+    if not isinstance(retention, timedelta) or retention <= timedelta(0):
+        described = describe_untrusted(retention)
+        msg = f"retention must be a strictly positive timedelta or None, got {described}"
+        raise ValueError(msg)
 
 
 def _check_page(limit: int, offset: int) -> None:
@@ -263,7 +281,14 @@ class FakeTranscriptArchive:
             retention: How long an entry stays readable, or ``None`` for "keep
                 forever" (ADR-0225 §6's default). Enforced at the read.
             now: Clock the retention predicate is evaluated against.
+
+        Raises:
+            ValueError: If ``retention`` is set and is not a strictly positive
+                ``timedelta``. The durable store refuses it at its own constructor,
+                so a fake that accepted it would let a test build a subject the
+                implementation it stands in for cannot be built as.
         """
+        _check_retention(retention)
         self._entries = _Entries(entries)
         self._retention = retention
         self._clock = checked_clock(now, owner="FakeTranscriptArchive")
