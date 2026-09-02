@@ -22,10 +22,14 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
+    MAX_HOP_LABELS,
     CurrentContext,
+    EpisodicMemory,
     Goal,
     MemorySource,
     Provenance,
+    ReadKind,
+    ReadRequest,
     TimeOfDay,
 )
 
@@ -60,6 +64,25 @@ def _context() -> CurrentContext:
         time_of_day=TimeOfDay.MORNING,
         is_weekend=False,
         within_working_hours=True,
+    )
+
+
+def _supply() -> tuple[EpisodicMemory, ...]:
+    """A two-record supply, so a call has positions for ADR-0226 §3 to label.
+
+    Episodes rather than beliefs so that the sequence is the shape ADR-0074 §5 puts
+    first — a conversation tail — and every planner renders it the same way. What
+    it holds decides nothing here: the suite never asserts what a planner asks
+    about it, only what the shape of an ask may be.
+    """
+    return tuple(
+        EpisodicMemory(
+            id=f"e{ordinal}",
+            content=f"Ada: turn {ordinal}.",
+            occurred_at=_WHEN,
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),
+        )
+        for ordinal in (1, 2)
     )
 
 
@@ -157,3 +180,128 @@ class PlannerContract:
         """
         plan = await planner.plan(_goal(), context=_context(), capabilities=list(_VOCABULARY))
         assert plan.goal_id == "g1"
+
+    # --- ADR-0226 §4: the widened return -----------------------------------
+    # `Planner.plan` may now answer a plan carrying a `read_request`. §10 obliges
+    # this suite to cover that widening, "so that every `Planner` implementation is
+    # held to it — the model-backed planner and the canonical fake alike".
+
+    @pytest.fixture
+    def asking_planner(self) -> Planner | None:
+        """The same implementation, arranged to emit a read request — or ``None``.
+
+        **Optional by construction, because ADR-0226 §4 makes the field additive
+        and defaulted.** A ``Planner`` that knows nothing of the envelope conforms
+        and returns no request on any turn, so a suite that *required* every
+        implementation to produce one would refuse a conforming planner. A subclass
+        that can arrange an emission overrides this and the arms below bind on it;
+        one that cannot leaves it, and they skip.
+
+        Returns:
+            A planner of the implementation under test that asks for a read, or
+            ``None`` where the implementation never asks.
+        """
+        return None
+
+    async def test_the_plan_says_whether_a_read_was_asked_for(self, planner: Planner) -> None:
+        """The widened return, at its weakest and most total form (ADR-0226 §4).
+
+        Whatever a planner decides, ``read_request`` is either ``None`` — "the
+        planner asked for no read", which §4 makes the semantically correct answer
+        and never an error — or a validated
+        :class:`~ai_assistant.core.types.ReadRequest`. *Which* of the two is a
+        judgement this suite may not assert, for ADR-0211 §9 item 2's reason: a
+        scripted plan and a model's plan would answer differently for one goal and
+        both would conform.
+        """
+        plan = await planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        assert plan.read_request is None or isinstance(plan.read_request, ReadRequest)
+
+    async def test_a_request_it_returns_is_one_this_contract_admits(
+        self, asking_planner: Planner | None
+    ) -> None:
+        """An emitted request is a *validated* model, arm by arm (ADR-0226 §§1-2, §6).
+
+        Every condition here is one ``ReadRequest`` and ``ReadAsk`` enforce, which
+        is the point: a planner can bypass them — ``model_construct`` skips
+        validation, and an implementation assembling a request by hand could ship a
+        two-ask ``SIGHTED_QUERY`` request or a three-label hop that no ``core`` test
+        would ever see. Re-asserted here over what a planner actually returned, the
+        conditions bind on the emission rather than only on the type.
+        """
+        if asking_planner is None:
+            pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
+        plan = await asking_planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None, "the fixture promises an implementation that asks"
+
+        kinds = [ask.kind for ask in request.asks]
+        assert kinds, "a request carries at least one ask"
+        assert len(set(kinds)) == len(kinds), "at most one ask of each kind"
+        for ask in request.asks:
+            assert ask.kind in set(ReadKind)
+            if ask.kind is ReadKind.SIGHTED_QUERY:
+                assert ask.query is not None
+                assert ask.query.strip()
+                assert ask.labels == ()
+            else:
+                assert ask.query is None
+                assert 1 <= len(ask.labels) <= MAX_HOP_LABELS
+
+    async def test_a_request_it_returns_cannot_be_edited(
+        self, asking_planner: Planner | None
+    ) -> None:
+        """ADR-0226 §11 item 15's first arm: a plan carrying a request is still frozen.
+
+        The plan is an audit record (ADR-0014 §2) and the request is now part of
+        what it records, so the freeze has to reach all the way down — the field on
+        the plan, the request, and each ask. A frozen plan holding a mutable request
+        would let a later stage rewrite what the planner asked for, after the
+        decision it is a record of.
+        """
+        if asking_planner is None:
+            pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
+        plan = await asking_planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None
+
+        frozen = (ValidationError, AttributeError, TypeError)
+        with pytest.raises(frozen):
+            plan.read_request = None
+        with pytest.raises(frozen):
+            request.asks = ()
+        with pytest.raises(frozen):
+            request.asks[0].kind = ReadKind.SIGHTED_QUERY
+
+    async def test_a_read_it_asks_for_never_becomes_a_step(
+        self, asking_planner: Planner | None
+    ) -> None:
+        """ADR-0226 §11 item 15's second arm, at the seam that emits it (§4).
+
+        "A ``ReadAsk`` is **not** a ``PlanStep``, and nothing drives it": reading
+        the owner's own store is not an act in the world, so no ask is selected
+        against the vocabulary, resolved to a tool, ruled on by the permission gate,
+        or reaches an executor. At *this* seam that means one thing — an emitted ask
+        appears in ``read_request`` and never in ``steps``, whatever it says. The
+        turn-level half, that no registry, gate or executor sees one, is the loop's
+        and is asserted there.
+        """
+        if asking_planner is None:
+            pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
+        plan = await asking_planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None
+
+        asked = {ask.query for ask in request.asks if ask.query is not None}
+        asked |= {label for ask in request.asks for label in ask.labels}
+        for step in plan.steps:
+            assert step.capability not in asked
+            assert step.intent not in asked

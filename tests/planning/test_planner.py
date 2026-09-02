@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
+    ActionPlan,
     Attestation,
     CalendarFacet,
     CurrentContext,
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     Message,
     PreferenceMemory,
     Provenance,
+    ReadKind,
     Role,
     TimeOfDay,
 )
@@ -43,6 +45,8 @@ from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.planning.planner import (
     _EMPTY_VOCABULARY,
     _MAX_EXTRACTION_MISSES,
+    _READ_REQUEST_DROPPED,
+    _READ_REQUEST_GUIDANCE,
     _STATED_FACT_GUIDANCE,
     _TAIL_HEADING,
     _UNAVAILABLE_GUIDANCE,
@@ -181,12 +185,38 @@ def _planner(reply: str = _VALID_REPLY) -> ModelBackedPlanner:
     )
 
 
+#: A reply carrying both of ADR-0226 §2's kinds beside a plan, for the arms of the
+#: shared suite that need a planner which actually asks.
+#:
+#: The hop is at §6's two-label cap and the query is a plain question, so the
+#: emission is the widest one the envelope admits — which is what makes the suite's
+#: shape assertions worth running against this implementation rather than only
+#: against the fake.
+_ASKING_REPLY = json.dumps(
+    {
+        "rationale": "two steps to relocate",
+        "steps": [
+            {"intent": "find a place", "capability": "search_housing", "parameters": {}},
+        ],
+        "read_request": {
+            "query": "where does Ada want to live?",
+            "labels": ["M1", "M2"],
+        },
+    }
+)
+
+
 class TestModelBackedPlannerContract(PlannerContract):
     """Runs ModelBackedPlanner through the shared Planner conformance suite."""
 
     @pytest.fixture
     def planner(self) -> Planner:
         return _planner()
+
+    @pytest.fixture
+    def asking_planner(self) -> Planner | None:
+        """A planner over a model that emits a request, so §4's arms bind here too."""
+        return _planner(_ASKING_REPLY)
 
 
 async def test_extracts_capabilities_in_order() -> None:
@@ -2190,3 +2220,271 @@ async def test_the_repair_prompt_states_no_vocabulary_of_its_own() -> None:
     assert "report_current_time" not in repair
     assert "send_email" not in repair
     assert _VOCABULARY_HEADING not in repair
+
+
+# --- ADR-0226: the labelled supply and the emission ---------------------------
+# §10's Lane A at this seam: §3's ordinal labelling, the prompt that asks for a
+# request, and the parser that reads one back. §11's numbers taken here are 2 and 4
+# in their emission halves — the servicing halves are the loop's.
+
+
+async def _emitted(reply: str, *records: MemoryRecord) -> ActionPlan:
+    """The plan a planner produces for ``reply`` over ``records``."""
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    return await planner.plan(
+        _goal(), context=_context(), memories=list(records), capabilities=_VOCABULARY
+    )
+
+
+def _envelope(**read_request: object) -> str:
+    """A valid plan envelope carrying ``read_request`` exactly as given."""
+    return json.dumps(
+        {
+            "rationale": "one step",
+            "steps": [{"intent": "find a place", "capability": "search_housing"}],
+            "read_request": read_request,
+        }
+    )
+
+
+async def test_a_sufficed_turn_emits_no_request() -> None:
+    """ADR-0226 §11 item 2, emission half: a plan that asked for nothing says so.
+
+    "A turn whose supply answers the question emits no request." At this seam that
+    is the whole of it — a reply carrying no ``read_request`` key produces a plan
+    whose field is ``None``, which §8 defines as a turn the trigger did **not** fire
+    on. The other half of item 2 — no store call, a byte-identical supply, and the
+    audit's non-firing record — is the loop's and is asserted there, because none of
+    those three things exists at this seam.
+    """
+    plan = await _emitted(_VALID_REPLY, _preference())
+
+    assert plan.read_request is None
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_the_label_is_the_records_ordinal_in_the_sequence_it_was_handed() -> None:
+    """ADR-0226 §11 item 4, emission half: ``M3`` is the third record and nothing else.
+
+    §3 fixes the scheme — "the label of the record at 1-based index *n* … is the
+    ASCII string ``M`` followed by *n* in decimal with no padding" — and fixes it
+    over ``memories`` **as a whole**, not per group: the labels run through the
+    conversation tail and on into the retrieved records without restarting, because
+    the loop resolves them by indexing the one sequence it passed. The resolution
+    half of item 4 is the loop's.
+    """
+    tail = _turn("t1", "Ada: I adopted a dog.")
+    lines = await _bullets_for(tail, _preference())
+
+    bullets = _bullets(lines)
+    assert bullets[0].startswith("  - M1 [episodic/")
+    assert bullets[1].startswith("  - M2 [preference/")
+
+
+async def test_the_same_records_in_a_different_order_are_labelled_differently() -> None:
+    """The label is a position and not a property of the record (§3).
+
+    Two records swapped between two turns take each other's labels, which is why no
+    label survives its turn and none is persistable as a reference: "a label that
+    outlived its turn would be an identifier by another name".
+    """
+    first = _turn("t1", "Ada: I adopted a dog.")
+    second = _turn("t2", "Ada: she is a beagle.")
+
+    forwards = _bullets(await _bullets_for(first, second))
+    backwards = _bullets(await _bullets_for(second, first))
+
+    assert "I adopted a dog" in forwards[0]
+    assert "I adopted a dog" in backwards[1]
+    assert forwards[0].startswith("  - M1 [")
+    assert backwards[1].startswith("  - M2 [")
+
+
+async def test_no_record_identifier_reaches_the_prompt_with_the_label() -> None:
+    """§3's invariant, on the rendering that makes a hop askable at all.
+
+    "No record identifier is rendered to a model, and none is accepted from one." The
+    label is what the model is given *instead* of an id, so a rendering that printed
+    both would have added a channel §3 exists to close — and the failure that opens
+    is not a crash but "a system in which the model can steer what it is shown by
+    naming records it never saw".
+    """
+    record = _turn("conv:6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f:12", "Ada: I adopted a dog.")
+    lines = await _bullets_for(record)
+
+    assert _bullets(lines)[0].startswith("  - M1 [")
+    assert record.id not in "\n".join(lines)
+
+
+async def test_the_system_prompt_asks_for_the_request_below_the_shapes() -> None:
+    """ADR-0226 §10's "the prompt that asks for it", asserted as ADR-0176 §4 asks.
+
+    That the block *reaches the model at all*, and where it sits — never by
+    string-matching its sentences, which "fails on every rewording that improves the
+    instruction and passes on every rewording that guts it". It sits below both
+    rendered envelopes because it adds an optional key to each of them and decides
+    nothing about the choice between them.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert _READ_REQUEST_GUIDANCE.strip(), "the block decides nothing if it is empty"
+    system = next(one.content for one in model.calls[0].messages if one.role is Role.SYSTEM)
+    assert _READ_REQUEST_GUIDANCE in system
+    assert system.index('"no_capability_needed": true') < system.index(_READ_REQUEST_GUIDANCE)
+
+
+async def test_a_request_of_each_kind_is_read_back_off_the_envelope() -> None:
+    """Both of ADR-0226 §2's kinds, from the shape the prompt asks for.
+
+    The wire shape is flat — one optional ``query`` and one optional ``labels`` —
+    which makes "two asks of one kind" unrepresentable rather than merely refused,
+    and maps exactly onto the request space §2 admits.
+    """
+    plan = await _emitted(_envelope(query="where does Ada want to live?", labels=["M1", "M2"]))
+
+    request = plan.read_request
+    assert request is not None
+    by_kind = {ask.kind: ask for ask in request.asks}
+    assert by_kind[ReadKind.SIGHTED_QUERY].query == "where does Ada want to live?"
+    assert by_kind[ReadKind.CITATION_HOP].labels == ("M1", "M2")
+
+
+@pytest.mark.parametrize(
+    ("request_body", "kind"),
+    [
+        pytest.param({"query": "where?"}, ReadKind.SIGHTED_QUERY, id="query-only"),
+        pytest.param({"labels": ["M1"]}, ReadKind.CITATION_HOP, id="labels-only"),
+    ],
+)
+async def test_either_member_alone_is_an_emission(
+    request_body: dict[str, object], kind: ReadKind
+) -> None:
+    """§2 admits an emission of one kind, so the parser must not require both."""
+    plan = await _emitted(_envelope(**request_body))
+
+    request = plan.read_request
+    assert request is not None
+    assert [ask.kind for ask in request.asks] == [kind]
+
+
+async def test_the_labels_are_taken_verbatim_and_in_the_order_they_were_named() -> None:
+    """§6: "labels are followed in the order the ask names them".
+
+    Verbatim, and unfiltered against the supply: this planner was handed **no**
+    memories at all, so neither label resolves to anything — and §3 gives that
+    discard to the loop, which records it in §9's audit as dropped. A planner that
+    dropped its own out-of-range labels would empty that field of the population it
+    exists to count.
+    """
+    plan = await _emitted(_envelope(labels=["M7", "M2"]))
+
+    request = plan.read_request
+    assert request is not None
+    assert request.asks[0].labels == ("M7", "M2")
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        pytest.param({"query": "   "}, id="blank-query"),
+        pytest.param({"query": 7}, id="non-string-query"),
+        pytest.param({"labels": []}, id="no-labels"),
+        pytest.param({"labels": ["M1", "M2", "M3"]}, id="three-labels"),
+        pytest.param({"labels": "M1"}, id="labels-not-a-list"),
+        pytest.param({"labels": [1, 2]}, id="labels-not-strings"),
+        pytest.param({}, id="empty-object"),
+    ],
+)
+async def test_an_unreadable_request_costs_the_request_and_never_the_plan(
+    request_body: dict[str, object],
+) -> None:
+    """The parser's whole posture, over every way one member can be unusable.
+
+    ADR-0176's reasoning about an inert envelope key is directly on point:
+    type-checking a key "would send a perfectly good plan to bounded repair over a
+    key that decides nothing on that shape". So the plan is built, its steps are the
+    ones the model named, and exactly one model call is made — no repair round is
+    spent on a request that could not be read.
+    """
+    model = FakeModelProvider(_envelope(**request_body))
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert plan.read_request is None
+    assert [step.capability for step in plan.steps] == ["search_housing"]
+    assert len(model.calls) == 1, "a malformed request never buys a repair round"
+
+
+async def test_a_non_object_request_is_dropped_whole() -> None:
+    """The key itself can be any JSON value the model wrote, not only an object."""
+    reply = json.dumps(
+        {
+            "rationale": "one step",
+            "steps": [{"intent": "find a place", "capability": "search_housing"}],
+            "read_request": "please look it up",
+        }
+    )
+
+    plan = await _emitted(reply)
+
+    assert plan.read_request is None
+
+
+async def test_a_decline_may_ask_for_a_read_too() -> None:
+    """The shape the trigger actually fires on most often (ADR-0226 §8).
+
+    A turn answered from memory needs no capability, so it declines — and it is
+    exactly there that a thin supply is what the planner is short of. A parser that
+    read the request only off the plan shape would miss the population the whole
+    envelope was bought for.
+    """
+    reply = json.dumps(
+        {
+            "rationale": "answered from what this turn carries",
+            "steps": [],
+            "no_capability_needed": True,
+            "read_request": {"labels": ["M1"]},
+        }
+    )
+
+    plan = await _emitted(reply)
+
+    assert plan.steps == ()
+    assert plan.read_request is not None
+    assert plan.read_request.asks[0].labels == ("M1",)
+
+
+async def test_a_dropped_request_is_logged_without_the_text_it_dropped() -> None:
+    """The honest cost of dropping, made visible (ADR-0226 §8, ADR-0004 §5).
+
+    A dropped emission records as a turn the trigger did not fire on, so a planner
+    writing malformed requests under-reports its own fire rate — and §8 makes that
+    figure the instrument this milestone is read by. The log line is what lets a
+    deployment tell an absent emission from an unreadable one. It carries a
+    ``reason`` from a closed set and **no text the model wrote**, because ADR-0004
+    §5 keeps content out of logs and a query is content.
+    """
+    query = "Salamander-Kestrel-9"
+    reply = json.dumps(
+        {
+            "rationale": "one step",
+            "steps": [{"intent": "find a place", "capability": "search_housing"}],
+            "read_request": {"query": query, "labels": ["M1", "M2", "M3"]},
+        }
+    )
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    with structlog.testing.capture_logs() as captured:
+        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert plan.read_request is not None, "the usable half of the emission survives"
+    assert plan.read_request.asks[0].query == query
+    drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+    assert [event["reason"] for event in drops] == ["label_count_out_of_bounds"]
+    assert query not in json.dumps(drops)
