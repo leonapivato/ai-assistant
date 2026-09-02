@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -105,6 +106,18 @@ def _unstamped(record: MemoryRecord) -> MemoryRecord:
     that would pass just as well if the store had returned the default.
     """
     return record.model_copy(update={"revision": 0})
+
+
+def _integers_in(message: str) -> set[int]:
+    """Every run of digits in ``message``, as the numbers it names.
+
+    The message arms below assert that a refusal *names* a revision, and a naive
+    ``str(revision) in message`` would pass on a coincidence of digits — a store
+    whose stamps are ``1`` and ``11`` names one whenever it names the other. Reading
+    the numbers out instead pins the fact rather than the substring, and leaves the
+    wording entirely free: ADR-0219 §3 states what a refusal must *say*, not how.
+    """
+    return {int(run) for run in re.findall(r"\d+", message)}
 
 
 def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
@@ -2598,6 +2611,93 @@ class MemoryStoreContract:
             )
 
         assert _unstamped_or_none(await store.get("t")) == replacement
+
+    async def test_a_stale_refusal_names_the_id_the_expectation_and_the_revision_found(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0219 §3 makes the refusal's *message* normative, not only its class.
+
+        "Its message names the record id, the expectation, and what the store found
+        — the stored revision, or that the id named nothing." Every other arm here
+        asserts the class, and a store raising ``MemoryStoreStaleError("stale")`` for
+        both limbs passes all of them while telling an operator nothing about which
+        write lost, what it expected, or what was there instead (#1835).
+
+        The three facts are asserted and the wording is not: the id by name, and the
+        two revisions read out of the message as *numbers* rather than as substrings,
+        so a store whose stamps happen to be ``1`` and ``11`` cannot pass on a
+        coincidence of digits. What this arm forbids is a message that omits the
+        revision the store found — which is the half that separates this limb from
+        the absent-row one below.
+        """
+        await store.add(_semantic("held-belief", "the first version"))
+        first = await store.get("held-belief")
+        assert first is not None
+        await store.add(_semantic("held-belief", "the second version"))
+        current = await store.get("held-belief")
+        assert current is not None
+        assert current.revision != first.revision
+
+        with pytest.raises(MemoryStoreStaleError) as refusal:
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("held-belief", "computed over the first version"),
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=first.revision,
+                    )
+                ]
+            )
+
+        message = str(refusal.value)
+        assert "held-belief" in message  # the record id
+        named = _integers_in(message)
+        assert first.revision in named  # the expectation the caller carried
+        assert current.revision in named  # and what the store found in its place
+
+    async def test_an_absent_rows_refusal_reports_absence_and_no_revision_found(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0219 §3's other limb, and the reason the message is normative at all.
+
+        The absent id "is the same failure and not a different one", raised under one
+        error — so the *message* is the only thing that tells an operator which of the
+        two happened, and §3 requires it to: "the stored revision, **or** that the id
+        named nothing".
+
+        Asserted without pinning a word of it. The same store, the same id and the
+        same expectation are driven through both limbs, and the two messages must
+        differ — which no implementation can satisfy by writing one sentence for
+        both — and the absent one must name no revision but the caller's, since there
+        is no stored row whose revision it could have found. Together with the arm
+        above, that is §3's three facts on each limb: an implementation reporting a
+        revision it did not find fails here, and one reporting none at all fails
+        there.
+        """
+        await store.add(_semantic("vanished", "the first version"))
+        first = await store.get("vanished")
+        assert first is not None
+        await store.add(_semantic("vanished", "the second version"))
+
+        stale_write = MemoryWrite(
+            record=_semantic("vanished", "computed over the first version"),
+            mode=MemoryWriteMode.IF_UNCHANGED,
+            expected_revision=first.revision,
+        )
+
+        # Limb one: the row is there, at a revision that is not the expectation.
+        with pytest.raises(MemoryStoreStaleError) as moved:
+            await store.write_atomic([stale_write])
+
+        # Limb two: the same id and the same expectation, with the row gone.
+        assert await store.delete("vanished") is True
+        with pytest.raises(MemoryStoreStaleError) as absent:
+            await store.write_atomic([stale_write])
+
+        gone = str(absent.value)
+        assert "vanished" in gone  # the record id
+        assert _integers_in(gone) == {first.revision}  # the expectation, and no other
+        assert gone != str(moved.value)  # the two limbs are told apart
 
     async def test_if_unchanged_at_a_different_kind_is_refused_and_not_as_stale(
         self, store: MemoryStore
