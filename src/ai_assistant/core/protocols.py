@@ -203,6 +203,9 @@ if TYPE_CHECKING:
         ToolResult,
         TraceChunk,
         TracePosition,
+        TranscriptArchiveSize,
+        TranscriptEntry,
+        TranscriptHit,
         TransportEndpoint,
         TurnOutcome,
         UtcInstant,
@@ -12112,5 +12115,363 @@ class OutboundTransport(Protocol):
         write to a far end that has gone. Releasing there is the holder's, under
         the rule that a channel is closed by whoever opened it: the division is by
         *where the failure lands*, and there is no case belonging to both.
+        """
+        ...
+
+
+@runtime_checkable
+class TranscriptArchiveWriter(Protocol):
+    """Capture's seam onto the transcript archive: append and destroy, no read.
+
+    The narrow half of ADR-0225 §10's two-way split, and the split is derived from
+    **which object performs which act** and from nothing else. ADR-0225 §2 puts the
+    archive write between the conversation index append and the episode write, both
+    of which are inside ``ConversationLifecycle.capture``, so capture is a genuine
+    second holder — and a single wide Protocol handed to it would give a turn-path
+    collaborator all four of §7's reads in the same breath §4 forbids them.
+
+    **Every site that writes to the archive declares its seam as one of these, as a
+    required constructor argument with no default** (§10). A composition that omits
+    it does not type-check, and the holder cannot call a read: ``self._archive.search``
+    on a value of this declared type fails ``mypy``, whatever object was passed. That
+    composes with §4's package fence — `orchestration` may not import
+    ``ai_assistant.archive`` at all, so it cannot name the concrete class, cannot
+    widen a value back to it, and sees exactly the members this Protocol has.
+
+    **This does not inherit** :class:`TranscriptArchive` **and is not inherited by
+    it**, which is the decision rather than a formatting choice (§10). The obvious
+    shape is a wide face that *is* the narrow one plus more, as
+    ``InvocationLedger(InvocationCompleter, Protocol)`` does; here it would hand
+    ``AssistantEngine`` an ``append``, and §1 reserves writing to capture. The two
+    faces therefore overlap in exactly the operations **both** holders genuinely
+    perform — the two destroys, each reached on a path of its own — and in nothing
+    else. Strike either destroy from either seam and a named act has no way to run.
+
+    **What a holder of this seam may not do is read an entry back** (§4). No
+    component of the turn path holds a seam carrying an archive read: the
+    conversation loop, the retrieval stage, the context assembler, the planner, the
+    composing stage, the observer, the reconciler, the router and every tool hold no
+    archive seam at all, and the one component that *writes* an entry cannot read one.
+
+    Every operation raises :class:`~ai_assistant.core.errors.TranscriptArchiveError`
+    on a backend failure, as ADR-0101 §4's ``MemoryStoreError`` clause does for its
+    own store. ``append`` raises rather than swallowing, and ADR-0225 §2 is what
+    decides that capture *degrades* rather than propagates — at the caller.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060); its input-observation clause (ADR-0065) is vacuous, every argument
+    being a frozen model or a string.
+    """
+
+    async def append(self, entry: TranscriptEntry) -> None:
+        """Write ``entry`` at its own address (ADR-0225 §1, §2, §3).
+
+        **The archive mints nothing.** ``entry.address`` is the id of the episode the
+        entry derives from, derived and returned by ``ConversationStore.append`` on
+        the turn (ADR-0074 §3); an implementation stores it and predicts none of it.
+
+        **An entry already present at that address is a fault, failed loudly** (§2).
+        It is the same class ADR-0074 §3 names for a colliding episode id — a broken
+        ordinal invariant, or a foreign producer in the reserved namespace — and no
+        implementation resolves it by overwriting, by merging or by retrying.
+
+        Args:
+            entry: The turn to record, whole. An implementation stores what it is
+                given and derives no field of it from anything else — capture judges
+                nothing (ADR-0074 §4), and the values reached it threaded per call
+                site.
+
+        Raises:
+            TranscriptArchiveError: If the archive cannot be written, an entry
+                already standing at ``entry.address`` included.
+        """
+        ...
+
+    async def discard(self, address: Identifier) -> bool:
+        """Destroy the entry at ``address``; report whether one was there (§5).
+
+        Resolved **inside the archive** against its own entries: it requires neither
+        the conversation index, the conversation record, nor the memory record to
+        still exist, and it enumerates no second store. That is what closes the hole
+        ADR-0074 §7's reclaim would otherwise open — a user whose conversation had
+        been reclaimed able to *read* their transcript and unable to *destroy* it.
+
+        **Idempotent, and it destroys what it matches or nothing**: an address with
+        no entry is a no-op. It reaches what the reads hide, too — an entry past a
+        finite ``transcript_archive_retention`` and not yet reclaimed still yields,
+        because a destruction is never refused on the ground that a read would not
+        have shown it (§6).
+
+        **The argument is required and positional, and no spelling of it means
+        "everything"** (ADR-0101 §9, inherited by §10).
+
+        Args:
+            address: The entry's address, taken as opaque.
+
+        Returns:
+            ``True`` if an entry was destroyed, ``False`` if none stood there.
+
+        Raises:
+            ValueError: If ``address`` is blank or whitespace-only. Never read as
+                "everything" — ADR-0101 §1's own rule for a blank label.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+    async def discard_conversation(self, conversation_id: Identifier) -> int:
+        """Destroy every entry grouped under ``conversation_id``; return how many (§5).
+
+        The head of ADR-0074 §8's step 2, performed **before any episode is
+        deleted**. A discard that raises aborts the deletion there, and no clause of
+        §8 changes: every episode the index names still resolves, so step 3's own
+        condition is unmet by §8's own terms, the tombstone survives, and the reclaim
+        re-runs the whole of step 2 — this discard included.
+
+        **Idempotent and no-op-safe**, which is what makes the re-run work: a
+        conversation with no entries returns zero, and zero on a second run is the
+        conforming answer rather than a failure. Like :meth:`discard` it resolves
+        inside the archive and needs no index, no record and no second store.
+
+        Args:
+            conversation_id: The conversation whose entries are destroyed, taken as
+                opaque. Required and positional; no spelling of it means "every
+                conversation" (ADR-0101 §9).
+
+        Returns:
+            How many entries were destroyed.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank or whitespace-only.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class TranscriptArchive(Protocol):
+    """The archive's wide seam: the user's four reads, two destroys and a size report.
+
+    ADR-0225 §10's second face, held by ``AssistantEngine`` alone and reached from
+    its user-facing and data-rights operations and from **no operation on the turn
+    path** (§4). The fence is cut at the *read* — one level in from ADR-0119 §7's
+    cut at the walk — because the engine has to keep the read: it is what serves the
+    user's own surface, and a turn-path component that could reach one does not
+    type-check.
+
+    **It carries no ``append``, and the omission is the capability** (§10). §1
+    reserves writing to capture, so a wide face inheriting
+    :class:`TranscriptArchiveWriter` would let a future engine helper write to the
+    archive without changing a Protocol, without crossing an import boundary, and
+    without anybody noticing. No holder of this seam may write to the archive; the
+    engine acquires no ``append``, no lane adds one here, and §4's package fence
+    stops a holder reaching the concrete class to get one.
+
+    **Nothing here is a walk.** The archive has no watermark, no cursor and no
+    resumable enumeration for a producer, and no observation, consolidation or
+    reconciliation pass reads it (§4). Nor is any of it a citation resolution: an
+    ``Evidence`` reference denotes a ``MemoryStore`` record still, no citation
+    resolution reads the archive, and that an expired episode's address is also a
+    live archive address is a property of §3's address reuse rather than a fallback.
+
+    **What every read is over is text, and every search over it is lexical** (§7).
+    There is no embedding of any kind, no vector column to populate, no relevance
+    model and no ranking by similarity — so "never embedded" is a property of the
+    shape rather than a rule a later lane must remember.
+
+    Every operation raises :class:`~ai_assistant.core.errors.TranscriptArchiveError`
+    on a backend failure. Cancelling any method here is governed by this module's
+    cancellation clause (ADR-0060); its input-observation clause (ADR-0065) is
+    vacuous, every argument being a string or an integer.
+    """
+
+    async def discard(self, address: Identifier) -> bool:
+        """Destroy the entry at ``address``; report whether one was there (§5).
+
+        The same act :meth:`TranscriptArchiveWriter.discard` names, on the seam of
+        the second holder that performs it: the engine reaches it from the
+        record-scoped ``forget`` this cascade rides on, where capture reaches it from
+        the compensation in its own verification. The overlap is derived and not
+        chosen — strike it here and the record-scoped cascade has no way to run.
+
+        Args:
+            address: The entry's address, taken as opaque.
+
+        Returns:
+            ``True`` if an entry was destroyed, ``False`` if none stood there.
+
+        Raises:
+            ValueError: If ``address`` is blank or whitespace-only.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+    async def discard_conversation(self, conversation_id: Identifier) -> int:
+        """Destroy every entry grouped under ``conversation_id``; return how many (§5).
+
+        The user's conversation-scoped destroy, at the unit they think in. A surface
+        offering it obeys ADR-0073 §5's show-then-confirm and states what will be
+        destroyed before consent is taken, exactly as ``forget-conversation`` does.
+
+        Args:
+            conversation_id: The conversation whose entries are destroyed, taken as
+                opaque. Required and positional; no spelling of it means "every
+                conversation" (ADR-0101 §9).
+
+        Returns:
+            How many entries were destroyed.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank or whitespace-only.
+            TranscriptArchiveError: If the archive cannot be written.
+        """
+        ...
+
+    async def search(
+        self, query: NonBlankEncodableText, *, limit: int = 20, offset: int = 0
+    ) -> list[TranscriptHit]:
+        """Find entries whose text contains ``query``, newest first (§7).
+
+        **The predicate is a case-insensitive substring match**, evaluated separately
+        over an entry's ``asked`` and over its ``replied`` and never across the two.
+        Both sides are normalised to Unicode NFC and then case-folded under **full**
+        Unicode case folding — ``str.casefold``'s semantics, which fold ``ß`` to
+        ``ss``, and not simple case folding, which does not — and an entry matches
+        where the folded, normalised query occurs as a contiguous run in either
+        folded, normalised field.
+
+        **Nothing else is applied**: no stemming, no lemmatisation, no stop-word
+        removal, no accent stripping beyond what NFC performs, no fuzzy or
+        edit-distance matching, and no minimum query length. Whether the search is
+        served by a full-text index or by a scan is the implementation's; the
+        predicate is not, and it is not relaxed to fit an index that cannot answer it.
+
+        **``query`` is never normalised beyond that.** It is typed
+        :class:`~ai_assistant.core.types.NonBlankEncodableText` rather than
+        ``Identifier`` because ``Identifier`` *strips* the value it accepts, which
+        would rewrite the user's search text before the predicate saw it and would
+        make ``" hello"`` and ``"hello"`` one query. No implementation trims,
+        collapses or otherwise normalises a query.
+
+        Args:
+            query: What to look for, byte for byte as the user typed it.
+            limit: Maximum hits to return.
+            offset: How many hits to skip, in the total order below.
+
+        Returns:
+            Up to ``limit`` hits, newest first: by the instant the turn occurred,
+            descending, with the address ascending as the tie-break, so the order is
+            total and deterministic. Each hit carries a bounded excerpt and never an
+            entry's text beyond that bound; reading an entry whole is a second,
+            addressed act.
+
+        Raises:
+            ValueError: If ``query`` is blank or whitespace-only, if ``limit`` is
+                zero or below, or if ``offset`` is negative — ADR-0114 §6's refusal
+                and for its reason.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def conversation(
+        self, conversation_id: Identifier, *, limit: int = 50, offset: int = 0
+    ) -> list[TranscriptEntry]:
+        """One conversation's entries, in the order they were said (§7).
+
+        **Ordinal order, ascending**, because a transcript's order is the order it was
+        said in — the one read whose order is not the newest-first total order the
+        other three use.
+
+        It resolves inside the archive, so a conversation whose index and record
+        ADR-0074 §7's reclaim has already dropped still yields its transcript. That
+        is what "expiry evicts" means, and it is the steady state rather than an
+        anomaly.
+
+        Args:
+            conversation_id: The conversation to read, taken as opaque.
+            limit: Maximum entries to return.
+            offset: How many entries to skip, in ordinal order.
+
+        Returns:
+            Up to ``limit`` entries, whole — elided, truncated and summarised in no
+            respect.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank or whitespace-only, if
+                ``limit`` is zero or below, or if ``offset`` is negative.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def entry(self, address: Identifier) -> TranscriptEntry | None:
+        """The entry at ``address``, whole, or ``None`` (§7).
+
+        The addressed read names one entry and is bounded by that: it takes no limit,
+        and there is no limit on it to refuse. ``None`` where the address names
+        nothing — because nothing was ever written there, because the entry was
+        destroyed, or because a finite retention hides it.
+
+        Args:
+            address: The entry's address, taken as opaque.
+
+        Returns:
+            The entry, whole, or ``None``.
+
+        Raises:
+            ValueError: If ``address`` is blank or whitespace-only.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def entries(self, *, limit: int = 50, offset: int = 0) -> list[TranscriptEntry]:
+        """Every entry the archive holds, newest first (§7).
+
+        **This is the archive's export**, and that is not a shortcut: for a store
+        holding text and nothing else, a paged, ordered, unfiltered read of every
+        entry *is* a portable snapshot of everything it holds, and a second
+        serialisation would be a second thing to keep correct for no information the
+        first does not carry. It satisfies ADR-0004 §6's export right for this store,
+        which makes the archive the first Tier-1 store whose export exists on day one
+        rather than deferred.
+
+        Args:
+            limit: Maximum entries to return.
+            offset: How many entries to skip, in the total order below.
+
+        Returns:
+            Up to ``limit`` entries, whole, newest first: by ``occurred_at``
+            descending with ``address`` ascending as the tie-break.
+
+        Raises:
+            ValueError: If ``limit`` is zero or below, or ``offset`` is negative.
+            TranscriptArchiveError: If the archive cannot be read.
+        """
+        ...
+
+    async def size(self) -> TranscriptArchiveSize:
+        """How many entries the archive holds and what they cost on disk (§6).
+
+        **A surface operation of its own, and not metadata hung on the reads.** A
+        store-wide figure copied onto every row would be recomputed per row and would
+        still leave a surface free to drop it, so it is neither a field on
+        :class:`~ai_assistant.core.types.TranscriptHit` nor one on
+        :class:`~ai_assistant.core.types.TranscriptEntry`. Every surface rendering
+        any archive read renders what this returns beside that read, unasked.
+
+        **It reads no entry.** The two figures are a count and a byte total; nothing
+        here decodes stored text, and no lane makes this operation a way to obtain
+        one.
+
+        Why it exists at all: ADR-0225 §6 sets no size or count cap, inheriting
+        ADR-0007 §5's deferral whole — and #1843's reading of ADR-0162 §5 is that a
+        trigger with no instrument never fires. So the cap stays deferred and the
+        number that would fire it is on the screen every time the user looks.
+
+        Returns:
+            The count the reads would return, and the bytes the archive's files
+            occupy on disk. The two are allowed to disagree, and the gap is the
+            point (ADR-0225 §6).
+
+        Raises:
+            TranscriptArchiveError: If the archive cannot be read.
         """
         ...

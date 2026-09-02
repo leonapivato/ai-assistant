@@ -835,6 +835,33 @@ class DeferralIdConflictError(DeferralStoreError):
     """
 
 
+class TranscriptArchiveError(AssistantError):
+    """Reading from or writing to the transcript archive failed (ADR-0225 §10).
+
+    Its own class in the :class:`AssistantError` hierarchy, mirroring
+    :class:`MemoryStoreError` and :class:`TraceStoreError`, because the archive is a
+    store of its own — a database of its own under ``Settings.data_dir``, in a
+    package no subsystem may import (ADR-0225 §10, §4).
+
+    **Every operation raises this on a backend failure**, ``append`` included: §10
+    is explicit that ``append`` "raises on a store failure and never swallows one",
+    and it is ADR-0225 §2 that decides capture *degrades* rather than propagates —
+    at the caller, where the answer the user already has is what would be thrown
+    away. That is the opposite arrangement from ``TraceSink.emit``, which swallows,
+    and the difference is deliberate: an unrecorded trace is a lost measurement,
+    while an unrecorded transcript is the exchange itself.
+
+    A malformed *argument* is not this error. A non-positive ``limit``, a negative
+    ``offset`` and a blank ``query``, ``address`` or ``conversation_id`` are each
+    ``ValueError``, mirroring ADR-0114 §6a and ADR-0101 §1's rule for a blank label.
+
+    **A message names an address and never an entry's text** (ADR-0225 §4, ADR-0004
+    §5): no transcript text is written to any log, trace or audit trail, and a
+    failure handling an entry is diagnosed by which entry it was, not by what it
+    said.
+    """
+
+
 class TraceStoreError(AssistantError):
     """Reading from or writing to the evaluation-trace store failed (ADR-0119 §13b).
 

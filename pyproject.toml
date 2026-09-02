@@ -579,6 +579,11 @@ forbidden_modules = [
     # fourth time: `core` holds `Secrets` and `SecretStore`, so the inverting edge
     # is one an implementation could reach for.
     "ai_assistant.secret_store",
+    # ADR-0225's transcript archive, a leaf holding the two archive Protocols'
+    # one implementation. Same reason a fifth time: `core` holds the contracts, so
+    # the edge that would invert the dependency is one an implementation could
+    # plausibly reach for.
+    "ai_assistant.archive",
 ]
 
 [[tool.importlinter.contracts]]
@@ -657,6 +662,11 @@ source_modules = [
     # package that exists and is absent from this list is one golden rule 4 is
     # asserted about and not checked on.
     "ai_assistant.secret_store",
+    # The transcript archive (ADR-0225 §10), listed for the reason every other
+    # package here is: a package that exists and is absent from this list is one
+    # golden rule 4 is asserted about and not checked on. It holds text and asks a
+    # model nothing.
+    "ai_assistant.archive",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -717,6 +727,9 @@ source_modules = [
     # it, and ADR-0125 §11 is explicit that the fake "is test-only, and no
     # composition root wires it".
     "ai_assistant.secret_store",
+    # And so is the transcript archive (ADR-0225 §10): the two canonical archive
+    # fakes stand in *for* it and must not reach it.
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
@@ -794,6 +807,10 @@ source_modules = [
     # §5 rules this seam is "not the hub's enrolment-verifier store", so `service`
     # holds neither face and this package has nothing to reach back up for.
     "ai_assistant.secret_store",
+    # `archive` is ADR-0225's, and the direction matters a fifth time: the hub
+    # builds an archive through the composition root and the archive reaches
+    # nothing back up at it.
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.service"]
 
@@ -840,6 +857,10 @@ forbidden_modules = [
     # on `core` and nothing else" true of the half of the hop ADR-0124 §1 puts
     # here.
     "ai_assistant.secret_store",
+    # ADR-0225's archive: the wire carries no archive type at all in this change,
+    # and when lane C registers the engine's archive operations it carries the
+    # `core` models rather than the concrete, exactly as it does for every store.
+    "ai_assistant.archive",
 ]
 
 [[tool.importlinter.contracts]]
@@ -876,6 +897,8 @@ forbidden_modules = [
     # One leaf may not reach another: a reader that wanted a credential would be
     # `tools/`'s case (ADR-0125 §8), reached by injection at the tool.
     "ai_assistant.secret_store",
+    # One leaf may not reach another, a second time (ADR-0225 §10).
+    "ai_assistant.archive",
 ]
 
 [[tool.importlinter.contracts]]
@@ -945,6 +968,9 @@ source_modules = [
     "ai_assistant.evaluation",
     # And `secret_store`, for the same reason: another leaf (ADR-0125 §8).
     "ai_assistant.secret_store",
+    # And `archive`, for the reason its own contract below states: it is a leaf
+    # that may import `core` and nothing else (ADR-0225 §10).
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.readers"]
 
@@ -1008,6 +1034,8 @@ forbidden_modules = [
     # One leaf may not reach another, and ADR-0125 §8 lists `evaluation` among the
     # packages that hold neither face of the keyring seam.
     "ai_assistant.secret_store",
+    # One leaf may not reach another, a second time (ADR-0225 §10).
+    "ai_assistant.archive",
 ]
 
 [[tool.importlinter.contracts]]
@@ -1064,6 +1092,8 @@ source_modules = [
     "ai_assistant.readers",
     # Another leaf, added by leg 9 (ADR-0125 §8).
     "ai_assistant.secret_store",
+    # Another leaf, added by ADR-0225 §10.
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.evaluation"]
 
@@ -1098,6 +1128,7 @@ forbidden_modules = [
     "ai_assistant.wire",
     "ai_assistant.readers",
     "ai_assistant.evaluation",
+    "ai_assistant.archive",
 ]
 
 [[tool.importlinter.contracts]]
@@ -1163,8 +1194,110 @@ source_modules = [
     "ai_assistant.service",
     "ai_assistant.readers",
     "ai_assistant.evaluation",
+    # ADR-0225 §4's never-list forbids egress from the archive outright, so it
+    # holds neither face of this seam and has nothing to reach for.
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.secret_store"]
+
+[[tool.importlinter.contracts]]
+# ADR-0225 §10: the transcript archive is "a new subsystem package,
+# `ai_assistant.archive`, which depends on `ai_assistant.core` and on nothing else
+# in `ai_assistant`". This is the first half — the leaf half — in the shape
+# `readers`, `evaluation` and `secret_store` established and for the reason all
+# three recorded: `core` holds the Protocols, so the edge that would invert the
+# dependency is one an implementation could plausibly reach for, and a package
+# outside every subsystem is what makes the inversion impossible rather than
+# discouraged.
+#
+# **The package and its two contracts land together**, which is the discipline the
+# three earlier leaf lanes recorded: every package is enumerated by name in the
+# contracts above, so a package that exists without its own is the silent escape
+# those comments warn about — it inherits nothing and is checked by nothing.
+name = "the transcript archive depends on core and nothing else"
+type = "forbidden"
+source_modules = ["ai_assistant.archive"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+    "ai_assistant.secret_store",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0225 §4's package fence, and it is the first of the three independent
+# properties that section enforces its never-list with: "The archive is its own
+# subsystem package, `ai_assistant.archive` (§10). An `import-linter` contract
+# forbids every other package from importing it, `ai_assistant.app` alone excepted
+# as the composition root, in the shape ADR-0119 §7 already uses for
+# `ai_assistant.evaluation`. A violation fails the gate."
+#
+# **What it buys is what ADR-0119 §7's own analogue buys, one level in.** There the
+# pipeline was forbidden the *walk* outright. Here the engine has to keep the
+# *read* — it is what serves the user's own surface — so §4 cuts the fence at the
+# read and splits the seam in `core` to do it: a component that holds a
+# `TranscriptArchiveWriter` cannot call a read and does not type-check if it tries.
+# This contract is the other half, and it is what makes that hold for a component
+# that would go and get its own: a package no subsystem may import cannot be
+# constructed inside one.
+#
+# It also closes an egress question by construction (ADR-0225 §4's last clause): an
+# archive `models/` cannot import is an archive `models/` cannot send, so ADR-0004
+# §2's egress rule needs no new exception and no designated seam is created.
+#
+# **`ai_assistant.app` is deliberately absent, and its absence is the clause's
+# meaning rather than a gap** — the carve-out the `readers`, `evaluation` and
+# `secret_store` contracts each state at length. The composition root is not a
+# subsystem; it is the one place golden rule 1 puts the injection that lets a
+# collaborator receive an implementation it may not name. Listing `app` here would
+# make the archive unreachable in production for good.
+#
+# **Direct imports only**, which is what makes that carve-out work: `service.hub`
+# imports `app` to call `build_engine`, so the chain `service -> app -> archive`
+# exists the moment the composition root opens the archive, and banning it
+# indirectly would reach the outcome the paragraph above says listing `app` would
+# cause. The ban this contract means is the *direct* one.
+allow_indirect_imports = "true"
+name = "nothing imports the transcript archive"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    # The subsystem the fence is *about*. ADR-0225 §4's turn-path fence keeps every
+    # stage off the read through the seam it is handed; this keeps `orchestration`
+    # from naming the concrete class, so it cannot widen a value back to it and sees
+    # exactly the members its declared Protocol has.
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    # The two canonical archive fakes stand in *for* the durable store and must
+    # never reach one.
+    "ai_assistant.testing",
+    "ai_assistant.wire",
+    # `service` builds an engine through the composition root and names no archive
+    # type itself (ADR-0083 §8).
+    "ai_assistant.service",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+    "ai_assistant.secret_store",
+]
+forbidden_modules = ["ai_assistant.archive"]
 
 [[tool.importlinter.contracts]]
 # ADR-0125 §8's marked clause, in the form it asks for: "The lane that lands the
@@ -1209,6 +1342,7 @@ source_modules = [
     "ai_assistant.readers",
     "ai_assistant.evaluation",
     "ai_assistant.testing",
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["keyring"]
 
@@ -1304,6 +1438,8 @@ source_modules = [
     # The canonical fakes stand in for the stores this census reads; none of them
     # has a geometry, and none may reach one.
     "ai_assistant.testing",
+    # ADR-0225's archive holds no geometry either, and is a leaf besides.
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["ai_assistant.memory.health"]
 
@@ -1353,6 +1489,7 @@ source_modules = [
     # The canonical fakes stand in for the real implementations at this seam and
     # have no more business building an evaluator than a subsystem does.
     "ai_assistant.testing",
+    "ai_assistant.archive",
 ]
 forbidden_modules = ["jsonschema"]
 
