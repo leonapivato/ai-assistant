@@ -1,6 +1,6 @@
 # 210. On a channel of unbounded audience the withholding fires on what the turn was retrieved for, and the conversation's own recent turns fire nothing
 
-- Status: Accepted, §1 and §8 amended by ADR-0217, partially superseded by ADR-0226 (§1's evaluated-set clause alone — the set gains the records a planner-named read request added to the supply after planning; §1's subtraction clause, its exclusion of the conversation's own recent turns, its bounded-channel clause and every other section stand)
+- Status: Accepted, §1 and §8 amended by ADR-0217
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -62,56 +62,6 @@
   name of the recorded value the second term reads, which is why this is an amendment
   under ADR-0070 §1 rather than a supersession. §8's prose-edit obligation is discharged
   again by ADR-0217 §9, which owes the same two edits where the field now lives.
-
-- **Partially superseded: 2026-09-02 by ADR-0226 — §1's evaluated-set clause, and
-  no other clause of §1.** ADR-0226 admits a **read request** the planner emits
-  beside its plan and the loop services after planning and before composing, over a
-  closed enumeration of two kinds: a sighted query run through `assemble_by_band`,
-  and a citation hop that resolves a label to a record the loop selected and follows
-  that record's own `Provenance.evidence`. Both add records to the turn's supply
-  after the point this ADR's evaluation was written over.
-
-  **Replaced, in one scope.** §1's evaluated-set clause names the members of the
-  supply *"that a **relevance read taken with this turn's own goal statement
-  returned**"*, together with the turn's context facets. **Neither of ADR-0226's
-  kinds is inside that set as written**: a sighted query is a relevance read taken
-  with the *planner's* query rather than with the goal statement, and a citation hop
-  is a keyed load and not a relevance read at all. A reader holding only this ADR
-  would therefore exclude both from the evaluation, so ADR-0070 §1's test lands on
-  partial supersession. ADR-0226 §7 puts them in.
-
-  **The reason this clause gives points the same way its letter does not, which is
-  why the extension is the right move and not merely the safe one.** §1 excludes the
-  conversation's own recent turns because *"A boolean whose meaning is 'something
-  bearing on this turn was held back' cannot be set by a group whose membership does
-  not depend on the turn"*, and includes the two relevance groups because *"A
-  withheld record in either was surfaced **for this question**."* An envelope's
-  records are the most turn-dependent members of the whole supply: they exist
-  because the planner read this turn's question, judged the supply short, and named
-  what it wanted. Excluding them would under-fire the deflection on the spoken
-  channel, on the turns most likely to be about the withheld class — the failure
-  §1's second clause was written to prevent one level down — and §1's own stated
-  posture for a case it does not classify is that *"the direction is fail-closed"*.
-
-  **Not replaced.** §1's subtraction clause — the subtraction runs over the **whole**
-  supply and no stage gains a record it did not have — stands, and ADR-0226 §7 binds
-  its servicer to re-apply *the same* narrowing over the union rather than a second
-  decision procedure, which is ADR-0203 §1's second clause honoured rather than
-  moved. §1's exclusion of ADR-0074 §5's first group stands untouched: a record held
-  only because it stands in the conversation's recent turns still fires nothing. §1's
-  bounded-channel clause stands: on an operation whose channel audience is bounded
-  the evaluation is over the whole supply, ADR-0226's fourth group included, exactly
-  as before. §§2 through 8 are untouched.
-
-  **The `Status` line has no leading token**, so ADR-0082 §2 leaves the existing
-  amendment qualifier in place and this pair accumulates beside it in the shape §2
-  names as permitted; ADR-0217's own record stays in the `Amended` note below, in
-  full. §1's third clause is read with the field where ADR-0217 moved it — ADR-0226
-  neither restores the old name nor moves it again. The scope on the line names
-  clauses and carries no `ADR-NNNN` token, so ADR-0070 §4's extraction invariant
-  holds. Appended note per ADR-0070 §1; no text below is rewritten. This note lands
-  in the same change as ADR-0226 itself, which is the existence condition ADR-0082
-  §7 states. Refs #1844, #1908.
 
 ## Context
 
