@@ -289,6 +289,20 @@ def test_an_unopenable_path_is_the_seams_own_error(tmp_path: Path) -> None:
         SqliteDeferralStore(path=occupied, now=_fixed_now)
 
 
+def test_a_path_the_driver_refuses_outright_is_still_a_deferral_store_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching only
+    those lets a bare builtin escape the ``DeferralStoreError`` boundary this
+    constructor documents — and this one already raises ``ValueError`` for a
+    tuning figure it refuses, so an untranslated one from the path would read as
+    that instead (#1933). No filesystem is touched: the driver refuses the
+    argument before it opens anything.
+    """
+    with pytest.raises(DeferralStoreError, match="failed to open"):
+        SqliteDeferralStore(path="deferrals\x00.db", now=_fixed_now)
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [

@@ -874,6 +874,20 @@ def test_opening_over_an_unusable_path_is_reported_as_this_stores_error(
         SqliteNotificationStore(traces_sink=FakeTraceSink(), path=tmp_path)
 
 
+def test_a_path_the_driver_refuses_outright_is_still_this_stores_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching only
+    those lets a bare builtin escape the ``NotificationStoreError`` boundary this
+    constructor documents — and this one already raises ``ValueError`` for a
+    tuning figure it refuses, so an untranslated one from the path would read as
+    that instead (#1933). No filesystem is touched: the driver refuses the
+    argument before it opens anything.
+    """
+    with pytest.raises(NotificationStoreError, match="failed to open notification store"):
+        SqliteNotificationStore(traces_sink=FakeTraceSink(), path="notifications\x00.db")
+
+
 def test_a_reopen_over_a_foreign_schema_is_reported_as_this_stores_error(
     tmp_path: Path,
 ) -> None:

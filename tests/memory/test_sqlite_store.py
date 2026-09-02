@@ -879,6 +879,24 @@ async def test_connect_failure_is_wrapped(tmp_path: Path) -> None:
         )
 
 
+async def test_a_path_the_driver_refuses_outright_is_still_a_memory_store_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching only
+    those lets a bare builtin escape the ``MemoryStoreError`` boundary this
+    constructor documents — a caller with one handler for "the store would not
+    open" meets a second exception type it was never told about (#1933). No
+    filesystem is touched: the driver refuses the argument before it opens
+    anything.
+    """
+    with pytest.raises(MemoryStoreError, match="failed to open memory store"):
+        SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
+            path="memory\x00.db",
+            embedder=HashingEmbedder(dimensions=8),
+        )
+
+
 async def test_setup_failure_is_wrapped_and_closes_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

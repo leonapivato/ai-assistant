@@ -385,7 +385,14 @@ class SqliteNotificationOutbox:
             # every read-decide-write step here open to exactly the interleaving
             # ADR-0131 §3's linearizability rule forbids.
             conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # ``ValueError`` is named because a path carrying an embedded NUL
+            # raises it out of the driver rather than a ``sqlite3.Error``, and a
+            # bad path is this layer's fault to report rather than a raw builtin
+            # escaping past the ``NotificationOutboxError`` boundary this
+            # constructor documents. Doubly so here: the constructor already
+            # documents ``ValueError`` for a bound it refuses, so an untranslated
+            # one from the path reads as that instead (#1933).
             msg = f"failed to open notification outbox at {self._path!r}: {exc}"
             raise NotificationOutboxError(msg) from exc
         try:

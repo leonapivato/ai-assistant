@@ -400,8 +400,13 @@ class SqliteMemoryStore:
             # exactly the cross-process interleaving `BEGIN IMMEDIATE` forbids.
             # The two sibling stores in this package connect the same way.
             conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             # e.g. the parent directory does not exist — no connection to close.
+            # ``ValueError`` is named because a path carrying an embedded NUL
+            # raises it out of the driver rather than a ``sqlite3.Error``, and a
+            # bad path is this layer's fault to report rather than a raw builtin
+            # escaping past the ``MemoryStoreError`` boundary this constructor
+            # documents (#1933; the grant store's own clause names it too).
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         try:

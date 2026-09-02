@@ -261,7 +261,11 @@ def _connect(path: Path) -> sqlite3.Connection:
     """
     try:
         conn = sqlite3.connect(str(path), isolation_level=None)
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        # ``ValueError`` is named because a path carrying an embedded NUL raises it
+        # out of the driver rather than a ``sqlite3.Error``, and a bad path is this
+        # layer's fault to report rather than a raw builtin escaping past the
+        # ``MemoryStoreError`` boundary this function documents (#1933).
         msg = f"failed to open {str(path)!r}: {exc}"
         raise MemoryStoreError(msg) from exc
     try:
