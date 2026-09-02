@@ -1318,6 +1318,19 @@ async def test_opening_an_unusable_path_is_reported_as_an_audit_error(tmp_path: 
         SqliteAuditTrail(path=tmp_path / "no_such_dir" / "audit.db")
 
 
+async def test_a_path_the_driver_refuses_outright_is_still_an_audit_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching only
+    those lets a bare builtin escape the ``AuditError`` boundary this constructor
+    documents — a caller with one handler for "the trail would not open" meets a
+    second exception type it was never told about (#238). No filesystem is
+    touched: the driver refuses the argument before it opens anything.
+    """
+    with pytest.raises(AuditError, match="failed to open"):
+        SqliteAuditTrail(path="audit\x00.db")
+
+
 async def test_a_limit_wider_than_sqlite_can_bind_returns_everything(
     ephemeral: SqliteAuditTrail,
 ) -> None:

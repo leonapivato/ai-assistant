@@ -650,8 +650,13 @@ class SqliteAuditTrail:
         """Connect and create the schema, never leaking a half-open connection."""
         try:
             conn = sqlite3.connect(self._path, check_same_thread=False)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             # e.g. the parent directory does not exist — no connection to close.
+            # ``ValueError`` is named because a path carrying an embedded NUL
+            # raises it out of the driver rather than a ``sqlite3.Error``, and a
+            # bad path is this layer's fault to report rather than a raw builtin
+            # escaping past the ``AuditError`` boundary this constructor documents
+            # (#238; the same clause on the grant store already names it).
             msg = f"failed to open the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         try:
