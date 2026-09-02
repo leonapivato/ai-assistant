@@ -553,6 +553,31 @@ it is about, and there is no field on an entry for a match to be made against.
 > somebody has rather than one nobody ever produces. The seam that supplies it is
 > `TranscriptArchive.size` (§10), and it reads no entry.
 
+> **Normative.** That obligation is discharged by a **surface operation of its own**
+> and not by metadata hung on the reads: the engine exposes the size report beside
+> the four reads and the two destroys (§14, lane C), and every surface that renders
+> any archive read renders the figure it returns beside that read, unasked. It is not
+> a field on `TranscriptHit` or `TranscriptEntry` — a store-wide figure copied onto
+> every row would be recomputed per row and would still leave a surface free to drop
+> it. A lane that ships the reads without the report has not shipped this section.
+
+> **Normative.** `stored_bytes` counts **every byte the archive's own files occupy on
+> disk under `Settings.data_dir`**, as they stand at the moment of the call: the
+> database, every index it keeps over the entries, and any journal or write-ahead log
+> it holds beside them. It is **not** a sum of entry lengths, not a count of logical
+> row bytes, and not the main database file alone. The figure answers *how much
+> storage this archive is costing*, and one that omits the part which grows fastest is
+> the dead trigger this section is written to avoid: §7 lets a lane serve the search
+> from a full-text index, and an index over this text costs about as much as the text
+> again (the arithmetic below), so an accounting that excluded it would understate the
+> archive by roughly half, and would understate an un-checkpointed log without bound.
+
+> **Normative.** An implementation holding no files of its own — the canonical fake —
+> reports by the same standard rather than reporting zero: the bytes its entries
+> occupy in whatever it holds them in. A figure of zero over a populated archive is
+> not a conforming answer for any implementation, and a fake that gave one would make
+> the conformance case vacuous.
+
 **The `None` default is the deliberate opposite of ADR-0074 §7's, and the reason it
 does not contradict §7 is that §7's argument is about a different store.** §7
 requires a finite default for `episode_retention` because an unbounded one *"would
@@ -721,8 +746,8 @@ deferred — the gap ADR-0101 names for the memory store is not inherited here.
 > believes or retrieves.
 
 > **Normative.** The CLI carries the surface first. A gateway page is permitted and
-> is not required by this decision; where one ships it offers the same four reads
-> and the same two destroys and adds no fifth.
+> is not required by this decision; where one ships it offers the same four reads,
+> the same two destroys and the same size report, and adds no operation of its own.
 
 **This section exists because ADR-0199 §3 requires it to.** That clause is explicit:
 *"An ADR admitting a new source, a new facet, a new notification producer, or any
@@ -829,12 +854,25 @@ mechanism is decided, and this ADR decides none of it.
 ### 10. The contract surface owed, and why the archive is its own subsystem
 
 > **Normative.** `core/protocols.py` gains **two** Protocols, and neither inherits
-> the other. `TranscriptArchiveWriter` carries §2's append and the discard of one
-> entry by address that §2's compensation performs, and carries no read.
-> `TranscriptArchive` carries that same address-scoped discard, §5's
-> conversation-scoped destroy, §7's four reads and §6's size report — and **no
-> append**. One concrete class satisfies both structurally, and the composition root
-> hands each holder exactly the seam it is entitled to (§4).
+> the other. The split is derived from **which object performs which act**, and from
+> nothing else. `TranscriptArchiveWriter` carries §2's append, the address-scoped
+> discard §2's compensation performs, and the conversation-scoped destroy §5 places
+> at the head of ADR-0074 §8's step 2 — and carries **no read**.
+> `TranscriptArchive` carries those same two destroys, §7's four reads and §6's size
+> report — and **no append**. One concrete class satisfies both structurally, and the
+> composition root hands each holder exactly the seam it is entitled to (§4).
+
+> **Normative.** The two holders are named, because the decomposition is theirs and a
+> later lane must not re-derive it from an analogy. **`ConversationLifecycle`** holds
+> the narrow seam and performs three acts on it: the append in `capture` (§2), the
+> address-scoped discard in the verification that compensates that capture (§2), and
+> the conversation-scoped destroy that heads §8's step 2 — which is `_finish_deletion`
+> in this tree, reached from `delete` and from `sweep_deletions` alike, and reached by
+> `AssistantEngine.forget_conversation` only through it. **`AssistantEngine`** holds
+> the wide seam and performs the rest: the address-scoped discard its record-scoped
+> `forget` cascades (§5), the archive's own two destroys and four reads on the command
+> §8 gives them, and §6's size report. A later lane adds an act to the seam of the
+> object that performs it, and to no other.
 
 > **Normative.** Every site that writes to the archive **declares** its seam as a
 > `TranscriptArchiveWriter`, as a required constructor argument with no default. A
@@ -893,16 +931,17 @@ class TranscriptArchiveSize(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     entries: int                            # §6: what the surface reports, unasked
-    stored_bytes: int
+    stored_bytes: int                       # §6: every byte the archive's files occupy on disk
 
 
 # core/protocols.py — narrow, then wide
 
-class TranscriptArchiveWriter(Protocol):
+class TranscriptArchiveWriter(Protocol):    # ConversationLifecycle's seam: no read
     async def append(self, entry: TranscriptEntry) -> None: ...
     async def discard(self, address: Identifier) -> bool: ...
+    async def discard_conversation(self, conversation_id: Identifier) -> int: ...
 
-class TranscriptArchive(Protocol):          # NOT a subclass of the writer: no append
+class TranscriptArchive(Protocol):          # AssistantEngine's seam; NOT a subclass: no append
     async def discard(self, address: Identifier) -> bool: ...
     async def discard_conversation(self, conversation_id: Identifier) -> int: ...
     async def search(                       # query is NEVER normalised: §7's predicate
@@ -988,8 +1027,10 @@ grants: a wide seam inheriting the writer would hand `AssistantEngine` an `appen
 and §1 reserves writing to capture. A future engine helper could then write to the
 archive without changing a Protocol, without crossing an import boundary, and
 without anybody noticing — the capability split defeated by the convenience that
-looked like tidiness. So the two faces overlap in the one operation both holders
-genuinely perform, the address-scoped discard, and in nothing else.
+looked like tidiness. So the two faces overlap in exactly the operations **both**
+holders genuinely perform — the two destroys, each of which each holder reaches on a
+path of its own — and in nothing else. The overlap is derived and not chosen: strike
+either destroy from either seam and a named act above has no way to run.
 
 **What each seam buys, stated without over-claiming.** The holder cannot call what
 its declared type does not carry: `ConversationLifecycle` declares a
@@ -1004,12 +1045,18 @@ root in its own words: one concrete satisfies every seam, and *"the composition 
 hands each collaborator exactly the seam it is entitled to"*. That ADR did not claim
 a type check enforced the handing, and neither does this one.
 
-**Two rather than three, and this is where the count stops.** ADR-0119 needed a
-third because its purge had a third holder; here the conversation-scoped destroy and
-every read are `AssistantEngine`'s alike, so a `TranscriptArchiveRetention` beside
-these two would be surface with no distinct consumer — which is what ADR-0073 §7 and
-ADR-0074 §10 each declined for a count and a title. A third becomes worth adding
-when a third holder exists, and adding one then is additive.
+**Two rather than three, and the count is read off the holders rather than off
+ADR-0119.** That ADR needed three faces because three different objects performed its
+three capabilities; the count is a consequence of its holders, not a shape to be
+copied. Counting this tree's holders gives two, and the enumeration above is
+exhaustive: every act this ADR names is performed by `ConversationLifecycle` or by
+`AssistantEngine`, and no other object touches the archive at all. The one capability
+that might have wanted a third face — §6's retention eviction — has no collaborator
+performing it: the archive evicts its own entries against its own setting, from
+inside, so there is nothing to hand anybody and a `TranscriptArchiveRetention` would
+be surface with no consumer, which is what ADR-0073 §7 and ADR-0074 §10 each declined
+for a count and a title. A third face becomes worth adding when a third holder
+exists, and adding one then is additive.
 
 **Its own package rather than a corner of `memory/`, and the fence is the reason.**
 An `import-linter` contract can forbid importing a package; it cannot forbid
@@ -1162,20 +1209,37 @@ address, and it is discharged.
     text carrying it; and a query spanning the boundary between `asked` and
     `replied`, which matches nothing. Every case runs against every conforming
     implementation, index-backed and scan-backed alike.
-14. **The destruction failure paths, both scopes.** A record-scoped forget whose
-    archive discard raises leaves the memory record present and reports the
-    failure; a second forget at the same id destroys the entry although the store
-    now holds no live record for it. A conversation-scoped delete whose archive
-    discard raises deletes no episode, does not drop the index or the record, and is
-    finished by the reclaim run again. And a conversation reclaimed on the horizon
-    — index and record gone, transcript kept — still yields to the archive's own
-    conversation-scoped destroy.
+14. **The destruction failure paths, both scopes and both orderings.** A
+    record-scoped forget whose archive discard raises leaves the memory record
+    present and reports the failure; a second forget at the same id destroys the
+    entry although the store now holds no live record for it. A conversation-scoped
+    delete whose archive discard raises deletes no episode, does not drop the index
+    or the record, and is finished by the reclaim run again. **And the path the
+    archive-first order creates on the other side:** on a conversation with several
+    episodes, the archive discard *succeeds* and a `MemoryStore.delete` then raises
+    part-way through step 2 — the tombstone and the index survive, no drop happens,
+    and the sweep run again finds the archive already empty, accepts that as the
+    no-op §5 rules it to be rather than as an error, and carries the remaining
+    episode deletions through to the drop. The second run's `discard_conversation`
+    returning zero is asserted to be the conforming answer and not a failure. And a
+    conversation reclaimed on the horizon — index and record gone, transcript kept —
+    still yields to the archive's own conversation-scoped destroy.
 15. **The disposition boundary.** A `TranscriptEntry` built with an omitted or
     `None` disposition fails validation; and a `ConversationLifecycle.capture` call
     supplying no disposition writes **no** archive entry, rather than coercing one
     to a member and archiving an exchange this system did not drive.
 16. **No archive text in a log or a trace**, on the capture path and on every
     failure path (ADR-0004 §5).
+17. **The size report counts what §6 says it counts, and reaches the surface.**
+    Shared, over every conforming implementation: `entries` tracks appends and both
+    destroys exactly, `stored_bytes` is positive over a populated archive and rises
+    with what is stored, and neither figure is obtained by reading an entry. Against
+    the SQLite implementation specifically: the figure is asserted **against the
+    archive's files on disk**, index and write-ahead log included, so an accounting
+    that summed entry lengths or read the main database file alone fails it. And the
+    surface half, which is where §6's obligation is actually discharged: the
+    operation is reachable on the engine and across the local API, and a rendered
+    archive read carries the figure beside it without being asked.
 
 ### 14. What the implementing lanes owe
 
@@ -1205,8 +1269,9 @@ consumer stress-tests it, and a `TranscriptArchive` whose only exercise was its 
 conformance suite would harden before anything had tried to write an entry from a
 routed pass or a recovered resumption. §3 binds too: the triad is not split.
 
-**Lane C — the surfaces.** The engine's four read operations and two destroy
-operations, their registration on the local API in `wire/` and `service/`, the
+**Lane C — the surfaces.** The engine's **seven** archive operations — §7's four
+reads, §5's two destroys, and §6's size report, which is not optional to this lane —
+their registration on the local API in `wire/` and `service/`, the
 `PROTOCOL_VERSION` bump the added methods oblige, the CLI command group, and the
 statements §8 requires. A gateway page may ride with it or follow as its own lane
 touching `interfaces/` alone; the ADR requires the CLI and permits the page.
@@ -1371,11 +1436,16 @@ ADR-0208 §1; ADR-0210 §1; ADR-0221 §1, §2 and §5.
 - **A wide Protocol inheriting the narrow one**, on `InvocationLedger`'s shape.
   Rejected in §10, and rejected on this ADR's third review round: it would give
   `AssistantEngine` an `append`, and §1 reserves writing to capture. The two faces
-  overlap in the one operation both holders perform and in nothing else.
-- **Three Protocols, on ADR-0119 §7's exact shape.** Rejected in §10. There the
-  purge had a third holder; here the conversation-scoped destroy and every read are
-  `AssistantEngine`'s alike, so the third seam would have no distinct consumer.
-  Additive when a third holder exists.
+  overlap in the two operations both holders perform — the two destroys — and in
+  nothing else.
+- **Three Protocols, on ADR-0119 §7's exact shape.** Rejected in §10, and rejected
+  on this ADR's seventh review round, which found that copying that shape had put the
+  conversation-scoped destroy on the wrong seam: it is `ConversationLifecycle` that
+  performs it, at the head of ADR-0074 §8's step 2, while the narrow face had been
+  denied it. The count is now read off this tree's holders, of which there are
+  exactly two, and the one capability that might have wanted a third face — §6's
+  retention eviction — has no collaborator performing it at all. Additive when a
+  third holder exists.
 - **Stating the subject cascade as "destroy the entries at the addresses it
   destroyed".** Rejected in §5. `delete_about` returns an `int` by ADR-0101 §1, so
   the clause names something no implementation can compute; the enumerate-then-
