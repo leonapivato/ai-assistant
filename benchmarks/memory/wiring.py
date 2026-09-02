@@ -315,10 +315,15 @@ class Harness:
     #: ``conversations`` is also handed to the ingestion driver, which takes it as a
     #: ``ConversationStore`` and reads a turn's store-allocated ordinal through that
     #: contract: the only exact answer to where a captured turn sits in an observation
-    #: window (ADR-0162 §7, #1075). Both are injected into the stages above, which is
-    #: where the rest of the harness meets them; ``deferrals`` is named nowhere else.
+    #: window (ADR-0162 §7, #1075). All three are injected into the stages above, which
+    #: is where the rest of the harness meets them; ``deferrals`` and ``archive`` are
+    #: named nowhere else. ``archive`` is the ephemeral transcript archive ADR-0225 §10
+    #: requires ``ConversationLifecycle`` to be given, and it is held for :meth:`close`
+    #: alone: a run builds one harness per case, so an archive nothing closed would
+    #: leave one live SQLite connection behind per case.
     conversations: SqliteConversationStore
     deferrals: SqliteDeferralStore
+    archive: SqliteTranscriptArchive
 
     def __post_init__(self) -> None:
         """Hold ADR-0158 §3's ceiling where ``LearningLoop`` holds it: at construction.
@@ -371,11 +376,14 @@ class Harness:
 
         The trace store is closed last because it was opened first: everything above
         it took it as a ``TraceSink``, and a store closed while a holder might still
-        emit is the one ordering that can lose a trace at shutdown.
+        emit is the one ordering that can lose a trace at shutdown. The archive's
+        position is free by contrast — nothing here reads it, it reads nothing, and it
+        emits into no ``TraceSink`` — so it goes before the one closure that is ordered.
         """
         self.store.close()
         self.conversations.close()
         self.deferrals.close()
+        self.archive.close()
         self.traces.close()
 
 
@@ -739,6 +747,14 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
         queue_limit=settings.deferral_queue_limit,
         now=clock,
     )
+    # ADR-0225 §10's narrow seam, required with no default. An ephemeral archive because
+    # a benchmark run's transcripts are not its subject and outlive nothing;
+    # `archive_enabled` below carries the shipped default so the harness composes as
+    # production does. Ingestion supplies no `disposition` (`ingest.py`), so §10's own
+    # rule means no entry is in fact written — this wiring exists to compose, not to
+    # archive. Bound here rather than constructed at the call site so `Harness` and the
+    # `ConversationLifecycle` hold the same object and `close` can reach it.
+    archive = SqliteTranscriptArchive(path=":memory:")
     # `conflict_limit` is passed for the reason the composition root passes it: the
     # figure a trace records should be one this layer chose rather than one a default
     # filled in. The value is imported, so it is the product's figure either way.
@@ -767,13 +783,7 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
             memory=store,
             retention=settings.episode_retention,
             now=clock,
-            # ADR-0225 §10's narrow seam, required with no default. An ephemeral
-            # archive because a benchmark run's transcripts are not its subject and
-            # outlive nothing; `archive_enabled` carries the shipped default so the
-            # harness composes as production does. Ingestion supplies no
-            # `disposition` (`ingest.py`), so §10's own rule means no entry is in
-            # fact written — this wiring exists to compose, not to archive.
-            archive=SqliteTranscriptArchive(path=":memory:"),
+            archive=archive,
             archive_enabled=settings.transcript_archive_enabled,
         ),
         observation=ObservationStage(
@@ -814,4 +824,5 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
         data_dir=data_dir,
         conversations=conversations,
         deferrals=deferrals,
+        archive=archive,
     )
