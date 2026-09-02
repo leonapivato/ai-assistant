@@ -120,6 +120,21 @@ def _integers_in(message: str) -> set[int]:
     return {int(run) for run in re.findall(r"\d+", message)}
 
 
+#: The ways a refusal can say ADR-0219 §3's "that the id named nothing". The clause
+#: makes the *message* normative, so a conformance arm over it has to read words at
+#: some point — there is no other channel through which a store reports absence. The
+#: alternation is therefore written to be wide rather than exact: it fixes no
+#: sentence, no order and no surrounding text, and a store spelling absence some
+#: further way adds its spelling here rather than being wrong. What it does refuse is
+#: a message that reports *nothing* about absence — "…at revision 1: stale request",
+#: which names both other facts §3 requires and leaves an operator unable to tell the
+#: missing row from the moved one.
+_ABSENCE = re.compile(
+    r"no record|no row|no such|not stored|nothing stored|nothing is stored"
+    r"|absent|missing|no longer|not found|does not exist|doesn't exist|is gone",
+)
+
+
 def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
     """:func:`_unstamped`, for a read whose answer may legitimately be ``None``.
 
@@ -2680,6 +2695,14 @@ class MemoryStoreContract:
         found, and ADR-0219 §1 keeps it clear of the plausible accidents: every issued
         revision is positive, so a count or an index in the wording cannot collide
         with it at zero.
+
+        **And absence is asserted positively, through :data:`_ABSENCE`.** The three
+        assertions above are all satisfiable by a message that says nothing about the
+        missing row — "…at revision 1: stale request" carries the id, carries the
+        expectation, reports no revision and differs from the moved-row sentence —
+        which is precisely the operator-facing failure §3's third fact exists to
+        prevent. So the third fact is read for, in a deliberately wide alternation
+        that pins no sentence.
         """
         await store.add(_semantic("vanished", "the first version"))
         first = await store.get("vanished")
@@ -2709,6 +2732,7 @@ class MemoryStoreContract:
         assert "vanished" in gone  # the record id
         assert first.revision in named  # the expectation the caller carried
         assert current.revision not in named  # ...and no revision it could not have found
+        assert _ABSENCE.search(gone.lower()) is not None  # ...and *that* the id named nothing
         assert gone != str(moved.value)  # the two limbs are told apart
 
     async def test_if_unchanged_at_a_different_kind_is_refused_and_not_as_stale(
