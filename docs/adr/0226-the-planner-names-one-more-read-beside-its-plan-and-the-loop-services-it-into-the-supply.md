@@ -13,13 +13,15 @@
   for each one a reader would expect to be — ADR-0203, ADR-0210, ADR-0158 and
   ADR-0074 among them. §5's scoping of this envelope off the channel of unbounded
   audience is what keeps that list at one.
-- **Decides a change to `src/ai_assistant/core/types.py`** — three added types and one
-  additive, defaulted field on `ActionPlan` — and a widening of `Planner.plan`'s and
-  `TurnResult`'s documented meaning in `src/ai_assistant/core/protocols.py`. It adds
-  **no Protocol and no member to one**, and moves no `PROTOCOL_VERSION`: `ActionPlan`
-  crosses neither `wire/` nor `service/` in the tree. **This ADR changes no code.**
-  §10 states what the implementing lanes owe; nothing implements against it until it
-  has merged ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
+- **Decides a change to `src/ai_assistant/core/types.py`** — three added types, one
+  additive defaulted field on `ActionPlan`, and `PlanExport.schema_version` moving to
+  **3** — and a widening of `Planner.plan`'s and `TurnResult`'s documented meaning in
+  `src/ai_assistant/core/protocols.py`. It adds **no Protocol and no member to one**,
+  and moves no `PROTOCOL_VERSION`: `ActionPlan` crosses neither `wire/` nor
+  `service/` in the tree. The versioned surface it *does* cross is the portable
+  export, and §4 moves it. **This ADR changes no code.** §10 states what the
+  implementing lanes owe; nothing implements against it until it has merged
+  ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
 
 ## Context
 
@@ -363,6 +365,20 @@ abuse of the mechanism is asking for something already on screen.
 > conditions is enforced by the model rather than by its callers — an emission that
 > fails any of them is not a request this ADR admits.
 
+> **Normative.** **`PlanExport.schema_version` becomes `Literal[3]`.** `PlanExport`
+> carries `plans: tuple[ActionPlan, ...]`, so a member of the portable document
+> changing shape is what that field exists to announce (ADR-0039 §10, ADR-0014 §5).
+> The annotation is edited rather than defaulted, exactly as ADR-0039 §10 made it, so
+> a document of the older shape does not validate against this contract at all.
+
+> **Normative.** **No migration is owed, and not because no v2 export exists.**
+> `PlanStore` offers `export` and no `import`, `restore` or `load`, so nothing in this
+> system ever validates a `PlanExport` it did not just construct. ADR-0039 §10's rule
+> carries forward unchanged and widens by one value: **an export of an earlier shape
+> is not readable by this contract at any version**, and if an import path is ever
+> contracted, accepting or refusing one is that ADR's decision and is not settled
+> here.
+
 > **Normative.** A `ReadAsk` is **not a `PlanStep`**, and nothing drives it. It is
 > not selected against the capability vocabulary, not resolved to a tool, not ruled
 > on by the permission gate, and never reaches `StepExecutor` or `ExecutionState`.
@@ -374,6 +390,19 @@ decided.** ADR-0014 §2 makes the plan *"an auditable record of a decision"*, an
 turn on which the planner judged its supply insufficient and named a read decided
 exactly that. The plan already reaches the durable planning store and the audit
 surface, so §9's record has somewhere to be without a second channel.
+
+**The export version moves because the export is the one durable surface `ActionPlan`
+crosses, and this ADR nearly missed it.** `PROTOCOL_VERSION` does not move —
+`ActionPlan` reaches neither `wire/` nor `service/` — and it would have been easy to
+read that as "no version moves". `PlanExport` is the counterexample, and the corpus
+has already ruled this exact case twice: ADR-0039 §10 moved the field to 2 because
+`StepExecution` *"is inside the export, so its shape changing is exactly what the
+version exists to announce"*, and ADR-0212 §8 moved `ConversationExport`'s for a
+member gaining one field. A defaulted field on a frozen model is still a shape change
+to every document that carries it, and `extra="forbid"` is what makes the mislabelling
+concrete: a reader validating an older-shaped document against the new contract, or
+the reverse, rejects it. ADR-0039 §10 called the annotation edit *"the intended
+friction"*, and this is the friction working.
 
 **The default is what makes this additive rather than breaking, and it is right on
 the merits rather than merely convenient.** Every existing `Planner` implementation
@@ -751,7 +780,8 @@ it lives.
 > **Normative.** Two lanes, in order, each briefed from this ADR's merged text.
 
 **Lane A — the types and the planner's emission.** `core/types.py` (`ReadKind`,
-`ReadAsk`, `ReadRequest`, and `ActionPlan`'s field with its validators), the widened
+`ReadAsk`, `ReadRequest`, `ActionPlan`'s field with its validators, and
+`PlanExport.schema_version` moving to `Literal[3]`), the widened
 docstrings on `Planner.plan` and `TurnResult` in `core/protocols.py` and
 `core/types.py`, §3's ordinal labelling of the supply in `planning/planner.py`, the
 planner's emission and the prompt that asks for it, and the canonical fakes in
@@ -859,6 +889,10 @@ to service.
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
     reads like a tool call and which reaches no registry, no gate and no executor.
+13. **The export carries the request and announces its shape.** A `PlanExport` whose
+    plans carry a request round-trips through serialisation with the request intact
+    and `schema_version` 3; a document labelled 2 does not validate as a `PlanExport`
+    at all; and both conforming `PlanStore` implementations export the new version.
 
 ### 12. Deferred, by name, each with what fires it
 
@@ -1035,11 +1069,12 @@ untouched**; §4 distinguishes its required-input reasoning rather than extendin
 **ADR-0154 and ADR-0223 are cited only in §12's deferral** and neither is moved.
 
 **Everything else this ADR cites is used as ratified**: ADR-0004 §7; ADR-0006 §5;
-ADR-0015 §5; ADR-0016 §5; ADR-0027 and ADR-0070 §§1, 3 and 4 for the supersession
-form; ADR-0072 §5; ADR-0086 §6; ADR-0088 and ADR-0089 for the citation forms and the
-marks; ADR-0098 §2; ADR-0113; ADR-0137 §§1 and 2; ADR-0158 §§1, 3, 4 and 5; ADR-0187
-§4; ADR-0199 §§1, 3 and 5; ADR-0203 §1; ADR-0208 §1; ADR-0210 §1; ADR-0217 §2;
-ADR-0221 §5; ADR-0224 §1; ADR-0225 §12.
+ADR-0014 §§2 and 5; ADR-0015 §5; ADR-0016 §5; ADR-0027 and ADR-0070 §§1, 3 and 4 for
+the supersession form; ADR-0039 §10; ADR-0072 §5; ADR-0086 §6; ADR-0088 and ADR-0089
+for the citation forms and the marks; ADR-0098 §2; ADR-0113; ADR-0137 §§1 and 2;
+ADR-0158 §§1, 3, 4 and 5; ADR-0187 §4; ADR-0199 §§1, 3 and 5; ADR-0203 §§1 and 2;
+ADR-0204 §2; ADR-0208 §1; ADR-0210 §1; ADR-0212 §8; ADR-0217 §2; ADR-0221 §5;
+ADR-0224 §1; ADR-0225 §12.
 
 **And one honest note on what this ADR is ratified without.** ADR-0015 §5 admits
 that *"a contract ratified with no implementation contact is how a seam that does not
