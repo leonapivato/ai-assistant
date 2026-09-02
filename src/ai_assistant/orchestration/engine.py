@@ -4737,11 +4737,13 @@ class Engine:
         The first of the two acts §6 says a surface rendering an interruption
         should offer in one step. **A dismissal is not a deletion**: the record
         stays readable and stays in the user's export, and what ends is its
-        actionability, which frees a slot under the cap at once (ADR-0215 §3). It
-        does **not** free the notification's key — the record goes on suppressing
-        the same fact until the expiry its candidate declared, so dismissing does
-        not invite that fact back on the next tick (§7, §8 as ADR-0215 §§1-2
-        replace them).
+        actionability, which frees a slot under the cap at once (ADR-0215 §3).
+        Freeing the slot does not free the notification's key: where the
+        candidate declared an expiry, the record goes on suppressing that same
+        fact until that instant, so dismissing does not invite it back on the
+        next tick. Where the candidate declared **no** expiry there is no horizon
+        to supply and suppression ends exactly where actionability does
+        (ADR-0215 §1; §7 and §8 as ADR-0215 §§1-2 replace them).
 
         Args:
             notification_id: The notification the user named, taken as opaque.
