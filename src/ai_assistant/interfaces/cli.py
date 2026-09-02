@@ -4330,6 +4330,13 @@ async def _drive_forget_transcript_entry(
 ) -> int:
     """Show the turn, take the answer, then destroy the entry (ADR-0225 §5, ADR-0073 §5).
 
+    **The ceremony renders an archive read, so it owes §8's statement and §6's figure
+    like any other.** The clause is keyed on rendering rather than on the command's
+    name — "every surface that renders any archive read renders the figure it returns
+    beside that read, unasked" — and a deletion preview is a read of the entry it is
+    about. Dropping either here would put the one rendering a user studies hardest
+    outside both obligations.
+
     **An address the read answers nothing for is still offered**, and that is the
     decision rather than an oversight. ADR-0225 §6 has the destroys reach what the
     reads hide — "a destruction is never refused on the ground that a read would not
@@ -4340,7 +4347,10 @@ async def _drive_forget_transcript_entry(
     """
     try:
         entry = await engine.transcript_entry(address)
+        size = await engine.transcript_archive_size()
+        _render_transcript_notice()
         _render_forget_transcript_prompt(address, entry)
+        _render_archive_size(size)
         if not confirm(entry):
             console.print("[dim]Left alone. Nothing was destroyed.[/]")
             return _EXIT_OK
@@ -4363,6 +4373,9 @@ async def _drive_forget_transcript_conversation(
 ) -> int:
     """Show what is held, take the answer, then destroy the conversation's transcript.
 
+    **It renders an archive read, so §8's statement and §6's figure are owed here
+    too**, on :func:`_drive_forget_transcript_entry`'s reason.
+
     Show-then-confirm at the unit the user thinks in (ADR-0225 §5, ADR-0073 §5), and
     the shown page is deliberately **not** claimed to be the whole of what will go:
     the read is paged and the retention hides what the destroy still reaches, so the
@@ -4371,7 +4384,10 @@ async def _drive_forget_transcript_conversation(
     """
     try:
         page = await engine.transcript_conversation(conversation_id)
+        size = await engine.transcript_archive_size()
+        _render_transcript_notice()
         _render_forget_transcript_conversation_prompt(conversation_id, page)
+        _render_archive_size(size)
         if not confirm(page):
             console.print("[dim]Left alone. Nothing was destroyed.[/]")
             return _EXIT_OK
