@@ -2364,7 +2364,8 @@ _BELIEF_SENTENCE = "Some of what I worked it out from came from a connected sour
 
 #: The sentence a stamped **episode** gets instead (ADR-0223 §5's second clause).
 _EPISODIC_SENTENCE = (
-    "Some of the material this exchange was conducted over traces back to a connected source"
+    "Some of the material I had in front of me during this exchange traces back to a "
+    "connected source"
 )
 
 
