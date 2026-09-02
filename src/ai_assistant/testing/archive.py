@@ -285,6 +285,27 @@ class FakeTranscriptArchive:
         twin._failure = self._failure  # the scripted fault travels with it
         return twin
 
+    def writer(self) -> FakeTranscriptArchiveWriter:
+        """The **narrow** view of this archive's own entries (ADR-0225 §10).
+
+        One archive, two seams — which is the arrangement the composition root
+        performs in production, where one concrete satisfies both Protocols and each
+        collaborator is handed the face it is entitled to. A test that wired two
+        unrelated fakes would be testing a composition nothing builds: capture would
+        write into one store and ``forget`` would destroy from another, and every
+        cascade case would pass vacuously.
+
+        The scripted fault does **not** travel: a case arming one seam is usually
+        asking what the *other* still does, and sharing it would make that
+        unaskable. Each view has its own :meth:`fail`.
+
+        Returns:
+            A writer over the same entries.
+        """
+        narrow = FakeTranscriptArchiveWriter()
+        narrow._entries = self._entries  # one storage, two views, by design
+        return narrow
+
     def fail(self, error: Exception | None = None) -> None:
         """Script a backing-store fault on every later call.
 
