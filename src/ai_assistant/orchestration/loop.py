@@ -158,25 +158,34 @@ _DEFAULT_RETRIEVAL_LIMIT = 30
 #: against recall@15 at 72.7%, while the belief layer was saturated at 63.1% because
 #: that was the ceiling of what its distilled records cite at all.
 #:
-#: **And 10 on ADR-0162 §9, which is the reversal.** Complete intake lifts the
-#: belief ceiling, so the marginal slot is worth more there: the probe puts 30+15 at
+#: **Then 10 on ADR-0162 §9, which was the reversal.** Complete intake lifts the
+#: belief ceiling, so the marginal slot was worth more there: the probe put 30+15 at
 #: 86.5% against 30+10's 85.1% — 1.4 points for half again as much transcript in
 #: every prompt, where an episode is a verbatim turn against a belief's distilled
-#: sentence. The count guard is still a weaker guard on *bytes* than it looks, which
-#: is what ADR-0158 §8's deferred byte bound is for, and taking the smaller number
-#: spends less of that unmeasured budget. Both values are provisional under §9's
-#: third clause and are re-tested by pilot 5's post-hoc attribution (ADR-0160 §3),
-#: read off a scored run; no ablation arm is owed for either.
+#: sentence.
+#:
+#: **And 30 on ADR-0224 §1, which reverses that in turn on evidence neither move
+#: had.** The #1844 replay widens the *existing* blind read and converts through
+#: pilot-5's own scored answers: ≈ +3.6 points of LoCoMo accuracy at 30+30 against
+#: ≈ +1.3 at 30+15, for no additional model call, no new read, no envelope and no
+#: trigger. The count guard is still a weaker guard on *bytes* than it looks, which
+#: is what ADR-0158 §8's deferred byte bound is for, and ADR-0224 §4 says plainly
+#: that this spends more of that unmeasured budget rather than less — outweighed,
+#: on this corpus, by a measured gain the guard was costing. Both values stay
+#: provisional under ADR-0162 §9's third clause and are re-tested by pilot 5's
+#: post-hoc attribution (ADR-0160 §3), read off a scored run; no ablation arm is
+#: owed for either.
 #:
 #: It is a *default*, not a floor: a construction tuning the belief budget below it
 #: and stating nothing episodic gets this figure capped at that budget, which is
 #: §3's ceiling holding rather than yielding. ``LearningLoop.__init__`` is where
-#: that resolution happens, because the cap needs both numbers. At 10 against a
-#: default budget of 30 the cap is a no-op for an untuned construction and bites for
-#: every belief budget tuned below 10 — a narrower band than at parity, because
-#: ADR-0162 §9 restores the slack ADR-0160 §2 had spent. ADR-0158 §3 still refuses a
-#: *stated* bound above the budget.
-_DEFAULT_EPISODIC_LIMIT = 10
+#: that resolution happens, because the cap needs both numbers. At 30 against a
+#: default budget of 30 the cap is still a no-op for an untuned construction, but it
+#: now bites for **every** construction stating a belief budget below 30, where at
+#: 10 only a budget below 10 reached it — a wider band, and the band parity implies
+#: (ADR-0224 §2). ADR-0158 §3 still refuses a *stated* bound above the budget, which
+#: at parity means it accepts 30 against 30 and refuses 31.
+_DEFAULT_EPISODIC_LIMIT = 30
 
 #: The kinds the episodic supplement's read selects (ADR-0158 §3) — ``EPISODIC``
 #: and nothing else, which is the half of the read that keeps a belief out of the

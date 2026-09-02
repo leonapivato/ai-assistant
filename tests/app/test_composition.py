@@ -3281,22 +3281,26 @@ def test_the_retrieval_budget_is_the_depth_the_reach_evidence_bought() -> None:
     assert composition_module.RETRIEVAL_LIMIT == 30
 
 
-def test_the_episodic_supplement_is_bounded_at_ten_and_never_above_the_beliefs() -> None:
-    """ADR-0162 §9's bound, and the ceiling it may never cross.
+def test_the_episodic_supplement_is_bounded_at_thirty_and_never_above_the_beliefs() -> None:
+    """ADR-0224 §1's bound, and the ceiling it now meets.
 
     Two figures, one test, because the second is what the first means. The value
-    began at 5 on a judgement, went to 15 on ADR-0160 §1's measurement, and comes
-    back to 10 here — not because the episodes got worse but because the beliefs got
-    better: 30+15 measures 86.5% against 30+10's 85.1%, 1.4 points for half again as
-    much transcript in every prompt, where ADR-0158 §5's byte bound is still unset.
-    The **relation** is not tuning: it is where the product thesis stops being
-    documentation, since whatever the two numbers become, nobody can configure a
-    system that asks for more transcript than belief. At 10 against 30 it is
-    satisfied with slack again rather than at the parity ADR-0160 §2 admitted, so the
-    second assertion records slack once more.
+    began at 5 on a judgement, went to 15 on ADR-0160 §1's measurement, came back to
+    10 on ADR-0162 §9's reach sweep, and goes to 30 here — not because the episodes
+    got better but because #1844's replay priced them: widening the *existing* blind
+    read buys ≈ +3.6 points of LoCoMo accuracy, converted through pilot-5's own
+    scored answers, for no additional model call and no new read, against ≈ +1.3 at
+    30+15. What it spends is prompt bytes on the budget ADR-0158 §5 still leaves
+    unset. The **relation** is not tuning: it is where the product thesis stops
+    being documentation, since whatever the two numbers become, nobody can configure
+    a system that asks for more transcript than belief. At 30 against 30 that
+    ceiling is **met** rather than satisfied with slack, which is the parity ADR-0160
+    §2 admitted and ADR-0224 §2 exercises — so the second assertion is
+    not-greater-than, and a strictly-less-than one would now fail rather than merely
+    read oddly.
     """
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 10
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT < composition_module.RETRIEVAL_LIMIT
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 30
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
 
 
 def test_the_roots_two_budgets_are_held_equal_to_orchestrations_own_defaults() -> None:

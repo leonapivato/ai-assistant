@@ -1389,20 +1389,22 @@ async def test_the_supplements_read_is_the_one_section_three_pins() -> None:
     assert call.limit == _DEFAULT_EPISODIC_LIMIT
 
 
-def test_the_episodic_bound_is_ten_and_never_exceeds_the_belief_budget() -> None:
-    """ADR-0162 §9's value, and the ceiling that is the thesis in code.
+def test_the_episodic_bound_is_thirty_and_never_exceeds_the_belief_budget() -> None:
+    """ADR-0224 §1's value, and the ceiling that is the thesis in code.
 
     The deployment figure lives in ``app/composition.py``, which this subsystem may
     not import; what is checkable here is the default a direct construction gets and
     the relation ADR-0158 §3 fixes between the two numbers. The value moves on the
     post-hoc attribution ADR-0160 §3 requires, read off a scored run — there is no
-    ablation arm left to wait for, and §9 widens the evidence that may move it to
-    include measured retrieval reach. The relation is back to holding with slack
-    rather than at the parity ADR-0160 §2 admitted, because the belief budget rose
-    while this one fell.
+    ablation arm left to wait for, and ADR-0162 §9 widens the evidence that may move
+    it to include measured retrieval reach, which is the half #1844's replay
+    supplies. The relation now holds **at** the parity ADR-0160 §2 admitted rather
+    than with slack, because this budget rose to meet a belief budget that stayed —
+    so the second assertion is not-greater-than, and the strictly-less-than it
+    replaces would fail here rather than merely read oddly.
     """
-    assert _DEFAULT_EPISODIC_LIMIT == 10
-    assert _DEFAULT_EPISODIC_LIMIT < _DEFAULT_RETRIEVAL_LIMIT
+    assert _DEFAULT_EPISODIC_LIMIT == 30
+    assert _DEFAULT_EPISODIC_LIMIT <= _DEFAULT_RETRIEVAL_LIMIT
 
 
 async def test_a_derived_belief_never_reaches_the_supplement() -> None:
@@ -1694,11 +1696,11 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
 async def test_an_untuned_bound_at_the_belief_budget_is_the_default_itself() -> None:
     """Capping is for the small-budget case only; the ordinary one is untouched.
 
-    The name is ADR-0160 §7's and still fits: it says where the cap does *not* fire,
-    which is the point whether the two numbers are equal or, as under ADR-0162 §9,
-    ten against thirty. What is proved is unchanged — ``LearningLoop.__init__``'s cap
-    fires only where a *stated* belief budget is below the default, and at the
-    default budget the untuned bound resolves whole.
+    The name is ADR-0160 §7's and describes the configuration exactly again: it says
+    where the cap does *not* fire, which is the point whether the two numbers differ
+    or, as under ADR-0224 §1, stand equal at thirty. What is proved is unchanged —
+    ``LearningLoop.__init__``'s cap fires only where a *stated* belief budget is
+    below the default, and at the default budget the untuned bound resolves whole.
     """
     loop = _loop_with(retrieval_limit=_DEFAULT_RETRIEVAL_LIMIT)
 
