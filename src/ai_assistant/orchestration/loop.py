@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     TurnResult,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.reads import (
     Servicing,
     TriggerOutcome,
@@ -95,9 +96,22 @@ _log = structlog.get_logger(__name__)
 #: :class:`~ai_assistant.orchestration.disclosure.BoundedAudienceSupply` is that
 #: filter, and it rides this seam because ADR-0204 §2 puts its *evaluation* at
 #: exactly the point ADR-0203 §2 puts the subtraction — once per turn, between
-#: retrieval and planning, on every conversational operation. This loop knows nothing
-#: of disclosure and applies whatever it is given, which is what keeps ADR-0199's
+#: retrieval and planning, on every conversational operation. This loop applies
+#: whatever it is given and holds no disclosure *policy*: what is placed, what is
+#: speakable and what a facet's class means all stay in
+#: :mod:`~ai_assistant.orchestration.disclosure`, which is what keeps ADR-0199's
 #: posture in one module.
+#:
+#: **What the loop does read off the filter, since ADR-0226 §5, is the channel's
+#: audience** — and only that. §5 refuses to service a read request on an operation
+#: whose output channel's audience is unbounded, and ADR-0199 §1 makes that posture
+#: "a function of the output channel's audience alone", which is why
+#: :data:`~ai_assistant.orchestration.disclosure.TurnSupply` is a closed union of
+#: exactly two classes. So :meth:`LearningLoop._turn` asks which of the two it holds
+#: rather than taking a second boolean beside this one: a pair a caller can
+#: contradict is not fail-closed, and §5 is a fail-closed clause. A filter that is
+#: neither — including ``None`` — has declared no posture, and nothing is serviced.
+#: No predicate, no placement and no subtraction is read here.
 #:
 #: **The third argument is the read set, and it is deliberately not a group boundary**
 #: (ADR-0210 §1, §10 item 1). It is the ids :meth:`LearningLoop._retrieve` returned
@@ -508,7 +522,6 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
-        bounded_audience: bool = False,
     ) -> TurnResult:
         """Run one turn, and record what its planner asked to have read.
 
@@ -537,8 +550,6 @@ class LearningLoop:
             history: The conversation's recent turns (:meth:`_turn`).
             history_degraded: Whether reading that history failed (:meth:`_turn`).
             narrow: The supply filter, or ``None`` (:meth:`_turn`).
-            bounded_audience: Whether this operation's output channel has a
-                **bounded** audience (:meth:`_turn`).
 
         Returns:
             The turn's goal, context, assembled memories and plan.
@@ -554,20 +565,18 @@ class LearningLoop:
                 history=history,
                 history_degraded=history_degraded,
                 narrow=narrow,
-                bounded_audience=bounded_audience,
                 audit=audit,
             )
         finally:
             audit.emit()
 
-    async def _turn(  # noqa: PLR0913  # the utterance, the tail and its health, the filter, the channel's audience and the turn's own record; every one is a distinct fact about this turn
+    async def _turn(
         self,
         utterance: str,
         *,
         history: Sequence[MemoryRecord],
         history_degraded: bool,
         narrow: SupplyFilter | None,
-        bounded_audience: bool,
         audit: TurnReadAudit,
     ) -> TurnResult:
         """Run one turn: intent, context, memory retrieval, planning.
@@ -692,22 +701,6 @@ class LearningLoop:
                 the filter that evaluates the same predicate and removes nothing
                 (ADR-0204 §2, §4). ``None`` remains valid and plans over
                 everything: this method is the seam, not the policy.
-            bounded_audience: Whether this operation's output channel has a
-                **bounded** audience (ADR-0199 §1). It decides two things and is a
-                declaration rather than a judgement: a read request is serviced
-                only where it is ``True`` (ADR-0226 §5), and ``narrow`` is applied
-                after the servicing rather than before the planner, so ADR-0204
-                §2's evaluation is taken once over the turn's final supply
-                (ADR-0226 §7). The two go together: on a bounded channel the
-                filter subtracts nothing, so moving it costs the planner nothing,
-                and on an unbounded one nothing is serviced and the filter stays
-                exactly where ADR-0203 §1 puts it. It defaults to ``False``
-                because that is the fail-closed answer for a caller that declares
-                no audience — a caller passing ``None`` for ``narrow`` has
-                declared no posture at all, and §5 refuses rather than guesses.
-                :meth:`~ai_assistant.orchestration.engine.Engine._run_turn`
-                derives it from the supply object it already mints, so the
-                declaration cannot drift from the filter it belongs to.
             audit: ADR-0226 §9's record for this turn, filled in as the stages
                 run and emitted by :meth:`respond` on every exit.
 
@@ -742,6 +735,17 @@ class LearningLoop:
         # position, where no boundary can distinguish it from a record the tail
         # merely happened to hold (§1's second clause).
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
+        # ADR-0226 §5's channel scoping, read off the object that carries the
+        # posture rather than taken as a second argument beside it. A boolean the
+        # caller supplies alongside ``narrow`` is a pair a caller can *contradict* —
+        # an unbounded supply declared bounded would service a request on the one
+        # channel §5 refuses, and subtract after planning rather than before it —
+        # and §5 is a fail-closed clause. `TurnSupply` is a closed union of exactly
+        # two classes, because ADR-0199 §1 "fixes the posture as a function of the
+        # output channel's audience alone", so this test is total and stays total by
+        # that ADR's own clause. Anything else — ``None``, or a filter a test
+        # supplies — has declared no posture, and §5 refuses rather than guesses.
+        bounded_audience = isinstance(narrow, BoundedAudienceSupply)
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
