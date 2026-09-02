@@ -356,11 +356,15 @@ Three independent properties enforce that list, and none of them is a convention
 > root, in the shape ADR-0119 §7 already uses for `ai_assistant.evaluation`. A
 > violation fails the gate.
 
-> **Normative.** **The turn-path fence.** The archive seam is held by
-> `AssistantEngine` and by no collaborator the engine constructs or is given: not
-> the conversation loop, not the retrieval stage, not the context assembler, not the
-> planner, the composing stage, the observer, the reconciler, the router or any tool.
-> A component of the turn path that could read the archive does not type-check.
+> **Normative.** **The turn-path fence.** No component of the turn path holds a
+> seam carrying an archive **read**. The conversation loop, the retrieval stage, the
+> context assembler, the planner, the composing stage, the observer, the reconciler,
+> the router and every tool hold no archive seam at all. `ConversationLifecycle`
+> holds the **writer** seam of §10 and nothing wider, so the one component that
+> writes an entry cannot read one back. Only `AssistantEngine` holds the wide seam,
+> and it reaches it from its user-facing and data-rights operations and from no
+> operation on the turn path. A turn-path component that could read the archive does
+> not type-check.
 
 > **Normative.** **The absent embedder.** The archive's search is lexical by
 > construction, over text the archive stores as text (§7). There is no vector column
@@ -391,11 +395,32 @@ a lane that wants it needs the ADR that decides it.
 > archive either.
 
 > **Normative.** **Destruction is a user act, and it reaches the archive whole.**
-> Each of the following destroys the transcript entries it names, in the same act
-> that destroys the record or records it names, and no implementation performs one
-> half without the other: forgetting one record by id; forgetting a conversation;
-> `MemoryStore.delete_about` when its surface lands (ADR-0101); and a whole-store
-> erasure when one gets a surface (`MemoryStore.clear`, ADR-0007 §4).
+> Forgetting one record by id destroys the entry at that address, and forgetting a
+> conversation destroys that conversation's entries, each in the same act and
+> neither performed by halves.
+
+> **Normative.** A **subject erasure** cascades by an enumerate-then-erase-then-
+> discard sequence, because ADR-0101 §1 gives `delete_about` the shape
+> `async def delete_about(self, about_person: EncodableText) -> int` — it returns a
+> count and names nothing. The stage holding both stores therefore reads the
+> addresses first through ADR-0101 §1's scoped export,
+> `export(about_person=…)`, erases through `delete_about`, and then discards each
+> address it enumerated. No implementation infers a subject for an archive entry,
+> and no entry carries a subject of its own for anything to match on.
+
+> **Normative.** That sequence's residue is named rather than claimed away, and it
+> is one class: a matched record the scoped export does not return, which by
+> ADR-0007 §3 as amended by ADR-0045 §6 is an **expired-but-unpurged** one, and a
+> matching record written between the export and the erasure. Neither entry is
+> discarded by the cascade, both stay reachable through this section's address- and
+> conversation-scoped destroys, and a surface offering the operation states its
+> reach under ADR-0101 §6 exactly as that section requires. What would close it is
+> named: an implementation of `delete_about` that returns the ids it destroyed
+> rather than their number. This ADR does not make that change to another ADR's
+> contract, and no lane cites this section as authority to.
+
+> **Normative.** A whole-store erasure erases the archive in the same act
+> (`MemoryStore.clear`, ADR-0007 §4), when one gets a surface.
 
 > **Normative.** The archive's own destroy operations are **by address** and **by
 > conversation**, each resolved inside the archive against its own entries. Neither
@@ -446,16 +471,29 @@ residue is visible and destroyable, because the archive's search returns it and 
 archive's destroy-by-address reaches it, so what is lost is the automatic sweep and
 not the user's reach.
 
-**`delete_about` binds by address and inherits ADR-0101 §6's limit exactly.** A
-subject erasure destroys the records that state a matching subject; this clause
-destroys the transcript entries at those records' addresses. It reaches no entry
-whose record never stated a subject, whatever the transcript says — ADR-0101 §6's
-*"honest limit"*, unchanged, and ADR-0100 §4's prohibition on inferring a subject
-applies to an archive entry with at least as much force as to a record. A surface
-offering the operation states its reach, unasked, every time, exactly as §6
-requires. Two things follow that a lane must not get wrong: nothing in this ADR
-authorises reading an entry's text to decide whom it is about, and the entry
-carries no `about_person` of its own for anything to match on.
+**The subject erasure is the hardest of the four to state, and the sequence above is
+what the ratified contract actually admits.** The tempting clause — "it destroys the
+entries at the addresses it destroyed" — is unimplementable against
+`delete_about`'s ratified shape, which returns an `int`. Reversing the order does
+not help either: erase first and the addresses are gone. So the enumeration comes
+first, through the scoped `export` ADR-0101 §1 adds in the same breath as
+`delete_about`, and the discard follows the erasure so that no entry is destroyed
+for a record the erasure did not in fact reach.
+
+**And the whole of it is currently unreachable, which is worth stating so nobody
+implements a phantom.** Capture stamps no `about_person`:
+`ConversationLifecycle._episode` builds its `EpisodicMemory` with no such argument,
+so the field takes `MemoryBase`'s `None` default and ADR-0101 §2's query matches no
+captured episode at all. Every clause above therefore binds a path that today
+destroys nothing — and is written now, in the ADR that creates the second store,
+because retrofitting a cascade into a populated archive is the expensive version.
+
+**The limit is ADR-0101 §6's, inherited exactly.** A subject erasure reaches only
+records that *state* a matching subject, and an archived transcript that names a
+person in its words is not reached, whatever the words say. ADR-0100 §4's
+prohibition on inferring a subject applies to an archive entry with at least as much
+force as to a record: nothing here authorises reading an entry's text to decide whom
+it is about, and there is no field on an entry for a match to be made against.
 
 ### 6. Retention and bounds of its own, and the honest size story
 
@@ -476,7 +514,8 @@ carries no `about_person` of its own for anything to match on.
 
 > **Normative.** The archive's read surface reports the archive's current entry
 > count and stored size, without being asked, so the cap's trigger is a figure
-> somebody has rather than one nobody ever produces.
+> somebody has rather than one nobody ever produces. The seam that supplies it is
+> `TranscriptArchive.size` (§10), and it reads no entry.
 
 **The `None` default is the deliberate opposite of ADR-0074 §7's, and the reason it
 does not contradict §7 is that §7's argument is about a different store.** §7
@@ -521,11 +560,12 @@ looks.
 
 ### 7. Search and reading: lexical, bounded, and the user's alone
 
-> **Normative.** The archive answers exactly four reads: a **lexical search** over
-> entries; an **ordered read of one conversation's** entries; a **read of one entry
-> by address**; and an **unfiltered enumeration** of every entry it holds. It
-> answers no other, and offers no relevance model, no ranking by similarity and no
-> vector search.
+> **Normative.** The archive answers exactly four reads **over its entries**: a
+> **lexical search**; an **ordered read of one conversation's** entries; a **read of
+> one entry by address**; and an **unfiltered enumeration** of every entry it holds.
+> It answers no other, and offers no relevance model, no ranking by similarity and
+> no vector search. §6's size report is a read over the store rather than over its
+> entries, and is the only operation beside these four.
 
 > **Normative.** The search is lexical over the text the archive stores. Whether it
 > is served by a full-text index or by a scan is the implementing lane's, and the
@@ -545,6 +585,14 @@ looks.
 > a second, addressed act, and no search response renders an entry's full text. The
 > other three reads return entries **whole**, and elide, truncate and summarise
 > nothing.
+
+> **Normative.** An excerpt is at most **512 bytes of UTF-8**. Where the text it is
+> taken from exceeds that, it is truncated at a codepoint boundary — so the encoded
+> result never exceeds the bound and never splits a codepoint — and the hit records
+> that it was truncated. Which window of the entry the excerpt is taken from is the
+> implementing lane's; the bound is not. The response is therefore bounded by the
+> caller's `limit` times that figure plus the fixed fields, and a conformance suite
+> asserts the bound over an entry far larger than it.
 
 > **Normative.** The unfiltered enumeration **is** the archive's export: every
 > entry, whole, paged, in the total order above, and it satisfies ADR-0004 §6's
@@ -566,6 +614,17 @@ search over a year of conversation can match hundreds of turns, and rendering ea
 one whole makes the result unreadable and the bound meaningless. Splitting it makes
 the address load-bearing in the surface the user actually touches, which is the
 cheapest possible way for §3's stability to be exercised rather than asserted.
+
+**The excerpt's figure is named here rather than left as "bounded", and ADR-0094 §8
+is the authority for naming it.** That section requires a bound to be *"named in the
+deciding ADR of the producer that needs them"*, because a bound with no figure is
+two conforming implementations diverging (ADR-0074 §9.3). "Bounded" alone would have
+admitted an implementation returning an entry's whole text minus one byte — bounded
+in the letter, unbounded in the response — and would have left a scan-backed
+implementation and an index-backed one with no shared assertion to conform to. The
+figure is in bytes rather than characters because what it bounds is a response that
+crosses the local API, and the truncation is stated at a codepoint boundary because
+a byte bound applied to UTF-8 without that clause produces invalid text.
 
 **The export is a read rather than a fourth artifact, and that is not a shortcut.**
 ADR-0004 §6 requires that the user can view, export and delete. For a store that
@@ -632,14 +691,15 @@ argument had to cover. Each is answered in its own terms.
 **Gate 1 — non-reachability, structurally, not by convention.** §4. Three
 independent properties, each mechanical: an `import-linter` contract on the model
 ADR-0119 §7 already runs for `ai_assistant.evaluation`, so a pipeline package that
-imports the archive fails the gate; a construction rule under which no stage of the
-turn path holds the seam, so a component that could read it does not type-check;
-and the absence of an embedder, so there is nothing to embed with. #1843 named
+imports the archive fails the gate; a construction rule under which no component of
+the turn path holds a seam carrying a *read* — capture holds the writer and nothing
+wider — so a component that could read one does not type-check; and the absence of
+an embedder, so there is nothing to embed with. #1843 named
 ADR-0119 §7 as *"probably the right shape"*, and it is — with one difference stated
 rather than glossed: there the pipeline was forbidden the read outright, and here
 the engine must keep it, because the read serves the user's own surface. So the
-fence moves one level in, to the stages, and §13 requires the representative-input
-test that pins it — a distinctive span archived, a turn run, and the span found in
+fence is cut at the read, exactly as ADR-0119 §7 cut its own at the walk, and §13
+requires the representative-input test that pins it — a distinctive span archived, a turn run, and the span found in
 no prompt.
 
 **Gate 2 — the explicit act is the whole authorisation.** §7 and §8. Nothing reads
@@ -700,15 +760,91 @@ mechanism is decided, and this ADR decides none of it.
 
 ### 10. The contract surface owed, and why the archive is its own subsystem
 
-> **Normative.** `core/protocols.py` gains one Protocol, `TranscriptArchive`,
-> carrying the append of §2, the two destroys of §5, and the four reads of §7. It
-> gains no second Protocol.
+> **Normative.** `core/protocols.py` gains **two** Protocols, narrow and wide.
+> `TranscriptArchiveWriter` carries §2's append and the discard of one entry by
+> address that §2's compensation performs, and carries no read.
+> `TranscriptArchive` **inherits it** and adds §5's conversation-scoped destroy,
+> §7's four reads and §6's size report. One concrete satisfies both, and the
+> composition root hands each holder exactly the seam it is entitled to (§4).
 
-> **Normative.** `core/types.py` gains one frozen pydantic model, `TranscriptEntry`,
-> carrying exactly the fields §1 enumerates **as this ADR ships it** and no other.
-> A later ADR may widen it by an additive, defaulted field, as §1's grouping clause
-> and §11 each contemplate; no implementation, setting or lane widens it without
-> one.
+> **Normative.** Every site that writes to the archive takes a
+> **`TranscriptArchiveWriter`** — never `TranscriptArchive` — as a required
+> constructor argument with no default. A composition that hands the wide seam to a
+> turn-path component does not type-check, and one that omits the seam does not
+> type-check either.
+
+> **Normative.** `core/types.py` gains three frozen pydantic models —
+> `TranscriptEntry`, `TranscriptHit` and `TranscriptArchiveSize` — carrying exactly
+> the fields ratified below **as this ADR ships them** and no other. A later ADR may
+> widen any of them by an additive, defaulted field, as §1's grouping clause and §11
+> each contemplate; no implementation, setting or lane widens one without an ADR.
+
+> **Normative.** The shapes below are the ratified surface. Docstrings are owed on
+> the real `core/protocols.py` and are not reproduced here, which is ADR-0101 §1's
+> move and its reason: what each must state is settled by the clauses of this ADR
+> and by nothing outside them (ADR-0089 §3).
+
+```python
+# core/types.py — all three frozen, all three additive-only
+
+class TranscriptEntry(BaseModel):
+    address: NonBlankEncodableText          # §3: the episode's own id
+    conversation_id: NonBlankEncodableText  # §1: a grouping, not the key
+    ordinal: int                            # §1: a grouping, not the key
+    occurred_at: UtcInstant
+    asked: EncodableText | None             # §1: the user's own words; None where none
+    replied: EncodableText | None           # §1: the composed reply, whole; None where none
+    disposition: ExchangeDisposition | None
+
+class TranscriptHit(BaseModel):
+    address: NonBlankEncodableText
+    conversation_id: NonBlankEncodableText
+    occurred_at: UtcInstant
+    excerpt: EncodableText                  # §7: bounded, never the whole entry
+    elided: bool                            # §7: True where the bound truncated it
+
+class TranscriptArchiveSize(BaseModel):
+    entries: int                            # §6: what the surface reports, unasked
+    stored_bytes: int
+
+
+# core/protocols.py — narrow, then wide
+
+class TranscriptArchiveWriter(Protocol):
+    async def append(self, entry: TranscriptEntry) -> None: ...
+    async def discard(self, address: NonBlankEncodableText) -> bool: ...
+
+class TranscriptArchive(TranscriptArchiveWriter, Protocol):
+    async def discard_conversation(self, conversation_id: NonBlankEncodableText) -> int: ...
+    async def search(
+        self, query: NonBlankEncodableText, *, limit: int = 20, offset: int = 0
+    ) -> list[TranscriptHit]: ...
+    async def conversation(
+        self, conversation_id: NonBlankEncodableText, *, limit: int = 50, offset: int = 0
+    ) -> list[TranscriptEntry]: ...
+    async def entry(self, address: NonBlankEncodableText) -> TranscriptEntry | None: ...
+    async def entries(self, *, limit: int = 50, offset: int = 0) -> list[TranscriptEntry]: ...
+    async def size(self) -> TranscriptArchiveSize: ...
+```
+
+> **Normative.** `append` raises on a store failure and never swallows one; §2 is
+> what decides that capture *degrades* rather than propagates, and it decides it at
+> the caller. `discard` returns whether an entry was removed; `discard_conversation`
+> returns how many were. Every operation raises a single archive error class on a
+> backend failure, as ADR-0101 §4's `MemoryStoreError` clause does for its own.
+
+> **Normative.** A `limit` of zero or below is refused with `ValueError` on all four
+> reads (§7); a negative `offset` is refused the same way; and a blank or
+> whitespace-only `query`, `address` or `conversation_id` is refused with
+> `ValueError` and never read as "everything", which is ADR-0101 §1's own rule for a
+> blank label.
+
+> **Normative.** Neither Protocol carries a walk, a cursor, a resumable position, an
+> embedder, a subject axis, or any operation this ADR has not named. ADR-0101 §9's
+> rule that a destructive operation is never given an optional scope whose absent
+> value widens what it destroys binds both destroys here: `discard` and
+> `discard_conversation` each take a **required, positional** argument, and no
+> spelling of either means "everything".
 
 > **Normative.** The archive is a new subsystem package, `ai_assistant.archive`,
 > which depends on `ai_assistant.core` and on nothing else in `ai_assistant`. The
@@ -719,17 +855,25 @@ mechanism is decided, and this ADR decides none of it.
 > as its own PR before anything implements against it, and it is reviewed by both
 > the adversarial and the architecture lens (ADR-0015 §1).
 
-**One Protocol rather than ADR-0119's three, and the difference is the holders.**
-That ADR split `TraceSink`, `TraceRetention` and `TraceStore` because three
-capabilities had three different holders — every subsystem emits, the engine purges,
-nothing in the pipeline reads — so the split was what let the composition root hand
-each collaborator exactly what it was entitled to. Here all three capabilities have
-one holder: `AssistantEngine` writes on capture, destroys on a data-rights act, and
-reads on a user's act. A narrower seam would be surface with no distinct consumer,
-which is what ADR-0073 §7 and ADR-0074 §10 both declined for a count and a title, and
-it would buy no property the fence in §4 does not already give. Splitting becomes
-worth doing when a second holder exists, and adding a narrower Protocol then is
-additive.
+**Two Protocols rather than one, because the write has a different holder from the
+read, and that is ADR-0119 §7's test rather than a preference.** That ADR split
+`TraceSink`, `TraceRetention` and `TraceStore` because three capabilities had three
+different holders, and its own words say what the split buys: *"what you cannot
+reach, you cannot misuse"*. The same test applied here returns two rather than one.
+The write does not happen in `AssistantEngine`: §2 puts it between the index append
+and the episode write, both of which are inside `ConversationLifecycle.capture`, and
+moving it out would split one sequence across two objects and break the single clock
+reading the append and the episode already share. So capture is a genuine second
+holder — and a single wide Protocol handed to it would give a turn-path collaborator
+all four reads, defeating §4's fence in the same breath that states it. The narrow
+seam is therefore bought against a specific failure and not for symmetry.
+
+**Two rather than three, and this is where the count stops.** ADR-0119 needed a
+third because its purge had a third holder; here the conversation-scoped destroy and
+every read are `AssistantEngine`'s alike, so a `TranscriptArchiveRetention` beside
+these two would be surface with no distinct consumer — which is what ADR-0073 §7 and
+ADR-0074 §10 each declined for a count and a title. A third becomes worth adding
+when a third holder exists, and adding one then is additive.
 
 **Its own package rather than a corner of `memory/`, and the fence is the reason.**
 An `import-linter` contract can forbid importing a package; it cannot forbid
@@ -820,8 +964,11 @@ address, and it is discharged.
    in no prompt any model seam receives: the router's, the planner's, the composing
    stage's and the observer's. This is the test a later feed-back lane must
    consciously delete, which is the point of it.
-2. **The fence is mechanical.** An `import-linter` contract fails when a pipeline
-   package imports `ai_assistant.archive`, and passes for `ai_assistant.app`.
+2. **The fence is mechanical, on both halves.** An `import-linter` contract fails
+   when a pipeline package imports `ai_assistant.archive`, and passes for
+   `ai_assistant.app`. And the write site is typed to `TranscriptArchiveWriter`: a
+   composition handing `ConversationLifecycle` the wide seam fails `mypy`, and one
+   handing it no seam fails too.
 3. **Eviction keeps and destruction destroys.** An entry survives its episode's
    expiry, its `purge_expired` reclaim, and the conversation reclaim ADR-0074 §7
    performs; and does not survive a forget of its record, a forget of its
@@ -843,24 +990,40 @@ address, and it is discharged.
    `transcript_archive_retention` evicts past it; `transcript_archive_enabled` set
    false stops the write and destroys nothing, and the reads still serve what is
    there.
-9. **The reads are bounded and ordered.** A limit of zero or below raises
-   `ValueError`; the search order is newest-first and total; a conversation's read is
-   in ordinal order; a search response carries no entry's full text.
-10. **No archive text in a log or a trace**, on the capture path and on every failure
-    path (ADR-0004 §5).
+9. **The reads are bounded and ordered.** A limit of zero or below and a negative
+   offset each raise `ValueError`, on all four reads; a blank `query`, `address` or
+   `conversation_id` raises `ValueError` and matches nothing; the search order is
+   newest-first and total; a conversation's read is in ordinal order; a search
+   response carries no entry's full text.
+10. **The excerpt bound holds over a hostile entry.** An entry far larger than 512
+    bytes yields a hit whose `excerpt` encodes to at most 512 bytes of UTF-8, splits
+    no codepoint, and carries `elided`. The same assertion runs against every
+    conforming implementation, index-backed or scan-backed.
+11. **The subject cascade, over the sequence and over its residue.** With a captured
+    episode carrying a stated `about_person`: the enumeration precedes the erasure,
+    every enumerated address is discarded after it, and the count `delete_about`
+    returns is not read as an address. And with a matched record that is
+    expired-but-unpurged: its entry survives the cascade — the residue §5 names —
+    and is destroyed by the archive's own address-scoped destroy.
+12. **No archive text in a log or a trace**, on the capture path and on every
+    failure path (ADR-0004 §5).
 
 ### 14. What the implementing lanes owe
 
 > **Normative.** Two lanes, in order, each briefed from this ADR's merged text.
 
 **Lane B — the contract, the store, the write and the cascade.** `core/protocols.py`
-(`TranscriptArchive`), `core/types.py` (`TranscriptEntry`), the shared conformance
+(`TranscriptArchiveWriter` and `TranscriptArchive`), `core/types.py`
+(`TranscriptEntry`, `TranscriptHit`, `TranscriptArchiveSize`), the shared conformance
 suite, the canonical fake in `ai_assistant.testing`, the SQLite implementation in the
 new `ai_assistant.archive` package, the two `Settings` fields, the `import-linter`
 contract, the `CLAUDE.md` map entry, the composition-root wiring in `app/`, and — in
 `orchestration/` — the user's words threaded per call site, the archive write in
 `ConversationLifecycle.capture`, the compensation in its verification, and the
-cascade in the conversation-scoped and record-scoped deletions.
+cascade in the conversation-scoped and record-scoped deletions. **Not** the subject
+cascade: `delete_about` is not on `MemoryStore` in the tree, so there is nothing for
+lane B to cascade from, and §5's sequence binds the lane that lands ADR-0101's
+operations instead.
 
 That is one lane under ADR-0137 on both of its tests. §1's: the substantial new
 machinery is in one subsystem, `archive/`, and what lands in `orchestration/` is one
@@ -996,6 +1159,10 @@ ADR-0208 §1; ADR-0210 §1; ADR-0221 §1, §2 and §5.
 - **A new subsystem package appears in the architecture map**, with an
   `import-linter` contract that fails the gate on a violation — the third package
   nothing imports, after `evaluation/` and `secret_store/`.
+- **The lane that lands ADR-0101's `delete_about` inherits an obligation** it did
+  not have before: §5's enumerate-then-erase-then-discard sequence, and the residue
+  it must state. It becomes cheaper the day that operation returns the ids it
+  destroyed rather than their count.
 - **Revisit if** the size figure the surface reports makes the deferred cap real; if
   application-level encryption is implemented; if the feed-back mechanism is decided;
   or if a lexical search is shown to fail questions users actually ask.
@@ -1015,10 +1182,20 @@ ADR-0208 §1; ADR-0210 §1; ADR-0221 §1, §2 and §5.
 - **A table in the memory database rather than a package and a file.** Rejected in
   §10. `import-linter` can fence a package and cannot fence part of one, so gate 1's
   mechanical enforcement would be unavailable.
-- **Three Protocols split by capability, on ADR-0119 §7's model.** Rejected in §10.
-  There, three capabilities had three holders; here they have one, and the split
-  would buy no property §4's fence does not already give. Additive when a second
-  holder exists.
+- **One Protocol for every capability.** Rejected in §10, and rejected on this
+  ADR's own first review round, which found the contradiction: §2 puts the write
+  inside `ConversationLifecycle.capture`, so a single wide seam would hand a
+  turn-path collaborator all four reads in the same breath §4 forbids them. The
+  narrow writer is bought against that failure.
+- **Three Protocols, on ADR-0119 §7's exact shape.** Rejected in §10. There the
+  purge had a third holder; here the conversation-scoped destroy and every read are
+  `AssistantEngine`'s alike, so the third seam would have no distinct consumer.
+  Additive when a third holder exists.
+- **Stating the subject cascade as "destroy the entries at the addresses it
+  destroyed".** Rejected in §5. `delete_about` returns an `int` by ADR-0101 §1, so
+  the clause names something no implementation can compute; the enumerate-then-
+  erase-then-discard sequence is what the ratified contract admits, with its residue
+  named.
 - **A finite default retention for the archive.** Rejected in §6. It reintroduces the
   loss the archive exists to remove, at a second number nobody can argue for, and
   ADR-0074 §7's argument for a finite episodic default is entirely about the read
