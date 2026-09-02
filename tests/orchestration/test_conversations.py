@@ -74,7 +74,7 @@ class MovableClock:
 
 
 class Wiring:
-    """A stage and the two stores behind it, all sharing one clock."""
+    """A stage and the three stores behind it, all sharing one clock."""
 
     def __init__(  # noqa: PLR0913 — one knob per store seam a case may need to vary
         self,
@@ -85,6 +85,8 @@ class Wiring:
         purge_batch: int = 100,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
+        archive: FakeTranscriptArchiveWriter | None = None,
+        archive_enabled: bool = True,
     ) -> None:
         self.clock = clock if clock is not None else MovableClock()
         self.memory = memory if memory is not None else FakeMemoryStore(now=self.clock)
@@ -98,13 +100,16 @@ class Wiring:
                 purge_batch=purge_batch,
             )
         )
+        # ADR-0225 §10's narrow seam, held on the harness so a case can look at what
+        # capture wrote: the seam itself carries no read, which is the point of it.
+        self.archive = archive if archive is not None else FakeTranscriptArchiveWriter()
         self.stage = ConversationLifecycle(
             conversations=self.conversations,
             memory=self.memory,
             retention=retention,
             now=self.clock,
-            archive=FakeTranscriptArchiveWriter(),
-            archive_enabled=True,
+            archive=self.archive,
+            archive_enabled=archive_enabled,
         )
 
 

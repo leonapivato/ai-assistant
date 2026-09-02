@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.utils import format_datetime
 from enum import StrEnum
+from inspect import get_annotations
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ from ai_assistant.app import (
     ensure_model_credentials,
 )
 from ai_assistant.app import composition as composition_module
+from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.context import (
     AssemblingContextProvider,
     CalendarContextSource,
@@ -59,6 +61,8 @@ from ai_assistant.core.protocols import (
     RecipientGrants,
     SpendGate,
     SpendLedger,
+    TranscriptArchive,
+    TranscriptArchiveWriter,
 )
 from ai_assistant.core.types import (
     BeliefBand,
@@ -91,7 +95,7 @@ from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder, RoutingProvider
 from ai_assistant.models.streaming import PydanticAIStreamingCompleter
 from ai_assistant.orchestration import Engine
-from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.conversations import BELIEF_KINDS, ConversationLifecycle
 from ai_assistant.orchestration.loop import (
     _DEFAULT_EPISODIC_LIMIT,
     _DEFAULT_RETRIEVAL_LIMIT,
@@ -1175,6 +1179,71 @@ async def test_build_engine_wires_the_observation_stage_over_the_one_memory_stor
         # The same conversation index the capture stage appends turns to, or the
         # selection would look for a conversation nothing ever recorded.
         assert stage._conversations is engine._conversations._conversations
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_hands_capture_the_narrow_archive_seam(tmp_path: Path) -> None:
+    """ADR-0225 §13 item 2's last clause: the composition root's wiring, asserted directly.
+
+    §10 leaves *which object the root passes* to the root — one concrete satisfies
+    both Protocols, and no type checker rejects the concrete at either parameter — so
+    this is the assertion that stands where the type system does not. What
+    ``ConversationLifecycle`` is handed is the archive; what makes it the **narrow**
+    seam is the annotation on its own constructor, which is why the second assertion
+    below is about the *declared* type rather than about the object.
+
+    **One archive and not two.** A root that opened a second store here would have
+    capture writing transcripts into one file and ``forget`` destroying from another,
+    so every cascade would report success over text that was still on disk — the same
+    failure ADR-0028 §4 names one store over.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        archive = engine._archive
+        # Read through ``object`` because the two *declared* types do not overlap —
+        # ``mypy`` refuses ``x is y`` between them outright, which is the seam split
+        # showing up in the assertion that has to reach past it. What is being
+        # asserted is object identity, which is the root's discipline (§10).
+        capture_seam: object = engine._conversations._archive
+        assert capture_seam is archive, "one archive, two seams"
+        assert isinstance(archive, SqliteTranscriptArchive)
+        # The narrowing is the *annotation* on each constructor, read as written
+        # because `from __future__ import annotations` leaves it a string and the
+        # names it resolves through live in a `TYPE_CHECKING` block. That the strings
+        # resolve to the two Protocols, and that the narrowing actually bites, is what
+        # `tests/archive/test_archive_seam_types.py` puts to `mypy`.
+        assert get_annotations(ConversationLifecycle.__init__)["archive"] == (
+            TranscriptArchiveWriter.__name__
+        )
+        assert get_annotations(Engine.__init__)["archive"] == TranscriptArchive.__name__
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_reads_both_archive_settings_from_configuration(
+    tmp_path: Path,
+) -> None:
+    """ADR-0225 §6: the archive's retention is its own, and the switch gates the write.
+
+    Pinned because both are the kind of value a root can plausibly derive from
+    something else — and §6 forbids exactly that: "no implementation, setting or later
+    lane derives it from ``episode_retention``, and a change to ``episode_retention``
+    moves nothing in the archive".
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        episode_retention=timedelta(days=7),
+        transcript_archive_retention=timedelta(days=900),
+        transcript_archive_enabled=False,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        archive = engine._archive
+        assert isinstance(archive, SqliteTranscriptArchive)
+        assert archive._retention == timedelta(days=900)
+        assert engine._conversations._archive_enabled is False
+        assert engine._conversations._retention == timedelta(days=7)
     finally:
         await engine.aclose()
 

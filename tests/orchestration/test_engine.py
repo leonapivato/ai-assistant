@@ -145,7 +145,6 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     FakeTranscriptArchive,
-    FakeTranscriptArchiveWriter,
     ObservationGate,
     evaluation_trace,
     source_grant,
@@ -526,12 +525,18 @@ class Harness:
             if conversation_store is None
             else conversation_store
         )
+        # ADR-0225 §10: **one** archive, handed out as two seams — the narrow writer
+        # to capture and the wide face to the façade below — which is what the
+        # composition root does. Two unrelated fakes would be a composition nothing
+        # builds: capture would write into one store and ``forget`` would destroy from
+        # another, so every cascade case would pass vacuously.
+        self.archive = FakeTranscriptArchive(now=lambda: AT)
         self.conversations = ConversationLifecycle(
             conversations=self.conversation_store,
             memory=self.memory,
             retention=RETENTION,
             now=lambda: AT,
-            archive=FakeTranscriptArchiveWriter(),
+            archive=self.archive.writer(),
             archive_enabled=True,
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
@@ -730,7 +735,9 @@ class Harness:
             # the call: ADR-0207's park cases pin that the spoken path acquired no
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
-            archive=FakeTranscriptArchive(),
+            # The **same** archive the capture stage above holds the narrow face of
+            # (ADR-0225 §10), so `forget` destroys the entry capture wrote.
+            archive=self.archive,
         )
 
 
@@ -1544,7 +1551,9 @@ def _fresh_facade(harness: Harness) -> Engine:
         observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
-        archive=FakeTranscriptArchive(),
+        # The same durable state, which for the archive means the same store: a
+        # restarted process reaches the transcripts the previous one wrote.
+        archive=harness.archive,
     )
 
 
