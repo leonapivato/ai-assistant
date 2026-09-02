@@ -485,9 +485,10 @@ There is nothing to make loud.
 
 > **Normative.** A servicing failure **degrades the turn and never fails it**. A
 > failed or partial read leaves the supply as planning saw it, the turn composes
-> from it, and the audit records what was asked and that nothing came back. No
-> implementation raises out of the turn, parks the turn, or asks the user anything
-> on account of a read that did not land.
+> from it, and the audit records what was asked and that nothing came back — which §9
+> fixes as every count zero, a partial read distinguished from a total one by its
+> failure fields alone. No implementation raises out of the turn, parks the turn, or
+> asks the user anything on account of a read that did not land.
 
 > **Normative.** **A read request is not serviced on an operation whose output
 > channel's audience is unbounded** (ADR-0199 §1, declared as ADR-0200 §3 declares
@@ -784,6 +785,17 @@ supplement, and a group appended after it leaves that condition untouched.
 > fired**. A record is written for a turn that asked for nothing, and it says so. An
 > instrument that only records its positives cannot measure a fire rate.
 
+> **Normative.** **The trigger has a third outcome, and it is neither a firing nor a
+> non-firing.** A turn on which planning did not return a plan — the planner raised, or
+> the turn ended before it returned — reached no judgement about its supply at all, so
+> its record says the trigger was **not reached** rather than that it did not fire.
+> Such a turn is in neither the fire rate's numerator nor its denominator; it is
+> counted on its own, so that a deployment can see how many turns the instrument took
+> no reading from rather than have them silently dilute the rate. A turn whose planner
+> **did** return a plan carrying no request judged the supply sufficient, and that is a
+> non-firing exactly as above: what separates the two is whether the judgement
+> happened, not whether the turn went on to succeed.
+
 > **Normative.** Every figure this audit supports is computed **over a population of
 > turns** and is never a per-turn quantity. A turn contributes to a numerator or a
 > denominator; it carries no rate of its own, and a turn on which the trigger rightly
@@ -862,13 +874,29 @@ by making the planner ask twice.
 
 ### 9. The audit record
 
-> **Normative.** Each turn records: whether a request was emitted; whether it was
-> serviced or declined under §5's channel scoping; for each ask, its **kind**; how
-> many records the servicing returned; how many of those were new after deduplication;
-> how many the deduplication removed; how many labels resolved to nothing; whether the
-> budget truncated a kind; and whether the servicing failed. No count here is of a
-> record the servicer refused on the ground of its class, because §7 admits no such
-> refusal.
+> **Normative.** Each turn records: whether a request was emitted, was not emitted, or
+> was **not reached** in §8's sense; whether it was serviced or declined under §5's
+> channel scoping; for each ask, its **kind**; how many records the servicing returned;
+> how many of those were new after deduplication; how many the deduplication removed;
+> how many labels resolved to nothing; whether the budget truncated a kind; whether the
+> servicing failed; and, where it failed, whether an earlier ask had already returned
+> records before it did. No count here is of a record the servicer refused on the
+> ground of its class, because §7 admits no such refusal.
+
+> **Normative.** **Every count above is taken over a servicing that completed, and
+> never over a store call whose result §5 discarded.** §5 makes the servicing
+> all-or-nothing — *"a failed **or partial** read leaves the supply as planning saw
+> it"* — so a servicing that failed returned nothing to the turn and every count above
+> is **zero**, the partial case included: where a hop returned records and the query
+> then raised, §5 discards the hop's records with the rest and none of them is counted
+> anywhere. *"How many records the servicing returned"* is therefore what a completed
+> servicing carried into the union before deduplication, and it is never a per-ask
+> tally of what each store call handed back. What represents a partial servicing is the
+> **pair of failure fields** — that the servicing failed, and that it failed after an
+> earlier ask had already returned — and that pair is deliberately the whole of it: a
+> count of discarded records would report a yield on a turn §5 defines as having
+> received none, and would make the novelty rate of §8 a figure about reads the prompt
+> never saw. §11's fourteenth test asserts both halves.
 
 > **Normative.** The record holds **counts and kinds**, and copies no text. It does
 > not copy the query the planner composed, the labels it named, any `content` span,
@@ -884,10 +912,13 @@ by making the planner ask twice.
 > is a caller's rather than this system's.
 
 > **Normative.** The record is emitted **once per turn**, at any point in the turn
-> after the servicing decision is known, and its emission is conditioned on nothing:
-> not on the plan being persisted, not on the turn completing, and not on capacity
-> being admitted. A turn that fired and then failed for any reason still contributes
-> its numerator, and a turn that did not fire still contributes its denominator.
+> after the servicing decision is known — or, on a turn where planning did not return a
+> plan, at the point that turn ends — and its emission is conditioned on nothing: not
+> on the plan being persisted, not on the turn completing, and not on capacity being
+> admitted. A turn that fired and then failed for any reason still contributes its
+> numerator; a turn that did not fire still contributes its denominator; and a turn
+> that never reached the planner's judgement (§8) contributes to neither and is
+> recorded as not reached.
 
 > **Normative.** The event is emitted at **`INFO`**, and the every-turn obligation
 > binds the **emitting code** rather than any deployment's log configuration. A
@@ -1074,7 +1105,9 @@ persisted through `PlanStore.save_plan`. So over the Lane-A-only window the nume
 and the denominator are both readable off the persisted plans — the turns whose plan
 carries a request, over the turns whose plan does not — which is the same measurement
 §9's record makes available live, and is why §9 needs to carry neither the ask nor a
-pointer to it. What only Lane B can add is the **yield**: what the servicing
+pointer to it. A turn whose planner did not return a plan persists none, so it is
+absent from that population exactly as §8's not-reached turns are excluded from the
+live one. What only Lane B can add is the **yield**: what the servicing
 returned, what deduplication removed, what a label failed to resolve. Those fields
 are absent in that window because the events they describe have not happened.
 
@@ -1133,11 +1166,15 @@ are absent in that window because the events they describe have not happened.
    string appears nowhere — no plan id, no goal id, no record id — and the ambient
    correlation id is the only identifier on the event. Asserted over the emitted
    event's own fields, not over the redaction net.
-10. **A turn that fired and then failed still counts.** Two cases, each emitting
-    exactly one record carrying the fired fact and the servicing counts: a turn
-    rejected for capacity, which `AssistantEngine` decides **after** the loop has
-    planned and serviced, and a turn whose `PlanStore.save_plan` raises. Neither
-    suppresses the record, so neither depresses the fire rate.
+10. **A turn that fired and then failed still counts, and a turn that never judged
+    counts as neither.** Three cases, each emitting exactly one record. Two carry the
+    fired fact and the servicing counts — a turn rejected for capacity, which
+    `AssistantEngine` decides **after** the loop has planned and serviced, and a turn
+    whose `PlanStore.save_plan` raises — and neither suppresses the record, so neither
+    depresses the fire rate. The third is a turn whose `Planner.plan` **raises before
+    returning a plan**: its record says the trigger was **not reached** (§8), and the
+    assertion places that turn in neither the numerator nor the denominator. That arm
+    is what stops a planner outage from reading as a collapse in the fire rate.
 11. **Every condition §4 puts on the models is refused by the models**, arm for arm,
     and none of them is left to a caller: a `ReadRequest` whose `asks` is empty; one
     carrying two asks of one kind; a `SIGHTED_QUERY` ask with a blank or
@@ -1172,7 +1209,10 @@ are absent in that window because the events they describe have not happened.
     *"failed **or partial** read leaves the supply as planning saw it"* from a
     best-effort servicer — the successful hop's records do **not** reach the fourth
     group, the supply is byte-for-byte the three groups planning saw, and the audit
-    records the degradation with no returned or new count rather than the hop's.
+    records the degradation with no returned or new count rather than the hop's — and
+    records that the failure came after an earlier ask had already returned, which is
+    the pair of failure fields §9 names and the only thing distinguishing this arm's
+    record from the first's.
 15. **The plan is still frozen and still auditable.** A plan carrying a request
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
