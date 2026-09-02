@@ -2618,15 +2618,21 @@ async def _store_device_enrolment(hub_identity: str, read_credential: Callable[[
 
     One error boundary spanning every stage that can fail, as every other command
     here has (ADR-0042 §7): a keyring that is absent or locked, a value this device
-    will not hold, a standard input this credential may not be read from, and a
-    configuration that will not load are all rendered and mapped to a non-zero exit
-    code rather than escaping as a traceback.
+    will not hold, a credential these readers refuse, and a configuration that will
+    not load are all rendered and mapped to a non-zero exit code rather than escaping
+    as a traceback.
 
     **The credential is read here rather than by the caller** (#1146), which is what
     puts it inside that boundary: both readers refuse by raising ``ValueError`` —
     a stream still going past the widest admissible line, or a hidden prompt asked
     for where standard input is not a terminal — and a refusal raised outside the
     ``try`` would leave as a traceback instead of a rendered line.
+
+    **A refusal, not a failed stream.** An ``OSError`` from the descriptor itself is
+    not caught here, and is not caught by :func:`_drive_connect` or
+    :func:`_drive_reconnect` either — nothing was read, so it is not a statement
+    about the value and the refusals above have nothing to say about it. Deciding
+    what all three surfaces render for it is #1940.
     """
     try:
         credential = read_credential()
